@@ -1,0 +1,4 @@
+Module: Abilities
+Patch Version: 1.0.0
+Patch Date: 2026-01-17 00:41:06
+Unity Version: 6000.3.2f1

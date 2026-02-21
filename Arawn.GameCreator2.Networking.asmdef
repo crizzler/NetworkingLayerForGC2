@@ -1,0 +1,47 @@
+{
+    "name": "Arawn.GameCreator2.Networking",
+    "rootNamespace": "Arawn.GameCreator2.Networking",
+    "references": [
+        "Arawn.NetworkingCore.Runtime",
+        "GameCreator.Runtime.Core",
+        "GameCreator.Runtime.Melee",
+        "GameCreator.Runtime.Shooter",
+        "GameCreator.Runtime.Stats",
+        "GPUInstancerPro.CrowdAnimations",
+        "GPUInstancerPro.Core",
+        "Unity.InputSystem",
+        "Daimahou.Runtime.Core",
+        "DaimahouGames.Runtime.Abilities",
+        "Unity.Netcode.Runtime"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [
+        {
+            "name": "com.gamecreator.melee",
+            "expression": "",
+            "define": "GAMECREATOR_MELEE"
+        },
+        {
+            "name": "com.gamecreator.shooter",
+            "expression": "",
+            "define": "GAMECREATOR_SHOOTER"
+        },
+        {
+            "name": "com.unity.inputsystem",
+            "expression": "",
+            "define": "ENABLE_INPUT_SYSTEM"
+        },
+        {
+            "name": "com.unity.netcode.gameobjects",
+            "expression": "",
+            "define": "UNITY_NETCODE"
+        }
+    ],
+    "noEngineReferences": false
+}

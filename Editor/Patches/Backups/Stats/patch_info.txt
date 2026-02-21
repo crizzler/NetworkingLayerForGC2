@@ -1,0 +1,4 @@
+Module: Stats
+Patch Version: 1.0.0
+Patch Date: 2026-01-17 00:41:26
+Unity Version: 6000.3.2f1

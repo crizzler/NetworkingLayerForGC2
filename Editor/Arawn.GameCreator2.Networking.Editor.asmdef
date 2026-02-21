@@ -1,0 +1,20 @@
+{
+    "name": "Arawn.GameCreator2.Networking.Editor",
+    "rootNamespace": "Arawn.GameCreator2.Networking.Editor",
+    "references": [
+        "Arawn.GameCreator2.Networking",
+        "GameCreator.Runtime.Core",
+        "GameCreator.Editor.Core"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
