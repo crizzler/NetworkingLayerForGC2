@@ -28,9 +28,19 @@
             "define": "GAMECREATOR_MELEE"
         },
         {
+            "name": "com.gamecreator.melee",
+            "expression": "",
+            "define": "GC2_MELEE"
+        },
+        {
             "name": "com.gamecreator.shooter",
             "expression": "",
             "define": "GAMECREATOR_SHOOTER"
+        },
+        {
+            "name": "com.gamecreator.shooter",
+            "expression": "",
+            "define": "GC2_SHOOTER"
         },
         {
             "name": "com.unity.inputsystem",

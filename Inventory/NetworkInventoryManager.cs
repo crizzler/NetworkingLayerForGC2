@@ -3,6 +3,8 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using UnityEngine;
+using Arawn.GameCreator2.Networking;
+using Arawn.GameCreator2.Networking.Security;
 
 namespace Arawn.GameCreator2.Networking.Inventory
 {
@@ -11,15 +13,14 @@ namespace Arawn.GameCreator2.Networking.Inventory
     /// Transport-agnostic - wire up delegates to your networking solution.
     /// </summary>
     [AddComponentMenu("Game Creator/Network/Inventory/Network Inventory Manager")]
-    public class NetworkInventoryManager : MonoBehaviour
+    public class NetworkInventoryManager : NetworkSingleton<NetworkInventoryManager>
     {
         // ════════════════════════════════════════════════════════════════════════════════════════
-        // SINGLETON
+        // SINGLETON (lazy-find override)
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
-        private static NetworkInventoryManager s_Instance;
-        
-        public static NetworkInventoryManager Instance
+
+        /// <summary>Singleton instance. Falls back to FindFirstObjectByType if not yet assigned.</summary>
+        public new static NetworkInventoryManager Instance
         {
             get
             {
@@ -28,63 +29,63 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 return s_Instance;
             }
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // TRANSPORT DELEGATES - Wire to your networking solution
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         // ─────────────────────────────────────────────────────────────────────────────────────────
         // CLIENT → SERVER: Content Operations
         // ─────────────────────────────────────────────────────────────────────────────────────────
-        
+
         public Action<NetworkContentAddRequest> OnSendContentAddRequest;
         public Action<NetworkContentRemoveRequest> OnSendContentRemoveRequest;
         public Action<NetworkContentMoveRequest> OnSendContentMoveRequest;
         public Action<NetworkContentUseRequest> OnSendContentUseRequest;
         public Action<NetworkContentDropRequest> OnSendContentDropRequest;
-        
+
         // ─────────────────────────────────────────────────────────────────────────────────────────
         // CLIENT → SERVER: Equipment Operations
         // ─────────────────────────────────────────────────────────────────────────────────────────
-        
+
         public Action<NetworkEquipmentRequest> OnSendEquipmentRequest;
-        
+
         // ─────────────────────────────────────────────────────────────────────────────────────────
         // CLIENT → SERVER: Socket Operations
         // ─────────────────────────────────────────────────────────────────────────────────────────
-        
+
         public Action<NetworkSocketRequest> OnSendSocketRequest;
-        
+
         // ─────────────────────────────────────────────────────────────────────────────────────────
         // CLIENT → SERVER: Wealth Operations
         // ─────────────────────────────────────────────────────────────────────────────────────────
-        
+
         public Action<NetworkWealthRequest> OnSendWealthRequest;
-        
+
         // ─────────────────────────────────────────────────────────────────────────────────────────
         // CLIENT → SERVER: Merchant Operations
         // ─────────────────────────────────────────────────────────────────────────────────────────
-        
+
         public Action<NetworkMerchantRequest> OnSendMerchantRequest;
-        
+
         // ─────────────────────────────────────────────────────────────────────────────────────────
         // CLIENT → SERVER: Crafting Operations
         // ─────────────────────────────────────────────────────────────────────────────────────────
-        
+
         public Action<NetworkCraftingRequest> OnSendCraftingRequest;
-        
+
         // ─────────────────────────────────────────────────────────────────────────────────────────
         // CLIENT → SERVER: Transfer Operations
         // ─────────────────────────────────────────────────────────────────────────────────────────
-        
+
         public Action<NetworkTransferRequest> OnSendTransferRequest;
         public Action<NetworkPickupRequest> OnSendPickupRequest;
         public Action<NetworkCombineRequest> OnSendCombineRequest;
-        
+
         // ─────────────────────────────────────────────────────────────────────────────────────────
         // SERVER → CLIENT: Responses (Single target)
         // ─────────────────────────────────────────────────────────────────────────────────────────
-        
+
         public Action<uint, NetworkContentAddResponse> OnSendContentAddResponse;
         public Action<uint, NetworkContentRemoveResponse> OnSendContentRemoveResponse;
         public Action<uint, NetworkContentMoveResponse> OnSendContentMoveResponse;
@@ -98,11 +99,11 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public Action<uint, NetworkTransferResponse> OnSendTransferResponse;
         public Action<uint, NetworkPickupResponse> OnSendPickupResponse;
         public Action<uint, NetworkCombineResponse> OnSendCombineResponse;
-        
+
         // ─────────────────────────────────────────────────────────────────────────────────────────
         // SERVER → ALL CLIENTS: Broadcasts
         // ─────────────────────────────────────────────────────────────────────────────────────────
-        
+
         public Action<NetworkItemAddedBroadcast> OnBroadcastItemAdded;
         public Action<NetworkItemRemovedBroadcast> OnBroadcastItemRemoved;
         public Action<NetworkItemMovedBroadcast> OnBroadcastItemMoved;
@@ -114,455 +115,820 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public Action<NetworkPropertyChangeBroadcast> OnBroadcastPropertyChange;
         public Action<NetworkInventorySnapshot> OnBroadcastFullSnapshot;
         public Action<NetworkInventoryDelta> OnBroadcastDelta;
-        
+
         // ─────────────────────────────────────────────────────────────────────────────────────────
         // SERVER → SINGLE CLIENT: Targeted
         // ─────────────────────────────────────────────────────────────────────────────────────────
-        
+
         public Action<ulong, NetworkInventorySnapshot> OnSendSnapshotToClient;
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // INSPECTOR
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         [Header("Settings")]
         [SerializeField] private bool m_IsServer;
-        
+
         [Header("Validation")]
         [SerializeField] private int m_MaxPendingRequestsPerPlayer = 50;
         [SerializeField] private float m_RequestTimeout = 5f;
-        
+
         [Header("Debug")]
         [SerializeField] private bool m_LogNetworkMessages = false;
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // PRIVATE FIELDS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         private readonly Dictionary<uint, NetworkInventoryController> m_Controllers = new(32);
         private readonly Dictionary<ulong, int> m_PendingRequestCounts = new(32);
-        
+        private NetworkInventoryPatchHooks m_PatchHooks;
+
         // Merchant controllers (separate from player bags)
         private readonly Dictionary<uint, NetworkMerchantController> m_MerchantControllers = new(8);
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // PROPERTIES
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         public bool IsServer
         {
             get => m_IsServer;
-            set => m_IsServer = value;
+            set
+            {
+                m_IsServer = value;
+                SyncPatchHooks();
+            }
         }
-        
+
         public int ControllerCount => m_Controllers.Count;
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // UNITY LIFECYCLE
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
-        private void Awake()
+        private void OnEnable()
         {
-            if (s_Instance != null && s_Instance != this)
+            SyncPatchHooks();
+        }
+
+        private void OnDisable()
+        {
+            if (m_PatchHooks != null)
             {
-                Debug.LogWarning("[NetworkInventoryManager] Duplicate instance found, destroying.");
-                Destroy(gameObject);
-                return;
+                m_PatchHooks.Initialize(false);
             }
-            s_Instance = this;
         }
-        
-        private void OnDestroy()
-        {
-            if (s_Instance == this)
-                s_Instance = null;
-        }
-        
+
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // REGISTRATION
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         public void RegisterController(uint networkId, NetworkInventoryController controller)
         {
             if (controller == null) return;
             m_Controllers[networkId] = controller;
-            
+
             if (m_LogNetworkMessages)
                 Debug.Log($"[NetworkInventoryManager] Registered inventory controller: NetworkId={networkId}");
         }
-        
+
         public void UnregisterController(uint networkId)
         {
             if (m_Controllers.Remove(networkId) && m_LogNetworkMessages)
                 Debug.Log($"[NetworkInventoryManager] Unregistered inventory controller: NetworkId={networkId}");
         }
-        
+
         public NetworkInventoryController GetController(uint networkId)
         {
             return m_Controllers.TryGetValue(networkId, out var controller) ? controller : null;
         }
-        
+
         public void RegisterMerchantController(uint networkId, NetworkMerchantController controller)
         {
             if (controller == null) return;
             m_MerchantControllers[networkId] = controller;
         }
-        
+
         public void UnregisterMerchantController(uint networkId)
         {
             m_MerchantControllers.Remove(networkId);
         }
-        
+
         public NetworkMerchantController GetMerchantController(uint networkId)
         {
             return m_MerchantControllers.TryGetValue(networkId, out var controller) ? controller : null;
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // CLIENT → SERVER: SENDING REQUESTS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         #region Send Requests
-        
+
         public void SendContentAddRequest(NetworkContentAddRequest request)
         {
             if (m_LogNetworkMessages)
                 Debug.Log($"[NetworkInventoryManager] Sending add request: RequestId={request.RequestId}");
             OnSendContentAddRequest?.Invoke(request);
         }
-        
+
         public void SendContentRemoveRequest(NetworkContentRemoveRequest request)
         {
             if (m_LogNetworkMessages)
                 Debug.Log($"[NetworkInventoryManager] Sending remove request: RequestId={request.RequestId}");
             OnSendContentRemoveRequest?.Invoke(request);
         }
-        
+
         public void SendContentMoveRequest(NetworkContentMoveRequest request)
         {
             if (m_LogNetworkMessages)
                 Debug.Log($"[NetworkInventoryManager] Sending move request: RequestId={request.RequestId}");
             OnSendContentMoveRequest?.Invoke(request);
         }
-        
+
         public void SendContentUseRequest(NetworkContentUseRequest request)
         {
             if (m_LogNetworkMessages)
                 Debug.Log($"[NetworkInventoryManager] Sending use request: RequestId={request.RequestId}");
             OnSendContentUseRequest?.Invoke(request);
         }
-        
+
         public void SendContentDropRequest(NetworkContentDropRequest request)
         {
             if (m_LogNetworkMessages)
                 Debug.Log($"[NetworkInventoryManager] Sending drop request: RequestId={request.RequestId}");
             OnSendContentDropRequest?.Invoke(request);
         }
-        
+
         public void SendEquipmentRequest(NetworkEquipmentRequest request)
         {
             if (m_LogNetworkMessages)
                 Debug.Log($"[NetworkInventoryManager] Sending equipment request: RequestId={request.RequestId}, Action={request.Action}");
             OnSendEquipmentRequest?.Invoke(request);
         }
-        
+
         public void SendSocketRequest(NetworkSocketRequest request)
         {
             if (m_LogNetworkMessages)
                 Debug.Log($"[NetworkInventoryManager] Sending socket request: RequestId={request.RequestId}, Action={request.Action}");
             OnSendSocketRequest?.Invoke(request);
         }
-        
+
         public void SendWealthRequest(NetworkWealthRequest request)
         {
             if (m_LogNetworkMessages)
                 Debug.Log($"[NetworkInventoryManager] Sending wealth request: RequestId={request.RequestId}, Action={request.Action}");
             OnSendWealthRequest?.Invoke(request);
         }
-        
+
         public void SendMerchantRequest(NetworkMerchantRequest request)
         {
             if (m_LogNetworkMessages)
                 Debug.Log($"[NetworkInventoryManager] Sending merchant request: RequestId={request.RequestId}, Action={request.Action}");
             OnSendMerchantRequest?.Invoke(request);
         }
-        
+
         public void SendCraftingRequest(NetworkCraftingRequest request)
         {
             if (m_LogNetworkMessages)
                 Debug.Log($"[NetworkInventoryManager] Sending crafting request: RequestId={request.RequestId}, Action={request.Action}");
             OnSendCraftingRequest?.Invoke(request);
         }
-        
+
         public void SendTransferRequest(NetworkTransferRequest request)
         {
             if (m_LogNetworkMessages)
                 Debug.Log($"[NetworkInventoryManager] Sending transfer request: RequestId={request.RequestId}");
             OnSendTransferRequest?.Invoke(request);
         }
-        
+
         public void SendPickupRequest(NetworkPickupRequest request)
         {
             if (m_LogNetworkMessages)
                 Debug.Log($"[NetworkInventoryManager] Sending pickup request: RequestId={request.RequestId}");
             OnSendPickupRequest?.Invoke(request);
         }
-        
+
         public void SendCombineRequest(NetworkCombineRequest request)
         {
             if (m_LogNetworkMessages)
                 Debug.Log($"[NetworkInventoryManager] Sending combine request: RequestId={request.RequestId}");
             OnSendCombineRequest?.Invoke(request);
         }
-        
+
         #endregion
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // SERVER: RECEIVING REQUESTS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         #region Receive Requests (Server)
-        
+
+        private static uint GetSenderClientId(ulong clientId)
+        {
+            return clientId <= uint.MaxValue ? (uint)clientId : 0u;
+        }
+
+        private static NetworkRequestContext BuildContext(uint actorNetworkId, uint correlationId)
+        {
+            return NetworkRequestContext.Create(actorNetworkId, correlationId);
+        }
+
+        private static InventoryRejectionReason GetSecurityRejection(uint actorNetworkId, uint correlationId)
+        {
+            return actorNetworkId == 0 || correlationId == 0
+                ? InventoryRejectionReason.ProtocolMismatch
+                : InventoryRejectionReason.SecurityViolation;
+        }
+
+        private void SyncPatchHooks()
+        {
+            if (!m_IsServer)
+            {
+                if (m_PatchHooks != null) m_PatchHooks.Initialize(false);
+                return;
+            }
+
+            if (m_PatchHooks == null)
+            {
+                m_PatchHooks = GetComponent<NetworkInventoryPatchHooks>();
+                if (m_PatchHooks == null)
+                {
+                    m_PatchHooks = gameObject.AddComponent<NetworkInventoryPatchHooks>();
+                }
+            }
+
+            m_PatchHooks.Initialize(true);
+        }
+
         public void ReceiveContentAddRequest(NetworkContentAddRequest request, ulong clientId)
         {
             if (!m_IsServer) return;
-            if (!CheckRateLimit(clientId)) return;
-            
-            var controller = GetController(request.TargetBagNetworkId);
-            if (controller == null)
+            uint senderClientId = GetSenderClientId(clientId);
+            if (!SecurityIntegration.ValidateModuleRequest(
+                    senderClientId,
+                    BuildContext(request.ActorNetworkId, request.CorrelationId),
+                    "Inventory",
+                    nameof(NetworkContentAddRequest)))
             {
-                SendContentAddResponse(request.TargetBagNetworkId, new NetworkContentAddResponse
+                SendContentAddResponse(senderClientId, new NetworkContentAddResponse
                 {
                     RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
                     Authorized = false,
-                    RejectionReason = InventoryRejectionReason.BagNotFound
+                    RejectionReason = GetSecurityRejection(request.ActorNetworkId, request.CorrelationId)
                 });
                 return;
             }
-            
-            var response = controller.ProcessContentAddRequest(request, request.TargetBagNetworkId);
-            SendContentAddResponse(request.TargetBagNetworkId, response);
+            if (!CheckRateLimit(clientId))
+            {
+                SendContentAddResponse(senderClientId, new NetworkContentAddResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Authorized = false,
+                    RejectionReason = InventoryRejectionReason.RateLimitExceeded
+                });
+                return;
+            }
+
+            try
+            {
+                var controller = GetController(request.TargetBagNetworkId);
+                if (controller == null)
+                {
+                    SendContentAddResponse(senderClientId, new NetworkContentAddResponse
+                    {
+                        RequestId = request.RequestId,
+                        ActorNetworkId = request.ActorNetworkId,
+                        CorrelationId = request.CorrelationId,
+                        Authorized = false,
+                        RejectionReason = InventoryRejectionReason.BagNotFound
+                    });
+                    return;
+                }
+
+                var response = controller.ProcessContentAddRequest(request, senderClientId);
+                response.ActorNetworkId = request.ActorNetworkId;
+                response.CorrelationId = request.CorrelationId;
+                SendContentAddResponse(senderClientId, response);
+            }
+            finally
+            {
+                DecrementPendingRequests(clientId);
+            }
         }
-        
+
         public void ReceiveContentRemoveRequest(NetworkContentRemoveRequest request, ulong clientId)
         {
             if (!m_IsServer) return;
-            if (!CheckRateLimit(clientId)) return;
-            
-            var controller = GetController(request.TargetBagNetworkId);
-            if (controller == null)
+            uint senderClientId = GetSenderClientId(clientId);
+            if (!SecurityIntegration.ValidateModuleRequest(
+                    senderClientId,
+                    BuildContext(request.ActorNetworkId, request.CorrelationId),
+                    "Inventory",
+                    nameof(NetworkContentRemoveRequest)))
             {
-                SendContentRemoveResponse(request.TargetBagNetworkId, new NetworkContentRemoveResponse
+                SendContentRemoveResponse(senderClientId, new NetworkContentRemoveResponse
                 {
                     RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
                     Authorized = false,
-                    RejectionReason = InventoryRejectionReason.BagNotFound
+                    RejectionReason = GetSecurityRejection(request.ActorNetworkId, request.CorrelationId)
                 });
                 return;
             }
-            
-            var response = controller.ProcessContentRemoveRequest(request, request.TargetBagNetworkId);
-            SendContentRemoveResponse(request.TargetBagNetworkId, response);
+            if (!CheckRateLimit(clientId))
+            {
+                SendContentRemoveResponse(senderClientId, new NetworkContentRemoveResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Authorized = false,
+                    RejectionReason = InventoryRejectionReason.RateLimitExceeded
+                });
+                return;
+            }
+
+            try
+            {
+                var controller = GetController(request.TargetBagNetworkId);
+                if (controller == null)
+                {
+                    SendContentRemoveResponse(senderClientId, new NetworkContentRemoveResponse
+                    {
+                        RequestId = request.RequestId,
+                        ActorNetworkId = request.ActorNetworkId,
+                        CorrelationId = request.CorrelationId,
+                        Authorized = false,
+                        RejectionReason = InventoryRejectionReason.BagNotFound
+                    });
+                    return;
+                }
+
+                var response = controller.ProcessContentRemoveRequest(request, senderClientId);
+                response.ActorNetworkId = request.ActorNetworkId;
+                response.CorrelationId = request.CorrelationId;
+                SendContentRemoveResponse(senderClientId, response);
+            }
+            finally
+            {
+                DecrementPendingRequests(clientId);
+            }
         }
-        
+
         public void ReceiveContentMoveRequest(NetworkContentMoveRequest request, ulong clientId)
         {
             if (!m_IsServer) return;
-            if (!CheckRateLimit(clientId)) return;
-            
-            var controller = GetController(request.TargetBagNetworkId);
-            if (controller == null)
+            uint senderClientId = GetSenderClientId(clientId);
+            if (!SecurityIntegration.ValidateModuleRequest(
+                    senderClientId,
+                    BuildContext(request.ActorNetworkId, request.CorrelationId),
+                    "Inventory",
+                    nameof(NetworkContentMoveRequest)))
             {
-                SendContentMoveResponse(request.TargetBagNetworkId, new NetworkContentMoveResponse
+                SendContentMoveResponse(senderClientId, new NetworkContentMoveResponse
                 {
                     RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
                     Authorized = false,
-                    RejectionReason = InventoryRejectionReason.BagNotFound
+                    RejectionReason = GetSecurityRejection(request.ActorNetworkId, request.CorrelationId)
                 });
                 return;
             }
-            
-            var response = controller.ProcessContentMoveRequest(request, request.TargetBagNetworkId);
-            SendContentMoveResponse(request.TargetBagNetworkId, response);
+            if (!CheckRateLimit(clientId))
+            {
+                SendContentMoveResponse(senderClientId, new NetworkContentMoveResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Authorized = false,
+                    RejectionReason = InventoryRejectionReason.RateLimitExceeded
+                });
+                return;
+            }
+
+            try
+            {
+                var controller = GetController(request.TargetBagNetworkId);
+                if (controller == null)
+                {
+                    SendContentMoveResponse(senderClientId, new NetworkContentMoveResponse
+                    {
+                        RequestId = request.RequestId,
+                        ActorNetworkId = request.ActorNetworkId,
+                        CorrelationId = request.CorrelationId,
+                        Authorized = false,
+                        RejectionReason = InventoryRejectionReason.BagNotFound
+                    });
+                    return;
+                }
+
+                var response = controller.ProcessContentMoveRequest(request, senderClientId);
+                response.ActorNetworkId = request.ActorNetworkId;
+                response.CorrelationId = request.CorrelationId;
+                SendContentMoveResponse(senderClientId, response);
+            }
+            finally
+            {
+                DecrementPendingRequests(clientId);
+            }
         }
-        
+
         public void ReceiveContentUseRequest(NetworkContentUseRequest request, ulong clientId)
         {
             if (!m_IsServer) return;
-            if (!CheckRateLimit(clientId)) return;
-            
-            var controller = GetController(request.TargetBagNetworkId);
-            if (controller == null)
+            uint senderClientId = GetSenderClientId(clientId);
+            if (!SecurityIntegration.ValidateModuleRequest(
+                    senderClientId,
+                    BuildContext(request.ActorNetworkId, request.CorrelationId),
+                    "Inventory",
+                    nameof(NetworkContentUseRequest)))
             {
-                SendContentUseResponse(request.TargetBagNetworkId, new NetworkContentUseResponse
+                SendContentUseResponse(senderClientId, new NetworkContentUseResponse
                 {
                     RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
                     Authorized = false,
-                    RejectionReason = InventoryRejectionReason.BagNotFound
+                    RejectionReason = GetSecurityRejection(request.ActorNetworkId, request.CorrelationId)
                 });
                 return;
             }
-            
-            var response = controller.ProcessContentUseRequest(request, request.TargetBagNetworkId);
-            SendContentUseResponse(request.TargetBagNetworkId, response);
+            if (!CheckRateLimit(clientId))
+            {
+                SendContentUseResponse(senderClientId, new NetworkContentUseResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Authorized = false,
+                    RejectionReason = InventoryRejectionReason.RateLimitExceeded
+                });
+                return;
+            }
+
+            try
+            {
+                var controller = GetController(request.TargetBagNetworkId);
+                if (controller == null)
+                {
+                    SendContentUseResponse(senderClientId, new NetworkContentUseResponse
+                    {
+                        RequestId = request.RequestId,
+                        ActorNetworkId = request.ActorNetworkId,
+                        CorrelationId = request.CorrelationId,
+                        Authorized = false,
+                        RejectionReason = InventoryRejectionReason.BagNotFound
+                    });
+                    return;
+                }
+
+                var response = controller.ProcessContentUseRequest(request, senderClientId);
+                response.ActorNetworkId = request.ActorNetworkId;
+                response.CorrelationId = request.CorrelationId;
+                SendContentUseResponse(senderClientId, response);
+            }
+            finally
+            {
+                DecrementPendingRequests(clientId);
+            }
         }
-        
+
         public void ReceiveContentDropRequest(NetworkContentDropRequest request, ulong clientId)
         {
             if (!m_IsServer) return;
-            if (!CheckRateLimit(clientId)) return;
-            
-            var controller = GetController(request.TargetBagNetworkId);
-            if (controller == null)
+            uint senderClientId = GetSenderClientId(clientId);
+            if (!SecurityIntegration.ValidateModuleRequest(
+                    senderClientId,
+                    BuildContext(request.ActorNetworkId, request.CorrelationId),
+                    "Inventory",
+                    nameof(NetworkContentDropRequest)))
             {
-                SendContentDropResponse(request.TargetBagNetworkId, new NetworkContentDropResponse
+                SendContentDropResponse(senderClientId, new NetworkContentDropResponse
                 {
                     RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
                     Authorized = false,
-                    RejectionReason = InventoryRejectionReason.BagNotFound
+                    RejectionReason = GetSecurityRejection(request.ActorNetworkId, request.CorrelationId)
                 });
                 return;
             }
-            
-            var response = controller.ProcessContentDropRequest(request, request.TargetBagNetworkId);
-            SendContentDropResponse(request.TargetBagNetworkId, response);
+            if (!CheckRateLimit(clientId))
+            {
+                SendContentDropResponse(senderClientId, new NetworkContentDropResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Authorized = false,
+                    RejectionReason = InventoryRejectionReason.RateLimitExceeded
+                });
+                return;
+            }
+
+            try
+            {
+                var controller = GetController(request.TargetBagNetworkId);
+                if (controller == null)
+                {
+                    SendContentDropResponse(senderClientId, new NetworkContentDropResponse
+                    {
+                        RequestId = request.RequestId,
+                        ActorNetworkId = request.ActorNetworkId,
+                        CorrelationId = request.CorrelationId,
+                        Authorized = false,
+                        RejectionReason = InventoryRejectionReason.BagNotFound
+                    });
+                    return;
+                }
+
+                var response = controller.ProcessContentDropRequest(request, senderClientId);
+                response.ActorNetworkId = request.ActorNetworkId;
+                response.CorrelationId = request.CorrelationId;
+                SendContentDropResponse(senderClientId, response);
+            }
+            finally
+            {
+                DecrementPendingRequests(clientId);
+            }
         }
-        
-        public async void ReceiveEquipmentRequest(NetworkEquipmentRequest request, ulong clientId)
+
+        public async Task ReceiveEquipmentRequest(NetworkEquipmentRequest request, ulong clientId)
         {
             if (!m_IsServer) return;
-            if (!CheckRateLimit(clientId)) return;
-            
-            var controller = GetController(request.TargetBagNetworkId);
-            if (controller == null)
+            uint senderClientId = GetSenderClientId(clientId);
+            if (!SecurityIntegration.ValidateModuleRequest(
+                    senderClientId,
+                    BuildContext(request.ActorNetworkId, request.CorrelationId),
+                    "Inventory",
+                    nameof(NetworkEquipmentRequest)))
             {
-                SendEquipmentResponse(request.TargetBagNetworkId, new NetworkEquipmentResponse
+                SendEquipmentResponse(senderClientId, new NetworkEquipmentResponse
                 {
                     RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
                     Authorized = false,
-                    RejectionReason = InventoryRejectionReason.BagNotFound
+                    RejectionReason = GetSecurityRejection(request.ActorNetworkId, request.CorrelationId)
                 });
                 return;
             }
-            
-            var response = await controller.ProcessEquipmentRequest(request, request.TargetBagNetworkId);
-            SendEquipmentResponse(request.TargetBagNetworkId, response);
+            if (!CheckRateLimit(clientId))
+            {
+                SendEquipmentResponse(senderClientId, new NetworkEquipmentResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Authorized = false,
+                    RejectionReason = InventoryRejectionReason.RateLimitExceeded
+                });
+                return;
+            }
+
+            try
+            {
+                var controller = GetController(request.TargetBagNetworkId);
+                if (controller == null)
+                {
+                    SendEquipmentResponse(senderClientId, new NetworkEquipmentResponse
+                    {
+                        RequestId = request.RequestId,
+                        ActorNetworkId = request.ActorNetworkId,
+                        CorrelationId = request.CorrelationId,
+                        Authorized = false,
+                        RejectionReason = InventoryRejectionReason.BagNotFound
+                    });
+                    return;
+                }
+
+                try
+                {
+                    var response = await controller.ProcessEquipmentRequest(request, senderClientId);
+                    response.ActorNetworkId = request.ActorNetworkId;
+                    response.CorrelationId = request.CorrelationId;
+                    SendEquipmentResponse(senderClientId, response);
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogError($"[NetworkInventory] ReceiveEquipmentRequest failed: {ex.Message}\n{ex.StackTrace}");
+                    SendEquipmentResponse(senderClientId, new NetworkEquipmentResponse
+                    {
+                        RequestId = request.RequestId,
+                        ActorNetworkId = request.ActorNetworkId,
+                        CorrelationId = request.CorrelationId,
+                        Authorized = false,
+                        RejectionReason = InventoryRejectionReason.InternalError
+                    });
+                }
+            }
+            finally
+            {
+                DecrementPendingRequests(clientId);
+            }
         }
-        
+
         public void ReceiveSocketRequest(NetworkSocketRequest request, ulong clientId)
         {
             if (!m_IsServer) return;
-            if (!CheckRateLimit(clientId)) return;
-            
-            var controller = GetController(request.TargetBagNetworkId);
-            if (controller == null)
+            uint senderClientId = GetSenderClientId(clientId);
+            if (!SecurityIntegration.ValidateModuleRequest(
+                    senderClientId,
+                    BuildContext(request.ActorNetworkId, request.CorrelationId),
+                    "Inventory",
+                    nameof(NetworkSocketRequest)))
             {
-                SendSocketResponse(request.TargetBagNetworkId, new NetworkSocketResponse
+                SendSocketResponse(senderClientId, new NetworkSocketResponse
                 {
                     RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
                     Authorized = false,
-                    RejectionReason = InventoryRejectionReason.BagNotFound
+                    RejectionReason = GetSecurityRejection(request.ActorNetworkId, request.CorrelationId)
                 });
                 return;
             }
-            
-            var response = controller.ProcessSocketRequest(request, request.TargetBagNetworkId);
-            SendSocketResponse(request.TargetBagNetworkId, response);
+            if (!CheckRateLimit(clientId))
+            {
+                SendSocketResponse(senderClientId, new NetworkSocketResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Authorized = false,
+                    RejectionReason = InventoryRejectionReason.RateLimitExceeded
+                });
+                return;
+            }
+
+            try
+            {
+                var controller = GetController(request.TargetBagNetworkId);
+                if (controller == null)
+                {
+                    SendSocketResponse(senderClientId, new NetworkSocketResponse
+                    {
+                        RequestId = request.RequestId,
+                        ActorNetworkId = request.ActorNetworkId,
+                        CorrelationId = request.CorrelationId,
+                        Authorized = false,
+                        RejectionReason = InventoryRejectionReason.BagNotFound
+                    });
+                    return;
+                }
+
+                var response = controller.ProcessSocketRequest(request, senderClientId);
+                response.ActorNetworkId = request.ActorNetworkId;
+                response.CorrelationId = request.CorrelationId;
+                SendSocketResponse(senderClientId, response);
+            }
+            finally
+            {
+                DecrementPendingRequests(clientId);
+            }
         }
-        
+
         public void ReceiveWealthRequest(NetworkWealthRequest request, ulong clientId)
         {
             if (!m_IsServer) return;
-            if (!CheckRateLimit(clientId)) return;
-            
-            var controller = GetController(request.TargetBagNetworkId);
-            if (controller == null)
+            uint senderClientId = GetSenderClientId(clientId);
+            if (!SecurityIntegration.ValidateModuleRequest(
+                    senderClientId,
+                    BuildContext(request.ActorNetworkId, request.CorrelationId),
+                    "Inventory",
+                    nameof(NetworkWealthRequest)))
             {
-                SendWealthResponse(request.TargetBagNetworkId, new NetworkWealthResponse
+                SendWealthResponse(senderClientId, new NetworkWealthResponse
                 {
                     RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
                     Authorized = false,
-                    RejectionReason = InventoryRejectionReason.BagNotFound
+                    RejectionReason = GetSecurityRejection(request.ActorNetworkId, request.CorrelationId)
                 });
                 return;
             }
-            
-            var response = controller.ProcessWealthRequest(request, request.TargetBagNetworkId);
-            SendWealthResponse(request.TargetBagNetworkId, response);
+            if (!CheckRateLimit(clientId))
+            {
+                SendWealthResponse(senderClientId, new NetworkWealthResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Authorized = false,
+                    RejectionReason = InventoryRejectionReason.RateLimitExceeded
+                });
+                return;
+            }
+
+            try
+            {
+                var controller = GetController(request.TargetBagNetworkId);
+                if (controller == null)
+                {
+                    SendWealthResponse(senderClientId, new NetworkWealthResponse
+                    {
+                        RequestId = request.RequestId,
+                        ActorNetworkId = request.ActorNetworkId,
+                        CorrelationId = request.CorrelationId,
+                        Authorized = false,
+                        RejectionReason = InventoryRejectionReason.BagNotFound
+                    });
+                    return;
+                }
+
+                var response = controller.ProcessWealthRequest(request, senderClientId);
+                response.ActorNetworkId = request.ActorNetworkId;
+                response.CorrelationId = request.CorrelationId;
+                SendWealthResponse(senderClientId, response);
+            }
+            finally
+            {
+                DecrementPendingRequests(clientId);
+            }
         }
-        
+
         #endregion
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // SERVER: SEND RESPONSES
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         #region Send Responses (Server)
-        
+
         private void SendContentAddResponse(uint targetNetworkId, NetworkContentAddResponse response)
         {
             if (m_LogNetworkMessages)
                 Debug.Log($"[NetworkInventoryManager] Sending add response: RequestId={response.RequestId}, Authorized={response.Authorized}");
             OnSendContentAddResponse?.Invoke(targetNetworkId, response);
         }
-        
+
         private void SendContentRemoveResponse(uint targetNetworkId, NetworkContentRemoveResponse response)
         {
             if (m_LogNetworkMessages)
                 Debug.Log($"[NetworkInventoryManager] Sending remove response: RequestId={response.RequestId}, Authorized={response.Authorized}");
             OnSendContentRemoveResponse?.Invoke(targetNetworkId, response);
         }
-        
+
         private void SendContentMoveResponse(uint targetNetworkId, NetworkContentMoveResponse response)
         {
             if (m_LogNetworkMessages)
                 Debug.Log($"[NetworkInventoryManager] Sending move response: RequestId={response.RequestId}, Authorized={response.Authorized}");
             OnSendContentMoveResponse?.Invoke(targetNetworkId, response);
         }
-        
+
         private void SendContentUseResponse(uint targetNetworkId, NetworkContentUseResponse response)
         {
             if (m_LogNetworkMessages)
                 Debug.Log($"[NetworkInventoryManager] Sending use response: RequestId={response.RequestId}, Authorized={response.Authorized}");
             OnSendContentUseResponse?.Invoke(targetNetworkId, response);
         }
-        
+
         private void SendContentDropResponse(uint targetNetworkId, NetworkContentDropResponse response)
         {
             if (m_LogNetworkMessages)
                 Debug.Log($"[NetworkInventoryManager] Sending drop response: RequestId={response.RequestId}, Authorized={response.Authorized}");
             OnSendContentDropResponse?.Invoke(targetNetworkId, response);
         }
-        
+
         private void SendEquipmentResponse(uint targetNetworkId, NetworkEquipmentResponse response)
         {
             if (m_LogNetworkMessages)
                 Debug.Log($"[NetworkInventoryManager] Sending equipment response: RequestId={response.RequestId}, Authorized={response.Authorized}");
             OnSendEquipmentResponse?.Invoke(targetNetworkId, response);
         }
-        
+
         private void SendSocketResponse(uint targetNetworkId, NetworkSocketResponse response)
         {
             if (m_LogNetworkMessages)
                 Debug.Log($"[NetworkInventoryManager] Sending socket response: RequestId={response.RequestId}, Authorized={response.Authorized}");
             OnSendSocketResponse?.Invoke(targetNetworkId, response);
         }
-        
+
         private void SendWealthResponse(uint targetNetworkId, NetworkWealthResponse response)
         {
             if (m_LogNetworkMessages)
                 Debug.Log($"[NetworkInventoryManager] Sending wealth response: RequestId={response.RequestId}, Authorized={response.Authorized}");
             OnSendWealthResponse?.Invoke(targetNetworkId, response);
         }
-        
+
         #endregion
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // SERVER: BROADCASTING
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         #region Broadcasting (Server)
-        
+
         public void BroadcastItemAdded(NetworkItemAddedBroadcast broadcast)
         {
             if (!m_IsServer) return;
@@ -570,7 +936,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 Debug.Log($"[NetworkInventoryManager] Broadcasting item added: BagId={broadcast.BagNetworkId}");
             OnBroadcastItemAdded?.Invoke(broadcast);
         }
-        
+
         public void BroadcastItemRemoved(NetworkItemRemovedBroadcast broadcast)
         {
             if (!m_IsServer) return;
@@ -578,7 +944,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 Debug.Log($"[NetworkInventoryManager] Broadcasting item removed: BagId={broadcast.BagNetworkId}");
             OnBroadcastItemRemoved?.Invoke(broadcast);
         }
-        
+
         public void BroadcastItemMoved(NetworkItemMovedBroadcast broadcast)
         {
             if (!m_IsServer) return;
@@ -586,7 +952,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 Debug.Log($"[NetworkInventoryManager] Broadcasting item moved: BagId={broadcast.BagNetworkId}");
             OnBroadcastItemMoved?.Invoke(broadcast);
         }
-        
+
         public void BroadcastItemUsed(NetworkItemUsedBroadcast broadcast)
         {
             if (!m_IsServer) return;
@@ -594,7 +960,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 Debug.Log($"[NetworkInventoryManager] Broadcasting item used: BagId={broadcast.BagNetworkId}");
             OnBroadcastItemUsed?.Invoke(broadcast);
         }
-        
+
         public void BroadcastItemEquipped(NetworkItemEquippedBroadcast broadcast)
         {
             if (!m_IsServer) return;
@@ -602,7 +968,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 Debug.Log($"[NetworkInventoryManager] Broadcasting item equipped: BagId={broadcast.BagNetworkId}, Index={broadcast.EquipmentIndex}");
             OnBroadcastItemEquipped?.Invoke(broadcast);
         }
-        
+
         public void BroadcastItemUnequipped(NetworkItemUnequippedBroadcast broadcast)
         {
             if (!m_IsServer) return;
@@ -610,7 +976,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 Debug.Log($"[NetworkInventoryManager] Broadcasting item unequipped: BagId={broadcast.BagNetworkId}, Index={broadcast.EquipmentIndex}");
             OnBroadcastItemUnequipped?.Invoke(broadcast);
         }
-        
+
         public void BroadcastSocketChange(NetworkSocketChangeBroadcast broadcast)
         {
             if (!m_IsServer) return;
@@ -618,7 +984,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 Debug.Log($"[NetworkInventoryManager] Broadcasting socket change: BagId={broadcast.BagNetworkId}");
             OnBroadcastSocketChange?.Invoke(broadcast);
         }
-        
+
         public void BroadcastWealthChange(NetworkWealthChangeBroadcast broadcast)
         {
             if (!m_IsServer) return;
@@ -626,7 +992,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 Debug.Log($"[NetworkInventoryManager] Broadcasting wealth change: BagId={broadcast.BagNetworkId}, Change={broadcast.Change}");
             OnBroadcastWealthChange?.Invoke(broadcast);
         }
-        
+
         public void BroadcastPropertyChange(NetworkPropertyChangeBroadcast broadcast)
         {
             if (!m_IsServer) return;
@@ -634,7 +1000,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 Debug.Log($"[NetworkInventoryManager] Broadcasting property change: BagId={broadcast.BagNetworkId}");
             OnBroadcastPropertyChange?.Invoke(broadcast);
         }
-        
+
         public void BroadcastFullSnapshot(NetworkInventorySnapshot snapshot)
         {
             if (!m_IsServer) return;
@@ -642,7 +1008,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 Debug.Log($"[NetworkInventoryManager] Broadcasting full snapshot: BagId={snapshot.BagNetworkId}, Cells={snapshot.Cells?.Length ?? 0}");
             OnBroadcastFullSnapshot?.Invoke(snapshot);
         }
-        
+
         public void BroadcastDelta(NetworkInventoryDelta delta)
         {
             if (!m_IsServer) return;
@@ -650,7 +1016,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 Debug.Log($"[NetworkInventoryManager] Broadcasting delta: BagId={delta.BagNetworkId}");
             OnBroadcastDelta?.Invoke(delta);
         }
-        
+
         public void SendSnapshotToClient(ulong clientId, NetworkInventorySnapshot snapshot)
         {
             if (!m_IsServer) return;
@@ -658,164 +1024,180 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 Debug.Log($"[NetworkInventoryManager] Sending snapshot to client {clientId}: BagId={snapshot.BagNetworkId}");
             OnSendSnapshotToClient?.Invoke(clientId, snapshot);
         }
-        
+
         #endregion
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // CLIENT: RECEIVING BROADCASTS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         #region Receive Broadcasts (Client)
-        
+
         public void ReceiveItemAddedBroadcast(NetworkItemAddedBroadcast broadcast)
         {
             var controller = GetController(broadcast.BagNetworkId);
             controller?.ReceiveItemAddedBroadcast(broadcast);
         }
-        
+
         public void ReceiveItemRemovedBroadcast(NetworkItemRemovedBroadcast broadcast)
         {
             var controller = GetController(broadcast.BagNetworkId);
             controller?.ReceiveItemRemovedBroadcast(broadcast);
         }
-        
+
         public void ReceiveItemMovedBroadcast(NetworkItemMovedBroadcast broadcast)
         {
             var controller = GetController(broadcast.BagNetworkId);
             controller?.ReceiveItemMovedBroadcast(broadcast);
         }
-        
+
         public void ReceiveItemUsedBroadcast(NetworkItemUsedBroadcast broadcast)
         {
             var controller = GetController(broadcast.BagNetworkId);
             controller?.ReceiveItemUsedBroadcast(broadcast);
         }
-        
+
         public void ReceiveItemEquippedBroadcast(NetworkItemEquippedBroadcast broadcast)
         {
             var controller = GetController(broadcast.BagNetworkId);
             controller?.ReceiveItemEquippedBroadcast(broadcast);
         }
-        
+
         public void ReceiveItemUnequippedBroadcast(NetworkItemUnequippedBroadcast broadcast)
         {
             var controller = GetController(broadcast.BagNetworkId);
             controller?.ReceiveItemUnequippedBroadcast(broadcast);
         }
-        
+
         public void ReceiveSocketChangeBroadcast(NetworkSocketChangeBroadcast broadcast)
         {
             var controller = GetController(broadcast.BagNetworkId);
             controller?.ReceiveSocketChangeBroadcast(broadcast);
         }
-        
+
         public void ReceiveWealthChangeBroadcast(NetworkWealthChangeBroadcast broadcast)
         {
             var controller = GetController(broadcast.BagNetworkId);
             controller?.ReceiveWealthChangeBroadcast(broadcast);
         }
-        
+
         public void ReceiveFullSnapshot(NetworkInventorySnapshot snapshot)
         {
             var controller = GetController(snapshot.BagNetworkId);
             controller?.ReceiveFullSnapshot(snapshot);
         }
-        
+
         #endregion
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // CLIENT: RECEIVING RESPONSES
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         #region Receive Responses (Client)
-        
+
         public void ReceiveContentAddResponse(NetworkContentAddResponse response, uint targetNetworkId)
         {
-            var controller = GetController(targetNetworkId);
+            uint actorId = response.ActorNetworkId != 0 ? response.ActorNetworkId : targetNetworkId;
+            var controller = GetController(actorId);
             controller?.ReceiveContentAddResponse(response);
         }
-        
+
         public void ReceiveContentRemoveResponse(NetworkContentRemoveResponse response, uint targetNetworkId)
         {
-            var controller = GetController(targetNetworkId);
+            uint actorId = response.ActorNetworkId != 0 ? response.ActorNetworkId : targetNetworkId;
+            var controller = GetController(actorId);
             controller?.ReceiveContentRemoveResponse(response);
         }
-        
+
         public void ReceiveContentMoveResponse(NetworkContentMoveResponse response, uint targetNetworkId)
         {
-            var controller = GetController(targetNetworkId);
+            uint actorId = response.ActorNetworkId != 0 ? response.ActorNetworkId : targetNetworkId;
+            var controller = GetController(actorId);
             controller?.ReceiveContentMoveResponse(response);
         }
-        
+
         public void ReceiveContentUseResponse(NetworkContentUseResponse response, uint targetNetworkId)
         {
-            var controller = GetController(targetNetworkId);
+            uint actorId = response.ActorNetworkId != 0 ? response.ActorNetworkId : targetNetworkId;
+            var controller = GetController(actorId);
             controller?.ReceiveContentUseResponse(response);
         }
-        
+
         public void ReceiveContentDropResponse(NetworkContentDropResponse response, uint targetNetworkId)
         {
-            var controller = GetController(targetNetworkId);
+            uint actorId = response.ActorNetworkId != 0 ? response.ActorNetworkId : targetNetworkId;
+            var controller = GetController(actorId);
             controller?.ReceiveContentDropResponse(response);
         }
-        
+
         public void ReceiveEquipmentResponse(NetworkEquipmentResponse response, uint targetNetworkId)
         {
-            var controller = GetController(targetNetworkId);
+            uint actorId = response.ActorNetworkId != 0 ? response.ActorNetworkId : targetNetworkId;
+            var controller = GetController(actorId);
             controller?.ReceiveEquipmentResponse(response);
         }
-        
+
         public void ReceiveSocketResponse(NetworkSocketResponse response, uint targetNetworkId)
         {
-            var controller = GetController(targetNetworkId);
+            uint actorId = response.ActorNetworkId != 0 ? response.ActorNetworkId : targetNetworkId;
+            var controller = GetController(actorId);
             controller?.ReceiveSocketResponse(response);
         }
-        
+
         public void ReceiveWealthResponse(NetworkWealthResponse response, uint targetNetworkId)
         {
-            var controller = GetController(targetNetworkId);
+            uint actorId = response.ActorNetworkId != 0 ? response.ActorNetworkId : targetNetworkId;
+            var controller = GetController(actorId);
             controller?.ReceiveWealthResponse(response);
         }
-        
+
         #endregion
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // CUSTOM VALIDATION EXTENSION POINTS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>Custom validator for add operations.</summary>
         public Func<NetworkContentAddRequest, uint, (bool allowed, InventoryRejectionReason reason)> CustomAddValidator;
-        
+
         /// <summary>Custom validator for remove operations.</summary>
         public Func<NetworkContentRemoveRequest, uint, (bool allowed, InventoryRejectionReason reason)> CustomRemoveValidator;
-        
+
         /// <summary>Custom validator for merchant operations.</summary>
         public Func<NetworkMerchantRequest, uint, (bool allowed, InventoryRejectionReason reason)> CustomMerchantValidator;
-        
+
         /// <summary>Custom validator for crafting operations.</summary>
         public Func<NetworkCraftingRequest, uint, (bool allowed, InventoryRejectionReason reason)> CustomCraftingValidator;
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // HELPERS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         private bool CheckRateLimit(ulong clientId)
         {
             if (!m_PendingRequestCounts.TryGetValue(clientId, out int count))
                 count = 0;
-            
+
             if (count >= m_MaxPendingRequestsPerPlayer)
             {
                 Debug.LogWarning($"[NetworkInventoryManager] Client {clientId} exceeded rate limit");
                 return false;
             }
-            
+
             m_PendingRequestCounts[clientId] = count + 1;
             return true;
         }
-        
+
+        private void DecrementPendingRequests(ulong clientId)
+        {
+            if (m_PendingRequestCounts.TryGetValue(clientId, out int count))
+            {
+                m_PendingRequestCounts[clientId] = Math.Max(0, count - 1);
+            }
+        }
+
         public IEnumerable<uint> GetRegisteredNetworkIds() => m_Controllers.Keys;
-        
+
         public void SendInitialState(ulong clientId)
         {
             if (!m_IsServer) return;
@@ -825,7 +1207,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 SendSnapshotToClient(clientId, snapshot);
             }
         }
-        
+
         public void ForceFullSync()
         {
             if (!m_IsServer) return;
@@ -835,7 +1217,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 BroadcastFullSnapshot(snapshot);
             }
         }
-        
+
         public void ClearControllers()
         {
             m_Controllers.Clear();
@@ -844,7 +1226,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 Debug.Log("[NetworkInventoryManager] All controllers cleared");
         }
     }
-    
+
     /// <summary>
     /// Placeholder for merchant-specific network controller.
     /// </summary>

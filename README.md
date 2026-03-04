@@ -2,6 +2,35 @@
 
 This folder contains server-authoritative networking components for Game Creator 2 characters, designed for competitive multiplayer games.
 
+Current reference integration: **Unity Netcode for GameObjects 2.9.2** via `NetcodeGameObjectsTransportBridge`.
+
+Note: this README includes both modern bridge/profile flows and legacy direct RPC examples for subsystem-specific integrations. For movement/state transport, prefer `NetworkTransportBridge`.
+
+## Table of Contents
+
+- [Architecture Overview](#architecture-overview)
+- [Deployment Architecture](#deployment-architecture)
+- [Visual Scripting & Sync Components](#visual-scripting--sync-components-)
+- [Components](#components)
+- [Session Profiles & Transport Bridge](#session-profiles--transport-bridge-)
+- [Quick Start](#quick-start-)
+- [NPC Synchronization Modes](#npc-synchronization-modes-)
+- [Usage (Manual Setup)](#usage-manual-setup)
+- [Bandwidth Analysis](#bandwidth-analysis)
+- [Configuration](#configuration)
+- [Integration Examples](#integration-examples)
+- [Debugging & Diagnostics](#debugging--diagnostics)
+- [Motion Controller (Dash/Teleport/Abilities)](#motion-controller-dashteleportabilities)
+- [Animation Sync (Playable Graph)](#animation-sync-playable-graph)
+- [Off-Mesh Link Networking](#off-mesh-link-networking)
+- [Lag Compensation (Hit Validation)](#lag-compensation-hit-validation)
+- [Network Combat System](#network-combat-system-)
+- [Late-Join State Synchronization](#late-join-state-synchronization-)
+- [Server-Authoritative Kernel Units](#server-authoritative-kernel-units-)
+- [NavMesh Agent Networking](#navmesh-agent-networking)
+- [IK Rig Sync (Procedural Animations)](#ik-rig-sync-procedural-animations)
+- [Total Bandwidth Summary](#total-bandwidth-summary)
+
 ## Architecture Overview
 
 The **NetworkCharacter** component is the primary entry point. It automatically configures the correct driver based on network role:
@@ -23,14 +52,18 @@ The **NetworkCharacter** component is the primary entry point. It automatically 
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
+Host-owner behavior is configurable with `Host Owner Uses Client Prediction`:
+- `false` (default): host-owned character stays `Server` role for stricter fairness
+- `true`: host-owned character uses `LocalClient` role for lower host input latency
+
 ### Data Flow
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │                         CLIENT SIDE                                  │
 │  ┌─────────────────────┐     ┌──────────────────────────────────┐  │
-│  │ UnitPlayerNetwork   │────►│ UnitDriverNetworkClient          │  │
-│  │ Client              │     │ - Client-side prediction         │  │
+│  │ Network-aware       │────►│ UnitDriverNetworkClient          │  │
+│  │ UnitPlayer          │     │ - Client-side prediction         │  │
 │  │ - Input capture     │     │ - Server reconciliation          │  │
 │  │ - Compression       │     │ - Input buffering                │  │
 │  └─────────────────────┘     └──────────────────────────────────┘  │
@@ -122,64 +155,18 @@ In a **2-player game with dedicated server**:
 
 ### Runtime Driver Selection
 
-The same prefab spawns on all machines, but each machine selects the appropriate driver:
+The same prefab spawns on all machines, but `NetworkCharacter` now resolves role and assigns the driver internally.
 
 ```csharp
-void OnNetworkSpawn()
+public override void OnNetworkSpawn()
 {
-#if UNITY_SERVER
-    // Dedicated server build: validate all players, no visuals needed
-    character.ChangeDriver(new UnitDriverNetworkServer());
-    DisableVisuals(); // Save memory on server
-#else
-    // Client build
-    if (IsOwner)
-    {
-        // This is MY character - use prediction for responsive feel
-        character.ChangeDriver(new UnitDriverNetworkClient());
-        EnableCameraFollow();
-        EnableInput();
-    }
-    else
-    {
-        // This is SOMEONE ELSE's character - interpolate their position
-        character.ChangeDriver(new UnitDriverNetworkRemote());
-    }
-#endif
-}
-```
-
-Or with runtime checks (works in all builds, useful for Host mode):
-
-```csharp
-void OnNetworkSpawn()
-{
-    if (IsServer && !IsHost)
-    {
-        // Dedicated server mode
-        character.ChangeDriver(new UnitDriverNetworkServer());
-        DisableVisuals();
-    }
-    else if (IsHost && IsOwner)
-    {
-        // I'm hosting AND playing - use client driver for my character
-        character.ChangeDriver(new UnitDriverNetworkClient());
-    }
-    else if (IsServer)
-    {
-        // Host validates other players
-        character.ChangeDriver(new UnitDriverNetworkServer());
-    }
-    else if (IsOwner)
-    {
-        // Client connected to host/server - my character
-        character.ChangeDriver(new UnitDriverNetworkClient());
-    }
-    else
-    {
-        // Remote player I'm watching
-        character.ChangeDriver(new UnitDriverNetworkRemote());
-    }
+    // NGO path: NetworkCharacter auto-initializes itself in OnNetworkSpawn.
+    // No manual InitializeNetworkRole call is required.
+    var networkCharacter = GetComponent<NetworkCharacter>();
+    
+    // Access assigned role/driver if needed:
+    // networkCharacter.Role
+    // networkCharacter.ServerDriver / ClientDriver / RemoteDriver
 }
 ```
 
@@ -233,7 +220,114 @@ UnitDriverNetworkServer (on Server)
 └───────────────┘                   └───────────────┘
 ```
 
+## Visual Scripting & Sync Components ⭐
+
+### GC2 Conditions (drop into any Condition List)
+
+| Condition | Category | Description |
+|-----------|----------|-------------|
+| **Is Network Owner** | Network/General | True if character is owned by local client |
+| **Is Network Server** | Network/General | True if running as server (incl. host) |
+| **Is Network Host** | Network/General | True if running as host (server + client) |
+| **Is Network Connected** | Network/General | True if connected to any network session |
+
+### GC2 Instructions (drop into any Instruction List)
+
+| Instruction | Category | Description |
+|-------------|----------|-------------|
+| **Invoke Network Trigger** | Network/Triggers | Fires a named trigger via `NetworkTriggerController`, broadcasting to all peers |
+| **Sync Network Variables** | Network/Variables | Forces a full snapshot broadcast of all networked variables on the target |
+| **Register Network Player** | Network/Player | Registers a GameObject with GC2's `ShortcutPlayer` so "Get Player" nodes work |
+
+### NetworkTriggerController
+
+Attach to any GameObject with GC2 Triggers that need network sync:
+
+```csharp
+// Inspector: add trigger entries with unique names
+// Code: hook the event to your networking layer
+var triggerCtrl = GetComponent<NetworkTriggerController>();
+triggerCtrl.IsOwner = isLocalPlayer;
+
+// Owner → network broadcast
+triggerCtrl.OnTriggerBroadcastRequested += broadcast =>
+{
+    // Send via your RPC system
+    MyRpc_FireTrigger(broadcast.TriggerName, broadcast.IsPersistent);
+};
+
+// Network → local execution (on remote clients)
+public void OnNetworkTriggerReceived(string name)
+{
+    triggerCtrl.ExecuteFromNetwork(name);
+}
+
+// Late joiner: replay persistent states
+triggerCtrl.ReplayPersistentStates(serverPersistentStates);
+```
+
+### NetworkVariableSync
+
+Syncs GC2 `LocalNameVariables` and `LocalListVariables` over the network:
+
+```csharp
+var varSync = GetComponent<NetworkVariableSync>();
+varSync.IsOwner = isLocalPlayer;
+
+// Owner → broadcast changes
+varSync.OnNameVariableBroadcast += change =>
+{
+    MyRpc_SyncNameVar(change.VariableName, change.SerializedValue);
+};
+
+// Network → apply on remote clients
+public void OnNetworkVarReceived(string name, string serialized)
+{
+    varSync.ApplyNameChange(new NetworkVariableSync.NameVariableChange
+    {
+        VariableName = name,
+        SerializedValue = serialized
+    });
+}
+
+// Late joiner: full snapshot
+var snapshot = varSync.GetNameSnapshot();
+```
+
+Values are serialized as type-prefixed strings: `"float:3.14"`, `"int:42"`, `"vector3:1.0,2.0,3.0"`, etc.
+
+### NetworkCameraSync
+
+Syncs Main Camera's local-space offset to remote clients:
+
+```csharp
+var camSync = GetComponent<NetworkCameraSync>();
+camSync.IsOwner = isLocalPlayer;
+camSync.CameraIndicator = remoteHeadTransform; // optional visual indicator
+
+camSync.OnCameraStateBroadcast += state =>
+{
+    MyRpc_SyncCamera(state.LocalPosition, state.LocalRotation, state.FieldOfView);
+};
+```
+
+### ShortcutPlayer Integration
+
+`NetworkCharacter.InitializeForRole()` now automatically calls `ShortcutPlayer.Change(gameObject)` when initialized as `LocalClient`. This means GC2's "Get Player" property getters work out-of-the-box for networked characters.
+
 ## Components
+
+### NetworkSpawnListener (NetworkingCore)
+Late-subscriber-safe spawn registry in the `Arawn.NetworkingCore` assembly. Tracks all networked character spawns/despawns and replays existing spawns to new subscribers.
+- `Subscribe(callback)` — immediately replays all existing spawns then receives future ones
+- `GetLocalPlayer()`, `GetByOwnerId(id)`, `GetByTag(tag)` — lookup helpers
+- `PurgeDestroyed()` — clean up destroyed references
+
+### NetworkLateJoinCoordinator
+Orchestrates per-subsystem state snapshots for clients that join mid-match. Uses `ILateJoinSnapshotProvider` interface for subsystem registration.
+- Priority-ordered collection (0-99 spawns, 100-199 gameplay, 200-299 visual scripting, 300+ cosmetic)
+- Auto-chunking for large bundles (default 32 KB)
+- See [Documentation/late-join-coordinator.md](Documentation/late-join-coordinator.md) for full integration guide
 
 ### NetworkCharacterTypes.cs
 Data structures for network transmission:
@@ -256,10 +350,10 @@ Client-side prediction driver:
 - Reconciles with server state when mismatch detected
 - Re-simulates after reconciliation
 
-### UnitPlayerNetworkClient.cs
-Input capture unit (WASD/Gamepad):
-- Captures and compresses player input
-- Integrates with network driver
+### UnitPlayerDirectionalNetwork.cs
+Network-aware directional input (WASD/Gamepad):
+- Captures and compresses local movement input
+- Integrates with `UnitDriverNetworkClient`
 - Supports programmatic input injection
 
 ### UnitPlayerDirectionalEnemyMassesNetwork.cs
@@ -300,6 +394,31 @@ Remote character interpolation:
 - Limited extrapolation when packets delayed
 - Snaps on teleport detection
 
+### NetworkTransportBridge.cs
+Transport abstraction for movement sync:
+- Exposes `SendToServer`, `SendToOwner`, `Broadcast`, `ResolveCharacter`, `ServerTime`
+- Registers character network IDs for cross-subsystem lookup
+- Provides global `NetworkSessionProfile` binding
+- Supports strict O(1) registry lookup (no runtime scene-scan fallback)
+- Supports server-issued runtime ID policy (transport-issued IDs first, optional bridge allocator fallback)
+
+### NetcodeGameObjectsTransportBridge.cs
+Default NGO adapter implementation:
+- Uses NGO Custom Messaging with named channels (`GC2N/Input`, `GC2N/State`)
+- Handles host loopback without serialization overhead
+- Uses static `NetworkManager.ServerClientId` (NGO 2.9.2 compatible)
+
+### NetworkSessionProfile.cs
+ScriptableObject network tuning profile:
+- Built-in presets: `Duel`, `Standard`, `Massive`
+- Controls simulation rates, input redundancy, reconciliation, anti-cheat thresholds
+- Configures near/mid/far relevance tiers and subsystem sync toggles
+
+### StableHashUtility.cs
+Deterministic hashing utility:
+- Replaces runtime `string.GetHashCode()` usage in network IDs/hashes
+- Ensures stable cross-platform, cross-session hash behavior
+
 ### NetworkCharacter.cs ⭐ NEW
 **Primary network wrapper for GC2 Characters.** This is the recommended way to network GC2 characters.
 
@@ -312,7 +431,7 @@ Remote character interpolation:
 │  │ ───────────────│  │ ───────────────│  │ ─────────────────── │ │
 │  │ Server → Server │  │ IsDead (sync)   │  │ IK: Sync/Local/Off │ │
 │  │ Owner  → Client │  │ IsPlayer (sync) │  │ Footsteps: Local   │ │
-│  │ Remote → Remote │  │ Events (RPC)    │  │ Interaction: Off   │ │
+│  │ Remote → Remote │  │ Bridge Events    │  │ Interaction: Off   │ │
 │  └─────────────────┘  └─────────────────┘  └─────────────────────┘ │
 │                                                                      │
 │  Optional Components:                                                │
@@ -456,6 +575,50 @@ Server-authoritative animation parameters for networked characters:
 
 **Note:** For most multiplayer games, the default `UnitAnimimKinematic` is sufficient. Remote characters derive animation parameters locally from interpolated position/velocity, which works well because animations are primarily cosmetic.
 
+## Session Profiles & Transport Bridge ⭐
+
+Movement transport and scaling are now configured around two core pieces:
+
+- `NetworkTransportBridge` (how movement payloads are delivered)
+- `NetworkSessionProfile` (how often, how strict, and what to sync by distance tier)
+
+### Recommended NGO Setup
+
+1. Add `NetcodeGameObjectsTransportBridge` to your scene.
+2. Create `NetworkSessionProfile` asset (`Create > Game Creator > Network > Session Profile`).
+3. Assign profile to `Global Session Profile` on the bridge.
+4. Optionally set per-character `Session Profile Override`.
+5. Keep `Strict Registry Lookup` enabled for competitive sessions.
+6. Keep `Use Server-Issued IDs When Available` enabled (NGO uses `NetworkObjectId`).
+7. Keep `Allocate Server-Issued IDs When Transport Missing` disabled unless your custom transport replicates those IDs to clients.
+
+### Presets
+
+| Preset | Intended Scale | Key Behavior |
+|--------|----------------|--------------|
+| `Duel` | 1v1, small matches | Higher rates, tighter reconciliation |
+| `Standard` | Typical multiplayer | Balanced rates and sync |
+| `Massive` | Large sessions (up to ~48v48) | Lower far-tier rates, reduced expensive sync, distance-based state fan-out culling |
+
+### Relevance Tiering
+
+Remote characters can be auto-tiered by distance:
+- `Near`: highest fidelity
+- `Mid`: reduced update rates, optional IK off
+- `Far`: low rates, optional animation/core/combat off
+
+This applies via `UnitDriverNetworkRemote.ApplyTierSettings(...)` and subsystem toggles controlled by `NetworkCharacter`.
+
+### Fan-Out Filtering (Server Send Path)
+
+`NetworkSessionProfile` also controls whether the server should send state at all for a target observer:
+- `requireObserverCharacterForRelevance`: if true, unresolved observer clients receive no state.
+- `enableDistanceCulling`: enables hard distance cull on send path.
+- `cullDistance`: distance threshold (meters) for culling.
+- `culledKeepAliveRate`: optional low-rate keepalive while culled (`0` = fully suppressed).
+
+This reduces packet fan-out in larger sessions by cutting per-character sends beyond relevance range.
+
 ## Quick Start ⭐
 
 The easiest way to network a GC2 Character is using **NetworkCharacter**:
@@ -473,21 +636,26 @@ Character (GC2)
 ┌─────────────────────────────────────────────────────────────────────┐
 │ NetworkCharacter                                                     │
 ├─────────────────────────────────────────────────────────────────────┤
-│ ▼ Driver Configuration                                              │
-│   Server Driver:  [●] UnitDriverNetworkServer   (authoritative)     │
-│   Client Driver:  [●] UnitDriverNetworkClient   (prediction)        │
-│   Remote Driver:  [●] UnitDriverNetworkRemote   (interpolation)     │
+│ ▼ Network Identity                                                  │
+│   Use Automatic Network ID: [✓]                                     │
+│   Manual Network ID: [0] (used if automatic is off)                │
 ├─────────────────────────────────────────────────────────────────────┤
 │ ▼ Remote Character Systems                                          │
 │   IK Mode:          [Synchronized ▼]  ← Sync look/aim direction     │
 │   Footsteps Mode:   [LocalOnly ▼]     ← Play from animation locally │
 │   Interaction Mode: [Disabled ▼]      ← Remotes don't interact      │
-│   Combat Mode:      [Disabled ▼]      ← Server handles combat       │
+│   Combat Mode:      [Disabled/Synchronized ▼]                       │
 ├─────────────────────────────────────────────────────────────────────┤
 │ ▼ Optional Network Components                                       │
 │   ☑ Use Network IK         ← Auto-creates UnitIKNetworkController   │
 │   ☑ Use Network Motion     ← Validates dash/teleport                │
 │   ☑ Use Lag Compensation   ← Enables hit validation                 │
+├─────────────────────────────────────────────────────────────────────┤
+│ ▼ Session and Compatibility                                         │
+│   Session Profile Override: [None/Profile Asset]                    │
+│   Use Relevance Tiers: [✓]                                          │
+│   Host Owner Uses Client Prediction: [ ] (default fairness-first)   │
+│   Allow Legacy Manager Compatibility: [✓]                           │
 ├─────────────────────────────────────────────────────────────────────┤
 │ ▼ Server Optimization                                               │
 │   ☑ Disable Visuals On Server  ← Saves memory on dedicated server   │
@@ -499,8 +667,8 @@ Character (GC2)
 
 **With Netcode for GameObjects:**
 ```csharp
-// NetworkCharacter automatically detects role in OnNetworkSpawn()
-// No additional code needed!
+// NetworkCharacter auto-initializes itself in OnNetworkSpawn.
+// No manual InitializeNetworkRole(...) call needed in NGO.
 
 public class MyPlayer : NetworkBehaviour
 {
@@ -508,13 +676,10 @@ public class MyPlayer : NetworkBehaviour
     
     public override void OnNetworkSpawn()
     {
-        // NetworkCharacter already configured itself
-        // Access drivers if needed:
+        // Access resolved role/driver if needed:
         if (m_NetworkCharacter.IsLocalPlayer)
         {
-            // Setup camera, UI, etc.
-            var clientDriver = m_NetworkCharacter.ClientDriver;
-            clientDriver.OnSendInput += SendInputToServer;
+            SetupCameraAndHud();
         }
     }
 }
@@ -533,11 +698,11 @@ public void OnNetworkSpawn() // Your framework's spawn callback
         isHost: IsHost()
     );
     
-    // Subscribe to state changes for manual sync
-    netChar.OnNetworkDeathChanged += isDead => {
-        // Send death state to other clients
-        SendRPC("SyncDeath", isDead);
-    };
+    // For non-NGO transports, either:
+    // 1) Implement a custom NetworkTransportBridge, or
+    // 2) Forward payload events manually:
+    netChar.OnInputPayloadReady += (id, inputs) => SendInputsToServer(id, inputs);
+    netChar.OnStatePayloadReady += (id, state, time) => BroadcastState(id, state, time);
 }
 ```
 
@@ -766,7 +931,7 @@ public class NetworkCivilian : NetworkBehaviour
 
 ## Usage (Manual Setup)
 
-For more control, you can set up components manually:
+For non-NGO frameworks (or custom spawn flows), you can set up components manually:
 
 ### Setup Local Player
 ```csharp
@@ -852,12 +1017,13 @@ void OnReceiveState(NetworkPositionState state, float serverTime)
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| inputSendRate | 60 | Input packets per second |
+| inputSendRate | 30 | Input packets per second |
 | inputRedundancy | 3 | Past inputs included for packet loss |
 | reconciliationThreshold | 0.1 | Position error (meters) to trigger reconciliation |
-| reconciliationSpeed | 10 | How fast to smooth reconciliation |
-| maxReconciliationDistance | 2 | Beyond this, teleport instead of smooth |
-| antiCheatMaxSpeed | 15 | Maximum validated movement speed |
+| reconciliationSpeed | 15 | How fast to smooth reconciliation |
+| maxReconciliationDistance | 3 | Beyond this, teleport instead of smooth |
+| maxSpeedMultiplier | 1.2 | Server-side speed tolerance multiplier |
+| violationThreshold | 5 | Violations before stronger anti-cheat action |
 
 ## Integration Examples
 
@@ -865,90 +1031,81 @@ void OnReceiveState(NetworkPositionState state, float serverTime)
 ```csharp
 public class NetcodeCharacterSync : NetworkBehaviour
 {
-    private NetworkCharacterManager manager;
+    private NetworkCharacter networkCharacter;
     
     public override void OnNetworkSpawn()
     {
-        manager = GetComponent<NetworkCharacterManager>();
-        
-        if (IsOwner)
-        {
-            manager.ChangeRole(NetworkCharacterManager.CharacterRole.LocalPlayer);
-            manager.OnSendInputs += SendInputsServerRpc;
-        }
-        else if (IsServer)
-        {
-            manager.CreateServerDriver();
-        }
-        else
-        {
-            manager.ChangeRole(NetworkCharacterManager.CharacterRole.RemotePlayer);
-        }
-    }
-    
-    [ServerRpc]
-    private void SendInputsServerRpc(NetworkInputState[] inputs)
-    {
-        manager.ReceiveClientInputs(inputs);
-    }
-    
-    [ClientRpc]
-    private void BroadcastStateClientRpc(NetworkPositionState state)
-    {
-        if (!IsOwner)
-        {
-            manager.ApplyServerState(state);
-        }
+        networkCharacter = GetComponent<NetworkCharacter>();
+        // NetworkCharacter already auto-configured itself in NGO.
+        // Use networkCharacter.Role/ClientDriver/ServerDriver as needed.
     }
 }
 ```
+
+> **Compatibility API**: `NetworkCharacterManager` with `ChangeRole()` / `CreateServerDriver()` / `ReceiveClientInputs()` / `ApplyServerState()` still works. Preferred path is `NetworkCharacter` + `NetworkTransportBridge` + `NetworkSessionProfile`.
 
 ### Mirror Networking
 ```csharp
 public class MirrorCharacterSync : NetworkBehaviour
 {
-    private NetworkCharacterManager manager;
+    private NetworkCharacter networkCharacter;
     
-    public override void OnStartAuthority()
+    public override void OnStartLocalPlayer()
     {
-        manager = GetComponent<NetworkCharacterManager>();
-        manager.ChangeRole(NetworkCharacterManager.CharacterRole.LocalPlayer);
-        manager.OnSendInputs += CmdSendInputs;
+        networkCharacter = GetComponent<NetworkCharacter>();
+        networkCharacter.InitializeNetworkRole(
+            isServer: isServer, isOwner: true, isHost: isServer
+        );
     }
     
     public override void OnStartServer()
     {
         if (!isLocalPlayer)
         {
-            manager = GetComponent<NetworkCharacterManager>();
-            manager.CreateServerDriver();
+            networkCharacter = GetComponent<NetworkCharacter>();
+            networkCharacter.InitializeNetworkRole(
+                isServer: true, isOwner: false
+            );
         }
     }
     
-    [Command]
-    private void CmdSendInputs(NetworkInputState[] inputs)
+    public override void OnStartClient()
     {
-        manager.ReceiveClientInputs(inputs);
-    }
-    
-    [ClientRpc]
-    private void RpcBroadcastState(NetworkPositionState state)
-    {
-        if (!isLocalPlayer)
+        if (!isLocalPlayer && !isServer)
         {
-            manager.ApplyServerState(state);
+            networkCharacter = GetComponent<NetworkCharacter>();
+            networkCharacter.InitializeNetworkRole(
+                isServer: false, isOwner: false
+            );
         }
     }
 }
 ```
 
-## Debugging
+## Debugging & Diagnostics
 
-Enable `LogEvents` on `NetworkCharacterManager` to see:
-- Input transmission counts and sequence numbers
-- Reconciliation triggers and error magnitudes
+Use these runtime signals for diagnostics:
+- `NetworkCharacter.OnRoleAssigned`
+- `NetworkCharacter.OnDriverAssigned`
+- `NetworkCharacter.OnInputPayloadReady`
+- `NetworkCharacter.OnStatePayloadReady`
 
 Remote characters show a yellow gizmo sphere when extrapolating.
+
+### NetworkSpawnListener
+- `GetAll()` returns every tracked spawn — useful for verifying spawn state after a scene load
+- `PurgeDestroyed()` cleans up stale references from destroyed objects
+
+### NetworkLateJoinCoordinator
+- `EstimateBundleSizeForClient(clientId)` — preview bundle size before sending
+- `OnError` event fires per-provider so a single broken provider doesn't block the rest
+- Set **Log Level** to `Verbose` in the Inspector for full snapshot collection logs
+
+### CharacterLagCompensation
+Enable gizmos to visualize:
+- Current hit zones (colored spheres)
+- Historical position trail (faded)
+- Hit validation results (green = valid, red = rejected)
 
 ## Motion Controller (Dash/Teleport/Abilities)
 
@@ -1433,6 +1590,55 @@ With Lag Compensation:
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
+### ⚠️ Required Setup: LagCompensationBootstrap
+
+`NetworkCharacter` automatically adds `CharacterLagCompensation` to each character.
+However, **the system will not function** unless the `LagCompensationManager` is
+initialized and recording frames on the server. Without this, the per-character
+components register silently but the history buffer stays empty.
+
+**Option A — Use the built-in Bootstrap component (recommended):**
+
+1. Add a `LagCompensationBootstrap` component to your NetworkManager or any
+   persistent server-side GameObject.
+2. Configure the settings in the Inspector (history size, snapshot rate, etc.).
+3. Call `SetServerMode(true)` from your networking solution's server start callback:
+
+```csharp
+// Netcode for GameObjects example:
+public override void OnNetworkSpawn()
+{
+    GetComponent<LagCompensationBootstrap>().SetServerMode(IsServer);
+}
+
+// Or enable "Treat As Server" in the Inspector for local testing.
+```
+
+The bootstrap handles `LagCompensationManager.Initialize()` and calls
+`RecordFrame()` every `FixedUpdate` automatically.
+
+**Option B — Manual initialization:**
+
+```csharp
+// On server startup:
+LagCompensationManager.Initialize(new LagCompensationConfig
+{
+    historySize  = 64,
+    snapshotRate = 60,
+    maxRewindTime = 0.5f,
+    hitTolerance  = 0.3f
+});
+
+// Every server tick (FixedUpdate or network tick):
+var timestamp = NetworkTimestamp.FromServerTime(Time.timeAsDouble);
+LagCompensationManager.Instance.RecordFrame(timestamp);
+```
+
+> **Why is this needed?** `CharacterLagCompensation.Register()` checks
+> `LagCompensationManager.IsInitialized` and silently skips when the manager
+> hasn't been created yet (the default when `ServerOnly` is true). And without
+> `RecordFrame()` being called each tick, there is no position history to rewind.
+
 ### CharacterLagCompensation Component
 
 Add to your networked GC2 Character prefab for automatic position history tracking:
@@ -1859,6 +2065,110 @@ m_CombatController.OnHitRejected += (request, reason) => {
 - Broadcasts: 60 × 16 × 3 = 2.88 KB/min
 - **Total: ~5 KB/min per player** (very efficient)
 
+## Late-Join State Synchronization ⭐
+
+When a client joins mid-match, it needs a snapshot of current game state (inventory, stats, active triggers, variables, etc.). The **NetworkLateJoinCoordinator** orchestrates this by collecting snapshots from registered subsystem providers.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    LATE-JOIN FLOW                                    │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│  SERVER (on client connect)                                         │
+│  ┌─────────────────────────────────────────────────────────────────┐│
+│  │ 1. NetworkLateJoinCoordinator.SendLateJoinBundle(clientId)      ││
+│  │ 2. Queries all ILateJoinSnapshotProviders in priority order     ││
+│  │ 3. Assembles LateJoinBundle (or chunks if > 32 KB)             ││
+│  │ 4. Fires OnSendBundleToClient / OnSendChunkToClient delegate   ││
+│  └─────────────────────────────────────────────────────────────────┘│
+│                              │                                       │
+│                              ▼ LateJoinBundle / LateJoinChunk        │
+│                                                                      │
+│  JOINING CLIENT                                                      │
+│  ┌─────────────────────────────────────────────────────────────────┐│
+│  │ 1. ReceiveLateJoinBundle(bundle) or ReceiveChunk(chunk)        ││
+│  │ 2. Routes entries to matching providers by ProviderId           ││
+│  │ 3. Each provider applies its own snapshot                       ││
+│  │ 4. Fires OnLateJoinComplete                                    ││
+│  └─────────────────────────────────────────────────────────────────┘│
+│                                                                      │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### ILateJoinSnapshotProvider Interface
+
+```csharp
+public interface ILateJoinSnapshotProvider
+{
+    string ProviderId { get; }      // e.g. "inventory", "stats", "triggers"
+    int Priority { get; }           // 0-99 spawns, 100-199 gameplay, 200-299 scripting
+    bool HasSnapshot { get; }       // false if nothing to send
+    LateJoinSnapshotEntry[] CollectSnapshots(ulong clientId);
+    void ApplySnapshots(LateJoinSnapshotEntry[] entries);
+}
+```
+
+Subsystems in separate assemblies (Inventory, Stats) implement this interface and register via `NetworkLateJoinCoordinator.RegisterProvider()` — no cross-assembly references needed.
+
+### Priority Bands
+
+| Range | Category | Examples |
+|-------|----------|----------|
+| 0–99 | Spawn state | Character existence, positions |
+| 100–199 | Gameplay | Inventory, Stats, Health |
+| 200–299 | Visual Scripting | Triggers, Variables |
+| 300+ | Cosmetic | Camera state, UI |
+
+### Netcode Integration Example
+
+```csharp
+public class NetcodeLateJoinBridge : NetworkBehaviour
+{
+    [SerializeField] private NetworkLateJoinCoordinator coordinator;
+
+    public override void OnNetworkSpawn()
+    {
+        if (IsServer)
+        {
+            coordinator.OnSendBundleToClient = (clientId, bundle) =>
+                SendBundleClientRpc(bundle, new ClientRpcParams
+                {
+                    Send = new ClientRpcSendParams
+                    { TargetClientIds = new[] { clientId } }
+                });
+
+            coordinator.OnSendChunkToClient = (clientId, chunk) =>
+                SendChunkClientRpc(chunk, new ClientRpcParams
+                {
+                    Send = new ClientRpcSendParams
+                    { TargetClientIds = new[] { clientId } }
+                });
+
+            NetworkManager.OnClientConnectedCallback += clientId =>
+                coordinator.SendLateJoinBundle(clientId);
+        }
+    }
+
+    [ClientRpc]
+    private void SendBundleClientRpc(LateJoinBundle bundle,
+        ClientRpcParams rpcParams = default)
+    {
+        coordinator.ReceiveLateJoinBundle(bundle);
+    }
+
+    [ClientRpc]
+    private void SendChunkClientRpc(LateJoinChunk chunk,
+        ClientRpcParams rpcParams = default)
+    {
+        coordinator.ReceiveChunk(chunk);
+    }
+}
+```
+
+For the full guide — including provider examples for Stats, Triggers, and Variables, chunking flow, diagnostics, and CrystalSave relationship — see [Documentation/late-join-coordinator.md](Documentation/late-join-coordinator.md).
+
 ## Server-Authoritative Kernel Units ⭐
 
 Optional GC2 Kernel unit replacements for when standard local calculation isn't sufficient.
@@ -2066,7 +2376,7 @@ Client-side NavMesh driver (for both local players and remote characters):
 - Reconciles with server path on mismatch
 
 ### UnitPlayerPointClickNetwork.cs
-Network-aware point-and-click input capture unit (parallels `UnitPlayerNetworkClient`):
+Network-aware point-and-click input capture unit (parallels `UnitPlayerDirectionalNetwork`):
 - Captures mouse/touch click input via raycast
 - Validates clicks before sending (rate limiting, distance checks)
 - Sends `NetworkNavMeshCommand` to driver
@@ -2735,7 +3045,7 @@ public class NetcodeIKSync : NetworkBehaviour
 // Full setup with all network components
 public class FullNetworkCharacter : NetworkBehaviour
 {
-    private NetworkCharacterManager characterManager;
+    private NetworkCharacter networkCharacter;
     private UnitAnimimNetworkController animController;
     private UnitIKNetworkController ikController;
     private UnitMotionNetworkController motionController;
@@ -2744,11 +3054,9 @@ public class FullNetworkCharacter : NetworkBehaviour
     {
         var character = GetComponent<Character>();
         
-        // 1. Movement (server-authoritative)
-        characterManager = GetComponent<NetworkCharacterManager>();
-        characterManager.ChangeRole(IsOwner 
-            ? NetworkCharacterManager.CharacterRole.LocalPlayer 
-            : NetworkCharacterManager.CharacterRole.RemotePlayer);
+        // 1. Movement + facing + combat (auto-configured from role)
+        networkCharacter = GetComponent<NetworkCharacter>();
+        // NetworkCharacter already auto-initialized in NGO.
         
         // 2. Animation (owner-authoritative)
         animController = gameObject.AddComponent<UnitAnimimNetworkController>();
@@ -2764,7 +3072,6 @@ public class FullNetworkCharacter : NetworkBehaviour
         // Hook up events
         if (IsOwner)
         {
-            characterManager.OnSendInputs += SendInputsServerRpc;
             animController.OnGestureCommandReady += BroadcastGestureClientRpc;
             ikController.OnIKStateReady += BroadcastIKStateClientRpc;
         }

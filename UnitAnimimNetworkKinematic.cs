@@ -14,7 +14,11 @@ namespace Arawn.GameCreator2.Networking
     /// Packed into 6 bytes for efficient transmission.
     /// </summary>
     [Serializable]
+#if UNITY_NETCODE
+    public struct NetworkAnimimState : IEquatable<NetworkAnimimState>, INetworkSerializable
+#else
     public struct NetworkAnimimState : IEquatable<NetworkAnimimState>
+#endif
     {
         // Speed packed as bytes (-1 to 1 range, 0.01 precision)
         public sbyte speedX;      // 1 byte

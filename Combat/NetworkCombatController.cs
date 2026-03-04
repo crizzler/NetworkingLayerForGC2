@@ -33,23 +33,13 @@ namespace Arawn.GameCreator2.Networking
     /// </remarks>
     [AddComponentMenu("Game Creator/Network/Network Combat Controller")]
     [DefaultExecutionOrder(ApplicationManager.EXECUTION_ORDER_DEFAULT)]
-    public class NetworkCombatController : MonoBehaviour
+    public class NetworkCombatController : NetworkSingleton<NetworkCombatController>
     {
         // ════════════════════════════════════════════════════════════════════════════════════════
-        // SINGLETON (Optional - for easy access)
+        // CONFIGURATION
         // ════════════════════════════════════════════════════════════════════════════════════════
         
-        private static NetworkCombatController s_Instance;
-        
-        /// <summary>
-        /// Global combat controller instance (if using singleton pattern).
-        /// </summary>
-        public static NetworkCombatController Instance => s_Instance;
-        
-        /// <summary>
-        /// Whether a global instance exists.
-        /// </summary>
-        public static bool HasInstance => s_Instance != null;
+        protected override DuplicatePolicy OnDuplicatePolicy => DuplicatePolicy.WarnOnly;
         
         // ════════════════════════════════════════════════════════════════════════════════════════
         // INSPECTOR
@@ -157,6 +147,9 @@ namespace Arawn.GameCreator2.Networking
         private bool m_IsServer;
         private bool m_IsClient;
         
+        // Reusable key buffer to avoid GC allocations during cleanup
+        private static readonly List<ushort> s_SharedKeyBuffer = new(16);
+        
         // Client-side pending requests
         private ushort m_NextRequestId = 1;
         private readonly Dictionary<ushort, PendingHitRequest> m_PendingRequests = new(32);
@@ -210,26 +203,6 @@ namespace Arawn.GameCreator2.Networking
         // ════════════════════════════════════════════════════════════════════════════════════════
         // UNITY LIFECYCLE
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
-        private void Awake()
-        {
-            if (s_Instance == null)
-            {
-                s_Instance = this;
-            }
-            else if (s_Instance != this)
-            {
-                Debug.LogWarning("[NetworkCombat] Multiple NetworkCombatController instances. Using first.");
-            }
-        }
-        
-        private void OnDestroy()
-        {
-            if (s_Instance == this)
-            {
-                s_Instance = null;
-            }
-        }
         
         private void Update()
         {
@@ -442,20 +415,20 @@ namespace Arawn.GameCreator2.Networking
         
         private void UpdatePendingRequests()
         {
-            // Clean up timed-out requests
-            var toRemove = new List<ushort>();
+            // Clean up timed-out requests (pooled list avoids per-frame GC allocation)
+            s_SharedKeyBuffer.Clear();
             float currentTime = Time.time;
             
             foreach (var kvp in m_PendingRequests)
             {
                 if (currentTime - kvp.Value.sentTime > m_HitResponseTimeout)
                 {
-                    toRemove.Add(kvp.Key);
+                    s_SharedKeyBuffer.Add(kvp.Key);
                     Debug.LogWarning($"[NetworkCombat] Hit request {kvp.Key} timed out");
                 }
             }
             
-            foreach (var id in toRemove)
+            foreach (var id in s_SharedKeyBuffer)
             {
                 m_PendingRequests.Remove(id);
             }

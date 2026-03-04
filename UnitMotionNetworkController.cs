@@ -773,14 +773,14 @@ namespace Arawn.GameCreator2.Networking
             
             base.SetMotionTransient(direction, speed, duration, fade);
             
-            m_LastDashTime = Time.time;
-            m_DashesUsed++;
-            
-            // Reset dash counter if cooldown passed
-            if (Time.time - m_LastDashTime > m_Dash.Cooldown)
+            float now = Time.time;
+            if (now - m_LastDashTime > m_Dash.Cooldown)
             {
-                m_DashesUsed = 1;
+                m_DashesUsed = 0;
             }
+            
+            m_DashesUsed++;
+            m_LastDashTime = now;
         }
 
         private void ApplyTeleportLocally(NetworkMotionCommand command)

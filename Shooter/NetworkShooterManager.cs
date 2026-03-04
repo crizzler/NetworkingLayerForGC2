@@ -4,6 +4,10 @@ using System.Collections.Generic;
 using UnityEngine;
 using GameCreator.Runtime.Characters;
 using GameCreator.Runtime.Common;
+using GameCreator.Runtime.Shooter;
+
+using Arawn.GameCreator2.Networking;
+using Arawn.GameCreator2.Networking.Security;
 
 #if UNITY_NETCODE
 using Unity.Netcode;
@@ -27,19 +31,13 @@ namespace Arawn.GameCreator2.Networking.Shooter
     /// </remarks>
     [AddComponentMenu("Game Creator/Network/Shooter/Network Shooter Manager")]
     [DefaultExecutionOrder(ApplicationManager.EXECUTION_ORDER_DEFAULT - 10)]
-    public class NetworkShooterManager : MonoBehaviour
+    public class NetworkShooterManager : NetworkSingleton<NetworkShooterManager>
     {
         // ════════════════════════════════════════════════════════════════════════════════════════
-        // SINGLETON
+        // CONFIGURATION
         // ════════════════════════════════════════════════════════════════════════════════════════
         
-        private static NetworkShooterManager s_Instance;
-        
-        /// <summary>Global manager instance.</summary>
-        public static NetworkShooterManager Instance => s_Instance;
-        
-        /// <summary>Whether an instance exists.</summary>
-        public static bool HasInstance => s_Instance != null;
+        protected override DuplicatePolicy OnDuplicatePolicy => DuplicatePolicy.DestroyComponent;
         
         // ════════════════════════════════════════════════════════════════════════════════════════
         // INSPECTOR
@@ -51,6 +49,30 @@ namespace Arawn.GameCreator2.Networking.Shooter
         
         [Tooltip("Maximum hit requests to process per frame on server.")]
         [SerializeField] private int m_MaxHitsPerFrame = 40;
+
+        [Tooltip("Maximum queued shot requests awaiting processing.")]
+        [SerializeField] private int m_MaxShotQueueLength = 512;
+
+        [Tooltip("Maximum queued hit requests awaiting processing.")]
+        [SerializeField] private int m_MaxHitQueueLength = 1024;
+
+        [Tooltip("Maximum queued reload requests awaiting processing.")]
+        [SerializeField] private int m_MaxReloadQueueLength = 128;
+
+        [Tooltip("Maximum queued fix-jam requests awaiting processing.")]
+        [SerializeField] private int m_MaxFixJamQueueLength = 128;
+
+        [Tooltip("Maximum queued charge requests awaiting processing.")]
+        [SerializeField] private int m_MaxChargeQueueLength = 128;
+
+        [Tooltip("Maximum queued sight-switch requests awaiting processing.")]
+        [SerializeField] private int m_MaxSightSwitchQueueLength = 128;
+
+        [Tooltip("Drop queued requests older than this many seconds.")]
+        [SerializeField] private float m_MaxQueueAgeSeconds = 1.5f;
+
+        [Tooltip("How long a validated shot reference remains valid for hit binding.")]
+        [SerializeField] private float m_ValidatedShotLifetime = 2f;
         
         [Tooltip("Maximum time in the past for shot validation (seconds).")]
         [SerializeField] private float m_MaxRewindTime = 0.5f;
@@ -144,6 +166,15 @@ namespace Arawn.GameCreator2.Networking.Shooter
         
         /// <summary>Get current network time.</summary>
         public Func<float> GetNetworkTimeFunc;
+
+        /// <summary>Optional server-side damage calculation hook.</summary>
+        public Func<NetworkShooterHitRequest, float> ComputeDamageFunc;
+
+        /// <summary>Optional server-side material hash resolver for hit effects.</summary>
+        public Func<NetworkShooterHitRequest, int> ResolveMaterialHashFunc;
+
+        /// <summary>Optional server-side damage application hook.</summary>
+        public Action<NetworkShooterHitRequest, float> ApplyDamageFunc;
         
         // ════════════════════════════════════════════════════════════════════════════════════════
         // EVENTS
@@ -185,6 +216,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
         
         private bool m_IsServer;
         private bool m_IsClient;
+        private static readonly List<ulong> s_SharedValidatedShotKeyBuffer = new(32);
         
         // Controller registry
         private readonly Dictionary<uint, NetworkShooterController> m_Controllers = new(32);
@@ -196,9 +228,85 @@ namespace Arawn.GameCreator2.Networking.Shooter
         private readonly Queue<QueuedFixJamRequest> m_ServerFixJamQueue = new(16);
         private readonly Queue<QueuedChargeRequest> m_ServerChargeQueue = new(16);
         private readonly Queue<QueuedSightSwitchRequest> m_ServerSightSwitchQueue = new(16);
+
+        private struct ValidatedShotReference
+        {
+            public float ValidatedTime;
+            public int WeaponHash;
+        }
+
+        private readonly Dictionary<ulong, ValidatedShotReference> m_ValidatedShotReferences = new(128);
         
         // Statistics
         private ShooterNetworkStats m_Stats;
+        private NetworkShooterPatchHooks m_PatchHooks;
+        
+        // ════════════════════════════════════════════════════════════════════════════════════════
+        // WEAPON REGISTRY
+        // ════════════════════════════════════════════════════════════════════════════════════════
+        
+        /// <summary>
+        /// Registry entry for a ShooterWeapon asset.
+        /// </summary>
+        public struct ShooterWeaponRegistryEntry
+        {
+            public int Hash;
+            public ShooterWeapon Weapon;
+            public string Name;
+        }
+        
+        private static readonly Dictionary<int, ShooterWeaponRegistryEntry> s_WeaponRegistry = new(32);
+        
+        /// <summary>
+        /// Register a ShooterWeapon for network hash-to-asset lookup.
+        /// Uses <c>weapon.Id.Hash</c> as the key.
+        /// </summary>
+        public static void RegisterShooterWeapon(ShooterWeapon weapon)
+        {
+            if (weapon == null) return;
+            int hash = weapon.Id.Hash;
+            s_WeaponRegistry[hash] = new ShooterWeaponRegistryEntry
+            {
+                Hash = hash,
+                Weapon = weapon,
+                Name = weapon.name
+            };
+        }
+        
+        /// <summary>
+        /// Unregister a ShooterWeapon.
+        /// </summary>
+        public static void UnregisterShooterWeapon(ShooterWeapon weapon)
+        {
+            if (weapon == null) return;
+            s_WeaponRegistry.Remove(weapon.Id.Hash);
+        }
+        
+        /// <summary>
+        /// Get a ShooterWeapon by its <see cref="IdString"/> hash.
+        /// </summary>
+        /// <returns>The weapon, or <c>null</c> if not registered.</returns>
+        public static ShooterWeapon GetShooterWeaponByHash(int hash)
+        {
+            return s_WeaponRegistry.TryGetValue(hash, out var entry) ? entry.Weapon : null;
+        }
+        
+        /// <summary>
+        /// Check if a ShooterWeapon is registered.
+        /// </summary>
+        public static bool IsShooterWeaponRegistered(ShooterWeapon weapon)
+        {
+            return weapon != null && s_WeaponRegistry.ContainsKey(weapon.Id.Hash);
+        }
+        
+        /// <summary>
+        /// Clear all weapon registries.
+        /// Call on scene unload or session end.
+        /// </summary>
+        public static void ClearRegistries()
+        {
+            s_WeaponRegistry.Clear();
+        }
         
         // ════════════════════════════════════════════════════════════════════════════════════════
         // STRUCTS
@@ -245,6 +353,118 @@ namespace Arawn.GameCreator2.Networking.Shooter
             public NetworkSightSwitchRequest Request;
             public float ReceivedTime;
         }
+
+        private static NetworkRequestContext BuildContext(uint actorNetworkId, uint correlationId)
+        {
+            return NetworkRequestContext.Create(actorNetworkId, correlationId);
+        }
+
+        private bool ValidateShooterRequest(uint senderClientId, uint actorNetworkId, uint correlationId, string requestType)
+        {
+            return SecurityIntegration.ValidateModuleRequest(
+                senderClientId,
+                BuildContext(actorNetworkId, correlationId),
+                "Shooter",
+                requestType);
+        }
+
+        private static ulong ComposeShotKey(uint shooterNetworkId, ushort shotRequestId)
+        {
+            return ((ulong)shooterNetworkId << 16) | shotRequestId;
+        }
+
+        private bool IsQueueAtCapacity<T>(Queue<T> queue, int maxQueueLength, uint senderClientId, uint actorNetworkId, string requestType)
+        {
+            int safeLimit = Mathf.Max(1, maxQueueLength);
+            if (queue.Count < safeLimit) return false;
+
+            SecurityIntegration.RecordViolation(
+                senderClientId,
+                actorNetworkId,
+                SecurityViolationType.RateLimitExceeded,
+                "Shooter",
+                $"{requestType} queue capacity reached ({queue.Count}/{safeLimit})");
+
+            if (m_LogShotRequests || m_LogHitRequests || m_LogBroadcasts)
+            {
+                Debug.LogWarning(
+                    $"[NetworkShooterManager] Dropped {requestType}: queue full ({queue.Count}/{safeLimit})");
+            }
+
+            return true;
+        }
+
+        private static int DropStaleRequests<T>(Queue<T> queue, float maxAgeSeconds, Func<T, float> getReceivedTime)
+        {
+            if (queue.Count == 0) return 0;
+
+            float now = Time.time;
+            int dropped = 0;
+            while (queue.Count > 0)
+            {
+                T queued = queue.Peek();
+                if (now - getReceivedTime(queued) <= maxAgeSeconds) break;
+
+                queue.Dequeue();
+                dropped++;
+            }
+
+            return dropped;
+        }
+
+        private bool ValidateHitSourceShot(NetworkShooterHitRequest request)
+        {
+            if (request.SourceShotRequestId == 0) return false;
+
+            ulong shotKey = ComposeShotKey(request.ShooterNetworkId, request.SourceShotRequestId);
+            if (!m_ValidatedShotReferences.TryGetValue(shotKey, out var shotReference))
+            {
+                return false;
+            }
+
+            if (shotReference.WeaponHash != 0 && shotReference.WeaponHash != request.WeaponHash)
+            {
+                return false;
+            }
+
+            if (Time.time - shotReference.ValidatedTime > m_ValidatedShotLifetime)
+            {
+                m_ValidatedShotReferences.Remove(shotKey);
+                return false;
+            }
+
+            return true;
+        }
+
+        private void RecordValidatedShot(NetworkShotRequest request)
+        {
+            ulong shotKey = ComposeShotKey(request.ShooterNetworkId, request.RequestId);
+            m_ValidatedShotReferences[shotKey] = new ValidatedShotReference
+            {
+                ValidatedTime = Time.time,
+                WeaponHash = request.WeaponHash
+            };
+        }
+
+        private void CleanupStaleValidatedShotReferences()
+        {
+            if (m_ValidatedShotReferences.Count == 0) return;
+
+            float now = Time.time;
+            s_SharedValidatedShotKeyBuffer.Clear();
+            foreach (var entry in m_ValidatedShotReferences)
+            {
+                if (now - entry.Value.ValidatedTime > m_ValidatedShotLifetime)
+                {
+                    s_SharedValidatedShotKeyBuffer.Add(entry.Key);
+                }
+            }
+
+            foreach (ulong key in s_SharedValidatedShotKeyBuffer)
+            {
+                m_ValidatedShotReferences.Remove(key);
+            }
+        }
         
         /// <summary>Network statistics.</summary>
         [Serializable]
@@ -281,38 +501,27 @@ namespace Arawn.GameCreator2.Networking.Shooter
         // UNITY LIFECYCLE
         // ════════════════════════════════════════════════════════════════════════════════════════
         
-        private void Awake()
-        {
-            if (s_Instance == null)
-            {
-                s_Instance = this;
-            }
-            else if (s_Instance != this)
-            {
-                Debug.LogWarning("[NetworkShooterManager] Multiple instances detected. Using first.");
-                Destroy(this);
-                return;
-            }
-        }
-        
-        private void OnDestroy()
-        {
-            if (s_Instance == this)
-            {
-                s_Instance = null;
-            }
-        }
-        
         private void Update()
         {
             if (m_IsServer)
             {
+                CleanupStaleValidatedShotReferences();
                 ProcessServerShotQueue();
                 ProcessServerHitQueue();
                 ProcessServerReloadQueue();
                 ProcessServerFixJamQueue();
                 ProcessServerChargeQueue();
                 ProcessServerSightSwitchQueue();
+            }
+        }
+
+        private void OnDisable()
+        {
+            m_ValidatedShotReferences.Clear();
+
+            if (m_PatchHooks != null)
+            {
+                m_PatchHooks.Initialize(false);
             }
         }
         
@@ -327,8 +536,29 @@ namespace Arawn.GameCreator2.Networking.Shooter
         {
             m_IsServer = isServer;
             m_IsClient = isClient;
+            SyncPatchHooks();
             
             Debug.Log($"[NetworkShooterManager] Initialized - Server: {isServer}, Client: {isClient}");
+        }
+
+        private void SyncPatchHooks()
+        {
+            if (!m_IsServer)
+            {
+                if (m_PatchHooks != null) m_PatchHooks.Initialize(false);
+                return;
+            }
+
+            if (m_PatchHooks == null)
+            {
+                m_PatchHooks = GetComponent<NetworkShooterPatchHooks>();
+                if (m_PatchHooks == null)
+                {
+                    m_PatchHooks = gameObject.AddComponent<NetworkShooterPatchHooks>();
+                }
+            }
+
+            m_PatchHooks.Initialize(true);
         }
         
         // ════════════════════════════════════════════════════════════════════════════════════════
@@ -423,8 +653,38 @@ namespace Arawn.GameCreator2.Networking.Shooter
         public void ReceiveShotRequest(uint clientNetworkId, NetworkShotRequest request)
         {
             if (!m_IsServer) return;
+            if (!ValidateShooterRequest(clientNetworkId, request.ActorNetworkId, request.CorrelationId, nameof(NetworkShotRequest)))
+            {
+                SendShotResponseToClient?.Invoke(clientNetworkId, new NetworkShotResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Validated = false,
+                    RejectionReason = ShotRejectionReason.CheatSuspected
+                });
+                return;
+            }
             
             m_Stats.ShotRequestsReceived++;
+
+            if (IsQueueAtCapacity(
+                    m_ServerShotQueue,
+                    m_MaxShotQueueLength,
+                    clientNetworkId,
+                    request.ActorNetworkId,
+                    nameof(NetworkShotRequest)))
+            {
+                SendShotResponseToClient?.Invoke(clientNetworkId, new NetworkShotResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Validated = false,
+                    RejectionReason = ShotRejectionReason.RateLimitExceeded
+                });
+                return;
+            }
             
             m_ServerShotQueue.Enqueue(new QueuedShotRequest
             {
@@ -440,8 +700,38 @@ namespace Arawn.GameCreator2.Networking.Shooter
         public void ReceiveHitRequest(uint clientNetworkId, NetworkShooterHitRequest request)
         {
             if (!m_IsServer) return;
+            if (!ValidateShooterRequest(clientNetworkId, request.ActorNetworkId, request.CorrelationId, nameof(NetworkShooterHitRequest)))
+            {
+                SendHitResponseToClient?.Invoke(clientNetworkId, new NetworkShooterHitResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Validated = false,
+                    RejectionReason = HitRejectionReason.CheatSuspected
+                });
+                return;
+            }
             
             m_Stats.HitRequestsReceived++;
+
+            if (IsQueueAtCapacity(
+                    m_ServerHitQueue,
+                    m_MaxHitQueueLength,
+                    clientNetworkId,
+                    request.ActorNetworkId,
+                    nameof(NetworkShooterHitRequest)))
+            {
+                SendHitResponseToClient?.Invoke(clientNetworkId, new NetworkShooterHitResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Validated = false,
+                    RejectionReason = HitRejectionReason.CheatSuspected
+                });
+                return;
+            }
             
             m_ServerHitQueue.Enqueue(new QueuedHitRequest
             {
@@ -453,6 +743,12 @@ namespace Arawn.GameCreator2.Networking.Shooter
         
         private void ProcessServerShotQueue()
         {
+            int staleDropped = DropStaleRequests(m_ServerShotQueue, m_MaxQueueAgeSeconds, queued => queued.ReceivedTime);
+            if (staleDropped > 0 && (m_LogShotRequests || m_LogBroadcasts))
+            {
+                Debug.LogWarning($"[NetworkShooterManager] Dropped {staleDropped} stale shot requests");
+            }
+
             int processed = 0;
             
             while (m_ServerShotQueue.Count > 0 && processed < m_MaxShotsPerFrame)
@@ -465,6 +761,12 @@ namespace Arawn.GameCreator2.Networking.Shooter
         
         private void ProcessServerHitQueue()
         {
+            int staleDropped = DropStaleRequests(m_ServerHitQueue, m_MaxQueueAgeSeconds, queued => queued.ReceivedTime);
+            if (staleDropped > 0 && (m_LogHitRequests || m_LogBroadcasts))
+            {
+                Debug.LogWarning($"[NetworkShooterManager] Dropped {staleDropped} stale hit requests");
+            }
+
             int processed = 0;
             
             while (m_ServerHitQueue.Count > 0 && processed < m_MaxHitsPerFrame)
@@ -489,12 +791,16 @@ namespace Arawn.GameCreator2.Networking.Shooter
             {
                 response = ValidateShotRequest(request);
             }
+
+            response.ActorNetworkId = request.ActorNetworkId;
+            response.CorrelationId = request.CorrelationId;
             
             SendShotResponseToClient?.Invoke(queued.ClientNetworkId, response);
             
             if (response.Validated)
             {
                 m_Stats.ShotsValidated++;
+                RecordValidatedShot(request);
                 
                 // Broadcast to all clients
                 var broadcast = new NetworkShotBroadcast
@@ -536,8 +842,19 @@ namespace Arawn.GameCreator2.Networking.Shooter
             var request = queued.Request;
             
             NetworkShooterHitResponse response;
-            
-            if (m_Controllers.TryGetValue(request.ShooterNetworkId, out var controller))
+
+            if (!ValidateHitSourceShot(request))
+            {
+                response = new NetworkShooterHitResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Validated = false,
+                    RejectionReason = HitRejectionReason.ShotNotValidated
+                };
+            }
+            else if (m_Controllers.TryGetValue(request.ShooterNetworkId, out var controller))
             {
                 response = controller.ProcessHitRequest(request, queued.ClientNetworkId);
             }
@@ -545,6 +862,9 @@ namespace Arawn.GameCreator2.Networking.Shooter
             {
                 response = ValidateHitRequest(request);
             }
+
+            response.ActorNetworkId = request.ActorNetworkId;
+            response.CorrelationId = request.CorrelationId;
             
             SendHitResponseToClient?.Invoke(queued.ClientNetworkId, response);
             
@@ -564,7 +884,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                     HitNormal = request.HitNormal,
                     WeaponHash = request.WeaponHash,
                     BlockResult = (byte)response.BlockResult,
-                    MaterialHash = 0 // TODO: Get from hit
+                    MaterialHash = ResolveMaterialHashFunc?.Invoke(request) ?? 0
                 };
                 
                 BroadcastHitToAllClients?.Invoke(broadcast);
@@ -601,6 +921,8 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 return new NetworkShotResponse
                 {
                     RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
                     Validated = false,
                     RejectionReason = ShotRejectionReason.TimestampTooOld
                 };
@@ -612,6 +934,8 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 return new NetworkShotResponse
                 {
                     RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
                     Validated = false,
                     RejectionReason = ShotRejectionReason.ShooterNotFound
                 };
@@ -620,6 +944,8 @@ namespace Arawn.GameCreator2.Networking.Shooter
             return new NetworkShotResponse
             {
                 RequestId = request.RequestId,
+                ActorNetworkId = request.ActorNetworkId,
+                CorrelationId = request.CorrelationId,
                 Validated = true,
                 RejectionReason = ShotRejectionReason.None,
                 AmmoRemaining = 0
@@ -636,6 +962,8 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 return new NetworkShooterHitResponse
                 {
                     RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
                     Validated = false,
                     RejectionReason = HitRejectionReason.TimestampTooOld
                 };
@@ -649,6 +977,8 @@ namespace Arawn.GameCreator2.Networking.Shooter
                     return new NetworkShooterHitResponse
                     {
                         RequestId = request.RequestId,
+                        ActorNetworkId = request.ActorNetworkId,
+                        CorrelationId = request.CorrelationId,
                         Validated = false,
                         RejectionReason = HitRejectionReason.TargetNotFound
                     };
@@ -662,6 +992,8 @@ namespace Arawn.GameCreator2.Networking.Shooter
                         return new NetworkShooterHitResponse
                         {
                             RequestId = request.RequestId,
+                            ActorNetworkId = request.ActorNetworkId,
+                            CorrelationId = request.CorrelationId,
                             Validated = false,
                             RejectionReason = HitRejectionReason.TargetInvincible
                         };
@@ -672,6 +1004,8 @@ namespace Arawn.GameCreator2.Networking.Shooter
                         return new NetworkShooterHitResponse
                         {
                             RequestId = request.RequestId,
+                            ActorNetworkId = request.ActorNetworkId,
+                            CorrelationId = request.CorrelationId,
                             Validated = false,
                             RejectionReason = HitRejectionReason.TargetDodged
                         };
@@ -682,9 +1016,11 @@ namespace Arawn.GameCreator2.Networking.Shooter
             return new NetworkShooterHitResponse
             {
                 RequestId = request.RequestId,
+                ActorNetworkId = request.ActorNetworkId,
+                CorrelationId = request.CorrelationId,
                 Validated = true,
                 RejectionReason = HitRejectionReason.None,
-                Damage = 10f,
+                Damage = Mathf.Max(0f, ComputeDamageFunc?.Invoke(request) ?? 10f),
                 BlockResult = NetworkBlockResult.None
             };
         }
@@ -699,8 +1035,41 @@ namespace Arawn.GameCreator2.Networking.Shooter
             var targetCharacter = targetNetworkChar.GetComponent<Character>();
             if (targetCharacter == null) return;
             
-            // TODO: Apply actual damage using GC2 stats system
-            Debug.Log($"[NetworkShooterManager] Server applying {damage} damage to {targetCharacter.name}");
+            if (ApplyDamageFunc != null)
+            {
+                ApplyDamageFunc.Invoke(request, damage);
+                return;
+            }
+
+            var attackerNetworkChar = GetCharacterByNetworkId(request.ShooterNetworkId);
+            Vector3 incomingDirection;
+
+            if (request.HitNormal.sqrMagnitude > 0.0001f)
+            {
+                incomingDirection = -request.HitNormal.normalized;
+            }
+            else if (attackerNetworkChar != null)
+            {
+                incomingDirection = (targetCharacter.transform.position - attackerNetworkChar.transform.position).normalized;
+            }
+            else
+            {
+                incomingDirection = targetCharacter.transform.forward;
+            }
+
+            Vector3 localDirection = targetCharacter.transform.InverseTransformDirection(incomingDirection).normalized;
+            if (localDirection.sqrMagnitude < 0.0001f)
+            {
+                localDirection = Vector3.forward;
+            }
+
+            var reactionInput = new ReactionInput(localDirection, Mathf.Max(0f, damage));
+            var args = new Args(attackerNetworkChar != null ? attackerNetworkChar.gameObject : null, targetCharacter.gameObject);
+            _ = targetCharacter.Combat.GetHitReaction(reactionInput, args, null);
+
+            Debug.LogWarning(
+                $"[NetworkShooterManager] ApplyDamageFunc not set. " +
+                $"Applied fallback hit reaction damage={damage:F2} target={targetCharacter.name}");
         }
         
         // ════════════════════════════════════════════════════════════════════════════════════════
@@ -712,9 +1081,9 @@ namespace Arawn.GameCreator2.Networking.Shooter
         /// </summary>
         public void ReceiveShotResponse(NetworkShotResponse response)
         {
-            foreach (var kvp in m_Controllers)
+            if (response.ActorNetworkId != 0 && m_Controllers.TryGetValue(response.ActorNetworkId, out var controller))
             {
-                kvp.Value.ReceiveShotResponse(response);
+                controller.ReceiveShotResponse(response);
             }
         }
         
@@ -723,9 +1092,9 @@ namespace Arawn.GameCreator2.Networking.Shooter
         /// </summary>
         public void ReceiveHitResponse(NetworkShooterHitResponse response)
         {
-            foreach (var kvp in m_Controllers)
+            if (response.ActorNetworkId != 0 && m_Controllers.TryGetValue(response.ActorNetworkId, out var controller))
             {
-                kvp.Value.ReceiveHitResponse(response);
+                controller.ReceiveHitResponse(response);
             }
         }
         
@@ -776,8 +1145,38 @@ namespace Arawn.GameCreator2.Networking.Shooter
         public void ReceiveReloadRequest(uint clientNetworkId, NetworkReloadRequest request)
         {
             if (!m_IsServer) return;
+            if (!ValidateShooterRequest(clientNetworkId, request.ActorNetworkId, request.CorrelationId, nameof(NetworkReloadRequest)))
+            {
+                SendReloadResponseToClient?.Invoke(clientNetworkId, new NetworkReloadResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Validated = false,
+                    RejectionReason = ReloadRejectionReason.CheatSuspected
+                });
+                return;
+            }
             
             m_Stats.ReloadRequestsReceived++;
+
+            if (IsQueueAtCapacity(
+                    m_ServerReloadQueue,
+                    m_MaxReloadQueueLength,
+                    clientNetworkId,
+                    request.ActorNetworkId,
+                    nameof(NetworkReloadRequest)))
+            {
+                SendReloadResponseToClient?.Invoke(clientNetworkId, new NetworkReloadResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Validated = false,
+                    RejectionReason = ReloadRejectionReason.RateLimitExceeded
+                });
+                return;
+            }
             
             m_ServerReloadQueue.Enqueue(new QueuedReloadRequest
             {
@@ -789,6 +1188,12 @@ namespace Arawn.GameCreator2.Networking.Shooter
         
         private void ProcessServerReloadQueue()
         {
+            int staleDropped = DropStaleRequests(m_ServerReloadQueue, m_MaxQueueAgeSeconds, queued => queued.ReceivedTime);
+            if (staleDropped > 0 && (m_LogShotRequests || m_LogBroadcasts))
+            {
+                Debug.LogWarning($"[NetworkShooterManager] Dropped {staleDropped} stale reload requests");
+            }
+
             while (m_ServerReloadQueue.Count > 0)
             {
                 var queued = m_ServerReloadQueue.Dequeue();
@@ -814,6 +1219,9 @@ namespace Arawn.GameCreator2.Networking.Shooter
                     RejectionReason = ReloadRejectionReason.CharacterNotFound
                 };
             }
+
+            response.ActorNetworkId = request.ActorNetworkId;
+            response.CorrelationId = request.CorrelationId;
             
             SendReloadResponseToClient?.Invoke(queued.ClientNetworkId, response);
             
@@ -845,9 +1253,9 @@ namespace Arawn.GameCreator2.Networking.Shooter
         /// </summary>
         public void ReceiveReloadResponse(NetworkReloadResponse response)
         {
-            foreach (var kvp in m_Controllers)
+            if (response.ActorNetworkId != 0 && m_Controllers.TryGetValue(response.ActorNetworkId, out var controller))
             {
-                kvp.Value.ReceiveReloadResponse(response);
+                controller.ReceiveReloadResponse(response);
             }
         }
         
@@ -877,8 +1285,38 @@ namespace Arawn.GameCreator2.Networking.Shooter
         public void ReceiveFixJamRequest(uint clientNetworkId, NetworkFixJamRequest request)
         {
             if (!m_IsServer) return;
+            if (!ValidateShooterRequest(clientNetworkId, request.ActorNetworkId, request.CorrelationId, nameof(NetworkFixJamRequest)))
+            {
+                SendFixJamResponseToClient?.Invoke(clientNetworkId, new NetworkFixJamResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Validated = false,
+                    RejectionReason = FixJamRejectionReason.CheatSuspected
+                });
+                return;
+            }
             
             m_Stats.FixJamRequestsReceived++;
+
+            if (IsQueueAtCapacity(
+                    m_ServerFixJamQueue,
+                    m_MaxFixJamQueueLength,
+                    clientNetworkId,
+                    request.ActorNetworkId,
+                    nameof(NetworkFixJamRequest)))
+            {
+                SendFixJamResponseToClient?.Invoke(clientNetworkId, new NetworkFixJamResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Validated = false,
+                    RejectionReason = FixJamRejectionReason.RateLimitExceeded
+                });
+                return;
+            }
             
             m_ServerFixJamQueue.Enqueue(new QueuedFixJamRequest
             {
@@ -890,6 +1328,12 @@ namespace Arawn.GameCreator2.Networking.Shooter
         
         private void ProcessServerFixJamQueue()
         {
+            int staleDropped = DropStaleRequests(m_ServerFixJamQueue, m_MaxQueueAgeSeconds, queued => queued.ReceivedTime);
+            if (staleDropped > 0 && (m_LogShotRequests || m_LogBroadcasts))
+            {
+                Debug.LogWarning($"[NetworkShooterManager] Dropped {staleDropped} stale fix-jam requests");
+            }
+
             while (m_ServerFixJamQueue.Count > 0)
             {
                 var queued = m_ServerFixJamQueue.Dequeue();
@@ -915,6 +1359,9 @@ namespace Arawn.GameCreator2.Networking.Shooter
                     RejectionReason = FixJamRejectionReason.CharacterNotFound
                 };
             }
+
+            response.ActorNetworkId = request.ActorNetworkId;
+            response.CorrelationId = request.CorrelationId;
             
             SendFixJamResponseToClient?.Invoke(queued.ClientNetworkId, response);
             
@@ -980,9 +1427,9 @@ namespace Arawn.GameCreator2.Networking.Shooter
         /// </summary>
         public void ReceiveFixJamResponse(NetworkFixJamResponse response)
         {
-            foreach (var kvp in m_Controllers)
+            if (response.ActorNetworkId != 0 && m_Controllers.TryGetValue(response.ActorNetworkId, out var controller))
             {
-                kvp.Value.ReceiveFixJamResponse(response);
+                controller.ReceiveFixJamResponse(response);
             }
         }
         
@@ -1028,8 +1475,38 @@ namespace Arawn.GameCreator2.Networking.Shooter
         public void ReceiveChargeStartRequest(uint clientNetworkId, NetworkChargeStartRequest request)
         {
             if (!m_IsServer) return;
+            if (!ValidateShooterRequest(clientNetworkId, request.ActorNetworkId, request.CorrelationId, nameof(NetworkChargeStartRequest)))
+            {
+                SendChargeStartResponseToClient?.Invoke(clientNetworkId, new NetworkChargeStartResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Validated = false,
+                    RejectionReason = ChargeRejectionReason.CheatSuspected
+                });
+                return;
+            }
             
             m_Stats.ChargeRequestsReceived++;
+
+            if (IsQueueAtCapacity(
+                    m_ServerChargeQueue,
+                    m_MaxChargeQueueLength,
+                    clientNetworkId,
+                    request.ActorNetworkId,
+                    nameof(NetworkChargeStartRequest)))
+            {
+                SendChargeStartResponseToClient?.Invoke(clientNetworkId, new NetworkChargeStartResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Validated = false,
+                    RejectionReason = ChargeRejectionReason.InvalidState
+                });
+                return;
+            }
             
             m_ServerChargeQueue.Enqueue(new QueuedChargeRequest
             {
@@ -1041,6 +1518,12 @@ namespace Arawn.GameCreator2.Networking.Shooter
         
         private void ProcessServerChargeQueue()
         {
+            int staleDropped = DropStaleRequests(m_ServerChargeQueue, m_MaxQueueAgeSeconds, queued => queued.ReceivedTime);
+            if (staleDropped > 0 && (m_LogShotRequests || m_LogBroadcasts))
+            {
+                Debug.LogWarning($"[NetworkShooterManager] Dropped {staleDropped} stale charge requests");
+            }
+
             while (m_ServerChargeQueue.Count > 0)
             {
                 var queued = m_ServerChargeQueue.Dequeue();
@@ -1066,6 +1549,9 @@ namespace Arawn.GameCreator2.Networking.Shooter
                     RejectionReason = ChargeRejectionReason.CharacterNotFound
                 };
             }
+
+            response.ActorNetworkId = request.ActorNetworkId;
+            response.CorrelationId = request.CorrelationId;
             
             SendChargeStartResponseToClient?.Invoke(queued.ClientNetworkId, response);
             
@@ -1117,9 +1603,9 @@ namespace Arawn.GameCreator2.Networking.Shooter
         /// </summary>
         public void ReceiveChargeStartResponse(NetworkChargeStartResponse response)
         {
-            foreach (var kvp in m_Controllers)
+            if (response.ActorNetworkId != 0 && m_Controllers.TryGetValue(response.ActorNetworkId, out var controller))
             {
-                kvp.Value.ReceiveChargeStartResponse(response);
+                controller.ReceiveChargeStartResponse(response);
             }
         }
         
@@ -1144,8 +1630,38 @@ namespace Arawn.GameCreator2.Networking.Shooter
         public void ReceiveSightSwitchRequest(uint clientNetworkId, NetworkSightSwitchRequest request)
         {
             if (!m_IsServer) return;
+            if (!ValidateShooterRequest(clientNetworkId, request.ActorNetworkId, request.CorrelationId, nameof(NetworkSightSwitchRequest)))
+            {
+                SendSightSwitchResponseToClient?.Invoke(clientNetworkId, new NetworkSightSwitchResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Validated = false,
+                    RejectionReason = SightSwitchRejectionReason.CheatSuspected
+                });
+                return;
+            }
             
             m_Stats.SightSwitchRequestsReceived++;
+
+            if (IsQueueAtCapacity(
+                    m_ServerSightSwitchQueue,
+                    m_MaxSightSwitchQueueLength,
+                    clientNetworkId,
+                    request.ActorNetworkId,
+                    nameof(NetworkSightSwitchRequest)))
+            {
+                SendSightSwitchResponseToClient?.Invoke(clientNetworkId, new NetworkSightSwitchResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Validated = false,
+                    RejectionReason = SightSwitchRejectionReason.RateLimitExceeded
+                });
+                return;
+            }
             
             m_ServerSightSwitchQueue.Enqueue(new QueuedSightSwitchRequest
             {
@@ -1157,6 +1673,12 @@ namespace Arawn.GameCreator2.Networking.Shooter
         
         private void ProcessServerSightSwitchQueue()
         {
+            int staleDropped = DropStaleRequests(m_ServerSightSwitchQueue, m_MaxQueueAgeSeconds, queued => queued.ReceivedTime);
+            if (staleDropped > 0 && (m_LogShotRequests || m_LogBroadcasts))
+            {
+                Debug.LogWarning($"[NetworkShooterManager] Dropped {staleDropped} stale sight-switch requests");
+            }
+
             while (m_ServerSightSwitchQueue.Count > 0)
             {
                 var queued = m_ServerSightSwitchQueue.Dequeue();
@@ -1182,6 +1704,9 @@ namespace Arawn.GameCreator2.Networking.Shooter
                     RejectionReason = SightSwitchRejectionReason.CharacterNotFound
                 };
             }
+
+            response.ActorNetworkId = request.ActorNetworkId;
+            response.CorrelationId = request.CorrelationId;
             
             SendSightSwitchResponseToClient?.Invoke(queued.ClientNetworkId, response);
             
@@ -1212,9 +1737,9 @@ namespace Arawn.GameCreator2.Networking.Shooter
         /// </summary>
         public void ReceiveSightSwitchResponse(NetworkSightSwitchResponse response)
         {
-            foreach (var kvp in m_Controllers)
+            if (response.ActorNetworkId != 0 && m_Controllers.TryGetValue(response.ActorNetworkId, out var controller))
             {
-                kvp.Value.ReceiveSightSwitchResponse(response);
+                controller.ReceiveSightSwitchResponse(response);
             }
         }
         

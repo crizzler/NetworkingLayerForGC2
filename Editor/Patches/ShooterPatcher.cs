@@ -343,6 +343,12 @@ namespace GameCreator.Runtime.Shooter
             }
             
             content = content.Replace(originalUsings, patchedUsings);
+
+            // Fix charge ratio math precedence bug:
+            // (now - lastPull) / maxChargeTime
+            content = content.Replace(
+                " ? Mathf.Clamp01(this.Character.Time.Time - this.m_LastTriggerPull / maxChargeTime)",
+                " ? Mathf.Clamp01((this.Character.Time.Time - this.m_LastTriggerPull) / maxChargeTime)");
             
             // Patch the private Shoot method - insert validation at the beginning
             string originalShoot = @"        private void Shoot()

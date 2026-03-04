@@ -105,7 +105,12 @@ namespace Arawn.GameCreator2.Networking.Inventory
         CannotUse = 22,
         CannotDrop = 23,
         RateLimitExceeded = 24,
-        InvalidOperation = 25
+        InvalidOperation = 25,
+        NotOwner = 26,
+        ProtocolMismatch = 27,
+        SecurityViolation = 28,
+        IdentityMismatch = 29,
+        InternalError = 30
     }
     
     /// <summary>
@@ -137,6 +142,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
     public struct NetworkRuntimeProperty
     {
         public int PropertyHash;      // 4 bytes - IdString hash
+        public string PropertyIdString; // Variable - Deterministic property ID
         public float Number;          // 4 bytes
         public string Text;           // Variable (null for most properties)
         
@@ -159,6 +165,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
     public struct NetworkRuntimeSocket
     {
         public int SocketHash;                     // 4 bytes
+        public string SocketIdString;             // Variable - Deterministic socket ID
         public bool HasAttachment;                 // 1 byte
         public NetworkRuntimeItem Attachment;     // Variable (null if no attachment)
     }
@@ -217,8 +224,11 @@ namespace Arawn.GameCreator2.Networking.Inventory
     public struct NetworkContentAddRequest
     {
         public ushort RequestId;                   // 2 bytes
+        public uint ActorNetworkId;               // 4 bytes
+        public uint CorrelationId;                // 4 bytes
         public uint TargetBagNetworkId;            // 4 bytes
         public int ItemHash;                       // 4 bytes - Item type to create, or 0 if providing RuntimeItem
+        public string ItemIdString;                // Variable - Deterministic item ID string
         public NetworkRuntimeItem RuntimeItem;     // Variable - If adding existing runtime item
         public Vector2Int Position;                // 8 bytes - (-1,-1) for auto-placement
         public bool AllowStack;                    // 1 byte
@@ -234,6 +244,8 @@ namespace Arawn.GameCreator2.Networking.Inventory
     public struct NetworkContentAddResponse
     {
         public ushort RequestId;                   // 2 bytes
+        public uint ActorNetworkId;               // 4 bytes
+        public uint CorrelationId;                // 4 bytes
         public bool Authorized;                    // 1 byte
         public InventoryRejectionReason RejectionReason; // 1 byte
         public Vector2Int ResultPosition;          // 8 bytes - Where item was placed
@@ -249,6 +261,8 @@ namespace Arawn.GameCreator2.Networking.Inventory
     public struct NetworkContentRemoveRequest
     {
         public ushort RequestId;                   // 2 bytes
+        public uint ActorNetworkId;               // 4 bytes
+        public uint CorrelationId;                // 4 bytes
         public uint TargetBagNetworkId;            // 4 bytes
         public long RuntimeIdHash;                 // 8 bytes - RuntimeItem to remove
         public Vector2Int Position;                // 8 bytes - Or position to remove from
@@ -264,6 +278,8 @@ namespace Arawn.GameCreator2.Networking.Inventory
     public struct NetworkContentRemoveResponse
     {
         public ushort RequestId;                   // 2 bytes
+        public uint ActorNetworkId;               // 4 bytes
+        public uint CorrelationId;                // 4 bytes
         public bool Authorized;                    // 1 byte
         public InventoryRejectionReason RejectionReason; // 1 byte
         public NetworkRuntimeItem RemovedItem;     // Variable - The item that was removed
@@ -277,6 +293,8 @@ namespace Arawn.GameCreator2.Networking.Inventory
     public struct NetworkContentMoveRequest
     {
         public ushort RequestId;                   // 2 bytes
+        public uint ActorNetworkId;               // 4 bytes
+        public uint CorrelationId;                // 4 bytes
         public uint TargetBagNetworkId;            // 4 bytes
         public Vector2Int FromPosition;            // 8 bytes
         public Vector2Int ToPosition;              // 8 bytes
@@ -291,6 +309,8 @@ namespace Arawn.GameCreator2.Networking.Inventory
     public struct NetworkContentMoveResponse
     {
         public ushort RequestId;                   // 2 bytes
+        public uint ActorNetworkId;               // 4 bytes
+        public uint CorrelationId;                // 4 bytes
         public bool Authorized;                    // 1 byte
         public InventoryRejectionReason RejectionReason; // 1 byte
         public Vector2Int FinalPosition;           // 8 bytes
@@ -304,6 +324,8 @@ namespace Arawn.GameCreator2.Networking.Inventory
     public struct NetworkContentUseRequest
     {
         public ushort RequestId;                   // 2 bytes
+        public uint ActorNetworkId;               // 4 bytes
+        public uint CorrelationId;                // 4 bytes
         public uint TargetBagNetworkId;            // 4 bytes
         public long RuntimeIdHash;                 // 8 bytes
         public Vector2Int Position;                // 8 bytes - Alternative to RuntimeID
@@ -318,6 +340,8 @@ namespace Arawn.GameCreator2.Networking.Inventory
     public struct NetworkContentUseResponse
     {
         public ushort RequestId;                   // 2 bytes
+        public uint ActorNetworkId;               // 4 bytes
+        public uint CorrelationId;                // 4 bytes
         public bool Authorized;                    // 1 byte
         public InventoryRejectionReason RejectionReason; // 1 byte
         public bool WasConsumed;                   // 1 byte
@@ -331,6 +355,8 @@ namespace Arawn.GameCreator2.Networking.Inventory
     public struct NetworkContentDropRequest
     {
         public ushort RequestId;                   // 2 bytes
+        public uint ActorNetworkId;               // 4 bytes
+        public uint CorrelationId;                // 4 bytes
         public uint TargetBagNetworkId;            // 4 bytes
         public long RuntimeIdHash;                 // 8 bytes
         public Vector3 DropPosition;               // 12 bytes
@@ -345,6 +371,8 @@ namespace Arawn.GameCreator2.Networking.Inventory
     public struct NetworkContentDropResponse
     {
         public ushort RequestId;                   // 2 bytes
+        public uint ActorNetworkId;               // 4 bytes
+        public uint CorrelationId;                // 4 bytes
         public bool Authorized;                    // 1 byte
         public InventoryRejectionReason RejectionReason; // 1 byte
         public int DroppedCount;                   // 4 bytes
@@ -363,6 +391,8 @@ namespace Arawn.GameCreator2.Networking.Inventory
     public struct NetworkEquipmentRequest
     {
         public ushort RequestId;                   // 2 bytes
+        public uint ActorNetworkId;               // 4 bytes
+        public uint CorrelationId;                // 4 bytes
         public uint TargetBagNetworkId;            // 4 bytes
         public long RuntimeIdHash;                 // 8 bytes
         public EquipmentAction Action;             // 1 byte
@@ -377,6 +407,8 @@ namespace Arawn.GameCreator2.Networking.Inventory
     public struct NetworkEquipmentResponse
     {
         public ushort RequestId;                   // 2 bytes
+        public uint ActorNetworkId;               // 4 bytes
+        public uint CorrelationId;                // 4 bytes
         public bool Authorized;                    // 1 byte
         public InventoryRejectionReason RejectionReason; // 1 byte
         public int EquippedIndex;                  // 4 bytes - Final equipment index
@@ -394,10 +426,13 @@ namespace Arawn.GameCreator2.Networking.Inventory
     public struct NetworkSocketRequest
     {
         public ushort RequestId;                   // 2 bytes
+        public uint ActorNetworkId;               // 4 bytes
+        public uint CorrelationId;                // 4 bytes
         public uint TargetBagNetworkId;            // 4 bytes
         public long ParentRuntimeIdHash;           // 8 bytes - Parent item
         public long AttachmentRuntimeIdHash;       // 8 bytes - Attachment item (for attach) or socket contents (for detach)
         public int SocketHash;                     // 4 bytes - Specific socket (0 for auto)
+        public string SocketIdString;              // Variable - Deterministic socket ID string
         public SocketAction Action;                // 1 byte
     }
     
@@ -409,6 +444,8 @@ namespace Arawn.GameCreator2.Networking.Inventory
     public struct NetworkSocketResponse
     {
         public ushort RequestId;                   // 2 bytes
+        public uint ActorNetworkId;               // 4 bytes
+        public uint CorrelationId;                // 4 bytes
         public bool Authorized;                    // 1 byte
         public InventoryRejectionReason RejectionReason; // 1 byte
         public int UsedSocketHash;                 // 4 bytes - Which socket was used
@@ -427,8 +464,11 @@ namespace Arawn.GameCreator2.Networking.Inventory
     public struct NetworkWealthRequest
     {
         public ushort RequestId;                   // 2 bytes
+        public uint ActorNetworkId;               // 4 bytes
+        public uint CorrelationId;                // 4 bytes
         public uint TargetBagNetworkId;            // 4 bytes
         public int CurrencyHash;                   // 4 bytes
+        public string CurrencyIdString;            // Variable - Deterministic currency ID string
         public int Value;                          // 4 bytes
         public WealthAction Action;                // 1 byte
         public InventoryModificationSource Source; // 1 byte
@@ -443,6 +483,8 @@ namespace Arawn.GameCreator2.Networking.Inventory
     public struct NetworkWealthResponse
     {
         public ushort RequestId;                   // 2 bytes
+        public uint ActorNetworkId;               // 4 bytes
+        public uint CorrelationId;                // 4 bytes
         public bool Authorized;                    // 1 byte
         public InventoryRejectionReason RejectionReason; // 1 byte
         public int NewValue;                       // 4 bytes
@@ -461,6 +503,8 @@ namespace Arawn.GameCreator2.Networking.Inventory
     public struct NetworkMerchantRequest
     {
         public ushort RequestId;                   // 2 bytes
+        public uint ActorNetworkId;               // 4 bytes
+        public uint CorrelationId;                // 4 bytes
         public uint ClientBagNetworkId;            // 4 bytes
         public uint MerchantNetworkId;             // 4 bytes - NetworkId of merchant's Bag
         public long RuntimeIdHash;                 // 8 bytes - Item to buy/sell
@@ -476,6 +520,8 @@ namespace Arawn.GameCreator2.Networking.Inventory
     public struct NetworkMerchantResponse
     {
         public ushort RequestId;                   // 2 bytes
+        public uint ActorNetworkId;               // 4 bytes
+        public uint CorrelationId;                // 4 bytes
         public bool Authorized;                    // 1 byte
         public InventoryRejectionReason RejectionReason; // 1 byte
         public int TotalPrice;                     // 4 bytes
@@ -495,9 +541,12 @@ namespace Arawn.GameCreator2.Networking.Inventory
     public struct NetworkCraftingRequest
     {
         public ushort RequestId;                   // 2 bytes
+        public uint ActorNetworkId;               // 4 bytes
+        public uint CorrelationId;                // 4 bytes
         public uint InputBagNetworkId;             // 4 bytes
         public uint OutputBagNetworkId;            // 4 bytes
         public int ItemHash;                       // 4 bytes - Item to craft (for Craft action)
+        public string ItemIdString;                // Variable - Deterministic crafted item ID string
         public long RuntimeIdHash;                 // 8 bytes - RuntimeItem to dismantle (for Dismantle)
         public CraftingAction Action;              // 1 byte
     }
@@ -510,6 +559,8 @@ namespace Arawn.GameCreator2.Networking.Inventory
     public struct NetworkCraftingResponse
     {
         public ushort RequestId;                   // 2 bytes
+        public uint ActorNetworkId;               // 4 bytes
+        public uint CorrelationId;                // 4 bytes
         public bool Authorized;                    // 1 byte
         public InventoryRejectionReason RejectionReason; // 1 byte
         public NetworkRuntimeItem CreatedItem;     // Variable - The crafted item
@@ -694,6 +745,8 @@ namespace Arawn.GameCreator2.Networking.Inventory
     public struct NetworkTransferRequest
     {
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         public uint SourceBagNetworkId;
         public uint DestinationBagNetworkId;
         public long RuntimeIdHash;
@@ -709,6 +762,8 @@ namespace Arawn.GameCreator2.Networking.Inventory
     public struct NetworkTransferResponse
     {
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         public bool Authorized;
         public InventoryRejectionReason RejectionReason;
         public Vector2Int FinalPosition;
@@ -725,6 +780,8 @@ namespace Arawn.GameCreator2.Networking.Inventory
     public struct NetworkPickupRequest
     {
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         public uint PickerBagNetworkId;
         public uint PropNetworkId;                 // NetworkId of the Prop object
     }
@@ -736,6 +793,8 @@ namespace Arawn.GameCreator2.Networking.Inventory
     public struct NetworkPickupResponse
     {
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         public bool Authorized;
         public InventoryRejectionReason RejectionReason;
         public NetworkRuntimeItem PickedUpItem;
@@ -753,6 +812,8 @@ namespace Arawn.GameCreator2.Networking.Inventory
     public struct NetworkCombineRequest
     {
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         public uint BagNetworkId;
         public Vector2Int PositionA;
         public Vector2Int PositionB;
@@ -765,6 +826,8 @@ namespace Arawn.GameCreator2.Networking.Inventory
     public struct NetworkCombineResponse
     {
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         public bool Authorized;
         public InventoryRejectionReason RejectionReason;
         public NetworkRuntimeItem ResultItem;

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Threading.Tasks;
 using UnityEngine;
 using GameCreator.Runtime.Characters;
 using GameCreator.Runtime.Characters.Animim;
@@ -85,6 +86,17 @@ namespace Arawn.GameCreator2.Networking
         public bool IsInitialized => m_IsInitialized;
         public NetworkAnimationRegistry Registry => m_AnimationRegistry;
         
+        public void SetSyncEnabled(bool enabled)
+        {
+            m_EnableSync = enabled;
+        }
+        
+        public void SetRateLimits(float stateRate, float gestureRate)
+        {
+            m_MaxStateRate = Mathf.Max(1f, stateRate);
+            m_MaxGestureRate = Mathf.Max(1f, gestureRate);
+        }
+        
         // INITIALIZATION: ------------------------------------------------------------------------
         
         public void Initialize(Character character, bool isLocalPlayer)
@@ -113,7 +125,7 @@ namespace Arawn.GameCreator2.Networking
         /// Set an animation state on a layer and broadcast to network.
         /// Use this instead of Character.States.SetState() for networked animations.
         /// </summary>
-        public async void SetState(
+        public async Task SetState(
             AnimationClip clip,
             AvatarMask mask,
             int layer,
@@ -122,33 +134,40 @@ namespace Arawn.GameCreator2.Networking
         {
             if (!m_EnableSync || !m_IsInitialized) return;
             
-            // Apply locally
-            if (m_Character?.States != null)
+            try
             {
-                await m_Character.States.SetState(clip, mask, layer, blendMode, config);
-            }
-            
-            // Broadcast if local player
-            if (m_IsLocalPlayer && CanSendState())
-            {
-                int clipHash = clip != null ? clip.name.GetHashCode() : 0;
-                var command = NetworkStateCommand.Create(
-                    clipHash,
-                    NetworkStateType.AnimationClip,
-                    layer,
-                    blendMode,
-                    config
-                );
+                // Apply locally
+                if (m_Character?.States != null)
+                {
+                    await m_Character.States.SetState(clip, mask, layer, blendMode, config);
+                }
                 
-                OnStateCommandReady?.Invoke(command);
-                m_LastStateTime = Time.time;
+                // Broadcast if local player
+                if (m_IsLocalPlayer && CanSendState())
+                {
+                    int clipHash = StableHashUtility.GetStableHash(clip);
+                    var command = NetworkStateCommand.Create(
+                        clipHash,
+                        NetworkStateType.AnimationClip,
+                        layer,
+                        blendMode,
+                        config
+                    );
+                    
+                    OnStateCommandReady?.Invoke(command);
+                    m_LastStateTime = Time.time;
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[NetworkAnimim] SetState(clip) failed: {ex.Message}\n{ex.StackTrace}");
             }
         }
         
         /// <summary>
         /// Set a State asset on a layer and broadcast to network.
         /// </summary>
-        public async void SetState(
+        public async Task SetState(
             State state,
             int layer,
             BlendMode blendMode,
@@ -156,26 +175,33 @@ namespace Arawn.GameCreator2.Networking
         {
             if (!m_EnableSync || !m_IsInitialized) return;
             
-            // Apply locally
-            if (m_Character?.States != null)
+            try
             {
-                await m_Character.States.SetState(state, layer, blendMode, config);
-            }
-            
-            // Broadcast if local player
-            if (m_IsLocalPlayer && CanSendState())
-            {
-                int stateHash = state != null ? state.name.GetHashCode() : 0;
-                var command = NetworkStateCommand.Create(
-                    stateHash,
-                    NetworkStateType.StateAsset,
-                    layer,
-                    blendMode,
-                    config
-                );
+                // Apply locally
+                if (m_Character?.States != null)
+                {
+                    await m_Character.States.SetState(state, layer, blendMode, config);
+                }
                 
-                OnStateCommandReady?.Invoke(command);
-                m_LastStateTime = Time.time;
+                // Broadcast if local player
+                if (m_IsLocalPlayer && CanSendState())
+                {
+                    int stateHash = StableHashUtility.GetStableHash(state);
+                    var command = NetworkStateCommand.Create(
+                        stateHash,
+                        NetworkStateType.StateAsset,
+                        layer,
+                        blendMode,
+                        config
+                    );
+                    
+                    OnStateCommandReady?.Invoke(command);
+                    m_LastStateTime = Time.time;
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[NetworkAnimim] SetState(asset) failed: {ex.Message}\n{ex.StackTrace}");
             }
         }
         
@@ -201,7 +227,7 @@ namespace Arawn.GameCreator2.Networking
         /// Play a gesture animation and broadcast to network.
         /// Use this instead of Character.Gestures.CrossFade() for networked animations.
         /// </summary>
-        public async void PlayGesture(
+        public async Task PlayGesture(
             AnimationClip clip,
             AvatarMask mask,
             BlendMode blendMode,
@@ -210,25 +236,32 @@ namespace Arawn.GameCreator2.Networking
         {
             if (!m_EnableSync || !m_IsInitialized) return;
             
-            // Apply locally
-            if (m_Character?.Gestures != null)
+            try
             {
-                await m_Character.Gestures.CrossFade(clip, mask, blendMode, config, stopPreviousGestures);
-            }
-            
-            // Broadcast if local player
-            if (m_IsLocalPlayer && CanSendGesture())
-            {
-                int clipHash = clip != null ? clip.name.GetHashCode() : 0;
-                var command = NetworkGestureCommand.Create(
-                    clipHash,
-                    blendMode,
-                    config,
-                    stopPreviousGestures
-                );
+                // Apply locally
+                if (m_Character?.Gestures != null)
+                {
+                    await m_Character.Gestures.CrossFade(clip, mask, blendMode, config, stopPreviousGestures);
+                }
                 
-                OnGestureCommandReady?.Invoke(command);
-                m_LastGestureTime = Time.time;
+                // Broadcast if local player
+                if (m_IsLocalPlayer && CanSendGesture())
+                {
+                    int clipHash = StableHashUtility.GetStableHash(clip);
+                    var command = NetworkGestureCommand.Create(
+                        clipHash,
+                        blendMode,
+                        config,
+                        stopPreviousGestures
+                    );
+                    
+                    OnGestureCommandReady?.Invoke(command);
+                    m_LastGestureTime = Time.time;
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[NetworkAnimim] PlayGesture failed: {ex.Message}\n{ex.StackTrace}");
             }
         }
         
@@ -263,7 +296,7 @@ namespace Arawn.GameCreator2.Networking
             // Broadcast if local player
             if (m_IsLocalPlayer)
             {
-                int clipHash = clip != null ? clip.name.GetHashCode() : 0;
+                int clipHash = StableHashUtility.GetStableHash(clip);
                 var command = NetworkStopGestureCommand.Create(clipHash, delay, transitionOut);
                 OnStopGestureCommandReady?.Invoke(command);
             }
@@ -276,54 +309,68 @@ namespace Arawn.GameCreator2.Networking
         /// Apply a received state command from a remote player.
         /// Call this from your network receive handler.
         /// </summary>
-        public async void ApplyStateCommand(NetworkStateCommand command)
+        public async Task ApplyStateCommand(NetworkStateCommand command)
         {
             if (!m_EnableSync || !m_IsInitialized || m_IsLocalPlayer) return;
             if (m_Character?.States == null) return;
             
-            var config = command.ToConfigState();
-            
-            switch (command.StateType)
+            try
             {
-                case NetworkStateType.AnimationClip:
-                    if (TryGetClip(command.AnimationId, out var clip))
-                    {
-                        await m_Character.States.SetState(
-                            clip, null, command.Layer, command.BlendMode, config
-                        );
-                    }
-                    break;
-                    
-                case NetworkStateType.StateAsset:
-                    if (TryGetState(command.AnimationId, out var state))
-                    {
-                        await m_Character.States.SetState(
-                            state, command.Layer, command.BlendMode, config
-                        );
-                    }
-                    break;
-                    
-                case NetworkStateType.RuntimeController:
-                    // RuntimeController sync would need additional registry support
-                    Debug.LogWarning("[NetworkAnimim] RuntimeController sync not implemented");
-                    break;
+                var config = command.ToConfigState();
+                
+                switch (command.StateType)
+                {
+                    case NetworkStateType.AnimationClip:
+                        if (TryGetClip(command.AnimationId, out var clip))
+                        {
+                            await m_Character.States.SetState(
+                                clip, null, command.Layer, command.BlendMode, config
+                            );
+                        }
+                        break;
+                        
+                    case NetworkStateType.StateAsset:
+                        if (TryGetState(command.AnimationId, out var state))
+                        {
+                            await m_Character.States.SetState(
+                                state, command.Layer, command.BlendMode, config
+                            );
+                        }
+                        break;
+                        
+                    case NetworkStateType.RuntimeController:
+                        // RuntimeController sync would need additional registry support
+                        Debug.LogWarning("[NetworkAnimim] RuntimeController sync not implemented");
+                        break;
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[NetworkAnimim] ApplyStateCommand failed: {ex.Message}\n{ex.StackTrace}");
             }
         }
         
         /// <summary>
         /// Apply a received gesture command from a remote player.
         /// </summary>
-        public async void ApplyGestureCommand(NetworkGestureCommand command)
+        public async Task ApplyGestureCommand(NetworkGestureCommand command)
         {
             if (!m_EnableSync || !m_IsInitialized || m_IsLocalPlayer) return;
             if (m_Character?.Gestures == null) return;
             
-            if (TryGetClip(command.ClipHash, out var clip))
+            try
             {
-                var config = command.ToConfigGesture();
-                await m_Character.Gestures.CrossFade(
-                    clip, null, command.BlendMode, config, command.StopPreviousGestures
-                );
+                if (TryGetClip(command.ClipHash, out var clip))
+                {
+                    var config = command.ToConfigGesture();
+                    await m_Character.Gestures.CrossFade(
+                        clip, null, command.BlendMode, config, command.StopPreviousGestures
+                    );
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[NetworkAnimim] ApplyGestureCommand failed: {ex.Message}\n{ex.StackTrace}");
             }
         }
         
@@ -362,7 +409,7 @@ namespace Arawn.GameCreator2.Networking
         public void RegisterClip(AnimationClip clip)
         {
             if (clip == null) return;
-            int hash = clip.name.GetHashCode();
+            int hash = StableHashUtility.GetStableHash(clip);
             m_ClipCache[hash] = clip;
         }
         
@@ -372,7 +419,7 @@ namespace Arawn.GameCreator2.Networking
         public void RegisterState(State state)
         {
             if (state == null) return;
-            int hash = state.name.GetHashCode();
+            int hash = StableHashUtility.GetStableHash(state);
             m_StateCache[hash] = state;
         }
         

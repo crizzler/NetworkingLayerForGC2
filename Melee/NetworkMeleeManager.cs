@@ -4,6 +4,10 @@ using System.Collections.Generic;
 using UnityEngine;
 using GameCreator.Runtime.Characters;
 using GameCreator.Runtime.Common;
+using GameCreator.Runtime.Melee;
+
+using Arawn.GameCreator2.Networking;
+using Arawn.GameCreator2.Networking.Security;
 
 #if UNITY_NETCODE
 using Unity.Netcode;
@@ -30,19 +34,13 @@ namespace Arawn.GameCreator2.Networking.Melee
     /// </remarks>
     [AddComponentMenu("Game Creator/Network/Melee/Network Melee Manager")]
     [DefaultExecutionOrder(ApplicationManager.EXECUTION_ORDER_DEFAULT - 10)]
-    public class NetworkMeleeManager : MonoBehaviour
+    public class NetworkMeleeManager : NetworkSingleton<NetworkMeleeManager>
     {
         // ════════════════════════════════════════════════════════════════════════════════════════
-        // SINGLETON
+        // CONFIGURATION
         // ════════════════════════════════════════════════════════════════════════════════════════
         
-        private static NetworkMeleeManager s_Instance;
-        
-        /// <summary>Global manager instance.</summary>
-        public static NetworkMeleeManager Instance => s_Instance;
-        
-        /// <summary>Whether an instance exists.</summary>
-        public static bool HasInstance => s_Instance != null;
+        protected override DuplicatePolicy OnDuplicatePolicy => DuplicatePolicy.DestroyComponent;
         
         // ════════════════════════════════════════════════════════════════════════════════════════
         // INSPECTOR
@@ -51,12 +49,30 @@ namespace Arawn.GameCreator2.Networking.Melee
         [Header("Processing Settings")]
         [Tooltip("Maximum hit requests to process per frame on server.")]
         [SerializeField] private int m_MaxHitsPerFrame = 10;
+
+        [Tooltip("Maximum queued hit requests awaiting processing.")]
+        [SerializeField] private int m_MaxHitQueueLength = 512;
+
+        [Tooltip("Maximum queued block requests awaiting processing.")]
+        [SerializeField] private int m_MaxBlockQueueLength = 256;
+
+        [Tooltip("Maximum queued skill requests awaiting processing.")]
+        [SerializeField] private int m_MaxSkillQueueLength = 256;
+
+        [Tooltip("Maximum queued charge requests awaiting processing.")]
+        [SerializeField] private int m_MaxChargeQueueLength = 256;
+
+        [Tooltip("Drop queued requests older than this many seconds.")]
+        [SerializeField] private float m_MaxQueueAgeSeconds = 1.5f;
         
         [Tooltip("Maximum time in the past for hit validation (seconds).")]
         [SerializeField] private float m_MaxRewindTime = 0.5f;
         
         [Tooltip("Extra tolerance for hit validation (meters).")]
         [SerializeField] private float m_HitTolerance = 0.3f;
+
+        [Tooltip("Default server melee range used when request data does not provide a range.")]
+        [SerializeField] private float m_DefaultMeleeRange = 3f;
         
         [Header("Debug")]
         [SerializeField] private bool m_LogHitRequests = false;
@@ -141,6 +157,12 @@ namespace Arawn.GameCreator2.Networking.Melee
         /// Assign to get current network time.
         /// </summary>
         public Func<float> GetNetworkTimeFunc;
+
+        /// <summary>Optional server-side damage calculation hook.</summary>
+        public Func<NetworkMeleeHitRequest, float> ComputeDamageFunc;
+
+        /// <summary>Optional server-side damage application hook.</summary>
+        public Action<NetworkMeleeHitRequest, float> ApplyDamageFunc;
         
         // ════════════════════════════════════════════════════════════════════════════════════════
         // EVENTS
@@ -194,6 +216,128 @@ namespace Arawn.GameCreator2.Networking.Melee
         
         // Statistics
         private MeleeNetworkStats m_Stats;
+        private NetworkMeleePatchHooks m_PatchHooks;
+        
+        // ════════════════════════════════════════════════════════════════════════════════════════
+        // WEAPON / SKILL REGISTRY
+        // ════════════════════════════════════════════════════════════════════════════════════════
+        
+        /// <summary>
+        /// Registry entry for a MeleeWeapon asset.
+        /// </summary>
+        public struct MeleeWeaponRegistryEntry
+        {
+            public int Hash;
+            public MeleeWeapon Weapon;
+            public string Name;
+        }
+        
+        /// <summary>
+        /// Registry entry for a Skill asset.
+        /// </summary>
+        public struct SkillRegistryEntry
+        {
+            public int Hash;
+            public Skill Skill;
+            public string Name;
+        }
+        
+        private static readonly Dictionary<int, MeleeWeaponRegistryEntry> s_WeaponRegistry = new(32);
+        private static readonly Dictionary<int, SkillRegistryEntry> s_SkillRegistry = new(64);
+        
+        /// <summary>
+        /// Register a MeleeWeapon for network hash-to-asset lookup.
+        /// Uses <c>weapon.Id.Hash</c> as the key.
+        /// </summary>
+        public static void RegisterMeleeWeapon(MeleeWeapon weapon)
+        {
+            if (weapon == null) return;
+            int hash = weapon.Id.Hash;
+            s_WeaponRegistry[hash] = new MeleeWeaponRegistryEntry
+            {
+                Hash = hash,
+                Weapon = weapon,
+                Name = weapon.name
+            };
+        }
+        
+        /// <summary>
+        /// Unregister a MeleeWeapon.
+        /// </summary>
+        public static void UnregisterMeleeWeapon(MeleeWeapon weapon)
+        {
+            if (weapon == null) return;
+            s_WeaponRegistry.Remove(weapon.Id.Hash);
+        }
+        
+        /// <summary>
+        /// Get a MeleeWeapon by its <see cref="IdString"/> hash.
+        /// </summary>
+        /// <returns>The weapon, or <c>null</c> if not registered.</returns>
+        public static MeleeWeapon GetMeleeWeaponByHash(int hash)
+        {
+            return s_WeaponRegistry.TryGetValue(hash, out var entry) ? entry.Weapon : null;
+        }
+        
+        /// <summary>
+        /// Check if a MeleeWeapon is registered.
+        /// </summary>
+        public static bool IsMeleeWeaponRegistered(MeleeWeapon weapon)
+        {
+            return weapon != null && s_WeaponRegistry.ContainsKey(weapon.Id.Hash);
+        }
+        
+        /// <summary>
+        /// Register a Skill for network hash-to-asset lookup.
+        /// Uses <see cref="StableHashUtility.GetStableHash(string)"/> on the skill name.
+        /// </summary>
+        public static void RegisterSkill(Skill skill)
+        {
+            if (skill == null) return;
+            int hash = StableHashUtility.GetStableHash(skill.name);
+            s_SkillRegistry[hash] = new SkillRegistryEntry
+            {
+                Hash = hash,
+                Skill = skill,
+                Name = skill.name
+            };
+        }
+        
+        /// <summary>
+        /// Unregister a Skill.
+        /// </summary>
+        public static void UnregisterSkill(Skill skill)
+        {
+            if (skill == null) return;
+            s_SkillRegistry.Remove(StableHashUtility.GetStableHash(skill.name));
+        }
+        
+        /// <summary>
+        /// Get a Skill by its stable hash.
+        /// </summary>
+        /// <returns>The skill, or <c>null</c> if not registered.</returns>
+        public static Skill GetSkillByHash(int hash)
+        {
+            return s_SkillRegistry.TryGetValue(hash, out var entry) ? entry.Skill : null;
+        }
+        
+        /// <summary>
+        /// Check if a Skill is registered.
+        /// </summary>
+        public static bool IsSkillRegistered(Skill skill)
+        {
+            return skill != null && s_SkillRegistry.ContainsKey(StableHashUtility.GetStableHash(skill.name));
+        }
+        
+        /// <summary>
+        /// Clear all weapon and skill registries.
+        /// Call on scene unload or session end.
+        /// </summary>
+        public static void ClearRegistries()
+        {
+            s_WeaponRegistry.Clear();
+            s_SkillRegistry.Clear();
+        }
         
         // ════════════════════════════════════════════════════════════════════════════════════════
         // STRUCTS
@@ -226,6 +370,58 @@ namespace Arawn.GameCreator2.Networking.Melee
             public NetworkChargeRequest Request;
             public float ReceivedTime;
         }
+
+        private static NetworkRequestContext BuildContext(uint actorNetworkId, uint correlationId)
+        {
+            return NetworkRequestContext.Create(actorNetworkId, correlationId);
+        }
+
+        private bool ValidateMeleeRequest(uint senderClientId, uint actorNetworkId, uint correlationId, string requestType)
+        {
+            return SecurityIntegration.ValidateModuleRequest(
+                senderClientId,
+                BuildContext(actorNetworkId, correlationId),
+                "Melee",
+                requestType);
+        }
+
+        private bool IsQueueAtCapacity<T>(Queue<T> queue, int maxQueueLength, uint senderClientId, uint actorNetworkId, string requestType)
+        {
+            int safeLimit = Mathf.Max(1, maxQueueLength);
+            if (queue.Count < safeLimit) return false;
+
+            SecurityIntegration.RecordViolation(
+                senderClientId,
+                actorNetworkId,
+                SecurityViolationType.RateLimitExceeded,
+                "Melee",
+                $"{requestType} queue capacity reached ({queue.Count}/{safeLimit})");
+
+            if (m_LogHitRequests || m_LogHitBroadcasts)
+            {
+                Debug.LogWarning($"[NetworkMeleeManager] Dropped {requestType}: queue full ({queue.Count}/{safeLimit})");
+            }
+
+            return true;
+        }
+
+        private static int DropStaleRequests<T>(Queue<T> queue, float maxAgeSeconds, Func<T, float> getReceivedTime)
+        {
+            if (queue.Count == 0) return 0;
+
+            float now = Time.time;
+            int dropped = 0;
+            while (queue.Count > 0)
+            {
+                T queued = queue.Peek();
+                if (now - getReceivedTime(queued) <= maxAgeSeconds) break;
+
+                queue.Dequeue();
+                dropped++;
+            }
+
+            return dropped;
+        }
         
         /// <summary>Network statistics.</summary>
         [Serializable]
@@ -255,28 +451,6 @@ namespace Arawn.GameCreator2.Networking.Melee
         // UNITY LIFECYCLE
         // ════════════════════════════════════════════════════════════════════════════════════════
         
-        private void Awake()
-        {
-            if (s_Instance == null)
-            {
-                s_Instance = this;
-            }
-            else if (s_Instance != this)
-            {
-                Debug.LogWarning("[NetworkMeleeManager] Multiple instances detected. Using first.");
-                Destroy(this);
-                return;
-            }
-        }
-        
-        private void OnDestroy()
-        {
-            if (s_Instance == this)
-            {
-                s_Instance = null;
-            }
-        }
-        
         private void Update()
         {
             if (m_IsServer)
@@ -285,6 +459,14 @@ namespace Arawn.GameCreator2.Networking.Melee
                 ProcessServerBlockQueue();
                 ProcessServerSkillQueue();
                 ProcessServerChargeQueue();
+            }
+        }
+
+        private void OnDisable()
+        {
+            if (m_PatchHooks != null)
+            {
+                m_PatchHooks.Initialize(false);
             }
         }
         
@@ -299,8 +481,29 @@ namespace Arawn.GameCreator2.Networking.Melee
         {
             m_IsServer = isServer;
             m_IsClient = isClient;
+            SyncPatchHooks();
             
             Debug.Log($"[NetworkMeleeManager] Initialized - Server: {isServer}, Client: {isClient}");
+        }
+
+        private void SyncPatchHooks()
+        {
+            if (!m_IsServer)
+            {
+                if (m_PatchHooks != null) m_PatchHooks.Initialize(false);
+                return;
+            }
+
+            if (m_PatchHooks == null)
+            {
+                m_PatchHooks = GetComponent<NetworkMeleePatchHooks>();
+                if (m_PatchHooks == null)
+                {
+                    m_PatchHooks = gameObject.AddComponent<NetworkMeleePatchHooks>();
+                }
+            }
+
+            m_PatchHooks.Initialize(true);
         }
         
         // ════════════════════════════════════════════════════════════════════════════════════════
@@ -415,8 +618,38 @@ namespace Arawn.GameCreator2.Networking.Melee
                 Debug.LogWarning("[NetworkMeleeManager] ReceiveHitRequest called on non-server");
                 return;
             }
+            if (!ValidateMeleeRequest(clientNetworkId, request.ActorNetworkId, request.CorrelationId, nameof(NetworkMeleeHitRequest)))
+            {
+                SendHitResponseToClient?.Invoke(clientNetworkId, new NetworkMeleeHitResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Validated = false,
+                    RejectionReason = MeleeHitRejectionReason.CheatSuspected
+                });
+                return;
+            }
             
             m_Stats.HitRequestsReceived++;
+
+            if (IsQueueAtCapacity(
+                    m_ServerHitQueue,
+                    m_MaxHitQueueLength,
+                    clientNetworkId,
+                    request.ActorNetworkId,
+                    nameof(NetworkMeleeHitRequest)))
+            {
+                SendHitResponseToClient?.Invoke(clientNetworkId, new NetworkMeleeHitResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Validated = false,
+                    RejectionReason = MeleeHitRejectionReason.CheatSuspected
+                });
+                return;
+            }
             
             // Queue for processing
             m_ServerHitQueue.Enqueue(new QueuedHitRequest
@@ -429,6 +662,12 @@ namespace Arawn.GameCreator2.Networking.Melee
         
         private void ProcessServerHitQueue()
         {
+            int staleDropped = DropStaleRequests(m_ServerHitQueue, m_MaxQueueAgeSeconds, queued => queued.ReceivedTime);
+            if (staleDropped > 0 && (m_LogHitRequests || m_LogHitBroadcasts))
+            {
+                Debug.LogWarning($"[NetworkMeleeManager] Dropped {staleDropped} stale hit requests");
+            }
+
             int processed = 0;
             
             while (m_ServerHitQueue.Count > 0 && processed < m_MaxHitsPerFrame)
@@ -462,6 +701,9 @@ namespace Arawn.GameCreator2.Networking.Melee
                 // Fallback validation
                 response = ValidateHitRequest(request);
             }
+
+            response.ActorNetworkId = request.ActorNetworkId;
+            response.CorrelationId = request.CorrelationId;
             
             // Send response to client
             SendHitResponseToClient?.Invoke(queued.ClientNetworkId, response);
@@ -583,6 +825,8 @@ namespace Arawn.GameCreator2.Networking.Melee
                 return new NetworkMeleeHitResponse
                 {
                     RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
                     Validated = false,
                     RejectionReason = MeleeHitRejectionReason.TimestampTooOld
                 };
@@ -595,6 +839,8 @@ namespace Arawn.GameCreator2.Networking.Melee
                 return new NetworkMeleeHitResponse
                 {
                     RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
                     Validated = false,
                     RejectionReason = MeleeHitRejectionReason.TargetNotFound
                 };
@@ -606,6 +852,8 @@ namespace Arawn.GameCreator2.Networking.Melee
                 return new NetworkMeleeHitResponse
                 {
                     RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
                     Validated = false,
                     RejectionReason = MeleeHitRejectionReason.TargetNotFound
                 };
@@ -617,6 +865,8 @@ namespace Arawn.GameCreator2.Networking.Melee
                 return new NetworkMeleeHitResponse
                 {
                     RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
                     Validated = false,
                     RejectionReason = MeleeHitRejectionReason.TargetInvincible
                 };
@@ -628,20 +878,75 @@ namespace Arawn.GameCreator2.Networking.Melee
                 return new NetworkMeleeHitResponse
                 {
                     RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
                     Validated = false,
                     RejectionReason = MeleeHitRejectionReason.TargetDodged
                 };
             }
             
-            // TODO: Range/position validation with lag compensation
+            var attackerNetworkChar = GetCharacterByNetworkId(request.AttackerNetworkId);
+            if (attackerNetworkChar == null)
+            {
+                return new NetworkMeleeHitResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Validated = false,
+                    RejectionReason = MeleeHitRejectionReason.AttackerNotFound
+                };
+            }
+
+            var attackerCharacter = attackerNetworkChar.GetComponent<Character>();
+            if (attackerCharacter == null || attackerCharacter.IsDead)
+            {
+                return new NetworkMeleeHitResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Validated = false,
+                    RejectionReason = MeleeHitRejectionReason.AttackerNotFound
+                };
+            }
+
+            // Validate range using current authoritative positions.
+            float maxRange = Mathf.Max(0.1f, m_DefaultMeleeRange) + m_HitTolerance;
+            float distance = Vector3.Distance(attackerCharacter.transform.position, targetCharacter.transform.position);
+            if (distance > maxRange)
+            {
+                return new NetworkMeleeHitResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Validated = false,
+                    RejectionReason = MeleeHitRejectionReason.OutOfRange
+                };
+            }
+
+            if (request.StrikeDirection.sqrMagnitude < 0.01f)
+            {
+                return new NetworkMeleeHitResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Validated = false,
+                    RejectionReason = MeleeHitRejectionReason.InvalidPhase
+                };
+            }
             
             // Valid hit
             return new NetworkMeleeHitResponse
             {
                 RequestId = request.RequestId,
+                ActorNetworkId = request.ActorNetworkId,
+                CorrelationId = request.CorrelationId,
                 Validated = true,
                 RejectionReason = MeleeHitRejectionReason.None,
-                Damage = 10f, // TODO: Calculate from skill
+                Damage = Mathf.Max(0f, ComputeDamageFunc?.Invoke(request) ?? 10f),
                 PoiseBroken = false
             };
         }
@@ -655,9 +960,32 @@ namespace Arawn.GameCreator2.Networking.Melee
             var targetCharacter = targetNetworkChar.GetComponent<Character>();
             if (targetCharacter == null) return;
             
-            // TODO: Apply actual damage using GC2 stats system
-            // This depends on your stats integration
-            Debug.Log($"[NetworkMeleeManager] Server applying {damage} damage to {targetCharacter.name}");
+            if (ApplyDamageFunc != null)
+            {
+                ApplyDamageFunc.Invoke(request, damage);
+                return;
+            }
+
+            var attackerNetworkChar = GetCharacterByNetworkId(request.AttackerNetworkId);
+            Vector3 incomingDirection = request.StrikeDirection.sqrMagnitude > 0.0001f
+                ? request.StrikeDirection.normalized
+                : attackerNetworkChar != null
+                    ? (targetCharacter.transform.position - attackerNetworkChar.transform.position).normalized
+                    : targetCharacter.transform.forward;
+
+            Vector3 localDirection = targetCharacter.transform.InverseTransformDirection(incomingDirection).normalized;
+            if (localDirection.sqrMagnitude < 0.0001f)
+            {
+                localDirection = Vector3.forward;
+            }
+
+            var reactionInput = new ReactionInput(localDirection, Mathf.Max(0f, damage));
+            var args = new Args(attackerNetworkChar != null ? attackerNetworkChar.gameObject : null, targetCharacter.gameObject);
+            _ = targetCharacter.Combat.GetHitReaction(reactionInput, args, null);
+
+            Debug.LogWarning(
+                $"[NetworkMeleeManager] ApplyDamageFunc not set. " +
+                $"Applied fallback hit reaction damage={damage:F2} target={targetCharacter.name}");
         }
         
         // ════════════════════════════════════════════════════════════════════════════════════════
@@ -670,8 +998,38 @@ namespace Arawn.GameCreator2.Networking.Melee
         public void ReceiveBlockRequest(uint clientNetworkId, NetworkBlockRequest request)
         {
             if (!m_IsServer) return;
+            if (!ValidateMeleeRequest(clientNetworkId, request.ActorNetworkId, request.CorrelationId, nameof(NetworkBlockRequest)))
+            {
+                SendBlockResponseToClient?.Invoke(clientNetworkId, new NetworkBlockResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Validated = false,
+                    RejectionReason = BlockRejectionReason.CheatSuspected
+                });
+                return;
+            }
             
             m_Stats.BlockRequestsReceived++;
+
+            if (IsQueueAtCapacity(
+                    m_ServerBlockQueue,
+                    m_MaxBlockQueueLength,
+                    clientNetworkId,
+                    request.ActorNetworkId,
+                    nameof(NetworkBlockRequest)))
+            {
+                SendBlockResponseToClient?.Invoke(clientNetworkId, new NetworkBlockResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Validated = false,
+                    RejectionReason = BlockRejectionReason.CheatSuspected
+                });
+                return;
+            }
             
             m_ServerBlockQueue.Enqueue(new QueuedBlockRequest
             {
@@ -683,6 +1041,12 @@ namespace Arawn.GameCreator2.Networking.Melee
         
         private void ProcessServerBlockQueue()
         {
+            int staleDropped = DropStaleRequests(m_ServerBlockQueue, m_MaxQueueAgeSeconds, queued => queued.ReceivedTime);
+            if (staleDropped > 0 && (m_LogHitRequests || m_LogHitBroadcasts))
+            {
+                Debug.LogWarning($"[NetworkMeleeManager] Dropped {staleDropped} stale block requests");
+            }
+
             while (m_ServerBlockQueue.Count > 0)
             {
                 var queued = m_ServerBlockQueue.Dequeue();
@@ -695,11 +1059,13 @@ namespace Arawn.GameCreator2.Networking.Melee
             var request = queued.Request;
             
             // Find character's controller
-            if (!m_Controllers.TryGetValue(queued.ClientNetworkId, out var controller))
+            if (!m_Controllers.TryGetValue(request.ActorNetworkId, out var controller))
             {
                 SendBlockResponseToClient?.Invoke(queued.ClientNetworkId, new NetworkBlockResponse
                 {
                     RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
                     Validated = false,
                     RejectionReason = BlockRejectionReason.InvalidState
                 });
@@ -708,6 +1074,8 @@ namespace Arawn.GameCreator2.Networking.Melee
             
             // Process request
             var response = controller.ProcessBlockRequest(request, queued.ClientNetworkId);
+            response.ActorNetworkId = request.ActorNetworkId;
+            response.CorrelationId = request.CorrelationId;
             
             // Send response to client
             SendBlockResponseToClient?.Invoke(queued.ClientNetworkId, response);
@@ -719,7 +1087,7 @@ namespace Arawn.GameCreator2.Networking.Melee
                 // Broadcast block state to all clients
                 var broadcast = new NetworkBlockBroadcast
                 {
-                    CharacterNetworkId = queued.ClientNetworkId,
+                    CharacterNetworkId = request.ActorNetworkId,
                     Action = request.Action,
                     ServerTimestamp = response.ServerBlockStartTime,
                     ShieldHash = request.ShieldHash
@@ -740,8 +1108,38 @@ namespace Arawn.GameCreator2.Networking.Melee
         public void ReceiveSkillRequest(uint clientNetworkId, NetworkSkillRequest request)
         {
             if (!m_IsServer) return;
+            if (!ValidateMeleeRequest(clientNetworkId, request.ActorNetworkId, request.CorrelationId, nameof(NetworkSkillRequest)))
+            {
+                SendSkillResponseToClient?.Invoke(clientNetworkId, new NetworkSkillResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Validated = false,
+                    RejectionReason = SkillRejectionReason.CheatSuspected
+                });
+                return;
+            }
             
             m_Stats.SkillRequestsReceived++;
+
+            if (IsQueueAtCapacity(
+                    m_ServerSkillQueue,
+                    m_MaxSkillQueueLength,
+                    clientNetworkId,
+                    request.ActorNetworkId,
+                    nameof(NetworkSkillRequest)))
+            {
+                SendSkillResponseToClient?.Invoke(clientNetworkId, new NetworkSkillResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Validated = false,
+                    RejectionReason = SkillRejectionReason.CheatSuspected
+                });
+                return;
+            }
             
             m_ServerSkillQueue.Enqueue(new QueuedSkillRequest
             {
@@ -753,6 +1151,12 @@ namespace Arawn.GameCreator2.Networking.Melee
         
         private void ProcessServerSkillQueue()
         {
+            int staleDropped = DropStaleRequests(m_ServerSkillQueue, m_MaxQueueAgeSeconds, queued => queued.ReceivedTime);
+            if (staleDropped > 0 && (m_LogHitRequests || m_LogHitBroadcasts))
+            {
+                Debug.LogWarning($"[NetworkMeleeManager] Dropped {staleDropped} stale skill requests");
+            }
+
             while (m_ServerSkillQueue.Count > 0)
             {
                 var queued = m_ServerSkillQueue.Dequeue();
@@ -765,11 +1169,13 @@ namespace Arawn.GameCreator2.Networking.Melee
             var request = queued.Request;
             
             // Find character's controller
-            if (!m_Controllers.TryGetValue(queued.ClientNetworkId, out var controller))
+            if (!m_Controllers.TryGetValue(request.ActorNetworkId, out var controller))
             {
                 SendSkillResponseToClient?.Invoke(queued.ClientNetworkId, new NetworkSkillResponse
                 {
-                    RequestId = (ushort)request.InputKey,
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
                     Validated = false,
                     RejectionReason = SkillRejectionReason.CheatSuspected
                 });
@@ -778,6 +1184,8 @@ namespace Arawn.GameCreator2.Networking.Melee
             
             // Process request
             var response = controller.ProcessSkillRequest(request, queued.ClientNetworkId);
+            response.ActorNetworkId = request.ActorNetworkId;
+            response.CorrelationId = request.CorrelationId;
             
             // Send response to client
             SendSkillResponseToClient?.Invoke(queued.ClientNetworkId, response);
@@ -789,7 +1197,7 @@ namespace Arawn.GameCreator2.Networking.Melee
                 // Broadcast skill execution to all clients
                 var broadcast = new NetworkSkillBroadcast
                 {
-                    CharacterNetworkId = queued.ClientNetworkId,
+                    CharacterNetworkId = request.ActorNetworkId,
                     TargetNetworkId = request.TargetNetworkId,
                     SkillHash = request.SkillHash,
                     WeaponHash = request.WeaponHash,
@@ -816,7 +1224,35 @@ namespace Arawn.GameCreator2.Networking.Melee
         public void ReceiveChargeRequest(uint clientNetworkId, NetworkChargeRequest request)
         {
             if (!m_IsServer) return;
+            if (!ValidateMeleeRequest(clientNetworkId, request.ActorNetworkId, request.CorrelationId, nameof(NetworkChargeRequest)))
+            {
+                SendChargeResponseToClient?.Invoke(clientNetworkId, new NetworkChargeResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Validated = false
+                });
+                return;
+            }
             
+            if (IsQueueAtCapacity(
+                    m_ServerChargeQueue,
+                    m_MaxChargeQueueLength,
+                    clientNetworkId,
+                    request.ActorNetworkId,
+                    nameof(NetworkChargeRequest)))
+            {
+                SendChargeResponseToClient?.Invoke(clientNetworkId, new NetworkChargeResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Validated = false
+                });
+                return;
+            }
+
             m_ServerChargeQueue.Enqueue(new QueuedChargeRequest
             {
                 ClientNetworkId = clientNetworkId,
@@ -827,6 +1263,12 @@ namespace Arawn.GameCreator2.Networking.Melee
         
         private void ProcessServerChargeQueue()
         {
+            int staleDropped = DropStaleRequests(m_ServerChargeQueue, m_MaxQueueAgeSeconds, queued => queued.ReceivedTime);
+            if (staleDropped > 0 && (m_LogHitRequests || m_LogHitBroadcasts))
+            {
+                Debug.LogWarning($"[NetworkMeleeManager] Dropped {staleDropped} stale charge requests");
+            }
+
             while (m_ServerChargeQueue.Count > 0)
             {
                 var queued = m_ServerChargeQueue.Dequeue();
@@ -839,11 +1281,13 @@ namespace Arawn.GameCreator2.Networking.Melee
             var request = queued.Request;
             
             // Find character's controller
-            if (!m_Controllers.TryGetValue(queued.ClientNetworkId, out var controller))
+            if (!m_Controllers.TryGetValue(request.ActorNetworkId, out var controller))
             {
                 SendChargeResponseToClient?.Invoke(queued.ClientNetworkId, new NetworkChargeResponse
                 {
                     RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
                     Validated = false
                 });
                 return;
@@ -851,6 +1295,8 @@ namespace Arawn.GameCreator2.Networking.Melee
             
             // Process request
             var response = controller.ProcessChargeRequest(request, queued.ClientNetworkId);
+            response.ActorNetworkId = request.ActorNetworkId;
+            response.CorrelationId = request.CorrelationId;
             
             // Send response to client
             SendChargeResponseToClient?.Invoke(queued.ClientNetworkId, response);
@@ -860,7 +1306,7 @@ namespace Arawn.GameCreator2.Networking.Melee
                 // Broadcast charge start to all clients
                 var broadcast = new NetworkChargeBroadcast
                 {
-                    CharacterNetworkId = queued.ClientNetworkId,
+                    CharacterNetworkId = request.ActorNetworkId,
                     ChargeStarted = true,
                     ChargeSkillHash = response.ChargeSkillHash,
                     ServerTimestamp = response.ServerChargeStartTime
@@ -896,12 +1342,9 @@ namespace Arawn.GameCreator2.Networking.Melee
         /// </summary>
         public void ReceiveHitResponse(NetworkMeleeHitResponse response)
         {
-            // Find the attacker's controller and forward the response
-            // We need to know which controller sent the original request
-            // For now, broadcast to all controllers with matching pending request
-            foreach (var kvp in m_Controllers)
+            if (response.ActorNetworkId != 0 && m_Controllers.TryGetValue(response.ActorNetworkId, out var controller))
             {
-                kvp.Value.ReceiveHitResponse(response);
+                controller.ReceiveHitResponse(response);
             }
         }
         
@@ -932,9 +1375,9 @@ namespace Arawn.GameCreator2.Networking.Melee
         /// </summary>
         public void ReceiveBlockResponse(NetworkBlockResponse response)
         {
-            foreach (var kvp in m_Controllers)
+            if (response.ActorNetworkId != 0 && m_Controllers.TryGetValue(response.ActorNetworkId, out var controller))
             {
-                kvp.Value.ReceiveBlockResponse(response);
+                controller.ReceiveBlockResponse(response);
             }
         }
         
@@ -954,9 +1397,9 @@ namespace Arawn.GameCreator2.Networking.Melee
         /// </summary>
         public void ReceiveSkillResponse(NetworkSkillResponse response)
         {
-            foreach (var kvp in m_Controllers)
+            if (response.ActorNetworkId != 0 && m_Controllers.TryGetValue(response.ActorNetworkId, out var controller))
             {
-                kvp.Value.ReceiveSkillResponse(response);
+                controller.ReceiveSkillResponse(response);
             }
         }
         
@@ -976,9 +1419,9 @@ namespace Arawn.GameCreator2.Networking.Melee
         /// </summary>
         public void ReceiveChargeResponse(NetworkChargeResponse response)
         {
-            foreach (var kvp in m_Controllers)
+            if (response.ActorNetworkId != 0 && m_Controllers.TryGetValue(response.ActorNetworkId, out var controller))
             {
-                kvp.Value.ReceiveChargeResponse(response);
+                controller.ReceiveChargeResponse(response);
             }
         }
         

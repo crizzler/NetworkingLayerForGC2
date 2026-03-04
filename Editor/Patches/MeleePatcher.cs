@@ -1,4 +1,5 @@
 using UnityEngine;
+using System.Text.RegularExpressions;
 
 namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
 {
@@ -359,7 +360,7 @@ namespace GameCreator.Runtime.Melee
             
             // Find OnHit method and add static hook if possible
             // Look for class declaration
-            string classDecl = "public class Skill :";
+            string classDecl = "class Skill :";
             int classIndex = content.IndexOf(classDecl);
             if (classIndex > 0)
             {
@@ -381,24 +382,25 @@ namespace GameCreator.Runtime.Melee
                 }
             }
             
-            // Patch OnHit method if found
-            string onHitPattern = "public void OnHit(Args args, Vector3 point, Vector3 direction)";
-            int onHitIndex = content.IndexOf(onHitPattern);
-            if (onHitIndex > 0)
+            // Patch OnHit method if found (supports internal/public + whitespace variants)
+            if (!content.Contains("NetworkOnHitValidator.Invoke"))
             {
-                // Find the opening brace
-                int braceIndex = content.IndexOf('{', onHitIndex);
-                if (braceIndex > 0)
+                const string onHitPattern = @"(?m)^(\s*)(public|internal)\s+void\s+OnHit\s*\(\s*Args\s+args\s*,\s*Vector3\s+point\s*,\s*Vector3\s+direction\s*\)\s*\{";
+                Match onHitMatch = Regex.Match(content, onHitPattern);
+                if (onHitMatch.Success)
                 {
-                    string validationCheck = @"
-            // [GC2_NETWORK_PATCH] Server authority check
-            if (NetworkOnHitValidator != null && !NetworkOnHitValidator.Invoke(this, args, point, direction))
-            {
-                return; // Network will handle this
-            }
-            // [GC2_NETWORK_PATCH_END]
-";
-                    content = content.Insert(braceIndex + 1, validationCheck);
+                    string indent = onHitMatch.Groups[1].Value + "    ";
+                    string validationCheck =
+                        "\n" +
+                        $"{indent}// [GC2_NETWORK_PATCH] Server authority check\n" +
+                        $"{indent}if (NetworkOnHitValidator != null && !NetworkOnHitValidator.Invoke(this, args, point, direction))\n" +
+                        $"{indent}{{\n" +
+                        $"{indent}    return; // Network will handle this\n" +
+                        $"{indent}}}\n" +
+                        $"{indent}// [GC2_NETWORK_PATCH_END]\n";
+
+                    int insertIndex = onHitMatch.Index + onHitMatch.Length;
+                    content = content.Insert(insertIndex, validationCheck);
                 }
             }
             

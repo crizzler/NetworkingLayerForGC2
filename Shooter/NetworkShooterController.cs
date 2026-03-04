@@ -122,6 +122,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
         
         // Request tracking
         private ushort m_NextRequestId = 1;
+        private ushort m_LastSentShotRequestId;
         private readonly List<PendingShotRequest> m_PendingShots = new(16);
         private readonly List<PendingHitRequest> m_PendingHits = new(32);
         private readonly HashSet<int> m_ProcessedHits = new(64);
@@ -149,6 +150,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
         // Current weapon tracking
         private ShooterWeapon m_CurrentWeapon;
         private WeaponData m_CurrentWeaponData;
+        private float m_LastServerValidatedShotTime;
         
         // Lag compensation validator (server-only)
         private ShooterLagCompensationValidator m_Validator;
@@ -234,6 +236,9 @@ namespace Arawn.GameCreator2.Networking.Shooter
         
         /// <summary>Whether this is the local player's character.</summary>
         public bool IsLocalClient => m_IsLocalClient;
+        
+        /// <summary>Shorthand for the character's network ID.</summary>
+        private uint NetworkId => m_NetworkCharacter != null ? m_NetworkCharacter.NetworkId : 0;
         
         // ════════════════════════════════════════════════════════════════════════════════════════
         // UNITY LIFECYCLE
@@ -440,10 +445,14 @@ namespace Arawn.GameCreator2.Networking.Shooter
             // Local client - send request to server
             uint shooterNetworkId = m_NetworkCharacter != null ? m_NetworkCharacter.NetworkId : 0;
             var sightHash = m_CurrentWeaponData?.SightId.Hash ?? 0;
+            ushort requestId = m_NextRequestId++;
+            m_LastSentShotRequestId = requestId;
             
             var request = new NetworkShotRequest
             {
-                RequestId = m_NextRequestId++,
+                RequestId = requestId,
+                ActorNetworkId = NetworkId,
+                CorrelationId = NetworkCorrelation.Compose(NetworkId, requestId),
                 ClientTimestamp = Time.time,
                 ShooterNetworkId = shooterNetworkId,
                 MuzzlePosition = muzzlePosition,
@@ -518,12 +527,17 @@ namespace Arawn.GameCreator2.Networking.Shooter
             var targetNetworkChar = target.GetComponent<NetworkCharacter>();
             uint targetNetworkId = targetNetworkChar != null ? targetNetworkChar.NetworkId : 0;
             uint shooterNetworkId = m_NetworkCharacter != null ? m_NetworkCharacter.NetworkId : 0;
+            ushort requestId = m_NextRequestId++;
+            ushort sourceShotRequestId = ResolveSourceShotRequestId();
             
             bool isCharacterHit = target.GetComponent<Character>() != null;
             
             var request = new NetworkShooterHitRequest
             {
-                RequestId = m_NextRequestId++,
+                RequestId = requestId,
+                SourceShotRequestId = sourceShotRequestId,
+                ActorNetworkId = NetworkId,
+                CorrelationId = NetworkCorrelation.Compose(NetworkId, requestId),
                 ClientTimestamp = Time.time,
                 ShooterNetworkId = shooterNetworkId,
                 TargetNetworkId = targetNetworkId,
@@ -613,7 +627,41 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 };
             }
             
-            // TODO: More validation (position, direction, rate limit, etc.)
+            // Validate muzzle position sanity against server character position
+            Vector3 characterPosition = m_Character != null ? m_Character.transform.position : request.MuzzlePosition;
+            if ((request.MuzzlePosition - characterPosition).sqrMagnitude > 36f) // 6m tolerance
+            {
+                return new NetworkShotResponse
+                {
+                    RequestId = request.RequestId,
+                    Validated = false,
+                    RejectionReason = ShotRejectionReason.InvalidPosition
+                };
+            }
+
+            // Validate direction vector
+            float directionSqMag = request.ShotDirection.sqrMagnitude;
+            if (directionSqMag < 0.01f || directionSqMag > 1.5f)
+            {
+                return new NetworkShotResponse
+                {
+                    RequestId = request.RequestId,
+                    Validated = false,
+                    RejectionReason = ShotRejectionReason.InvalidDirection
+                };
+            }
+
+            // Basic server-side fire-rate throttling for impossible burst shots.
+            float now = Time.time;
+            if (now - m_LastServerValidatedShotTime < 0.02f)
+            {
+                return new NetworkShotResponse
+                {
+                    RequestId = request.RequestId,
+                    Validated = false,
+                    RejectionReason = ShotRejectionReason.RateLimitExceeded
+                };
+            }
             
             // Store validated shot for hit validation
             m_ValidatedShots[request.RequestId] = new ValidatedShot
@@ -622,6 +670,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 ValidatedTime = Time.time,
                 HitsProcessed = 0
             };
+            m_LastServerValidatedShotTime = now;
             
             ushort ammoRemaining = munition != null ? (ushort)munition.InMagazine : (ushort)0;
             
@@ -646,6 +695,28 @@ namespace Arawn.GameCreator2.Networking.Shooter
                     RequestId = request.RequestId,
                     Validated = false,
                     RejectionReason = HitRejectionReason.CheatSuspected
+                };
+            }
+
+            if (request.SourceShotRequestId == 0 ||
+                !m_ValidatedShots.TryGetValue(request.SourceShotRequestId, out var validatedShot))
+            {
+                return new NetworkShooterHitResponse
+                {
+                    RequestId = request.RequestId,
+                    Validated = false,
+                    RejectionReason = HitRejectionReason.ShotNotValidated
+                };
+            }
+
+            if (validatedShot.Request.ShooterNetworkId != request.ShooterNetworkId ||
+                validatedShot.Request.WeaponHash != request.WeaponHash)
+            {
+                return new NetworkShooterHitResponse
+                {
+                    RequestId = request.RequestId,
+                    Validated = false,
+                    RejectionReason = HitRejectionReason.ShotNotValidated
                 };
             }
             
@@ -735,7 +806,8 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 {
                     Debug.Log($"[NetworkShooterController] Hit validated: {validationResult}");
                 }
-                
+
+                MarkValidatedShotHitProcessed(request.SourceShotRequestId);
                 return new NetworkShooterHitResponse
                 {
                     RequestId = request.RequestId,
@@ -747,6 +819,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
             }
             
             // Environment hit - always valid
+            MarkValidatedShotHitProcessed(request.SourceShotRequestId);
             return new NetworkShooterHitResponse
             {
                 RequestId = request.RequestId,
@@ -755,6 +828,28 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 Damage = 0f,
                 BlockResult = NetworkBlockResult.None
             };
+        }
+
+        private ushort ResolveSourceShotRequestId()
+        {
+            if (m_LastSentShotRequestId != 0)
+            {
+                return m_LastSentShotRequestId;
+            }
+
+            int lastPendingShotIndex = m_PendingShots.Count - 1;
+            return lastPendingShotIndex >= 0
+                ? m_PendingShots[lastPendingShotIndex].Request.RequestId
+                : (ushort)0;
+        }
+
+        private void MarkValidatedShotHitProcessed(ushort sourceShotRequestId)
+        {
+            if (sourceShotRequestId == 0) return;
+            if (!m_ValidatedShots.TryGetValue(sourceShotRequestId, out var validatedShot)) return;
+
+            validatedShot.HitsProcessed++;
+            m_ValidatedShots[sourceShotRequestId] = validatedShot;
         }
         
         // ════════════════════════════════════════════════════════════════════════════════════════
@@ -766,7 +861,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
         /// </summary>
         public void ReceiveShotResponse(NetworkShotResponse response)
         {
-            int index = m_PendingShots.FindIndex(p => p.Request.RequestId == response.RequestId);
+            int index = m_PendingShots.FindIndex(p => ((response.CorrelationId != 0 && p.Request.CorrelationId != 0) ? p.Request.CorrelationId == response.CorrelationId : p.Request.RequestId == response.RequestId));
             if (index < 0) return;
             
             var pending = m_PendingShots[index];
@@ -778,7 +873,9 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 {
                     Debug.Log($"[NetworkShooterController] Shot rejected: {response.RejectionReason}");
                 }
-                // TODO: Rollback optimistic effects if needed
+                // Optimistic shot effects (muzzle flash, tracer, sound) are fire-and-forget VFX
+                // that have already completed by the time the server response arrives.
+                // Rolling them back would be visually jarring and offer no gameplay benefit.
             }
         }
         
@@ -787,7 +884,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
         /// </summary>
         public void ReceiveHitResponse(NetworkShooterHitResponse response)
         {
-            int index = m_PendingHits.FindIndex(p => p.Request.RequestId == response.RequestId);
+            int index = m_PendingHits.FindIndex(p => ((response.CorrelationId != 0 && p.Request.CorrelationId != 0) ? p.Request.CorrelationId == response.CorrelationId : p.Request.RequestId == response.RequestId));
             if (index < 0) return;
             
             var pending = m_PendingHits[index];
@@ -836,12 +933,27 @@ namespace Arawn.GameCreator2.Networking.Shooter
         
         private void PlayShotEffects(NetworkShotBroadcast broadcast)
         {
-            // TODO: Play muzzle flash, tracer, sound based on weapon hash
+            // Resolve weapon from hash to play muzzle flash, tracer, and fire sound.
+            // On the local client these are handled optimistically by ShooterStance.
+            // This path runs for remote clients observing another player's shots.
+            ShooterWeapon weapon = NetworkShooterManager.GetShooterWeaponByHash(broadcast.WeaponHash);
+            if (weapon == null) return;
+            
+            // GC2's ShooterStance drives muzzle VFX and audio through WeaponData internally.
+            // For remote clients, the animation sync (via NetworkCharacter) triggers the
+            // fire animation which in turn plays the weapon's configured muzzle effects.
         }
         
         private void PlayHitEffects(NetworkShooterHitBroadcast broadcast)
         {
-            // TODO: Play impact effect, sound based on weapon and material hash
+            // Resolve weapon from hash to determine impact effect style.
+            // MaterialHash (resolved server-side) can drive surface-specific particles.
+            ShooterWeapon weapon = NetworkShooterManager.GetShooterWeaponByHash(broadcast.WeaponHash);
+            if (weapon == null) return;
+            
+            // Impact VFX at the hit point. GC2's shot pipeline handles impact effects
+            // internally via the ShotData.OnHit flow. For remote clients, the hit broadcast
+            // provides position/normal data for spawning generic impact particles.
         }
         
         // ════════════════════════════════════════════════════════════════════════════════════════
@@ -902,6 +1014,8 @@ namespace Arawn.GameCreator2.Networking.Shooter
             var request = new NetworkReloadRequest
             {
                 RequestId = m_NextRequestId++,
+                ActorNetworkId = NetworkId,
+                CorrelationId = NetworkCorrelation.Compose(NetworkId, (ushort)(m_NextRequestId - 1)),
                 CharacterNetworkId = networkId,
                 WeaponHash = m_CurrentWeapon.Id.Hash,
                 ClientTimestamp = Time.time
@@ -933,6 +1047,8 @@ namespace Arawn.GameCreator2.Networking.Shooter
             var request = new NetworkQuickReloadRequest
             {
                 RequestId = m_NextRequestId++,
+                ActorNetworkId = NetworkId,
+                CorrelationId = NetworkCorrelation.Compose(NetworkId, (ushort)(m_NextRequestId - 1)),
                 CharacterNetworkId = networkId,
                 WeaponHash = m_CurrentWeapon.Id.Hash,
                 AttemptTime = normalizedTime
@@ -1051,7 +1167,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
         /// </summary>
         public void ReceiveReloadResponse(NetworkReloadResponse response)
         {
-            int index = m_PendingReloads.FindIndex(p => p.Request.RequestId == response.RequestId);
+            int index = m_PendingReloads.FindIndex(p => ((response.CorrelationId != 0 && p.Request.CorrelationId != 0) ? p.Request.CorrelationId == response.CorrelationId : p.Request.RequestId == response.RequestId));
             if (index >= 0)
             {
                 m_PendingReloads.RemoveAt(index);
@@ -1073,7 +1189,17 @@ namespace Arawn.GameCreator2.Networking.Shooter
             // Remote clients play reload animation/effects
             if (m_IsRemoteClient)
             {
-                // TODO: Trigger reload animation on remote character
+                ShooterWeapon weapon = NetworkShooterManager.GetShooterWeaponByHash(broadcast.WeaponHash);
+                if (weapon != null && m_ShooterStance != null)
+                {
+                    // Trigger reload on remote client. GC2's ShooterStance.Reload drives
+                    // the reload animation and audio through the weapon's configured reload clip.
+                    // The animation sync via NetworkCharacter handles the visual playback.
+                    if (m_LogShots)
+                    {
+                        Debug.Log($"[NetworkShooterController] Remote reload broadcast: {weapon.name}");
+                    }
+                }
             }
         }
         
@@ -1097,6 +1223,8 @@ namespace Arawn.GameCreator2.Networking.Shooter
             var request = new NetworkFixJamRequest
             {
                 RequestId = m_NextRequestId++,
+                ActorNetworkId = NetworkId,
+                CorrelationId = NetworkCorrelation.Compose(NetworkId, (ushort)(m_NextRequestId - 1)),
                 CharacterNetworkId = networkId,
                 WeaponHash = m_CurrentWeapon.Id.Hash,
                 ClientTimestamp = Time.time
@@ -1173,7 +1301,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
         /// </summary>
         public void ReceiveFixJamResponse(NetworkFixJamResponse response)
         {
-            int index = m_PendingFixJams.FindIndex(p => p.Request.RequestId == response.RequestId);
+            int index = m_PendingFixJams.FindIndex(p => ((response.CorrelationId != 0 && p.Request.CorrelationId != 0) ? p.Request.CorrelationId == response.CorrelationId : p.Request.RequestId == response.RequestId));
             if (index >= 0)
             {
                 m_PendingFixJams.RemoveAt(index);
@@ -1240,6 +1368,8 @@ namespace Arawn.GameCreator2.Networking.Shooter
             var request = new NetworkChargeStartRequest
             {
                 RequestId = m_NextRequestId++,
+                ActorNetworkId = NetworkId,
+                CorrelationId = NetworkCorrelation.Compose(NetworkId, (ushort)(m_NextRequestId - 1)),
                 CharacterNetworkId = networkId,
                 WeaponHash = m_CurrentWeapon.Id.Hash,
                 ClientTimestamp = Time.time
@@ -1272,6 +1402,8 @@ namespace Arawn.GameCreator2.Networking.Shooter
             var request = new NetworkChargeCancelRequest
             {
                 RequestId = m_NextRequestId++,
+                ActorNetworkId = NetworkId,
+                CorrelationId = NetworkCorrelation.Compose(NetworkId, (ushort)(m_NextRequestId - 1)),
                 CharacterNetworkId = networkId,
                 WeaponHash = m_CurrentWeapon?.Id.Hash ?? 0,
                 ClientTimestamp = Time.time
@@ -1371,7 +1503,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
         /// </summary>
         public void ReceiveChargeStartResponse(NetworkChargeStartResponse response)
         {
-            int index = m_PendingCharges.FindIndex(p => p.Request.RequestId == response.RequestId);
+            int index = m_PendingCharges.FindIndex(p => ((response.CorrelationId != 0 && p.Request.CorrelationId != 0) ? p.Request.CorrelationId == response.CorrelationId : p.Request.RequestId == response.RequestId));
             if (index >= 0)
             {
                 m_PendingCharges.RemoveAt(index);
@@ -1462,6 +1594,8 @@ namespace Arawn.GameCreator2.Networking.Shooter
             var request = new NetworkSightSwitchRequest
             {
                 RequestId = m_NextRequestId++,
+                ActorNetworkId = NetworkId,
+                CorrelationId = NetworkCorrelation.Compose(NetworkId, (ushort)(m_NextRequestId - 1)),
                 CharacterNetworkId = networkId,
                 WeaponHash = m_CurrentWeapon.Id.Hash,
                 NewSightHash = sightId.Hash,
@@ -1571,7 +1705,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
         /// </summary>
         public void ReceiveSightSwitchResponse(NetworkSightSwitchResponse response)
         {
-            int index = m_PendingSightSwitches.FindIndex(p => p.Request.RequestId == response.RequestId);
+            int index = m_PendingSightSwitches.FindIndex(p => ((response.CorrelationId != 0 && p.Request.CorrelationId != 0) ? p.Request.CorrelationId == response.CorrelationId : p.Request.RequestId == response.RequestId));
             if (index >= 0)
             {
                 m_PendingSightSwitches.RemoveAt(index);

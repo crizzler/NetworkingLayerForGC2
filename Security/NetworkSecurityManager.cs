@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using UnityEngine;
+using Arawn.GameCreator2.Networking;
 
 namespace Arawn.GameCreator2.Networking.Security
 {
@@ -9,15 +10,8 @@ namespace Arawn.GameCreator2.Networking.Security
     /// Provides unified rate limiting, violation tracking, and state validation.
     /// </summary>
     [AddComponentMenu("Game Creator/Network/Security/Network Security Manager")]
-    public class NetworkSecurityManager : MonoBehaviour
+    public class NetworkSecurityManager : NetworkSingleton<NetworkSecurityManager>
     {
-        // ════════════════════════════════════════════════════════════════════════════════════════
-        // SINGLETON
-        // ════════════════════════════════════════════════════════════════════════════════════════
-        
-        private static NetworkSecurityManager s_Instance;
-        public static NetworkSecurityManager Instance => s_Instance;
-        public static bool HasInstance => s_Instance != null;
         
         // ════════════════════════════════════════════════════════════════════════════════════════
         // INSPECTOR
@@ -104,29 +98,13 @@ namespace Arawn.GameCreator2.Networking.Security
         // UNITY LIFECYCLE
         // ════════════════════════════════════════════════════════════════════════════════════════
         
-        private void Awake()
+        protected override void OnSingletonAwake()
         {
-            if (s_Instance != null && s_Instance != this)
-            {
-                Destroy(gameObject);
-                return;
-            }
-            
-            s_Instance = this;
-            
             // Initialize violation tracker
             m_ViolationTracker = new ViolationTracker(
                 m_Config.ViolationThreshold,
                 m_Config.ViolationWindow
             );
-        }
-        
-        private void OnDestroy()
-        {
-            if (s_Instance == this)
-            {
-                s_Instance = null;
-            }
         }
         
         // ════════════════════════════════════════════════════════════════════════════════════════

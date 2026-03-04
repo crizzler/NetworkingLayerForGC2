@@ -1,4 +1,5 @@
 using System;
+using System.Threading.Tasks;
 using UnityEngine;
 using DaimahouGames.Runtime.Abilities;
 using DaimahouGames.Runtime.Core.Common;
@@ -19,15 +20,8 @@ namespace Arawn.GameCreator2.Networking
     /// - Falls back to interception-based validation
     /// - Less secure but still functional
     /// </summary>
-    public class NetworkAbilitiesPatchHooks : MonoBehaviour
+    public class NetworkAbilitiesPatchHooks : NetworkSingleton<NetworkAbilitiesPatchHooks>
     {
-        // ════════════════════════════════════════════════════════════════════════════════════════
-        // SINGLETON
-        // ════════════════════════════════════════════════════════════════════════════════════════
-        
-        private static NetworkAbilitiesPatchHooks s_Instance;
-        public static NetworkAbilitiesPatchHooks Instance => s_Instance;
-        public static bool HasInstance => s_Instance != null;
         
         // ════════════════════════════════════════════════════════════════════════════════════════
         // STATE
@@ -72,25 +66,9 @@ namespace Arawn.GameCreator2.Networking
         // LIFECYCLE
         // ════════════════════════════════════════════════════════════════════════════════════════
         
-        private void Awake()
-        {
-            if (s_Instance != null && s_Instance != this)
-            {
-                Destroy(gameObject);
-                return;
-            }
-            
-            s_Instance = this;
-        }
-        
-        private void OnDestroy()
+        protected override void OnSingletonCleanup()
         {
             UninstallHooks();
-            
-            if (s_Instance == this)
-            {
-                s_Instance = null;
-            }
         }
         
         // ════════════════════════════════════════════════════════════════════════════════════════
@@ -133,7 +111,7 @@ namespace Arawn.GameCreator2.Networking
         /// Force a cast to execute locally (server use only).
         /// This bypasses the network validation hook.
         /// </summary>
-        public async void ExecuteCastLocally(Caster caster, Ability ability, ExtendedArgs args)
+        public async Task ExecuteCastLocally(Caster caster, Ability ability, ExtendedArgs args)
         {
             if (!m_IsServer)
             {
@@ -148,6 +126,10 @@ namespace Arawn.GameCreator2.Networking
             try
             {
                 await caster.Cast(ability, args);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[NetworkAbilitiesPatchHooks] ExecuteCastLocally failed: {ex.Message}\n{ex.StackTrace}");
             }
             finally
             {

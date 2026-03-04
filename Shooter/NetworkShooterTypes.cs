@@ -20,6 +20,8 @@ namespace Arawn.GameCreator2.Networking.Shooter
     {
         /// <summary>Unique request ID for response matching.</summary>
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         
         /// <summary>Client timestamp when shot was fired.</summary>
         public float ClientTimestamp;
@@ -62,6 +64,12 @@ namespace Arawn.GameCreator2.Networking.Shooter
     {
         /// <summary>Unique request ID for response matching.</summary>
         public ushort RequestId;
+
+        /// <summary>Shot request ID that produced this hit claim.</summary>
+        public ushort SourceShotRequestId;
+
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         
         /// <summary>Client timestamp when hit was detected.</summary>
         public float ClientTimestamp;
@@ -103,6 +111,8 @@ namespace Arawn.GameCreator2.Networking.Shooter
     {
         /// <summary>The request ID this is responding to.</summary>
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         
         /// <summary>Whether the shot was validated.</summary>
         public bool Validated;
@@ -122,6 +132,8 @@ namespace Arawn.GameCreator2.Networking.Shooter
     {
         /// <summary>The request ID this is responding to.</summary>
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         
         /// <summary>Whether the hit was validated.</summary>
         public bool Validated;
@@ -302,6 +314,8 @@ namespace Arawn.GameCreator2.Networking.Shooter
     {
         /// <summary>Unique request ID for response matching.</summary>
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         
         /// <summary>Network ID of the character reloading.</summary>
         public uint CharacterNetworkId;
@@ -321,6 +335,8 @@ namespace Arawn.GameCreator2.Networking.Shooter
     {
         /// <summary>The request ID this is responding to.</summary>
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         
         /// <summary>Whether the reload was validated.</summary>
         public bool Validated;
@@ -343,6 +359,8 @@ namespace Arawn.GameCreator2.Networking.Shooter
     {
         /// <summary>Unique request ID for response matching.</summary>
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         
         /// <summary>Network ID of the character.</summary>
         public uint CharacterNetworkId;
@@ -405,7 +423,8 @@ namespace Arawn.GameCreator2.Networking.Shooter
         NoReserveAmmo = 5,
         WeaponJammed = 6,
         InvalidState = 7,
-        RateLimitExceeded = 8
+        RateLimitExceeded = 8,
+        CheatSuspected = 9
     }
     
     // ════════════════════════════════════════════════════════════════════════════════════════════
@@ -434,6 +453,8 @@ namespace Arawn.GameCreator2.Networking.Shooter
     {
         /// <summary>Unique request ID for response matching.</summary>
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         
         /// <summary>Network ID of the character.</summary>
         public uint CharacterNetworkId;
@@ -453,6 +474,8 @@ namespace Arawn.GameCreator2.Networking.Shooter
     {
         /// <summary>The request ID this is responding to.</summary>
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         
         /// <summary>Whether the fix was validated.</summary>
         public bool Validated;
@@ -488,7 +511,8 @@ namespace Arawn.GameCreator2.Networking.Shooter
         WeaponNotJammed = 3,
         AlreadyFixing = 4,
         InvalidState = 5,
-        RateLimitExceeded = 6
+        RateLimitExceeded = 6,
+        CheatSuspected = 7
     }
     
     // ════════════════════════════════════════════════════════════════════════════════════════════
@@ -504,6 +528,8 @@ namespace Arawn.GameCreator2.Networking.Shooter
     {
         /// <summary>Unique request ID for response matching.</summary>
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         
         /// <summary>Network ID of the character.</summary>
         public uint CharacterNetworkId;
@@ -523,6 +549,8 @@ namespace Arawn.GameCreator2.Networking.Shooter
     {
         /// <summary>The request ID this is responding to.</summary>
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         
         /// <summary>Whether the charge was validated.</summary>
         public bool Validated;
@@ -539,6 +567,8 @@ namespace Arawn.GameCreator2.Networking.Shooter
     {
         /// <summary>Unique request ID for response matching.</summary>
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         
         /// <summary>Network ID of the character.</summary>
         public uint CharacterNetworkId;
@@ -601,7 +631,8 @@ namespace Arawn.GameCreator2.Networking.Shooter
         WeaponJammed = 6,
         Reloading = 7,
         CooldownActive = 8,
-        InvalidState = 9
+        InvalidState = 9,
+        CheatSuspected = 10
     }
     
     // ════════════════════════════════════════════════════════════════════════════════════════════
@@ -616,6 +647,8 @@ namespace Arawn.GameCreator2.Networking.Shooter
     {
         /// <summary>Unique request ID for response matching.</summary>
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         
         /// <summary>Network ID of the character.</summary>
         public uint CharacterNetworkId;
@@ -638,6 +671,8 @@ namespace Arawn.GameCreator2.Networking.Shooter
     {
         /// <summary>The request ID this is responding to.</summary>
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         
         /// <summary>Whether the switch was validated.</summary>
         public bool Validated;
@@ -675,7 +710,8 @@ namespace Arawn.GameCreator2.Networking.Shooter
         Reloading = 5,
         Shooting = 6,
         InvalidState = 7,
-        RateLimitExceeded = 8
+        RateLimitExceeded = 8,
+        CheatSuspected = 9
     }
     
     // ════════════════════════════════════════════════════════════════════════════════════════════

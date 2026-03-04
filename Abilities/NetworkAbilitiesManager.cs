@@ -227,7 +227,7 @@ namespace Arawn.GameCreator2.Networking
         {
             if (projectile == null) return;
             
-            int hash = projectile.GetHashCode();
+            int hash = StableHashUtility.GetStableHash(projectile);
             s_ProjectileRegistry[hash] = new ProjectileRegistryEntry
             {
                 Hash = hash,
@@ -253,7 +253,7 @@ namespace Arawn.GameCreator2.Networking
         public static void UnregisterProjectile(Projectile projectile)
         {
             if (projectile == null) return;
-            s_ProjectileRegistry.Remove(projectile.GetHashCode());
+            s_ProjectileRegistry.Remove(StableHashUtility.GetStableHash(projectile));
         }
         
         /// <summary>
@@ -275,7 +275,7 @@ namespace Arawn.GameCreator2.Networking
         {
             if (impact == null) return;
             
-            int hash = impact.GetHashCode();
+            int hash = StableHashUtility.GetStableHash(impact);
             s_ImpactRegistry[hash] = new ImpactRegistryEntry
             {
                 Hash = hash,
@@ -301,7 +301,7 @@ namespace Arawn.GameCreator2.Networking
         public static void UnregisterImpact(Impact impact)
         {
             if (impact == null) return;
-            s_ImpactRegistry.Remove(impact.GetHashCode());
+            s_ImpactRegistry.Remove(StableHashUtility.GetStableHash(impact));
         }
         
         /// <summary>

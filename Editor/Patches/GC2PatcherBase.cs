@@ -70,13 +70,30 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
         public bool IsPatched()
         {
             if (FilesToPatch.Length == 0) return false;
-            
-            string fullPath = Path.Combine(Application.dataPath, FilesToPatch[0]);
-            if (!File.Exists(fullPath)) return false;
-            
-            string content = File.ReadAllText(fullPath);
-            // No need to normalize - just checking for marker presence
-            return content.Contains(PatchMarker);
+
+            bool hasRequiredPatchedFile = false;
+
+            foreach (var relativePath in FilesToPatch)
+            {
+                if (!ShouldRequirePatchMarker(relativePath)) continue;
+
+                string fullPath = Path.Combine(Application.dataPath, relativePath);
+                if (!File.Exists(fullPath)) return false;
+
+                string content = NormalizeLineEndings(File.ReadAllText(fullPath));
+                if (!content.Contains(PatchMarker))
+                {
+                    return false;
+                }
+
+                hasRequiredPatchedFile = true;
+                if (!VerifyPatchedFile(relativePath, content, out _))
+                {
+                    return false;
+                }
+            }
+
+            return hasRequiredPatchedFile;
         }
         
         /// <summary>
@@ -113,6 +130,13 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                     if (!PatchFile(relativePath))
                     {
                         // Rollback on failure
+                        RestoreFromBackups();
+                        return false;
+                    }
+
+                    if (!VerifyPatchedOutput(relativePath, out string verifyError))
+                    {
+                        Debug.LogError($"[GC2 Networking] Patch verification failed for {relativePath}: {verifyError}");
                         RestoreFromBackups();
                         return false;
                     }
@@ -175,6 +199,38 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
         /// Apply patch to a specific file. Override to implement patching logic.
         /// </summary>
         protected abstract bool PatchFile(string relativePath);
+
+        /// <summary>
+        /// Runtime/editor files can opt out of strict marker requirements.
+        /// </summary>
+        protected virtual bool ShouldRequirePatchMarker(string relativePath)
+        {
+            return !relativePath.Contains("/Editor/");
+        }
+
+        /// <summary>
+        /// Verifies a patched file contains required markers and balanced patch sections.
+        /// Override for module-specific hook-point verification.
+        /// </summary>
+        protected virtual bool VerifyPatchedFile(string relativePath, string content, out string failureReason)
+        {
+            if (ShouldRequirePatchMarker(relativePath) && !content.Contains(PatchMarker))
+            {
+                failureReason = "Patch marker missing.";
+                return false;
+            }
+
+            bool hasStart = content.Contains("// [GC2_NETWORK_PATCH]");
+            bool hasEnd = content.Contains("// [GC2_NETWORK_PATCH_END]");
+            if (hasStart != hasEnd)
+            {
+                failureReason = "Patch hook markers are unbalanced.";
+                return false;
+            }
+
+            failureReason = null;
+            return true;
+        }
         
         // ════════════════════════════════════════════════════════════════════════════════════════
         // BACKUP MANAGEMENT
@@ -245,6 +301,25 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
             string fullPath = Path.Combine(Application.dataPath, relativePath);
             string content = File.ReadAllText(fullPath);
             return NormalizeLineEndings(content);
+        }
+
+        private bool VerifyPatchedOutput(string relativePath, out string failureReason)
+        {
+            if (!ShouldRequirePatchMarker(relativePath))
+            {
+                failureReason = null;
+                return true;
+            }
+
+            string fullPath = Path.Combine(Application.dataPath, relativePath);
+            if (!File.Exists(fullPath))
+            {
+                failureReason = "Patched file missing after write.";
+                return false;
+            }
+
+            string content = NormalizeLineEndings(File.ReadAllText(fullPath));
+            return VerifyPatchedFile(relativePath, content, out failureReason);
         }
         
         protected void WriteFile(string relativePath, string content)

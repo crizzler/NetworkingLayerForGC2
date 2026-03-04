@@ -91,6 +91,8 @@ namespace Arawn.GameCreator2.Networking.Security
         RateLimitExceeded,
         StateDiscrepancy,
         InvalidRequest,
+        ProtocolMismatch,
+        InvalidTarget,
         UnauthorizedAction,
         SuspiciousPattern,
         ReplayAttack,
@@ -370,7 +372,9 @@ namespace Arawn.GameCreator2.Networking.Security
     {
         private readonly Dictionary<uint, ushort> m_LastSequence = new(64);
         private readonly Dictionary<uint, HashSet<ushort>> m_RecentSequences = new(64);
+        private static readonly List<ushort> s_SharedKeyBuffer = new(16);
         private const int MAX_RECENT = 32;
+        private const int SEQUENCE_HALF_RANGE = 32768;
         
         /// <summary>
         /// Validate a sequence number from a client.
@@ -383,38 +387,52 @@ namespace Arawn.GameCreator2.Networking.Security
                 recent = new HashSet<ushort>(MAX_RECENT);
                 m_RecentSequences[clientId] = recent;
             }
-            
-            // Check if this sequence was recently used (replay)
+
+            // Reject duplicates immediately.
             if (recent.Contains(sequence))
             {
                 return false;
             }
-            
-            // Add to recent
-            recent.Add(sequence);
-            
-            // Prune old sequences if too many
-            if (recent.Count > MAX_RECENT)
+
+            // Enforce strict monotonic progression with ushort wraparound support.
+            if (m_LastSequence.TryGetValue(clientId, out ushort lastSequence))
             {
-                // Keep sequences near the current one
-                var toRemove = new List<ushort>();
-                foreach (var s in recent)
+                if (!IsStrictlyNewer(sequence, lastSequence))
                 {
-                    // Simple distance check (handles wraparound)
-                    int dist = Math.Abs(sequence - s);
-                    if (dist > MAX_RECENT / 2 && dist < 65536 - MAX_RECENT / 2)
-                    {
-                        toRemove.Add(s);
-                    }
-                }
-                foreach (var s in toRemove)
-                {
-                    recent.Remove(s);
+                    return false;
                 }
             }
-            
+
+            recent.Add(sequence);
+            PruneRecentWindow(recent, sequence);
             m_LastSequence[clientId] = sequence;
             return true;
+        }
+
+        private static bool IsStrictlyNewer(ushort current, ushort previous)
+        {
+            ushort delta = (ushort)(current - previous);
+            return delta != 0 && delta < SEQUENCE_HALF_RANGE;
+        }
+
+        private static void PruneRecentWindow(HashSet<ushort> recent, ushort newestSequence)
+        {
+            if (recent.Count <= MAX_RECENT) return;
+
+            s_SharedKeyBuffer.Clear();
+            foreach (ushort sequence in recent)
+            {
+                ushort delta = (ushort)(newestSequence - sequence);
+                if (delta >= MAX_RECENT)
+                {
+                    s_SharedKeyBuffer.Add(sequence);
+                }
+            }
+
+            foreach (ushort sequence in s_SharedKeyBuffer)
+            {
+                recent.Remove(sequence);
+            }
         }
         
         /// <summary>

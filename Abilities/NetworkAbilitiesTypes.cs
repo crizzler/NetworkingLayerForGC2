@@ -21,6 +21,8 @@ namespace Arawn.GameCreator2.Networking
     {
         /// <summary>Unique request ID for response matching.</summary>
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         
         /// <summary>Network ID of the caster character.</summary>
         public uint CasterNetworkId;
@@ -54,6 +56,8 @@ namespace Arawn.GameCreator2.Networking
     {
         /// <summary>Matches RequestId from request.</summary>
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         
         /// <summary>Server-assigned cast instance ID (for tracking this specific cast).</summary>
         public uint CastInstanceId;
@@ -136,7 +140,10 @@ namespace Arawn.GameCreator2.Networking
         TargetInvalid = 6,
         OutOfRange = 7,
         NotAuthorized = 8,
-        InternalError = 9
+        InternalError = 9,
+        NotOwner = 10,
+        ProtocolMismatch = 11,
+        SecurityViolation = 12
     }
     
     // ════════════════════════════════════════════════════════════════════════════════════════
@@ -346,6 +353,8 @@ namespace Arawn.GameCreator2.Networking
     {
         /// <summary>Request ID for matching.</summary>
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         
         /// <summary>Network ID of the caster.</summary>
         public uint CasterNetworkId;
@@ -364,6 +373,8 @@ namespace Arawn.GameCreator2.Networking
     {
         /// <summary>Matches request ID.</summary>
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         
         /// <summary>Whether ability is on cooldown.</summary>
         public bool IsOnCooldown;
@@ -426,6 +437,8 @@ namespace Arawn.GameCreator2.Networking
     {
         /// <summary>Request ID for matching.</summary>
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         
         /// <summary>Network ID of the character.</summary>
         public uint CharacterNetworkId;
@@ -450,6 +463,8 @@ namespace Arawn.GameCreator2.Networking
     {
         /// <summary>Matches request ID.</summary>
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         
         /// <summary>Whether the operation was approved.</summary>
         public bool Approved;
@@ -492,7 +507,10 @@ namespace Arawn.GameCreator2.Networking
         SlotInvalid = 3,
         SlotOccupied = 4,
         AbilityNotKnown = 5,
-        NotAuthorized = 6
+        NotAuthorized = 6,
+        NotOwner = 7,
+        ProtocolMismatch = 8,
+        SecurityViolation = 9
     }
     
     // ════════════════════════════════════════════════════════════════════════════════════════
@@ -507,6 +525,8 @@ namespace Arawn.GameCreator2.Networking
     {
         /// <summary>Request ID for matching.</summary>
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         
         /// <summary>Network ID of the caster.</summary>
         public uint CasterNetworkId;
@@ -525,6 +545,8 @@ namespace Arawn.GameCreator2.Networking
     {
         /// <summary>Matches request ID.</summary>
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         
         /// <summary>Whether cancel was approved.</summary>
         public bool Approved;
@@ -547,6 +569,8 @@ namespace Arawn.GameCreator2.Networking
     {
         /// <summary>Request ID.</summary>
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         
         /// <summary>Network ID of the character to get state for.</summary>
         public uint CharacterNetworkId;
@@ -563,6 +587,8 @@ namespace Arawn.GameCreator2.Networking
     {
         /// <summary>Matches request ID.</summary>
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         
         /// <summary>Network ID of the character.</summary>
         public uint CharacterNetworkId;

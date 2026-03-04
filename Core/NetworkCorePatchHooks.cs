@@ -17,15 +17,8 @@ namespace Arawn.GameCreator2.Networking
     /// - Falls back to interception-based validation
     /// - Less secure but still functional
     /// </summary>
-    public class NetworkCorePatchHooks : MonoBehaviour
+    public class NetworkCorePatchHooks : NetworkSingleton<NetworkCorePatchHooks>
     {
-        // ════════════════════════════════════════════════════════════════════════════════════════
-        // SINGLETON
-        // ════════════════════════════════════════════════════════════════════════════════════════
-        
-        private static NetworkCorePatchHooks s_Instance;
-        public static NetworkCorePatchHooks Instance => s_Instance;
-        public static bool HasInstance => s_Instance != null;
         
         // ════════════════════════════════════════════════════════════════════════════════════════
         // STATE
@@ -134,25 +127,9 @@ namespace Arawn.GameCreator2.Networking
         // LIFECYCLE
         // ════════════════════════════════════════════════════════════════════════════════════════
         
-        private void Awake()
-        {
-            if (s_Instance != null && s_Instance != this)
-            {
-                Destroy(gameObject);
-                return;
-            }
-            
-            s_Instance = this;
-        }
-        
-        private void OnDestroy()
+        protected override void OnSingletonCleanup()
         {
             UninstallHooks();
-            
-            if (s_Instance == this)
-            {
-                s_Instance = null;
-            }
         }
         
         // ════════════════════════════════════════════════════════════════════════════════════════

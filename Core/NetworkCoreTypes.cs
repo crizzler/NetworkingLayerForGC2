@@ -21,6 +21,8 @@ namespace Arawn.GameCreator2.Networking
     {
         /// <summary>Unique request ID for response matching.</summary>
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         
         /// <summary>Network ID of the character to ragdoll.</summary>
         public uint CharacterNetworkId;
@@ -48,6 +50,8 @@ namespace Arawn.GameCreator2.Networking
     {
         /// <summary>Matches RequestId from request.</summary>
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         
         /// <summary>Whether the ragdoll was approved.</summary>
         public bool Approved;
@@ -111,7 +115,10 @@ namespace Arawn.GameCreator2.Networking
         NotRagdoll = 2,
         CharacterNotFound = 3,
         NotAuthorized = 4,
-        Cooldown = 5
+        Cooldown = 5,
+        NotOwner = 6,
+        ProtocolMismatch = 7,
+        SecurityViolation = 8
     }
     
     // ════════════════════════════════════════════════════════════════════════════════════════
@@ -127,6 +134,8 @@ namespace Arawn.GameCreator2.Networking
     {
         /// <summary>Unique request ID for response matching.</summary>
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         
         /// <summary>Network ID of the character.</summary>
         public uint CharacterNetworkId;
@@ -176,6 +185,8 @@ namespace Arawn.GameCreator2.Networking
     {
         /// <summary>Matches RequestId from request.</summary>
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         
         /// <summary>Whether the prop action was approved.</summary>
         public bool Approved;
@@ -272,7 +283,10 @@ namespace Arawn.GameCreator2.Networking
         AlreadyAttached = 4,
         NotAttached = 5,
         NotAuthorized = 6,
-        MaxPropsReached = 7
+        MaxPropsReached = 7,
+        NotOwner = 8,
+        ProtocolMismatch = 9,
+        SecurityViolation = 10
     }
     
     // ════════════════════════════════════════════════════════════════════════════════════════
@@ -288,6 +302,8 @@ namespace Arawn.GameCreator2.Networking
     {
         /// <summary>Unique request ID for response matching.</summary>
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         
         /// <summary>Network ID of the character.</summary>
         public uint CharacterNetworkId;
@@ -309,6 +325,8 @@ namespace Arawn.GameCreator2.Networking
     {
         /// <summary>Matches RequestId from request.</summary>
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         
         /// <summary>Whether the invincibility was approved.</summary>
         public bool Approved;
@@ -355,7 +373,10 @@ namespace Arawn.GameCreator2.Networking
         NotInvincible = 3,
         InvalidDuration = 4,
         NotAuthorized = 5,
-        OnCooldown = 6
+        OnCooldown = 6,
+        NotOwner = 7,
+        ProtocolMismatch = 8,
+        SecurityViolation = 9
     }
     
     // ════════════════════════════════════════════════════════════════════════════════════════
@@ -371,6 +392,8 @@ namespace Arawn.GameCreator2.Networking
     {
         /// <summary>Unique request ID for response matching.</summary>
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         
         /// <summary>Network ID of the character.</summary>
         public uint CharacterNetworkId;
@@ -395,6 +418,8 @@ namespace Arawn.GameCreator2.Networking
     {
         /// <summary>Matches RequestId from request.</summary>
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         
         /// <summary>Whether the poise action was approved.</summary>
         public bool Approved;
@@ -463,7 +488,10 @@ namespace Arawn.GameCreator2.Networking
         CharacterNotFound = 1,
         InvalidValue = 2,
         AlreadyBroken = 3,
-        NotAuthorized = 4
+        NotAuthorized = 4,
+        NotOwner = 5,
+        ProtocolMismatch = 6,
+        SecurityViolation = 7
     }
     
     // ════════════════════════════════════════════════════════════════════════════════════════
@@ -479,6 +507,8 @@ namespace Arawn.GameCreator2.Networking
     {
         /// <summary>Unique request ID for response matching.</summary>
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         
         /// <summary>Network ID of the character.</summary>
         public uint CharacterNetworkId;
@@ -503,6 +533,8 @@ namespace Arawn.GameCreator2.Networking
     {
         /// <summary>Matches RequestId from request.</summary>
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         
         /// <summary>Whether the busy action was approved.</summary>
         public bool Approved;
@@ -557,7 +589,10 @@ namespace Arawn.GameCreator2.Networking
         CharacterNotFound = 1,
         AlreadyBusy = 2,
         NotBusy = 3,
-        NotAuthorized = 4
+        NotAuthorized = 4,
+        NotOwner = 5,
+        ProtocolMismatch = 6,
+        SecurityViolation = 7
     }
     
     // ════════════════════════════════════════════════════════════════════════════════════════
@@ -573,6 +608,8 @@ namespace Arawn.GameCreator2.Networking
     {
         /// <summary>Unique request ID for response matching.</summary>
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         
         /// <summary>Network ID of the interacting character.</summary>
         public uint CharacterNetworkId;
@@ -600,6 +637,8 @@ namespace Arawn.GameCreator2.Networking
     {
         /// <summary>Matches RequestId from request.</summary>
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         
         /// <summary>Whether the interaction was approved.</summary>
         public bool Approved;
@@ -699,7 +738,10 @@ namespace Arawn.GameCreator2.Networking
         CharacterBusy = 5,
         NotAuthorized = 6,
         ConditionsFailed = 7,
-        OnCooldown = 8
+        OnCooldown = 8,
+        NotOwner = 9,
+        ProtocolMismatch = 10,
+        SecurityViolation = 11
     }
     
     // ════════════════════════════════════════════════════════════════════════════════════════

@@ -1,5 +1,6 @@
 using System;
 using UnityEngine;
+using Arawn.GameCreator2.Networking;
 
 namespace Arawn.GameCreator2.Networking.Security
 {
@@ -10,6 +11,172 @@ namespace Arawn.GameCreator2.Networking.Security
     /// </summary>
     public static class SecurityIntegration
     {
+        private static INetworkOwnershipResolver s_OwnershipResolver = new NetworkOwnershipResolver();
+
+        private static bool IsAuthoritativeServerContext()
+        {
+            var bridge = NetworkTransportBridge.Active;
+            return bridge != null && bridge.IsServer;
+        }
+
+        private static bool ShouldFailClosedNoSecurityManager(NetworkSecurityManager manager, string module, string requestType)
+        {
+            if (!IsAuthoritativeServerContext())
+            {
+                return false;
+            }
+
+            if (manager == null)
+            {
+                Debug.LogError(
+                    $"[SecurityIntegration] Rejecting {module}/{requestType}: " +
+                    "NetworkSecurityManager is missing while running in server context.");
+                return true;
+            }
+
+            if (!manager.IsServer)
+            {
+                Debug.LogError(
+                    $"[SecurityIntegration] Rejecting {module}/{requestType}: " +
+                    "NetworkSecurityManager is not initialized for server mode.");
+                return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Shared ownership resolver used by all gameplay modules.
+        /// </summary>
+        public static INetworkOwnershipResolver OwnershipResolver
+        {
+            get => s_OwnershipResolver ??= new NetworkOwnershipResolver();
+            set => s_OwnershipResolver = value;
+        }
+
+        public static void RegisterEntityOwner(uint entityNetworkId, uint ownerClientId)
+        {
+            OwnershipResolver.RegisterEntityOwner(entityNetworkId, ownerClientId);
+        }
+
+        public static void RegisterEntityActor(uint entityNetworkId, uint actorNetworkId)
+        {
+            OwnershipResolver.RegisterEntityActor(entityNetworkId, actorNetworkId);
+        }
+
+        public static void UnregisterEntity(uint entityNetworkId)
+        {
+            OwnershipResolver.UnregisterEntity(entityNetworkId);
+        }
+
+        /// <summary>
+        /// Validates the shared v2 request context (rate limit + sequence + strict ownership).
+        /// </summary>
+        public static bool ValidateModuleRequest(
+            uint senderClientId,
+            in NetworkRequestContext context,
+            string module,
+            string requestType)
+        {
+            var manager = NetworkSecurityManager.Instance;
+            if (ShouldFailClosedNoSecurityManager(manager, module, requestType))
+            {
+                return false;
+            }
+
+            if (manager == null || !manager.IsServer) return true;
+
+            if (context.ActorNetworkId == 0 || context.CorrelationId == 0)
+            {
+                manager.RecordViolation(
+                    senderClientId,
+                    context.ActorNetworkId,
+                    SecurityViolationType.ProtocolMismatch,
+                    module,
+                    $"Missing protocol v2 context for {requestType}");
+                return false;
+            }
+
+            if (!manager.CheckRateLimit(senderClientId, module))
+            {
+                return false;
+            }
+
+            ushort sequence = NetworkCorrelation.ExtractRequestId(context.CorrelationId);
+            if (!manager.ValidateSequence(senderClientId, sequence, module))
+            {
+                return false;
+            }
+
+            return ValidateOwnership(senderClientId, context.ActorNetworkId, module);
+        }
+
+        /// <summary>
+        /// Strictly validates sender ownership of the actor network entity.
+        /// </summary>
+        public static bool ValidateOwnership(uint senderClientId, uint actorNetworkId, string module)
+        {
+            var manager = NetworkSecurityManager.Instance;
+            if (ShouldFailClosedNoSecurityManager(manager, module, "ValidateOwnership"))
+            {
+                return false;
+            }
+
+            if (manager == null || !manager.IsServer) return true;
+
+            if (senderClientId == 0 || actorNetworkId == 0)
+            {
+                manager.RecordViolation(
+                    senderClientId,
+                    actorNetworkId,
+                    SecurityViolationType.InvalidTarget,
+                    module,
+                    $"Invalid ownership context sender={senderClientId}, actor={actorNetworkId}");
+                return false;
+            }
+
+            if (!OwnershipResolver.TryResolveOwnerClientId(actorNetworkId, out uint ownerClientId))
+            {
+                manager.RecordViolation(
+                    senderClientId,
+                    actorNetworkId,
+                    SecurityViolationType.InvalidTarget,
+                    module,
+                    $"Unresolved ownership for actor {actorNetworkId}");
+                return false;
+            }
+
+            if (ownerClientId != senderClientId)
+            {
+                manager.RecordViolation(
+                    senderClientId,
+                    actorNetworkId,
+                    SecurityViolationType.UnauthorizedAction,
+                    module,
+                    $"Ownership mismatch actor={actorNetworkId}, expected={ownerClientId}, sender={senderClientId}");
+                return false;
+            }
+
+            return true;
+        }
+
+        public static bool ValidateOwnership(ulong senderClientId, uint actorNetworkId, string module)
+        {
+            if (senderClientId > uint.MaxValue)
+            {
+                var manager = NetworkSecurityManager.Instance;
+                manager?.RecordViolation(
+                    0,
+                    actorNetworkId,
+                    SecurityViolationType.InvalidTarget,
+                    module,
+                    $"Sender id {senderClientId} exceeds uint range");
+                return false;
+            }
+
+            return ValidateOwnership((uint)senderClientId, actorNetworkId, module);
+        }
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // CORE MODULE INTEGRATION
         // ════════════════════════════════════════════════════════════════════════════════════════
@@ -260,11 +427,32 @@ namespace Arawn.GameCreator2.Networking.Security
             {
                 return false;
             }
-            
-            // TODO: Additional checks:
-            // - Distance between attacker and victim
-            // - Skill cooldown
-            // - Combat state validity
+
+            // Basic target sanity
+            if (attackerCharacterId == 0 || victimCharacterId == 0 || attackerCharacterId == victimCharacterId)
+            {
+                manager.RecordViolation(attackerClientId, attackerCharacterId,
+                    SecurityViolationType.InvalidTarget, "Melee",
+                    $"Invalid melee target pair attacker={attackerCharacterId}, victim={victimCharacterId}");
+                return false;
+            }
+
+            // Skill hash must be present for deterministic validation.
+            if (skillHash == 0)
+            {
+                manager.RecordViolation(attackerClientId, attackerCharacterId,
+                    SecurityViolationType.InvalidRequest, "Melee",
+                    "Missing skill hash in melee hit validation");
+                return false;
+            }
+
+            if (float.IsNaN(damage) || float.IsInfinity(damage))
+            {
+                manager.RecordViolation(attackerClientId, attackerCharacterId,
+                    SecurityViolationType.OutOfBoundsValue, "Melee",
+                    $"Invalid damage value: {damage}");
+                return false;
+            }
             
             return true;
         }
@@ -422,11 +610,22 @@ namespace Arawn.GameCreator2.Networking.Security
                     return false;
                 }
             }
-            
-            // TODO: Additional checks:
-            // - Cooldown validation
-            // - Resource validation (mana, etc.)
-            // - Range check between caster and target
+
+            if (casterCharacterId == 0 || abilityHash == 0)
+            {
+                manager.RecordViolation(casterClientId, casterCharacterId,
+                    SecurityViolationType.InvalidRequest, "Abilities",
+                    $"Invalid ability cast payload caster={casterCharacterId}, ability={abilityHash}");
+                return false;
+            }
+
+            if (targetCharacterId != 0 && targetCharacterId == casterCharacterId)
+            {
+                manager.RecordViolation(casterClientId, casterCharacterId,
+                    SecurityViolationType.InvalidTarget, "Abilities",
+                    $"Self-targeted cast rejected for ability={abilityHash}");
+                return false;
+            }
             
             return true;
         }

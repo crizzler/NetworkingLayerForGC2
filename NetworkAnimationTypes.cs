@@ -328,11 +328,11 @@ namespace Arawn.GameCreator2.Networking
                 m_LookupById[entry.NetworkId] = entry;
                 
                 if (entry.Clip != null)
-                    m_HashToId[entry.Clip.name.GetHashCode()] = entry.NetworkId;
+                    m_HashToId[StableHashUtility.GetStableHash(entry.Clip)] = entry.NetworkId;
                 if (entry.StateAsset != null)
-                    m_HashToId[entry.StateAsset.name.GetHashCode()] = entry.NetworkId;
+                    m_HashToId[StableHashUtility.GetStableHash(entry.StateAsset)] = entry.NetworkId;
                 if (entry.Controller != null)
-                    m_HashToId[entry.Controller.name.GetHashCode()] = entry.NetworkId;
+                    m_HashToId[StableHashUtility.GetStableHash(entry.Controller)] = entry.NetworkId;
             }
         }
         
@@ -347,16 +347,16 @@ namespace Arawn.GameCreator2.Networking
         public bool TryGetNetworkId(AnimationClip clip, out int networkId)
         {
             if (m_HashToId == null) BuildLookups();
-            return m_HashToId.TryGetValue(clip.name.GetHashCode(), out networkId);
+            return m_HashToId.TryGetValue(StableHashUtility.GetStableHash(clip), out networkId);
         }
         
         public bool TryGetNetworkId(State state, out int networkId)
         {
             if (m_HashToId == null) BuildLookups();
-            return m_HashToId.TryGetValue(state.name.GetHashCode(), out networkId);
+            return m_HashToId.TryGetValue(StableHashUtility.GetStableHash(state), out networkId);
         }
         
-        public int GetClipHash(AnimationClip clip) => clip != null ? clip.name.GetHashCode() : 0;
-        public int GetStateHash(State state) => state != null ? state.name.GetHashCode() : 0;
+        public int GetClipHash(AnimationClip clip) => StableHashUtility.GetStableHash(clip);
+        public int GetStateHash(State state) => StableHashUtility.GetStableHash(state);
     }
 }

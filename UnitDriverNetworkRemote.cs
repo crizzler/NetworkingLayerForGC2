@@ -40,6 +40,8 @@ namespace Arawn.GameCreator2.Networking
         [NonSerialized] private float m_ServerTime;
         [NonSerialized] private float m_LastSnapshotTime;
         [NonSerialized] private bool m_IsExtrapolating;
+        [NonSerialized] private float m_MinSnapshotInterval;
+        [NonSerialized] private float m_LastAcceptedSnapshotTime;
 
         // INTERFACE PROPERTIES: ------------------------------------------------------------------
 
@@ -63,6 +65,16 @@ namespace Arawn.GameCreator2.Networking
         
         public bool IsExtrapolating => m_IsExtrapolating;
         public float InterpolationDelay => m_InterpolationDelay;
+        
+        public void ApplyTierSettings(NetworkRelevanceSettings settings)
+        {
+            m_InterpolationDelay = settings.interpolationDelay;
+            m_MaxExtrapolationTime = settings.maxExtrapolationTime;
+            m_SnapDistance = settings.snapDistance;
+            
+            float clampedRate = Mathf.Max(1f, settings.stateApplyRate);
+            m_MinSnapshotInterval = 1f / clampedRate;
+        }
 
         // INITIALIZERS: --------------------------------------------------------------------------
 
@@ -79,6 +91,8 @@ namespace Arawn.GameCreator2.Networking
             m_InterpolatedPosition = this.Transform.position;
             m_InterpolatedRotation = this.Transform.rotation;
             m_ServerTime = 0f;
+            m_MinSnapshotInterval = 0f;
+            m_LastAcceptedSnapshotTime = -100f;
 
             this.m_Controller = this.Character.GetComponent<CharacterController>();
             if (this.m_Controller == null)
@@ -118,6 +132,19 @@ namespace Arawn.GameCreator2.Networking
             Vector3 position = state.GetPosition();
             float rotationY = state.GetRotationY();
             
+            if (m_MinSnapshotInterval > 0f && m_SnapshotBuffer.Count > 0)
+            {
+                float delta = serverTimestamp - m_LastAcceptedSnapshotTime;
+                if (delta < m_MinSnapshotInterval)
+                {
+                    Vector3 latest = m_SnapshotBuffer[m_SnapshotBuffer.Count - 1].position;
+                    if (Vector3.Distance(position, latest) <= m_SnapDistance)
+                    {
+                        return;
+                    }
+                }
+            }
+            
             // Check for teleport
             if (m_SnapshotBuffer.Count > 0)
             {
@@ -154,6 +181,7 @@ namespace Arawn.GameCreator2.Networking
             });
             
             m_LastSnapshotTime = serverTimestamp;
+            m_LastAcceptedSnapshotTime = serverTimestamp;
             
             // Trim old snapshots
             float minTime = serverTimestamp - 1f; // Keep 1 second of history

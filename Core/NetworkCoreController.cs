@@ -19,16 +19,13 @@ namespace Arawn.GameCreator2.Networking
     /// </remarks>
     [AddComponentMenu("Game Creator/Network/Network Core Controller")]
     [DefaultExecutionOrder(ApplicationManager.EXECUTION_ORDER_DEFAULT)]
-    public class NetworkCoreController : MonoBehaviour
+    public class NetworkCoreController : NetworkSingleton<NetworkCoreController>
     {
         // ════════════════════════════════════════════════════════════════════════════════════════
-        // SINGLETON
+        // CONFIGURATION
         // ════════════════════════════════════════════════════════════════════════════════════════
         
-        private static NetworkCoreController s_Instance;
-        
-        public static NetworkCoreController Instance => s_Instance;
-        public static bool HasInstance => s_Instance != null;
+        protected override DuplicatePolicy OnDuplicatePolicy => DuplicatePolicy.WarnOnly;
         
         // ════════════════════════════════════════════════════════════════════════════════════════
         // INSPECTOR
@@ -153,14 +150,19 @@ namespace Arawn.GameCreator2.Networking
         
         // Request tracking
         private ushort m_NextRequestId = 1;
+
+        private static uint GetPendingKey(uint correlationId, ushort requestId)
+        {
+            return correlationId != 0 ? correlationId : requestId;
+        }
         
         // Pending requests (client-side)
-        private readonly Dictionary<ushort, PendingRagdollRequest> m_PendingRagdollRequests = new(16);
-        private readonly Dictionary<ushort, PendingPropRequest> m_PendingPropRequests = new(16);
-        private readonly Dictionary<ushort, PendingInvincibilityRequest> m_PendingInvincibilityRequests = new(16);
-        private readonly Dictionary<ushort, PendingPoiseRequest> m_PendingPoiseRequests = new(16);
-        private readonly Dictionary<ushort, PendingBusyRequest> m_PendingBusyRequests = new(16);
-        private readonly Dictionary<ushort, PendingInteractionRequest> m_PendingInteractionRequests = new(16);
+        private readonly Dictionary<uint, PendingRagdollRequest> m_PendingRagdollRequests = new(16);
+        private readonly Dictionary<uint, PendingPropRequest> m_PendingPropRequests = new(16);
+        private readonly Dictionary<uint, PendingInvincibilityRequest> m_PendingInvincibilityRequests = new(16);
+        private readonly Dictionary<uint, PendingPoiseRequest> m_PendingPoiseRequests = new(16);
+        private readonly Dictionary<uint, PendingBusyRequest> m_PendingBusyRequests = new(16);
+        private readonly Dictionary<uint, PendingInteractionRequest> m_PendingInteractionRequests = new(16);
         
         // Cooldown tracking (server-side)
         private readonly Dictionary<uint, float> m_RagdollCooldowns = new(64);
@@ -232,25 +234,7 @@ namespace Arawn.GameCreator2.Networking
         // UNITY LIFECYCLE
         // ════════════════════════════════════════════════════════════════════════════════════════
         
-        private void Awake()
-        {
-            if (s_Instance == null)
-            {
-                s_Instance = this;
-            }
-            else if (s_Instance != this)
-            {
-                Debug.LogWarning("[NetworkCore] Multiple NetworkCoreController instances.");
-            }
-        }
-        
-        private void OnDestroy()
-        {
-            if (s_Instance == this)
-            {
-                s_Instance = null;
-            }
-        }
+
         
         // ════════════════════════════════════════════════════════════════════════════════════════
         // INITIALIZATION
@@ -303,6 +287,8 @@ namespace Arawn.GameCreator2.Networking
             var request = new NetworkRagdollRequest
             {
                 RequestId = m_NextRequestId++,
+                ActorNetworkId = characterNetworkId,
+                CorrelationId = NetworkCorrelation.Compose(characterNetworkId, (ushort)(m_NextRequestId - 1)),
                 CharacterNetworkId = characterNetworkId,
                 ClientTime = GetServerTime?.Invoke() ?? Time.time,
                 ActionType = force != default ? RagdollActionType.StartRagdollWithForce : RagdollActionType.StartRagdoll,
@@ -310,7 +296,7 @@ namespace Arawn.GameCreator2.Networking
                 ForcePoint = forcePoint
             };
             
-            m_PendingRagdollRequests[request.RequestId] = new PendingRagdollRequest
+            m_PendingRagdollRequests[GetPendingKey(request.CorrelationId, request.RequestId)] = new PendingRagdollRequest
             {
                 Request = request,
                 SentTime = Time.time,
@@ -333,12 +319,14 @@ namespace Arawn.GameCreator2.Networking
             var request = new NetworkRagdollRequest
             {
                 RequestId = m_NextRequestId++,
+                ActorNetworkId = characterNetworkId,
+                CorrelationId = NetworkCorrelation.Compose(characterNetworkId, (ushort)(m_NextRequestId - 1)),
                 CharacterNetworkId = characterNetworkId,
                 ClientTime = GetServerTime?.Invoke() ?? Time.time,
                 ActionType = instant ? RagdollActionType.InstantRecover : RagdollActionType.StartRecover
             };
             
-            m_PendingRagdollRequests[request.RequestId] = new PendingRagdollRequest
+            m_PendingRagdollRequests[GetPendingKey(request.CorrelationId, request.RequestId)] = new PendingRagdollRequest
             {
                 Request = request,
                 SentTime = Time.time,
@@ -367,7 +355,7 @@ namespace Arawn.GameCreator2.Networking
             var character = GetCharacterByNetworkId?.Invoke(request.CharacterNetworkId);
             if (character == null)
             {
-                SendRagdollResponse(senderNetworkId, request.RequestId, false, RagdollRejectReason.CharacterNotFound);
+                SendRagdollResponse(senderNetworkId, request.RequestId, false, RagdollRejectReason.CharacterNotFound, request.ActorNetworkId, request.CorrelationId);
                 return;
             }
             
@@ -375,7 +363,7 @@ namespace Arawn.GameCreator2.Networking
             float currentTime = GetServerTime?.Invoke() ?? Time.time;
             if (m_RagdollCooldowns.TryGetValue(request.CharacterNetworkId, out float cooldownEnd) && currentTime < cooldownEnd)
             {
-                SendRagdollResponse(senderNetworkId, request.RequestId, false, RagdollRejectReason.Cooldown);
+                SendRagdollResponse(senderNetworkId, request.RequestId, false, RagdollRejectReason.Cooldown, request.ActorNetworkId, request.CorrelationId);
                 return;
             }
             
@@ -400,7 +388,7 @@ namespace Arawn.GameCreator2.Networking
             
             if (!canPerform)
             {
-                SendRagdollResponse(senderNetworkId, request.RequestId, false, rejectReason);
+                SendRagdollResponse(senderNetworkId, request.RequestId, false, rejectReason, request.ActorNetworkId, request.CorrelationId);
                 m_Stats.RagdollRejected++;
                 return;
             }
@@ -412,7 +400,7 @@ namespace Arawn.GameCreator2.Networking
             m_RagdollCooldowns[request.CharacterNetworkId] = currentTime + m_RagdollCooldown;
             
             // Send response
-            SendRagdollResponse(senderNetworkId, request.RequestId, true, RagdollRejectReason.None);
+            SendRagdollResponse(senderNetworkId, request.RequestId, true, RagdollRejectReason.None, request.ActorNetworkId, request.CorrelationId);
             m_Stats.RagdollApproved++;
             
             // Broadcast to all clients
@@ -469,11 +457,14 @@ namespace Arawn.GameCreator2.Networking
             }
         }
         
-        private void SendRagdollResponse(uint clientId, ushort requestId, bool approved, RagdollRejectReason reason)
+        private void SendRagdollResponse(uint clientId, ushort requestId, bool approved, RagdollRejectReason reason,
+            uint actorNetworkId = 0, uint correlationId = 0)
         {
             var response = new NetworkRagdollResponse
             {
                 RequestId = requestId,
+                ActorNetworkId = actorNetworkId,
+                CorrelationId = correlationId,
                 Approved = approved,
                 RejectReason = reason
             };
@@ -488,9 +479,10 @@ namespace Arawn.GameCreator2.Networking
         {
             if (!m_IsClient) return;
             
-            if (m_PendingRagdollRequests.TryGetValue(response.RequestId, out var pending))
+            uint pendingKey = GetPendingKey(response.CorrelationId, response.RequestId);
+            if (m_PendingRagdollRequests.TryGetValue(pendingKey, out var pending))
             {
-                m_PendingRagdollRequests.Remove(response.RequestId);
+                m_PendingRagdollRequests.Remove(pendingKey);
                 pending.Callback?.Invoke(response);
             }
             
@@ -535,6 +527,8 @@ namespace Arawn.GameCreator2.Networking
             var request = new NetworkPropRequest
             {
                 RequestId = m_NextRequestId++,
+                ActorNetworkId = characterNetworkId,
+                CorrelationId = NetworkCorrelation.Compose(characterNetworkId, (ushort)(m_NextRequestId - 1)),
                 CharacterNetworkId = characterNetworkId,
                 ActionType = PropActionType.AttachPrefab,
                 PropHash = propHash,
@@ -543,7 +537,7 @@ namespace Arawn.GameCreator2.Networking
             };
             request.SetLocalRotation(localRotation == default ? Quaternion.identity : localRotation);
             
-            m_PendingPropRequests[request.RequestId] = new PendingPropRequest
+            m_PendingPropRequests[GetPendingKey(request.CorrelationId, request.RequestId)] = new PendingPropRequest
             {
                 Request = request,
                 SentTime = Time.time,
@@ -566,12 +560,14 @@ namespace Arawn.GameCreator2.Networking
             var request = new NetworkPropRequest
             {
                 RequestId = m_NextRequestId++,
+                ActorNetworkId = characterNetworkId,
+                CorrelationId = NetworkCorrelation.Compose(characterNetworkId, (ushort)(m_NextRequestId - 1)),
                 CharacterNetworkId = characterNetworkId,
                 ActionType = PropActionType.DetachPrefab,
                 PropHash = propHash
             };
             
-            m_PendingPropRequests[request.RequestId] = new PendingPropRequest
+            m_PendingPropRequests[GetPendingKey(request.CorrelationId, request.RequestId)] = new PendingPropRequest
             {
                 Request = request,
                 SentTime = Time.time,
@@ -600,7 +596,7 @@ namespace Arawn.GameCreator2.Networking
             var character = GetCharacterByNetworkId?.Invoke(request.CharacterNetworkId);
             if (character == null)
             {
-                SendPropResponse(senderNetworkId, request.RequestId, false, PropRejectReason.CharacterNotFound, 0);
+                SendPropResponse(senderNetworkId, request.RequestId, false, PropRejectReason.CharacterNotFound, 0, request.ActorNetworkId, request.CorrelationId);
                 return;
             }
             
@@ -647,13 +643,13 @@ namespace Arawn.GameCreator2.Networking
             
             if (rejectReason != PropRejectReason.None)
             {
-                SendPropResponse(senderNetworkId, request.RequestId, false, rejectReason, 0);
+                SendPropResponse(senderNetworkId, request.RequestId, false, rejectReason, 0, request.ActorNetworkId, request.CorrelationId);
                 m_Stats.PropRejected++;
                 return;
             }
             
             // Send response
-            SendPropResponse(senderNetworkId, request.RequestId, true, PropRejectReason.None, propInstanceId);
+            SendPropResponse(senderNetworkId, request.RequestId, true, PropRejectReason.None, propInstanceId, request.ActorNetworkId, request.CorrelationId);
             m_Stats.PropApproved++;
             
             // Broadcast
@@ -706,11 +702,14 @@ namespace Arawn.GameCreator2.Networking
             }
         }
         
-        private void SendPropResponse(uint clientId, ushort requestId, bool approved, PropRejectReason reason, int instanceId)
+        private void SendPropResponse(uint clientId, ushort requestId, bool approved, PropRejectReason reason, int instanceId,
+            uint actorNetworkId = 0, uint correlationId = 0)
         {
             var response = new NetworkPropResponse
             {
                 RequestId = requestId,
+                ActorNetworkId = actorNetworkId,
+                CorrelationId = correlationId,
                 Approved = approved,
                 RejectReason = reason,
                 PropInstanceId = instanceId
@@ -726,9 +725,10 @@ namespace Arawn.GameCreator2.Networking
         {
             if (!m_IsClient) return;
             
-            if (m_PendingPropRequests.TryGetValue(response.RequestId, out var pending))
+            uint pendingKey = GetPendingKey(response.CorrelationId, response.RequestId);
+            if (m_PendingPropRequests.TryGetValue(pendingKey, out var pending))
             {
-                m_PendingPropRequests.Remove(response.RequestId);
+                m_PendingPropRequests.Remove(pendingKey);
                 pending.Callback?.Invoke(response);
             }
             
@@ -787,12 +787,14 @@ namespace Arawn.GameCreator2.Networking
             var request = new NetworkInvincibilityRequest
             {
                 RequestId = m_NextRequestId++,
+                ActorNetworkId = characterNetworkId,
+                CorrelationId = NetworkCorrelation.Compose(characterNetworkId, (ushort)(m_NextRequestId - 1)),
                 CharacterNetworkId = characterNetworkId,
                 Duration = duration,
                 ClientTime = GetServerTime?.Invoke() ?? Time.time
             };
             
-            m_PendingInvincibilityRequests[request.RequestId] = new PendingInvincibilityRequest
+            m_PendingInvincibilityRequests[GetPendingKey(request.CorrelationId, request.RequestId)] = new PendingInvincibilityRequest
             {
                 Request = request,
                 SentTime = Time.time,
@@ -822,7 +824,7 @@ namespace Arawn.GameCreator2.Networking
             if (character == null)
             {
                 SendInvincibilityResponse(senderNetworkId, request.RequestId, false, 
-                    InvincibilityRejectReason.CharacterNotFound, 0);
+                    InvincibilityRejectReason.CharacterNotFound, 0, request.ActorNetworkId, request.CorrelationId);
                 return;
             }
             
@@ -833,7 +835,7 @@ namespace Arawn.GameCreator2.Networking
                 && currentTime < cooldownEnd)
             {
                 SendInvincibilityResponse(senderNetworkId, request.RequestId, false,
-                    InvincibilityRejectReason.OnCooldown, 0);
+                    InvincibilityRejectReason.OnCooldown, 0, request.ActorNetworkId, request.CorrelationId);
                 m_Stats.InvincibilityRejected++;
                 return;
             }
@@ -846,7 +848,7 @@ namespace Arawn.GameCreator2.Networking
                 if (!character.Combat.Invincibility.IsInvincible)
                 {
                     SendInvincibilityResponse(senderNetworkId, request.RequestId, false,
-                        InvincibilityRejectReason.NotInvincible, 0);
+                        InvincibilityRejectReason.NotInvincible, 0, request.ActorNetworkId, request.CorrelationId);
                     m_Stats.InvincibilityRejected++;
                     return;
                 }
@@ -860,7 +862,7 @@ namespace Arawn.GameCreator2.Networking
             
             // Send response
             SendInvincibilityResponse(senderNetworkId, request.RequestId, true,
-                InvincibilityRejectReason.None, approvedDuration);
+                InvincibilityRejectReason.None, approvedDuration, request.ActorNetworkId, request.CorrelationId);
             m_Stats.InvincibilityApproved++;
             
             // Broadcast
@@ -876,11 +878,13 @@ namespace Arawn.GameCreator2.Networking
         }
         
         private void SendInvincibilityResponse(uint clientId, ushort requestId, bool approved,
-            InvincibilityRejectReason reason, float duration)
+            InvincibilityRejectReason reason, float duration, uint actorNetworkId = 0, uint correlationId = 0)
         {
             var response = new NetworkInvincibilityResponse
             {
                 RequestId = requestId,
+                ActorNetworkId = actorNetworkId,
+                CorrelationId = correlationId,
                 Approved = approved,
                 RejectReason = reason,
                 ApprovedDuration = duration
@@ -896,9 +900,10 @@ namespace Arawn.GameCreator2.Networking
         {
             if (!m_IsClient) return;
             
-            if (m_PendingInvincibilityRequests.TryGetValue(response.RequestId, out var pending))
+            uint pendingKey = GetPendingKey(response.CorrelationId, response.RequestId);
+            if (m_PendingInvincibilityRequests.TryGetValue(pendingKey, out var pending))
             {
-                m_PendingInvincibilityRequests.Remove(response.RequestId);
+                m_PendingInvincibilityRequests.Remove(pendingKey);
                 pending.Callback?.Invoke(response);
             }
             
@@ -934,13 +939,15 @@ namespace Arawn.GameCreator2.Networking
             var request = new NetworkPoiseRequest
             {
                 RequestId = m_NextRequestId++,
+                ActorNetworkId = characterNetworkId,
+                CorrelationId = NetworkCorrelation.Compose(characterNetworkId, (ushort)(m_NextRequestId - 1)),
                 CharacterNetworkId = characterNetworkId,
                 ActionType = PoiseActionType.Damage,
                 Value = damage,
                 ClientTime = GetServerTime?.Invoke() ?? Time.time
             };
             
-            m_PendingPoiseRequests[request.RequestId] = new PendingPoiseRequest
+            m_PendingPoiseRequests[GetPendingKey(request.CorrelationId, request.RequestId)] = new PendingPoiseRequest
             {
                 Request = request,
                 SentTime = Time.time,
@@ -963,13 +970,15 @@ namespace Arawn.GameCreator2.Networking
             var request = new NetworkPoiseRequest
             {
                 RequestId = m_NextRequestId++,
+                ActorNetworkId = characterNetworkId,
+                CorrelationId = NetworkCorrelation.Compose(characterNetworkId, (ushort)(m_NextRequestId - 1)),
                 CharacterNetworkId = characterNetworkId,
                 ActionType = value < 0 ? PoiseActionType.Reset : PoiseActionType.Set,
                 Value = value,
                 ClientTime = GetServerTime?.Invoke() ?? Time.time
             };
             
-            m_PendingPoiseRequests[request.RequestId] = new PendingPoiseRequest
+            m_PendingPoiseRequests[GetPendingKey(request.CorrelationId, request.RequestId)] = new PendingPoiseRequest
             {
                 Request = request,
                 SentTime = Time.time,
@@ -999,7 +1008,7 @@ namespace Arawn.GameCreator2.Networking
             if (character == null)
             {
                 SendPoiseResponse(senderNetworkId, request.RequestId, false,
-                    PoiseRejectReason.CharacterNotFound, 0, false);
+                    PoiseRejectReason.CharacterNotFound, 0, false, request.ActorNetworkId, request.CorrelationId);
                 return;
             }
             
@@ -1013,7 +1022,7 @@ namespace Arawn.GameCreator2.Networking
                     if (m_ValidatePoiseDamage && request.Value < 0)
                     {
                         SendPoiseResponse(senderNetworkId, request.RequestId, false,
-                            PoiseRejectReason.InvalidValue, poise.Current, poise.IsBroken);
+                            PoiseRejectReason.InvalidValue, poise.Current, poise.IsBroken, request.ActorNetworkId, request.CorrelationId);
                         m_Stats.PoiseRejected++;
                         return;
                     }
@@ -1035,7 +1044,7 @@ namespace Arawn.GameCreator2.Networking
             
             // Send response
             SendPoiseResponse(senderNetworkId, request.RequestId, true,
-                PoiseRejectReason.None, poise.Current, poise.IsBroken);
+                PoiseRejectReason.None, poise.Current, poise.IsBroken, request.ActorNetworkId, request.CorrelationId);
             m_Stats.PoiseApproved++;
             
             // Broadcast
@@ -1052,11 +1061,13 @@ namespace Arawn.GameCreator2.Networking
         }
         
         private void SendPoiseResponse(uint clientId, ushort requestId, bool approved,
-            PoiseRejectReason reason, float currentPoise, bool isBroken)
+            PoiseRejectReason reason, float currentPoise, bool isBroken, uint actorNetworkId = 0, uint correlationId = 0)
         {
             var response = new NetworkPoiseResponse
             {
                 RequestId = requestId,
+                ActorNetworkId = actorNetworkId,
+                CorrelationId = correlationId,
                 Approved = approved,
                 RejectReason = reason,
                 CurrentPoise = currentPoise,
@@ -1073,9 +1084,10 @@ namespace Arawn.GameCreator2.Networking
         {
             if (!m_IsClient) return;
             
-            if (m_PendingPoiseRequests.TryGetValue(response.RequestId, out var pending))
+            uint pendingKey = GetPendingKey(response.CorrelationId, response.RequestId);
+            if (m_PendingPoiseRequests.TryGetValue(pendingKey, out var pending))
             {
-                m_PendingPoiseRequests.Remove(response.RequestId);
+                m_PendingPoiseRequests.Remove(pendingKey);
                 pending.Callback?.Invoke(response);
             }
             
@@ -1113,13 +1125,15 @@ namespace Arawn.GameCreator2.Networking
             var request = new NetworkBusyRequest
             {
                 RequestId = m_NextRequestId++,
+                ActorNetworkId = characterNetworkId,
+                CorrelationId = NetworkCorrelation.Compose(characterNetworkId, (ushort)(m_NextRequestId - 1)),
                 CharacterNetworkId = characterNetworkId,
                 Limbs = limbs,
                 SetBusy = setBusy,
                 Timeout = timeout
             };
             
-            m_PendingBusyRequests[request.RequestId] = new PendingBusyRequest
+            m_PendingBusyRequests[GetPendingKey(request.CorrelationId, request.RequestId)] = new PendingBusyRequest
             {
                 Request = request,
                 SentTime = Time.time,
@@ -1146,7 +1160,7 @@ namespace Arawn.GameCreator2.Networking
             var character = GetCharacterByNetworkId?.Invoke(request.CharacterNetworkId);
             if (character == null)
             {
-                SendBusyResponse(senderNetworkId, request.RequestId, false, BusyRejectReason.CharacterNotFound);
+                SendBusyResponse(senderNetworkId, request.RequestId, false, BusyRejectReason.CharacterNotFound, request.ActorNetworkId, request.CorrelationId);
                 return;
             }
             
@@ -1181,7 +1195,7 @@ namespace Arawn.GameCreator2.Networking
             }
             
             // Send response
-            SendBusyResponse(senderNetworkId, request.RequestId, true, BusyRejectReason.None);
+            SendBusyResponse(senderNetworkId, request.RequestId, true, BusyRejectReason.None, request.ActorNetworkId, request.CorrelationId);
             
             // Broadcast
             BusyLimbs currentBusy = 0;
@@ -1198,11 +1212,14 @@ namespace Arawn.GameCreator2.Networking
             BroadcastBusyToClients?.Invoke(broadcast);
         }
         
-        private void SendBusyResponse(uint clientId, ushort requestId, bool approved, BusyRejectReason reason)
+        private void SendBusyResponse(uint clientId, ushort requestId, bool approved, BusyRejectReason reason,
+            uint actorNetworkId = 0, uint correlationId = 0)
         {
             var response = new NetworkBusyResponse
             {
                 RequestId = requestId,
+                ActorNetworkId = actorNetworkId,
+                CorrelationId = correlationId,
                 Approved = approved,
                 RejectReason = reason
             };
@@ -1217,9 +1234,10 @@ namespace Arawn.GameCreator2.Networking
         {
             if (!m_IsClient) return;
             
-            if (m_PendingBusyRequests.TryGetValue(response.RequestId, out var pending))
+            uint pendingKey = GetPendingKey(response.CorrelationId, response.RequestId);
+            if (m_PendingBusyRequests.TryGetValue(pendingKey, out var pending))
             {
-                m_PendingBusyRequests.Remove(response.RequestId);
+                m_PendingBusyRequests.Remove(pendingKey);
                 pending.Callback?.Invoke(response);
             }
             
@@ -1274,6 +1292,8 @@ namespace Arawn.GameCreator2.Networking
             var request = new NetworkInteractionRequest
             {
                 RequestId = m_NextRequestId++,
+                ActorNetworkId = characterNetworkId,
+                CorrelationId = NetworkCorrelation.Compose(characterNetworkId, (ushort)(m_NextRequestId - 1)),
                 CharacterNetworkId = characterNetworkId,
                 TargetNetworkId = targetNetworkId,
                 TargetHash = targetHash,
@@ -1281,7 +1301,7 @@ namespace Arawn.GameCreator2.Networking
                 ClientTime = GetServerTime?.Invoke() ?? Time.time
             };
             
-            m_PendingInteractionRequests[request.RequestId] = new PendingInteractionRequest
+            m_PendingInteractionRequests[GetPendingKey(request.CorrelationId, request.RequestId)] = new PendingInteractionRequest
             {
                 Request = request,
                 SentTime = Time.time,
@@ -1311,7 +1331,7 @@ namespace Arawn.GameCreator2.Networking
             if (character == null)
             {
                 SendInteractionResponse(senderNetworkId, request.RequestId, false,
-                    InteractionRejectReason.CharacterNotFound, 0);
+                    InteractionRejectReason.CharacterNotFound, 0, request.ActorNetworkId, request.CorrelationId);
                 return;
             }
             
@@ -1322,7 +1342,7 @@ namespace Arawn.GameCreator2.Networking
             if (m_InteractionCooldowns.TryGetValue(cooldownKey, out float cooldownEnd) && currentTime < cooldownEnd)
             {
                 SendInteractionResponse(senderNetworkId, request.RequestId, false,
-                    InteractionRejectReason.OnCooldown, 0);
+                    InteractionRejectReason.OnCooldown, 0, request.ActorNetworkId, request.CorrelationId);
                 m_Stats.InteractionRejected++;
                 return;
             }
@@ -1332,7 +1352,7 @@ namespace Arawn.GameCreator2.Networking
             if (distance > m_MaxInteractionRange)
             {
                 SendInteractionResponse(senderNetworkId, request.RequestId, false,
-                    InteractionRejectReason.OutOfRange, 0);
+                    InteractionRejectReason.OutOfRange, 0, request.ActorNetworkId, request.CorrelationId);
                 m_Stats.InteractionRejected++;
                 return;
             }
@@ -1341,7 +1361,7 @@ namespace Arawn.GameCreator2.Networking
             if (!character.Interaction.CanInteract)
             {
                 SendInteractionResponse(senderNetworkId, request.RequestId, false,
-                    InteractionRejectReason.CharacterBusy, 0);
+                    InteractionRejectReason.CharacterBusy, 0, request.ActorNetworkId, request.CorrelationId);
                 m_Stats.InteractionRejected++;
                 return;
             }
@@ -1355,7 +1375,7 @@ namespace Arawn.GameCreator2.Networking
             
             // Send response
             SendInteractionResponse(senderNetworkId, request.RequestId, true,
-                InteractionRejectReason.None, 0);
+                InteractionRejectReason.None, 0, request.ActorNetworkId, request.CorrelationId);
             m_Stats.InteractionApproved++;
             
             // Broadcast
@@ -1372,11 +1392,13 @@ namespace Arawn.GameCreator2.Networking
         }
         
         private void SendInteractionResponse(uint clientId, ushort requestId, bool approved,
-            InteractionRejectReason reason, int resultData)
+            InteractionRejectReason reason, int resultData, uint actorNetworkId = 0, uint correlationId = 0)
         {
             var response = new NetworkInteractionResponse
             {
                 RequestId = requestId,
+                ActorNetworkId = actorNetworkId,
+                CorrelationId = correlationId,
                 Approved = approved,
                 RejectReason = reason,
                 ResultData = resultData
@@ -1392,9 +1414,10 @@ namespace Arawn.GameCreator2.Networking
         {
             if (!m_IsClient) return;
             
-            if (m_PendingInteractionRequests.TryGetValue(response.RequestId, out var pending))
+            uint pendingKey = GetPendingKey(response.CorrelationId, response.RequestId);
+            if (m_PendingInteractionRequests.TryGetValue(pendingKey, out var pending))
             {
-                m_PendingInteractionRequests.Remove(response.RequestId);
+                m_PendingInteractionRequests.Remove(pendingKey);
                 pending.Callback?.Invoke(response);
             }
             

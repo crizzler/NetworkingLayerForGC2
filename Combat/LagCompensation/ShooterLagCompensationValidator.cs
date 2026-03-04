@@ -6,6 +6,7 @@ using GameCreator.Runtime.Characters;
 using GameCreator.Runtime.Shooter;
 using Arawn.NetworkingCore;
 using Arawn.NetworkingCore.LagCompensation;
+using GameCreator.Runtime.Common;
 using Arawn.GameCreator2.Networking.Shooter;
 
 namespace Arawn.GameCreator2.Networking.Combat
@@ -38,6 +39,9 @@ namespace Arawn.GameCreator2.Networking.Combat
         // ════════════════════════════════════════════════════════════════════
         
         private readonly LagCompensationManager m_LagManager;
+        
+        // Reusable key buffer to avoid GC allocations during cleanup
+        private static readonly List<ushort> s_SharedKeyBuffer = new(16);
         
         // Validated shot tracking (shot ID -> data)
         private readonly Dictionary<ushort, ValidatedShotData> m_ValidatedShots = new(32);
@@ -216,6 +220,46 @@ namespace Arawn.GameCreator2.Networking.Combat
             // Convert timestamp
             result.ClientTimestamp = NetworkTimestamp.FromServerTime(request.ClientTimestamp);
             result.ServerTimestamp = m_LagManager.LastTimestamp;
+
+            // ═══════════════════════════════════════════════════════════════
+            // STEP 0: Validate that this hit is bound to a validated shot
+            // ═══════════════════════════════════════════════════════════════
+
+            if (request.SourceShotRequestId == 0 ||
+                !m_ValidatedShots.TryGetValue(request.SourceShotRequestId, out var validatedShot))
+            {
+                result.IsValid = false;
+                result.RejectionReason = CombatValidationRejectionReason.ShotNotValidated;
+                result.RejectionDetails = "Missing or unknown source shot reference";
+                return result;
+            }
+
+            if (Time.time - validatedShot.ValidatedTime > Config.ValidatedShotLifetime)
+            {
+                m_ValidatedShots.Remove(request.SourceShotRequestId);
+                result.IsValid = false;
+                result.RejectionReason = CombatValidationRejectionReason.ShotNotValidated;
+                result.RejectionDetails = "Source shot expired";
+                return result;
+            }
+
+            if (validatedShot.Request.ShooterNetworkId != request.ShooterNetworkId ||
+                validatedShot.Request.WeaponHash != request.WeaponHash)
+            {
+                result.IsValid = false;
+                result.RejectionReason = CombatValidationRejectionReason.ShotNotValidated;
+                result.RejectionDetails = "Source shot metadata mismatch";
+                return result;
+            }
+
+            int maxAllowedHits = Mathf.Max(1, validatedShot.MaxPierceCount);
+            if (validatedShot.HitsProcessed >= maxAllowedHits)
+            {
+                result.IsValid = false;
+                result.RejectionReason = CombatValidationRejectionReason.ShotNotValidated;
+                result.RejectionDetails = "Source shot already consumed";
+                return result;
+            }
             
             // ═══════════════════════════════════════════════════════════════
             // STEP 1: Environment hits (no target validation needed)
@@ -228,6 +272,7 @@ namespace Arawn.GameCreator2.Networking.Combat
                 result.RejectionReason = CombatValidationRejectionReason.None;
                 result.ValidatedHitPoint = request.HitPoint;
                 result.HitZoneName = "Environment";
+                MarkShotHitProcessed(request.SourceShotRequestId, validatedShot);
                 return result;
             }
             
@@ -378,7 +423,7 @@ namespace Arawn.GameCreator2.Networking.Combat
             // STEP 8: Calculate damage with falloff
             // ═══════════════════════════════════════════════════════════════
             
-            result.BaseDamage = GetBaseDamage(weapon);
+            result.BaseDamage = GetBaseDamage(weapon, shooterCharacter);
             result.DistanceFalloff = CalculateDistanceFalloff(calculatedDistance, weapon);
             result.FinalDamage = result.BaseDamage * result.HitZoneDamageMultiplier * result.DistanceFalloff;
             
@@ -388,8 +433,15 @@ namespace Arawn.GameCreator2.Networking.Combat
             
             result.IsValid = true;
             result.RejectionReason = CombatValidationRejectionReason.None;
+            MarkShotHitProcessed(request.SourceShotRequestId, validatedShot);
             
             return result;
+        }
+
+        private void MarkShotHitProcessed(ushort sourceShotRequestId, ValidatedShotData shotData)
+        {
+            shotData.HitsProcessed++;
+            m_ValidatedShots[sourceShotRequestId] = shotData;
         }
         
         /// <summary>
@@ -504,36 +556,51 @@ namespace Arawn.GameCreator2.Networking.Combat
         
         private float GetWeaponRange(ShooterWeapon weapon)
         {
-            // TODO: Get actual range from weapon
+            // GC2 ShooterWeapon range is per-shot-type (e.g. ShotRaycast.m_MaxDistance)
+            // and stored in private fields. The config default serves as the server-side
+            // maximum range gate for anti-cheat validation.
             return Config.DefaultWeaponRange;
         }
         
         private float GetBaseDamage(ShooterWeapon weapon)
         {
-            // TODO: Get actual damage from weapon
+            return GetBaseDamage(weapon, null);
+        }
+        
+        private float GetBaseDamage(ShooterWeapon weapon, Character shooter)
+        {
+            // Use weapon's configured fire power if available.
+            if (weapon != null && shooter != null)
+            {
+                Args args = new Args(shooter);
+                float power = (float)weapon.Fire.Power(args);
+                if (power > 0f) return power;
+            }
+            
             return Config.DefaultBaseDamage;
         }
         
         private int GetMaxPierceCount(ShooterWeapon weapon)
         {
-            // TODO: Get from weapon configuration
+            // GC2 pierce count is configured per-shot-type (ShotRaycast.m_Pierces)
+            // in a private field. The config default is used for server validation.
             return Config.DefaultMaxPierceCount;
         }
         
         private void CleanupOldShots()
         {
             float currentTime = Time.time;
-            var keysToRemove = new List<ushort>();
+            s_SharedKeyBuffer.Clear();
             
             foreach (var kvp in m_ValidatedShots)
             {
                 if (currentTime - kvp.Value.ValidatedTime > Config.ValidatedShotLifetime)
                 {
-                    keysToRemove.Add(kvp.Key);
+                    s_SharedKeyBuffer.Add(kvp.Key);
                 }
             }
             
-            foreach (var key in keysToRemove)
+            foreach (var key in s_SharedKeyBuffer)
             {
                 m_ValidatedShots.Remove(key);
             }

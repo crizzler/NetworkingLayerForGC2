@@ -23,6 +23,8 @@ namespace Arawn.GameCreator2.Networking.Melee
     {
         /// <summary>Unique request ID for response matching.</summary>
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         
         /// <summary>Client timestamp when hit was detected.</summary>
         public float ClientTimestamp;
@@ -64,6 +66,8 @@ namespace Arawn.GameCreator2.Networking.Melee
     {
         /// <summary>The request ID this is responding to.</summary>
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         
         /// <summary>Whether the hit was validated.</summary>
         public bool Validated;
@@ -186,6 +190,11 @@ namespace Arawn.GameCreator2.Networking.Melee
     [Serializable]
     public struct NetworkSkillRequest
     {
+        /// <summary>Unique request ID for response matching.</summary>
+        public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
+
         /// <summary>Network ID of the target (0 if none).</summary>
         public uint TargetNetworkId;
         
@@ -319,6 +328,8 @@ namespace Arawn.GameCreator2.Networking.Melee
     {
         /// <summary>Unique request ID for response matching.</summary>
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         
         /// <summary>Client timestamp when block was requested.</summary>
         public float ClientTimestamp;
@@ -351,6 +362,8 @@ namespace Arawn.GameCreator2.Networking.Melee
     {
         /// <summary>The request ID this is responding to.</summary>
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         
         /// <summary>Whether the block was validated.</summary>
         public bool Validated;
@@ -408,8 +421,10 @@ namespace Arawn.GameCreator2.Networking.Melee
     [Serializable]
     public struct NetworkSkillResponse
     {
-        /// <summary>Request ID this responds to (from InputKey used as ID).</summary>
+        /// <summary>Request ID this responds to.</summary>
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         
         /// <summary>Whether the skill was validated.</summary>
         public bool Validated;
@@ -495,6 +510,8 @@ namespace Arawn.GameCreator2.Networking.Melee
     {
         /// <summary>Unique request ID.</summary>
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         
         /// <summary>Client timestamp when charge started.</summary>
         public float ClientTimestamp;
@@ -514,6 +531,8 @@ namespace Arawn.GameCreator2.Networking.Melee
     {
         /// <summary>Request ID this responds to.</summary>
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         
         /// <summary>Whether charge was validated.</summary>
         public bool Validated;

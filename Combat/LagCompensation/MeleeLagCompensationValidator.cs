@@ -6,6 +6,7 @@ using GameCreator.Runtime.Characters;
 using GameCreator.Runtime.Melee;
 using Arawn.NetworkingCore;
 using Arawn.NetworkingCore.LagCompensation;
+using GameCreator.Runtime.Common;
 using Arawn.GameCreator2.Networking.Melee;
 
 namespace Arawn.GameCreator2.Networking.Combat
@@ -180,7 +181,7 @@ namespace Arawn.GameCreator2.Networking.Combat
             // STEP 5: Validate range (with tolerance)
             // ═══════════════════════════════════════════════════════════════
             
-            float weaponReach = GetWeaponReach(weapon, skill);
+            float weaponReach = GetWeaponReach(weapon, skill, attackerCharacter);
             float distanceToTarget = Vector3.Distance(attackerPosition, targetSnapshot.position);
             float maxRange = weaponReach + Config.RangeTolerance;
             
@@ -273,7 +274,7 @@ namespace Arawn.GameCreator2.Networking.Combat
             // STEP 10: Calculate damage
             // ═══════════════════════════════════════════════════════════════
             
-            result.BaseDamage = GetBaseDamage(weapon, skill);
+            result.BaseDamage = GetBaseDamage(weapon, skill, attackerCharacter);
             result.DistanceFalloff = 1f; // Melee typically doesn't have distance falloff
             result.FinalDamage = result.BaseDamage * result.HitZoneDamageMultiplier * result.DistanceFalloff;
             
@@ -368,14 +369,11 @@ namespace Arawn.GameCreator2.Networking.Combat
             return phase == MeleePhase.Active;
         }
         
-        private float GetWeaponReach(MeleeWeapon weapon, Skill skill)
+        private float GetWeaponReach(MeleeWeapon weapon, Skill skill, Character attacker)
         {
-            // Default reach if no weapon/skill specified
-            if (weapon == null && skill == null)
-                return Config.DefaultWeaponReach;
-            
-            // TODO: Get actual reach from weapon/skill configuration
-            // For now, use default with slight modification based on weapon presence
+            // GC2 MeleeWeapon has no explicit reach property — melee hit detection
+            // is physics-based (collider sweeps). The config default serves as the
+            // server-side range gate for anti-cheat validation.
             return Config.DefaultWeaponReach;
         }
         
@@ -385,9 +383,16 @@ namespace Arawn.GameCreator2.Networking.Combat
             return Config.DefaultAttackArc;
         }
         
-        private float GetBaseDamage(MeleeWeapon weapon, Skill skill)
+        private float GetBaseDamage(MeleeWeapon weapon, Skill skill, Character attacker)
         {
-            // TODO: Get actual damage from weapon/skill
+            // Use the skill's configured power value if available.
+            if (skill != null && attacker != null)
+            {
+                Args args = new Args(attacker);
+                float power = skill.GetPower(args);
+                if (power > 0f) return power;
+            }
+            
             return Config.DefaultBaseDamage;
         }
         

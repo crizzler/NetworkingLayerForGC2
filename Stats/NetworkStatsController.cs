@@ -107,11 +107,12 @@ namespace Arawn.GameCreator2.Networking.Stats
         
         // Request tracking
         private ushort m_NextRequestId = 1;
-        private readonly Dictionary<ushort, PendingStatModify> m_PendingStatMods = new(16);
-        private readonly Dictionary<ushort, PendingAttributeModify> m_PendingAttrMods = new(16);
-        private readonly Dictionary<ushort, PendingStatusEffectAction> m_PendingStatusEffects = new(8);
-        private readonly Dictionary<ushort, PendingStatModifierAction> m_PendingModifierRequests = new(8);
-        private readonly Dictionary<ushort, PendingClearStatusEffectsAction> m_PendingClearStatusEffects = new(4);
+        private static readonly List<uint> s_SharedKeyBuffer = new(16);
+        private readonly Dictionary<uint, PendingStatModify> m_PendingStatMods = new(16);
+        private readonly Dictionary<uint, PendingAttributeModify> m_PendingAttrMods = new(16);
+        private readonly Dictionary<uint, PendingStatusEffectAction> m_PendingStatusEffects = new(8);
+        private readonly Dictionary<uint, PendingStatModifierAction> m_PendingModifierRequests = new(8);
+        private readonly Dictionary<uint, PendingClearStatusEffectsAction> m_PendingClearStatusEffects = new(4);
         
         // State tracking for delta sync
         private readonly Dictionary<int, float> m_LastSyncedStatValues = new(16);
@@ -346,6 +347,8 @@ namespace Arawn.GameCreator2.Networking.Stats
             var request = new NetworkStatModifyRequest
             {
                 RequestId = m_NextRequestId++,
+                ActorNetworkId = NetworkId,
+                CorrelationId = NetworkCorrelation.Compose(NetworkId, (ushort)(m_NextRequestId - 1)),
                 TargetNetworkId = NetworkId,
                 StatHash = statId.Hash,
                 ModificationType = modType,
@@ -366,7 +369,7 @@ namespace Arawn.GameCreator2.Networking.Stats
             }
             
             // Track pending request
-            m_PendingStatMods[request.RequestId] = new PendingStatModify
+            m_PendingStatMods[GetPendingKey(request.CorrelationId, request.RequestId)] = new PendingStatModify
             {
                 Request = request,
                 OriginalValue = originalValue,
@@ -379,6 +382,8 @@ namespace Arawn.GameCreator2.Networking.Stats
             if (m_IsServer)
             {
                 var response = ProcessStatModifyRequest(request, NetworkId);
+                response.ActorNetworkId = request.ActorNetworkId;
+                response.CorrelationId = request.CorrelationId;
                 ReceiveStatModifyResponse(response);
             }
             else
@@ -414,6 +419,8 @@ namespace Arawn.GameCreator2.Networking.Stats
             var request = new NetworkAttributeModifyRequest
             {
                 RequestId = m_NextRequestId++,
+                ActorNetworkId = NetworkId,
+                CorrelationId = NetworkCorrelation.Compose(NetworkId, (ushort)(m_NextRequestId - 1)),
                 TargetNetworkId = NetworkId,
                 AttributeHash = attributeId.Hash,
                 ModificationType = modType,
@@ -434,7 +441,7 @@ namespace Arawn.GameCreator2.Networking.Stats
             }
             
             // Track pending request
-            m_PendingAttrMods[request.RequestId] = new PendingAttributeModify
+            m_PendingAttrMods[GetPendingKey(request.CorrelationId, request.RequestId)] = new PendingAttributeModify
             {
                 Request = request,
                 OriginalValue = originalValue,
@@ -447,6 +454,8 @@ namespace Arawn.GameCreator2.Networking.Stats
             if (m_IsServer)
             {
                 var response = ProcessAttributeModifyRequest(request, NetworkId);
+                response.ActorNetworkId = request.ActorNetworkId;
+                response.CorrelationId = request.CorrelationId;
                 ReceiveAttributeModifyResponse(response);
             }
             else
@@ -474,6 +483,8 @@ namespace Arawn.GameCreator2.Networking.Stats
             var request = new NetworkStatusEffectRequest
             {
                 RequestId = m_NextRequestId++,
+                ActorNetworkId = NetworkId,
+                CorrelationId = NetworkCorrelation.Compose(NetworkId, (ushort)(m_NextRequestId - 1)),
                 TargetNetworkId = NetworkId,
                 StatusEffectHash = statusEffectId.Hash,
                 Action = action,
@@ -482,7 +493,7 @@ namespace Arawn.GameCreator2.Networking.Stats
                 SourceHash = sourceHash
             };
             
-            m_PendingStatusEffects[request.RequestId] = new PendingStatusEffectAction
+            m_PendingStatusEffects[GetPendingKey(request.CorrelationId, request.RequestId)] = new PendingStatusEffectAction
             {
                 Request = request,
                 SentTime = Time.time
@@ -493,6 +504,8 @@ namespace Arawn.GameCreator2.Networking.Stats
             if (m_IsServer)
             {
                 var response = ProcessStatusEffectRequest(request, NetworkId);
+                response.ActorNetworkId = request.ActorNetworkId;
+                response.CorrelationId = request.CorrelationId;
                 ReceiveStatusEffectResponse(response);
             }
             else
@@ -520,6 +533,8 @@ namespace Arawn.GameCreator2.Networking.Stats
             var request = new NetworkStatModifierRequest
             {
                 RequestId = m_NextRequestId++,
+                ActorNetworkId = NetworkId,
+                CorrelationId = NetworkCorrelation.Compose(NetworkId, (ushort)(m_NextRequestId - 1)),
                 TargetNetworkId = NetworkId,
                 StatHash = statId.Hash,
                 Action = ModifierAction.Add,
@@ -529,7 +544,7 @@ namespace Arawn.GameCreator2.Networking.Stats
                 SourceHash = sourceHash
             };
             
-            m_PendingModifierRequests[request.RequestId] = new PendingStatModifierAction
+            m_PendingModifierRequests[GetPendingKey(request.CorrelationId, request.RequestId)] = new PendingStatModifierAction
             {
                 Request = request,
                 SentTime = Time.time
@@ -540,6 +555,8 @@ namespace Arawn.GameCreator2.Networking.Stats
             if (m_IsServer)
             {
                 var response = ProcessStatModifierRequest(request, NetworkId);
+                response.ActorNetworkId = request.ActorNetworkId;
+                response.CorrelationId = request.CorrelationId;
                 ReceiveStatModifierResponse(response);
             }
             else
@@ -567,6 +584,8 @@ namespace Arawn.GameCreator2.Networking.Stats
             var request = new NetworkStatModifierRequest
             {
                 RequestId = m_NextRequestId++,
+                ActorNetworkId = NetworkId,
+                CorrelationId = NetworkCorrelation.Compose(NetworkId, (ushort)(m_NextRequestId - 1)),
                 TargetNetworkId = NetworkId,
                 StatHash = statId.Hash,
                 Action = ModifierAction.Remove,
@@ -576,7 +595,7 @@ namespace Arawn.GameCreator2.Networking.Stats
                 SourceHash = sourceHash
             };
             
-            m_PendingModifierRequests[request.RequestId] = new PendingStatModifierAction
+            m_PendingModifierRequests[GetPendingKey(request.CorrelationId, request.RequestId)] = new PendingStatModifierAction
             {
                 Request = request,
                 SentTime = Time.time
@@ -587,6 +606,8 @@ namespace Arawn.GameCreator2.Networking.Stats
             if (m_IsServer)
             {
                 var response = ProcessStatModifierRequest(request, NetworkId);
+                response.ActorNetworkId = request.ActorNetworkId;
+                response.CorrelationId = request.CorrelationId;
                 ReceiveStatModifierResponse(response);
             }
             else
@@ -611,6 +632,8 @@ namespace Arawn.GameCreator2.Networking.Stats
             var request = new NetworkStatModifierRequest
             {
                 RequestId = m_NextRequestId++,
+                ActorNetworkId = NetworkId,
+                CorrelationId = NetworkCorrelation.Compose(NetworkId, (ushort)(m_NextRequestId - 1)),
                 TargetNetworkId = NetworkId,
                 StatHash = 0, // 0 = all stats
                 Action = ModifierAction.Clear,
@@ -620,7 +643,7 @@ namespace Arawn.GameCreator2.Networking.Stats
                 SourceHash = sourceHash
             };
             
-            m_PendingModifierRequests[request.RequestId] = new PendingStatModifierAction
+            m_PendingModifierRequests[GetPendingKey(request.CorrelationId, request.RequestId)] = new PendingStatModifierAction
             {
                 Request = request,
                 SentTime = Time.time
@@ -631,6 +654,8 @@ namespace Arawn.GameCreator2.Networking.Stats
             if (m_IsServer)
             {
                 var response = ProcessStatModifierRequest(request, NetworkId);
+                response.ActorNetworkId = request.ActorNetworkId;
+                response.CorrelationId = request.CorrelationId;
                 ReceiveStatModifierResponse(response);
             }
             else
@@ -656,13 +681,15 @@ namespace Arawn.GameCreator2.Networking.Stats
             var request = new NetworkClearStatusEffectsRequest
             {
                 RequestId = m_NextRequestId++,
+                ActorNetworkId = NetworkId,
+                CorrelationId = NetworkCorrelation.Compose(NetworkId, (ushort)(m_NextRequestId - 1)),
                 TargetNetworkId = NetworkId,
                 TypeMask = typeMask,
                 Source = source,
                 SourceHash = sourceHash
             };
             
-            m_PendingClearStatusEffects[request.RequestId] = new PendingClearStatusEffectsAction
+            m_PendingClearStatusEffects[GetPendingKey(request.CorrelationId, request.RequestId)] = new PendingClearStatusEffectsAction
             {
                 Request = request,
                 SentTime = Time.time
@@ -671,6 +698,8 @@ namespace Arawn.GameCreator2.Networking.Stats
             if (m_IsServer)
             {
                 var response = ProcessClearStatusEffectsRequest(request, NetworkId);
+                response.ActorNetworkId = request.ActorNetworkId;
+                response.CorrelationId = request.CorrelationId;
                 ReceiveClearStatusEffectsResponse(response);
             }
             else
@@ -789,6 +818,7 @@ namespace Arawn.GameCreator2.Networking.Stats
             }
             
             // Apply modification
+            float oldValue = (float)attr.Value;
             float newValue = ApplyAttributeModification(attr, request.ModificationType, request.Value);
             
             // Broadcast change
@@ -798,7 +828,7 @@ namespace Arawn.GameCreator2.Networking.Stats
                 AttributeHash = request.AttributeHash,
                 NewValue = (float)attr.Value,
                 MaxValue = (float)attr.MaxValue,
-                Change = newValue - (float)attr.Value
+                Change = newValue - oldValue
             };
             
             NetworkStatsManager.Instance?.BroadcastAttributeChange(broadcast);
@@ -1038,10 +1068,11 @@ namespace Arawn.GameCreator2.Networking.Stats
         /// </summary>
         public void ReceiveStatModifyResponse(NetworkStatModifyResponse response)
         {
-            if (!m_PendingStatMods.TryGetValue(response.RequestId, out var pending))
+            uint key = GetPendingKey(response.CorrelationId, response.RequestId);
+            if (!m_PendingStatMods.TryGetValue(key, out var pending))
                 return;
             
-            m_PendingStatMods.Remove(response.RequestId);
+            m_PendingStatMods.Remove(key);
             
             if (!response.Authorized)
             {
@@ -1075,10 +1106,11 @@ namespace Arawn.GameCreator2.Networking.Stats
         /// </summary>
         public void ReceiveAttributeModifyResponse(NetworkAttributeModifyResponse response)
         {
-            if (!m_PendingAttrMods.TryGetValue(response.RequestId, out var pending))
+            uint key = GetPendingKey(response.CorrelationId, response.RequestId);
+            if (!m_PendingAttrMods.TryGetValue(key, out var pending))
                 return;
             
-            m_PendingAttrMods.Remove(response.RequestId);
+            m_PendingAttrMods.Remove(key);
             
             if (!response.Authorized)
             {
@@ -1111,7 +1143,7 @@ namespace Arawn.GameCreator2.Networking.Stats
         /// </summary>
         public void ReceiveStatusEffectResponse(NetworkStatusEffectResponse response)
         {
-            m_PendingStatusEffects.Remove(response.RequestId);
+            m_PendingStatusEffects.Remove(GetPendingKey(response.CorrelationId, response.RequestId));
             
             if (!response.Authorized && m_LogRejections)
             {
@@ -1125,7 +1157,7 @@ namespace Arawn.GameCreator2.Networking.Stats
         /// </summary>
         public void ReceiveStatModifierResponse(NetworkStatModifierResponse response)
         {
-            m_PendingModifierRequests.Remove(response.RequestId);
+            m_PendingModifierRequests.Remove(GetPendingKey(response.CorrelationId, response.RequestId));
             
             if (!response.Authorized && m_LogRejections)
             {
@@ -1139,7 +1171,7 @@ namespace Arawn.GameCreator2.Networking.Stats
         /// </summary>
         public void ReceiveClearStatusEffectsResponse(NetworkClearStatusEffectsResponse response)
         {
-            m_PendingClearStatusEffects.Remove(response.RequestId);
+            m_PendingClearStatusEffects.Remove(GetPendingKey(response.CorrelationId, response.RequestId));
             
             if (!response.Authorized && m_LogRejections)
             {
@@ -1491,30 +1523,35 @@ namespace Arawn.GameCreator2.Networking.Stats
             
             return accumulated <= m_MaxChangePerSecond;
         }
+
+        private static uint GetPendingKey(uint correlationId, ushort requestId)
+        {
+            return correlationId != 0 ? correlationId : requestId;
+        }
         
         private void CleanupPendingRequests()
         {
             float timeout = 5f;
             float currentTime = Time.time;
             
-            // Cleanup stat requests
-            var statKeysToRemove = new List<ushort>();
+            // Cleanup stat requests (pooled list avoids per-frame GC allocation)
+            s_SharedKeyBuffer.Clear();
             foreach (var kvp in m_PendingStatMods)
             {
                 if (currentTime - kvp.Value.SentTime > timeout)
-                    statKeysToRemove.Add(kvp.Key);
+                    s_SharedKeyBuffer.Add(kvp.Key);
             }
-            foreach (var key in statKeysToRemove)
+            foreach (var key in s_SharedKeyBuffer)
                 m_PendingStatMods.Remove(key);
             
             // Cleanup attribute requests
-            var attrKeysToRemove = new List<ushort>();
+            s_SharedKeyBuffer.Clear();
             foreach (var kvp in m_PendingAttrMods)
             {
                 if (currentTime - kvp.Value.SentTime > timeout)
-                    attrKeysToRemove.Add(kvp.Key);
+                    s_SharedKeyBuffer.Add(kvp.Key);
             }
-            foreach (var key in attrKeysToRemove)
+            foreach (var key in s_SharedKeyBuffer)
                 m_PendingAttrMods.Remove(key);
         }
         

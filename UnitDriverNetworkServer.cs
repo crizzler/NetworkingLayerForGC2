@@ -41,6 +41,12 @@ namespace Arawn.GameCreator2.Networking
         [NonSerialized] private Vector3 m_LastValidatedPosition;
         [NonSerialized] private float m_ExpectedMaxSpeed;
         
+        /// <summary>
+        /// Maximum number of buffered inputs. Protects against memory growth from
+        /// packet floods or malicious clients. At 60 inputs/sec this is ~4 seconds.
+        /// </summary>
+        private const int MAX_BUFFERED_INPUTS = 256;
+        
         [NonSerialized] protected int m_GroundFrame = -100;
         [NonSerialized] protected float m_GroundTime = -100f;
         [NonSerialized] private bool m_IsOnSteepSlope;
@@ -90,6 +96,14 @@ namespace Arawn.GameCreator2.Networking
         
         public ushort LastProcessedInput => m_LastProcessedInput;
         public NetworkCharacterConfig Config => m_Config;
+        
+        public void ApplySessionProfile(NetworkSessionProfile profile)
+        {
+            if (profile == null) return;
+            
+            m_Config.maxSpeedMultiplier = profile.maxSpeedMultiplier;
+            m_Config.violationThreshold = profile.violationThreshold;
+        }
 
         // INITIALIZERS: --------------------------------------------------------------------------
 
@@ -161,6 +175,11 @@ namespace Arawn.GameCreator2.Networking
             // Reject out-of-order inputs (simple protection)
             if (IsSequenceNewer(input.sequenceNumber, m_LastProcessedInput))
             {
+                // Cap buffer size to prevent memory growth from floods
+                if (m_InputBuffer.Count >= MAX_BUFFERED_INPUTS)
+                {
+                    m_InputBuffer.Dequeue(); // Drop oldest input
+                }
                 m_InputBuffer.Enqueue(input);
             }
         }

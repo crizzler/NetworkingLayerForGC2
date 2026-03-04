@@ -42,6 +42,7 @@ namespace Arawn.GameCreator2.Networking
         [NonSerialized] private Vector3 m_ReconciliationTarget;
         [NonSerialized] private bool m_IsReconciling;
         [NonSerialized] private float m_ReconciliationProgress;
+        [NonSerialized] private Vector3 m_ReconciliationVisualOffset;
         
         // Input buffering
         [NonSerialized] private List<NetworkInputState> m_UnacknowledgedInputs;
@@ -96,6 +97,30 @@ namespace Arawn.GameCreator2.Networking
         
         public ushort CurrentSequence => m_CurrentSequence;
         public NetworkCharacterConfig Config => m_Config;
+        
+        /// <summary>
+        /// Visual offset caused by reconciliation. External systems (camera, visual mesh)
+        /// should read this to smooth the visual snap. Decays to zero over time.
+        /// </summary>
+        public Vector3 ReconciliationVisualOffset => m_ReconciliationVisualOffset;
+        
+        /// <summary>
+        /// Whether smooth reconciliation is currently in progress.
+        /// </summary>
+        public bool IsReconciling => m_IsReconciling;
+        
+        public void ApplySessionProfile(NetworkSessionProfile profile)
+        {
+            if (profile == null) return;
+            
+            m_Config.inputSendRate = profile.inputSendRate;
+            m_Config.inputRedundancy = profile.inputRedundancy;
+            m_Config.reconciliationThreshold = profile.reconciliationThreshold;
+            m_Config.maxReconciliationDistance = profile.maxReconciliationDistance;
+            m_Config.reconciliationSpeed = profile.reconciliationSpeed;
+            m_Config.maxSpeedMultiplier = profile.maxSpeedMultiplier;
+            m_Config.violationThreshold = profile.violationThreshold;
+        }
 
         // STRUCTS: -------------------------------------------------------------------------------
 
@@ -350,10 +375,13 @@ namespace Arawn.GameCreator2.Networking
 
         private void StartReconciliation(Vector3 serverPosition, float serverRotationY, float serverVerticalSpeed, int fromIndex)
         {
-            // Teleport to server position
+            // Capture pre-reconciliation position for visual smoothing
+            Vector3 preReconcilePosition = this.Transform.position;
+            
+            // Teleport to server position (physics correction)
             TeleportTo(serverPosition, serverRotationY, serverVerticalSpeed);
             
-            // Re-apply all inputs after this point
+            // Re-apply all inputs after this point (standard CSP replay)
             for (int i = fromIndex + 1; i < m_PredictionHistory.Count; i++)
             {
                 var state = m_PredictionHistory[i];
@@ -370,7 +398,12 @@ namespace Arawn.GameCreator2.Networking
                 };
             }
             
-            m_IsReconciling = false;
+            // Calculate visual offset: the difference between where the player WAS visually
+            // and where they ARE after correction+replay. External systems (camera, mesh offset)
+            // can use ReconciliationVisualOffset to smooth the visual snap.
+            m_ReconciliationVisualOffset = preReconcilePosition - this.Transform.position;
+            m_ReconciliationProgress = 0f;
+            m_IsReconciling = true;
         }
 
         private void TeleportTo(Vector3 position, float rotationY, float verticalSpeed)
@@ -393,11 +426,18 @@ namespace Arawn.GameCreator2.Networking
 
         private void UpdateReconciliation(float deltaTime)
         {
-            // Smooth interpolation to reconciliation target (currently using instant reconciliation)
+            // Exponentially decay the visual offset toward zero.
+            // This provides smooth visual reconciliation while physics stays authoritative.
+            // Uses exponential decay: offset *= e^(-speed * dt), which is frame-rate independent.
+            float decayFactor = Mathf.Exp(-m_Config.reconciliationSpeed * deltaTime);
+            m_ReconciliationVisualOffset *= decayFactor;
+            
             m_ReconciliationProgress += deltaTime * m_Config.reconciliationSpeed;
             
-            if (m_ReconciliationProgress >= 1f)
+            // Snap to zero once the offset is negligible (< 1mm)
+            if (m_ReconciliationVisualOffset.sqrMagnitude < 0.000001f || m_ReconciliationProgress >= 1f)
             {
+                m_ReconciliationVisualOffset = Vector3.zero;
                 m_IsReconciling = false;
             }
         }

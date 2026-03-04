@@ -22,6 +22,8 @@ namespace Arawn.GameCreator2.Networking.Stats
     {
         /// <summary>Unique request ID for response matching.</summary>
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         
         /// <summary>Network ID of the target character.</summary>
         public uint TargetNetworkId;
@@ -50,6 +52,8 @@ namespace Arawn.GameCreator2.Networking.Stats
     {
         /// <summary>The request ID this is responding to.</summary>
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         
         /// <summary>Whether the modification was authorized.</summary>
         public bool Authorized;
@@ -74,6 +78,8 @@ namespace Arawn.GameCreator2.Networking.Stats
     {
         /// <summary>Unique request ID for response matching.</summary>
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         
         /// <summary>Network ID of the target character.</summary>
         public uint TargetNetworkId;
@@ -102,6 +108,8 @@ namespace Arawn.GameCreator2.Networking.Stats
     {
         /// <summary>The request ID this is responding to.</summary>
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         
         /// <summary>Whether the modification was authorized.</summary>
         public bool Authorized;
@@ -128,6 +136,8 @@ namespace Arawn.GameCreator2.Networking.Stats
     {
         /// <summary>Unique request ID for response matching.</summary>
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         
         /// <summary>Network ID of the target character.</summary>
         public uint TargetNetworkId;
@@ -156,6 +166,8 @@ namespace Arawn.GameCreator2.Networking.Stats
     {
         /// <summary>The request ID this is responding to.</summary>
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         
         /// <summary>Whether the action was authorized.</summary>
         public bool Authorized;
@@ -179,6 +191,8 @@ namespace Arawn.GameCreator2.Networking.Stats
     {
         /// <summary>Unique request ID for response matching.</summary>
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         
         /// <summary>Network ID of the target character.</summary>
         public uint TargetNetworkId;
@@ -210,6 +224,8 @@ namespace Arawn.GameCreator2.Networking.Stats
     {
         /// <summary>The request ID this is responding to.</summary>
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         
         /// <summary>Whether the action was authorized.</summary>
         public bool Authorized;
@@ -325,6 +341,8 @@ namespace Arawn.GameCreator2.Networking.Stats
     {
         /// <summary>Unique request ID for response matching.</summary>
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         
         /// <summary>Network ID of the target character.</summary>
         public uint TargetNetworkId;
@@ -347,6 +365,8 @@ namespace Arawn.GameCreator2.Networking.Stats
     {
         /// <summary>The request ID this is responding to.</summary>
         public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
         
         /// <summary>Whether the action was authorized.</summary>
         public bool Authorized;
@@ -573,6 +593,9 @@ namespace Arawn.GameCreator2.Networking.Stats
         // Permission issues
         NotAuthorized = 40,
         InvalidSource = 41,
+        NotOwner = 42,
+        ProtocolMismatch = 43,
+        SecurityViolation = 44,
         
         // Rate limiting
         RateLimitExceeded = 50,
