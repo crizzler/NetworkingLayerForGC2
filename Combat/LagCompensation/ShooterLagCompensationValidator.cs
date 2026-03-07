@@ -260,6 +260,18 @@ namespace Arawn.GameCreator2.Networking.Combat
                 result.RejectionDetails = "Source shot already consumed";
                 return result;
             }
+
+            Vector3 validatedMuzzlePosition = validatedShot.Request.MuzzlePosition;
+            Vector3 validatedShotDirection = validatedShot.Request.ShotDirection;
+            if (validatedShotDirection.sqrMagnitude < 0.9f || validatedShotDirection.sqrMagnitude > 1.1f)
+            {
+                result.IsValid = false;
+                result.RejectionReason = CombatValidationRejectionReason.ShotNotValidated;
+                result.RejectionDetails = "Source shot direction is invalid";
+                return result;
+            }
+
+            validatedShotDirection = validatedShotDirection.normalized;
             
             // ═══════════════════════════════════════════════════════════════
             // STEP 1: Environment hits (no target validation needed)
@@ -267,7 +279,45 @@ namespace Arawn.GameCreator2.Networking.Combat
             
             if (!request.IsCharacterHit || request.TargetNetworkId == 0)
             {
-                // Environment hit - just validate the raycast trajectory
+                // Environment hit - validate that claimed point lies on validated shot trajectory.
+                float maxRange = GetWeaponRange(weapon);
+                Vector3 toHit = request.HitPoint - validatedMuzzlePosition;
+                float projectedDistance = Vector3.Dot(toHit, validatedShotDirection);
+                if (projectedDistance < -Config.MaxDistanceDeviation)
+                {
+                    result.IsValid = false;
+                    result.RejectionReason = CombatValidationRejectionReason.InvalidTrajectory;
+                    result.RejectionDetails = "Environment hit is behind validated muzzle direction";
+                    return result;
+                }
+
+                if (projectedDistance > maxRange + Config.MaxDistanceDeviation)
+                {
+                    result.IsValid = false;
+                    result.RejectionReason = CombatValidationRejectionReason.OutOfShooterRange;
+                    result.RejectionDetails = $"Environment hit distance {projectedDistance:F2}m exceeds range {maxRange:F2}m";
+                    return result;
+                }
+
+                Vector3 projectedPoint = validatedMuzzlePosition + validatedShotDirection * Mathf.Max(0f, projectedDistance);
+                float hitPointDeviation = Vector3.Distance(request.HitPoint, projectedPoint);
+                if (hitPointDeviation > Config.MaxHitPointDeviation)
+                {
+                    result.IsValid = false;
+                    result.RejectionReason = CombatValidationRejectionReason.InvalidTrajectory;
+                    result.RejectionDetails = $"Environment hit trajectory deviation {hitPointDeviation:F2}m exceeds max";
+                    return result;
+                }
+
+                float distanceDeviation = Mathf.Abs(request.Distance - Mathf.Max(0f, projectedDistance));
+                if (distanceDeviation > Config.MaxDistanceDeviation)
+                {
+                    result.IsValid = false;
+                    result.RejectionReason = CombatValidationRejectionReason.InvalidTrajectory;
+                    result.RejectionDetails = $"Environment distance deviation {distanceDeviation:F2}m exceeds max";
+                    return result;
+                }
+
                 result.IsValid = true;
                 result.RejectionReason = CombatValidationRejectionReason.None;
                 result.ValidatedHitPoint = request.HitPoint;
@@ -329,17 +379,9 @@ namespace Arawn.GameCreator2.Networking.Combat
             // STEP 4: Validate raycast (reconstruct shot trajectory)
             // ═══════════════════════════════════════════════════════════════
             
-            // Get shooter's historical position for trajectory validation
-            Vector3 muzzlePosition = shooterCharacter.transform.position + Vector3.up * 1.5f;
-            Vector3 shotDirection = (request.HitPoint - muzzlePosition).normalized;
-            
-            if (m_LagManager.TryGetPositionAtTime(
-                request.ShooterNetworkId,
-                result.ClientTimestamp,
-                out var historicalShooterPos))
-            {
-                muzzlePosition = historicalShooterPos + Vector3.up * 1.5f;
-            }
+            // Use the validated shot trajectory as authoritative source.
+            Vector3 muzzlePosition = validatedMuzzlePosition;
+            Vector3 shotDirection = validatedShotDirection;
             
             // Validate that the shot could have hit the target
             float maxRange = GetWeaponRange(weapon);
@@ -350,19 +392,6 @@ namespace Arawn.GameCreator2.Networking.Combat
                 maxRange,
                 result.ClientTimestamp
             );
-            
-            if (!hitValidation.isValid)
-            {
-                // Try with the client's claimed hit point direction
-                Vector3 claimedDirection = (request.HitPoint - muzzlePosition).normalized;
-                hitValidation = m_LagManager.ValidateRaycastHit(
-                    request.TargetNetworkId,
-                    muzzlePosition,
-                    claimedDirection,
-                    maxRange,
-                    result.ClientTimestamp
-                );
-            }
             
             if (!hitValidation.isValid)
             {

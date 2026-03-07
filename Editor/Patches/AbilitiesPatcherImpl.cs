@@ -1,4 +1,5 @@
 using System.IO;
+using System.Text.RegularExpressions;
 using UnityEngine;
 
 namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
@@ -22,13 +23,47 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
         {
             "Plugins/DaimahouGames/Packages/Abilities/Runtime/Pawns/Features/Caster.cs"
         };
+
+        protected override string[] GetRequiredPatchTokens(string relativePath)
+        {
+            if (relativePath.EndsWith("Caster.cs"))
+            {
+                return new[]
+                {
+                    "NetworkCastValidator",
+                    "NetworkLearnValidator",
+                    "NetworkUnLearnValidator",
+                    "NetworkCastCompleted",
+                    "LearnDirect(",
+                    "UnLearnDirect("
+                };
+            }
+
+            return base.GetRequiredPatchTokens(relativePath);
+        }
+
+        protected override System.Collections.Generic.Dictionary<string, int> GetRequiredPatchTokenCounts(string relativePath)
+        {
+            if (relativePath.EndsWith("Caster.cs"))
+            {
+                return new System.Collections.Generic.Dictionary<string, int>
+                {
+                    { "NetworkCastValidator.Invoke", 1 },
+                    { "NetworkLearnValidator.Invoke", 1 },
+                    { "NetworkUnLearnValidator.Invoke", 1 },
+                    { "NetworkCastCompleted?.Invoke", 1 }
+                };
+            }
+
+            return base.GetRequiredPatchTokenCounts(relativePath);
+        }
         
         protected override bool PatchFile(string relativePath)
         {
             string content = ReadFile(relativePath);
             
             // Check if already patched
-            if (content.Contains(PatchMarker))
+            if (ContainsPatchMarker(content))
             {
                 Debug.LogWarning($"[GC2 Networking] {relativePath} already contains patch marker.");
                 return true;
@@ -64,25 +99,28 @@ using UnityEngine;
 namespace DaimahouGames.Runtime.Abilities
 {";
 
-            if (!content.Contains(originalUsings))
+            if (!TryReplaceRequired(
+                    ref content,
+                    originalUsings,
+                    patchedUsings,
+                    "[GC2 Networking] Could not find expected using statements in Caster.cs."))
             {
-                Debug.LogError("[GC2 Networking] Could not find expected using statements in Caster.cs.");
                 return false;
             }
             
-            content = content.Replace(originalUsings, patchedUsings);
-            
-            // Add static network authority hooks after class declaration
-            string classDeclaration = @"    [Serializable]
-    public sealed class Caster : Feature
-    {
-        //============================================================================================================||";
-            
-            string patchedClassDeclaration = @"    [Serializable]
-    public sealed class Caster : Feature
-    {
-        //============================================================================================================||
-        
+            // Add static network authority hooks after class declaration (regex anchor for source variants).
+            if (!content.Contains("NetworkCastValidator"))
+            {
+                Match casterClassMatch = Regex.Match(
+                    content,
+                    @"(?m)^(\s*)(public\s+)?(?:(?:sealed|partial|abstract)\s+)*class\s+Caster\b[^{]*\{");
+                if (!casterClassMatch.Success)
+                {
+                    Debug.LogError("[GC2 Networking] Could not find Caster class declaration in Caster.cs.");
+                    return false;
+                }
+
+                string staticHooks = @"
         // [GC2_NETWORK_PATCH] Static hooks for server-authoritative networking
         
         /// <summary>When set, validates if a cast should proceed locally.</summary>
@@ -100,15 +138,11 @@ namespace DaimahouGames.Runtime.Abilities
         /// <summary>Returns true if networking hooks are active.</summary>
         public static bool IsNetworkingActive => NetworkCastValidator != null;
         
-        // [GC2_NETWORK_PATCH_END]";
-
-            if (!content.Contains(classDeclaration))
-            {
-                Debug.LogError("[GC2 Networking] Could not find expected class declaration in Caster.cs.");
-                return false;
+        // [GC2_NETWORK_PATCH_END]
+";
+                int insertIndex = casterClassMatch.Index + casterClassMatch.Length;
+                content = content.Insert(insertIndex, staticHooks);
             }
-            
-            content = content.Replace(classDeclaration, patchedClassDeclaration);
             
             // Patch the Cast method
             string originalCast = @"        public async Task<bool> Cast(Ability ability, ExtendedArgs args)
@@ -155,13 +189,14 @@ namespace DaimahouGames.Runtime.Abilities
             return success;
         }";
 
-            if (!content.Contains(originalCast))
+            if (!TryReplaceRequired(
+                    ref content,
+                    originalCast,
+                    patchedCast,
+                    "[GC2 Networking] Could not find expected Cast method in Caster.cs."))
             {
-                Debug.LogError("[GC2 Networking] Could not find expected Cast method in Caster.cs.");
                 return false;
             }
-            
-            content = content.Replace(originalCast, patchedCast);
             
             // Patch Learn method
             string originalLearn = @"        public void Learn(Ability ability, int slot)
@@ -201,13 +236,14 @@ namespace DaimahouGames.Runtime.Abilities
         }
         // [GC2_NETWORK_PATCH_END]";
 
-            if (!content.Contains(originalLearn))
+            if (!TryReplaceRequired(
+                    ref content,
+                    originalLearn,
+                    patchedLearn,
+                    "[GC2 Networking] Could not find expected Learn method in Caster.cs."))
             {
-                Debug.LogError("[GC2 Networking] Could not find expected Learn method in Caster.cs.");
                 return false;
             }
-            
-            content = content.Replace(originalLearn, patchedLearn);
             
             // Patch UnLearn method
             string originalUnLearn = @"        public void UnLearn(Ability ability)
@@ -254,13 +290,14 @@ namespace DaimahouGames.Runtime.Abilities
         }
         // [GC2_NETWORK_PATCH_END]";
 
-            if (!content.Contains(originalUnLearn))
+            if (!TryReplaceRequired(
+                    ref content,
+                    originalUnLearn,
+                    patchedUnLearn,
+                    "[GC2 Networking] Could not find expected UnLearn method in Caster.cs."))
             {
-                Debug.LogError("[GC2 Networking] Could not find expected UnLearn method in Caster.cs.");
                 return false;
             }
-            
-            content = content.Replace(originalUnLearn, patchedUnLearn);
             
             WriteFile(relativePath, content);
             Debug.Log($"[GC2 Networking] Successfully patched {relativePath}");

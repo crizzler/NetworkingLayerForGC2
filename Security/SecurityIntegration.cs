@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using UnityEngine;
 using Arawn.GameCreator2.Networking;
 
@@ -12,11 +13,81 @@ namespace Arawn.GameCreator2.Networking.Security
     public static class SecurityIntegration
     {
         private static INetworkOwnershipResolver s_OwnershipResolver = new NetworkOwnershipResolver();
+        private static readonly HashSet<string> s_ServerModules = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private static bool s_MissingSecurityManagerWarningLogged;
 
         private static bool IsAuthoritativeServerContext()
         {
             var bridge = NetworkTransportBridge.Active;
-            return bridge != null && bridge.IsServer;
+            if (bridge != null && bridge.IsServer)
+            {
+                return true;
+            }
+
+            if (s_ServerModules.Count > 0)
+            {
+                return true;
+            }
+
+            var manager = NetworkSecurityManager.Instance;
+            return manager != null && manager.IsServer;
+        }
+
+        /// <summary>
+        /// Registers whether a module is currently running in server-authoritative mode.
+        /// Modules should call this during init/teardown to avoid fail-open security when
+        /// requests arrive before transport bridge context is available.
+        /// </summary>
+        public static void SetModuleServerContext(string module, bool isServer)
+        {
+            if (string.IsNullOrWhiteSpace(module)) return;
+
+            if (isServer)
+            {
+                s_ServerModules.Add(module);
+            }
+            else
+            {
+                s_ServerModules.Remove(module);
+            }
+        }
+
+        /// <summary>
+        /// Clears module server context registrations.
+        /// Primarily intended for tests.
+        /// </summary>
+        public static void ClearModuleServerContexts()
+        {
+            s_ServerModules.Clear();
+            s_MissingSecurityManagerWarningLogged = false;
+        }
+
+        /// <summary>
+        /// Ensures the security manager exists and is initialized with the correct role.
+        /// </summary>
+        public static bool EnsureSecurityManagerInitialized(bool isServer, Func<float> getServerTime = null)
+        {
+            NetworkSecurityManager manager = NetworkSecurityManager.Instance;
+            if (manager == null)
+            {
+                if (isServer && !s_MissingSecurityManagerWarningLogged)
+                {
+                    s_MissingSecurityManagerWarningLogged = true;
+                    Debug.LogWarning(
+                        "[SecurityIntegration] Server mode is active but no NetworkSecurityManager instance exists. " +
+                        "Add one to the scene or use the Setup Wizard security option.");
+                }
+
+                return !isServer;
+            }
+
+            Func<float> timeProvider = getServerTime ?? (() => Time.time);
+            if (!manager.IsInitialized || manager.IsServer != isServer)
+            {
+                manager.Initialize(isServer, timeProvider);
+            }
+
+            return true;
         }
 
         private static bool ShouldFailClosedNoSecurityManager(NetworkSecurityManager manager, string module, string requestType)
@@ -70,6 +141,32 @@ namespace Arawn.GameCreator2.Networking.Security
         }
 
         /// <summary>
+        /// Returns true when protocol v2 context is malformed or does not match the actor.
+        /// </summary>
+        public static bool IsProtocolContextMismatch(uint actorNetworkId, uint correlationId)
+        {
+            if (actorNetworkId == 0 || correlationId == 0)
+            {
+                return true;
+            }
+
+            if (NetworkCorrelation.ExtractRequestId(correlationId) == 0)
+            {
+                return true;
+            }
+
+            return !NetworkCorrelation.MatchesActor(correlationId, actorNetworkId);
+        }
+
+        /// <summary>
+        /// Returns true when protocol v2 context is malformed or does not match the actor.
+        /// </summary>
+        public static bool IsProtocolContextMismatch(in NetworkRequestContext context)
+        {
+            return IsProtocolContextMismatch(context.ActorNetworkId, context.CorrelationId);
+        }
+
+        /// <summary>
         /// Validates the shared v2 request context (rate limit + sequence + strict ownership).
         /// </summary>
         public static bool ValidateModuleRequest(
@@ -86,14 +183,18 @@ namespace Arawn.GameCreator2.Networking.Security
 
             if (manager == null || !manager.IsServer) return true;
 
-            if (context.ActorNetworkId == 0 || context.CorrelationId == 0)
+            if (IsProtocolContextMismatch(in context))
             {
+                ushort actorSegment = NetworkCorrelation.ExtractActorSegment(context.CorrelationId);
+                ushort requestSegment = NetworkCorrelation.ExtractRequestId(context.CorrelationId);
                 manager.RecordViolation(
                     senderClientId,
                     context.ActorNetworkId,
                     SecurityViolationType.ProtocolMismatch,
                     module,
-                    $"Missing protocol v2 context for {requestType}");
+                    $"Invalid protocol v2 context for {requestType}: " +
+                    $"actor={context.ActorNetworkId}, correlation={context.CorrelationId}, " +
+                    $"corrActorSegment={actorSegment}, corrRequestSegment={requestSegment}");
                 return false;
             }
 
@@ -103,7 +204,7 @@ namespace Arawn.GameCreator2.Networking.Security
             }
 
             ushort sequence = NetworkCorrelation.ExtractRequestId(context.CorrelationId);
-            if (!manager.ValidateSequence(senderClientId, sequence, module))
+            if (!manager.ValidateSequence(senderClientId, context.ActorNetworkId, sequence, module))
             {
                 return false;
             }
@@ -177,6 +278,108 @@ namespace Arawn.GameCreator2.Networking.Security
             return ValidateOwnership((uint)senderClientId, actorNetworkId, module);
         }
 
+        /// <summary>
+        /// Validates that sender owns the target entity and (when mapped) that it belongs to the same actor.
+        /// </summary>
+        public static bool ValidateTargetEntityOwnership(
+            uint senderClientId,
+            uint actorNetworkId,
+            uint targetEntityNetworkId,
+            string module,
+            string requestType)
+        {
+            var manager = NetworkSecurityManager.Instance;
+            if (ShouldFailClosedNoSecurityManager(manager, module, requestType))
+            {
+                return false;
+            }
+
+            if (manager == null || !manager.IsServer) return true;
+
+            if (targetEntityNetworkId == 0)
+            {
+                manager.RecordViolation(
+                    senderClientId,
+                    actorNetworkId,
+                    SecurityViolationType.InvalidTarget,
+                    module,
+                    $"Missing target entity for {requestType}");
+                return false;
+            }
+
+            if (!OwnershipResolver.TryResolveOwnerClientIdForEntity(targetEntityNetworkId, out uint ownerClientId))
+            {
+                manager.RecordViolation(
+                    senderClientId,
+                    actorNetworkId,
+                    SecurityViolationType.InvalidTarget,
+                    module,
+                    $"Unresolved target ownership entity={targetEntityNetworkId} for {requestType}");
+                return false;
+            }
+
+            if (ownerClientId != senderClientId)
+            {
+                manager.RecordViolation(
+                    senderClientId,
+                    actorNetworkId,
+                    SecurityViolationType.UnauthorizedAction,
+                    module,
+                    $"Target entity ownership mismatch entity={targetEntityNetworkId}, expectedOwner={ownerClientId}, sender={senderClientId}");
+                return false;
+            }
+
+            if (OwnershipResolver.TryResolveActorNetworkIdForEntity(targetEntityNetworkId, out uint mappedActorNetworkId) &&
+                mappedActorNetworkId != 0 &&
+                actorNetworkId != 0 &&
+                mappedActorNetworkId != actorNetworkId)
+            {
+                manager.RecordViolation(
+                    senderClientId,
+                    actorNetworkId,
+                    SecurityViolationType.InvalidTarget,
+                    module,
+                    $"Target entity actor mismatch entity={targetEntityNetworkId}, mappedActor={mappedActorNetworkId}, actor={actorNetworkId}");
+                return false;
+            }
+
+            return true;
+        }
+
+        private static NetworkRequestContext BuildLegacyContext(uint actorNetworkId, ushort requestId)
+        {
+            uint correlationId = actorNetworkId != 0 && requestId != 0
+                ? NetworkCorrelation.Compose(actorNetworkId, requestId)
+                : 0u;
+
+            return NetworkRequestContext.Create(actorNetworkId, correlationId);
+        }
+
+        private static bool RequireLegacyServerSecurityManager(
+            string module,
+            string requestType,
+            out NetworkSecurityManager manager)
+        {
+            manager = NetworkSecurityManager.Instance;
+            if (manager == null)
+            {
+                Debug.LogError(
+                    $"[SecurityIntegration] Rejecting legacy {module}/{requestType}: " +
+                    "NetworkSecurityManager is missing.");
+                return false;
+            }
+
+            if (!manager.IsServer)
+            {
+                Debug.LogError(
+                    $"[SecurityIntegration] Rejecting legacy {module}/{requestType}: " +
+                    "NetworkSecurityManager is not initialized for server mode.");
+                return false;
+            }
+
+            return true;
+        }
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // CORE MODULE INTEGRATION
         // ════════════════════════════════════════════════════════════════════════════════════════
@@ -190,22 +393,13 @@ namespace Arawn.GameCreator2.Networking.Security
             ushort requestId, 
             string requestType)
         {
-            var manager = NetworkSecurityManager.Instance;
-            if (manager == null || !manager.IsServer) return true;
-            
-            // Rate limit check
-            if (!manager.CheckRateLimit(clientId, "Core"))
+            if (!RequireLegacyServerSecurityManager("Core", requestType, out _))
             {
                 return false;
             }
-            
-            // Sequence validation
-            if (!manager.ValidateSequence(clientId, requestId, "Core"))
-            {
-                return false;
-            }
-            
-            return true;
+
+            var context = BuildLegacyContext(characterNetworkId, requestId);
+            return ValidateModuleRequest(clientId, in context, "Core", requestType);
         }
         
         /// <summary>
@@ -219,6 +413,11 @@ namespace Arawn.GameCreator2.Networking.Security
             float maxSpeed = 50f)
         {
             var manager = NetworkSecurityManager.Instance;
+            if (ShouldFailClosedNoSecurityManager(manager, "Core", nameof(ValidateCorePositionUpdate)))
+            {
+                return false;
+            }
+
             if (manager == null || !manager.IsServer) return true;
             
             // Position validation
@@ -251,17 +450,13 @@ namespace Arawn.GameCreator2.Networking.Security
             int statHash,
             float value)
         {
-            var manager = NetworkSecurityManager.Instance;
-            if (manager == null || !manager.IsServer) return true;
-            
-            // Rate limit check
-            if (!manager.CheckRateLimit(clientId, "Stats"))
+            if (!RequireLegacyServerSecurityManager("Stats", requestType, out var manager))
             {
                 return false;
             }
-            
-            // Sequence validation
-            if (!manager.ValidateSequence(clientId, requestId, "Stats"))
+
+            var context = BuildLegacyContext(characterNetworkId, requestId);
+            if (!ValidateModuleRequest(clientId, in context, "Stats", requestType))
             {
                 return false;
             }
@@ -313,22 +508,13 @@ namespace Arawn.GameCreator2.Networking.Security
             ushort requestId,
             string requestType)
         {
-            var manager = NetworkSecurityManager.Instance;
-            if (manager == null || !manager.IsServer) return true;
-            
-            // Rate limit check
-            if (!manager.CheckRateLimit(clientId, "Inventory"))
+            if (!RequireLegacyServerSecurityManager("Inventory", requestType, out _))
             {
                 return false;
             }
-            
-            // Sequence validation
-            if (!manager.ValidateSequence(clientId, requestId, "Inventory"))
-            {
-                return false;
-            }
-            
-            return true;
+
+            var context = BuildLegacyContext(characterNetworkId, requestId);
+            return ValidateModuleRequest(clientId, in context, "Inventory", requestType);
         }
         
         /// <summary>
@@ -342,6 +528,11 @@ namespace Arawn.GameCreator2.Networking.Security
             bool isAdd)
         {
             var manager = NetworkSecurityManager.Instance;
+            if (ShouldFailClosedNoSecurityManager(manager, "Inventory", nameof(ValidateItemTransfer)))
+            {
+                return false;
+            }
+
             if (manager == null || !manager.IsServer) return true;
             
             // Check for negative quantities
@@ -381,22 +572,13 @@ namespace Arawn.GameCreator2.Networking.Security
             ushort requestId,
             string requestType)
         {
-            var manager = NetworkSecurityManager.Instance;
-            if (manager == null || !manager.IsServer) return true;
-            
-            // Rate limit check (combat actions may need tighter limits)
-            if (!manager.CheckRateLimit(clientId, "Melee"))
+            if (!RequireLegacyServerSecurityManager("Melee", requestType, out _))
             {
                 return false;
             }
-            
-            // Sequence validation
-            if (!manager.ValidateSequence(clientId, requestId, "Melee"))
-            {
-                return false;
-            }
-            
-            return true;
+
+            var context = BuildLegacyContext(characterNetworkId, requestId);
+            return ValidateModuleRequest(clientId, in context, "Melee", requestType);
         }
         
         /// <summary>
@@ -411,6 +593,11 @@ namespace Arawn.GameCreator2.Networking.Security
             Vector3 hitPoint)
         {
             var manager = NetworkSecurityManager.Instance;
+            if (ShouldFailClosedNoSecurityManager(manager, "Melee", nameof(ValidateMeleeHit)))
+            {
+                return false;
+            }
+
             if (manager == null || !manager.IsServer) return true;
             
             // Position validation
@@ -470,22 +657,13 @@ namespace Arawn.GameCreator2.Networking.Security
             ushort requestId,
             string requestType)
         {
-            var manager = NetworkSecurityManager.Instance;
-            if (manager == null || !manager.IsServer) return true;
-            
-            // Rate limit check
-            if (!manager.CheckRateLimit(clientId, "Shooter"))
+            if (!RequireLegacyServerSecurityManager("Shooter", requestType, out _))
             {
                 return false;
             }
-            
-            // Sequence validation
-            if (!manager.ValidateSequence(clientId, requestId, "Shooter"))
-            {
-                return false;
-            }
-            
-            return true;
+
+            var context = BuildLegacyContext(characterNetworkId, requestId);
+            return ValidateModuleRequest(clientId, in context, "Shooter", requestType);
         }
         
         /// <summary>
@@ -500,6 +678,11 @@ namespace Arawn.GameCreator2.Networking.Security
             float chargeRatio)
         {
             var manager = NetworkSecurityManager.Instance;
+            if (ShouldFailClosedNoSecurityManager(manager, "Shooter", nameof(ValidateShot)))
+            {
+                return false;
+            }
+
             if (manager == null || !manager.IsServer) return true;
             
             // Position validation
@@ -539,6 +722,11 @@ namespace Arawn.GameCreator2.Networking.Security
             Vector3 hitPoint)
         {
             var manager = NetworkSecurityManager.Instance;
+            if (ShouldFailClosedNoSecurityManager(manager, "Shooter", nameof(ValidateProjectileHit)))
+            {
+                return false;
+            }
+
             if (manager == null || !manager.IsServer) return true;
             
             // Position validation
@@ -571,22 +759,13 @@ namespace Arawn.GameCreator2.Networking.Security
             ushort requestId,
             string requestType)
         {
-            var manager = NetworkSecurityManager.Instance;
-            if (manager == null || !manager.IsServer) return true;
-            
-            // Rate limit check
-            if (!manager.CheckRateLimit(clientId, "Abilities"))
+            if (!RequireLegacyServerSecurityManager("Abilities", requestType, out _))
             {
                 return false;
             }
-            
-            // Sequence validation
-            if (!manager.ValidateSequence(clientId, requestId, "Abilities"))
-            {
-                return false;
-            }
-            
-            return true;
+
+            var context = BuildLegacyContext(characterNetworkId, requestId);
+            return ValidateModuleRequest(clientId, in context, "Abilities", requestType);
         }
         
         /// <summary>
@@ -600,6 +779,11 @@ namespace Arawn.GameCreator2.Networking.Security
             uint targetCharacterId)
         {
             var manager = NetworkSecurityManager.Instance;
+            if (ShouldFailClosedNoSecurityManager(manager, "Abilities", nameof(ValidateAbilityCast)))
+            {
+                return false;
+            }
+
             if (manager == null || !manager.IsServer) return true;
             
             // Position validation (if targeting a position)

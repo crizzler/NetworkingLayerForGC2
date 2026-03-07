@@ -24,13 +24,59 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
             "Plugins/GameCreator/Packages/Stats/Runtime/Classes/Traits/Stats/RuntimeStatData.cs",
             "Plugins/GameCreator/Packages/Stats/Runtime/Classes/Traits/Attributes/RuntimeAttributeData.cs"
         };
+
+        protected override string[] GetRequiredPatchTokens(string relativePath)
+        {
+            if (relativePath.EndsWith("RuntimeStatData.cs"))
+            {
+                return new[]
+                {
+                    "NetworkBaseValidator",
+                    "AddModifierDirect(",
+                    "RemoveModifierDirect(",
+                    "ClearModifiersDirect(",
+                    "SetBaseDirect("
+                };
+            }
+
+            if (relativePath.EndsWith("RuntimeAttributeData.cs"))
+            {
+                return new[] { "NetworkValueValidator", "SetValueDirect(" };
+            }
+
+            return base.GetRequiredPatchTokens(relativePath);
+        }
+
+        protected override System.Collections.Generic.Dictionary<string, int> GetRequiredPatchTokenCounts(string relativePath)
+        {
+            if (relativePath.EndsWith("RuntimeStatData.cs"))
+            {
+                return new System.Collections.Generic.Dictionary<string, int>
+                {
+                    { "NetworkBaseValidator.Invoke", 1 },
+                    { "NetworkAddModifierValidator.Invoke", 1 },
+                    { "NetworkRemoveModifierValidator.Invoke", 1 },
+                    { "NetworkClearModifiersValidator.Invoke", 1 }
+                };
+            }
+
+            if (relativePath.EndsWith("RuntimeAttributeData.cs"))
+            {
+                return new System.Collections.Generic.Dictionary<string, int>
+                {
+                    { "NetworkValueValidator.Invoke", 1 }
+                };
+            }
+
+            return base.GetRequiredPatchTokenCounts(relativePath);
+        }
         
         protected override bool PatchFile(string relativePath)
         {
             string content = ReadFile(relativePath);
             
             // Check if already patched
-            if (content.Contains(PatchMarker))
+            if (ContainsPatchMarker(content))
             {
                 Debug.LogWarning($"[GC2 Networking] {relativePath} already contains patch marker.");
                 return true;
@@ -93,13 +139,14 @@ namespace GameCreator.Runtime.Stats
         // [GC2_NETWORK_PATCH_END]
 ";
 
-            if (!content.Contains(originalUsings))
+            if (!TryReplaceRequired(
+                    ref content,
+                    originalUsings,
+                    patchedUsings,
+                    "[GC2 Networking] Could not find expected using statements in RuntimeStatData.cs."))
             {
-                Debug.LogError("[GC2 Networking] Could not find expected using statements in RuntimeStatData.cs.");
                 return false;
             }
-            
-            content = content.Replace(originalUsings, patchedUsings);
             
             // Patch the Base property setter
             string originalBaseSetter = @"        public double Base
@@ -137,13 +184,14 @@ namespace GameCreator.Runtime.Stats
             }
         }";
 
-            if (!content.Contains(originalBaseSetter))
+            if (!TryReplaceRequired(
+                    ref content,
+                    originalBaseSetter,
+                    patchedBaseSetter,
+                    "[GC2 Networking] Could not find expected Base property in RuntimeStatData.cs."))
             {
-                Debug.LogError("[GC2 Networking] Could not find expected Base property in RuntimeStatData.cs.");
                 return false;
             }
-            
-            content = content.Replace(originalBaseSetter, patchedBaseSetter);
             
             // Patch AddModifier method
             string originalAddModifier = @"        public void AddModifier(ModifierType type, double value)
@@ -190,13 +238,14 @@ namespace GameCreator.Runtime.Stats
         }
         // [GC2_NETWORK_PATCH_END]";
 
-            if (!content.Contains(originalAddModifier))
+            if (!TryReplaceRequired(
+                    ref content,
+                    originalAddModifier,
+                    patchedAddModifier,
+                    "[GC2 Networking] Could not find expected AddModifier method in RuntimeStatData.cs."))
             {
-                Debug.LogError("[GC2 Networking] Could not find expected AddModifier method in RuntimeStatData.cs.");
                 return false;
             }
-            
-            content = content.Replace(originalAddModifier, patchedAddModifier);
             
             // Patch RemoveModifier method
             string originalRemoveModifier = @"        public bool RemoveModifier(ModifierType type, double value)
@@ -246,13 +295,14 @@ namespace GameCreator.Runtime.Stats
         }
         // [GC2_NETWORK_PATCH_END]";
 
-            if (!content.Contains(originalRemoveModifier))
+            if (!TryReplaceRequired(
+                    ref content,
+                    originalRemoveModifier,
+                    patchedRemoveModifier,
+                    "[GC2 Networking] Could not find expected RemoveModifier method in RuntimeStatData.cs."))
             {
-                Debug.LogError("[GC2 Networking] Could not find expected RemoveModifier method in RuntimeStatData.cs.");
                 return false;
             }
-            
-            content = content.Replace(originalRemoveModifier, patchedRemoveModifier);
             
             // Patch ClearModifiers method
             string originalClearModifiers = @"        public void ClearModifiers()
@@ -291,13 +341,14 @@ namespace GameCreator.Runtime.Stats
         }
         // [GC2_NETWORK_PATCH_END]";
 
-            if (!content.Contains(originalClearModifiers))
+            if (!TryReplaceRequired(
+                    ref content,
+                    originalClearModifiers,
+                    patchedClearModifiers,
+                    "[GC2 Networking] Could not find expected ClearModifiers method in RuntimeStatData.cs."))
             {
-                Debug.LogError("[GC2 Networking] Could not find expected ClearModifiers method in RuntimeStatData.cs.");
                 return false;
             }
-            
-            content = content.Replace(originalClearModifiers, patchedClearModifiers);
             
             // Add SetBaseDirect method before internal methods
             string originalInternalMethod = @"        // INTERNAL METHODS: ----------------------------------------------------------------------
@@ -324,13 +375,14 @@ namespace GameCreator.Runtime.Stats
             this.m_Base = value;
         }";
 
-            if (!content.Contains(originalInternalMethod))
+            if (!TryReplaceRequired(
+                    ref content,
+                    originalInternalMethod,
+                    patchedInternalMethod,
+                    "[GC2 Networking] Could not find expected internal methods in RuntimeStatData.cs."))
             {
-                Debug.LogError("[GC2 Networking] Could not find expected internal methods in RuntimeStatData.cs.");
                 return false;
             }
-            
-            content = content.Replace(originalInternalMethod, patchedInternalMethod);
             
             WriteFile(relativePath, content);
             Debug.Log($"[GC2 Networking] Patched {relativePath}");
@@ -368,13 +420,14 @@ namespace GameCreator.Runtime.Stats
         // [GC2_NETWORK_PATCH_END]
 ";
 
-            if (!content.Contains(originalUsings))
+            if (!TryReplaceRequired(
+                    ref content,
+                    originalUsings,
+                    patchedUsings,
+                    "[GC2 Networking] Could not find expected using statements in RuntimeAttributeData.cs."))
             {
-                Debug.LogError("[GC2 Networking] Could not find expected using statements in RuntimeAttributeData.cs.");
                 return false;
             }
-            
-            content = content.Replace(originalUsings, patchedUsings);
             
             // Patch the Value property - exact pattern from actual file
             string originalValueProperty = @"        public double Value
@@ -423,13 +476,14 @@ namespace GameCreator.Runtime.Stats
         }
         // [GC2_NETWORK_PATCH_END]";
 
-            if (!content.Contains(originalValueProperty))
+            if (!TryReplaceRequired(
+                    ref content,
+                    originalValueProperty,
+                    patchedValueProperty,
+                    "[GC2 Networking] Could not find expected Value property in RuntimeAttributeData.cs."))
             {
-                Debug.LogError("[GC2 Networking] Could not find expected Value property in RuntimeAttributeData.cs.");
                 return false;
             }
-            
-            content = content.Replace(originalValueProperty, patchedValueProperty);
             
             WriteFile(relativePath, content);
             Debug.Log($"[GC2 Networking] Patched {relativePath}");

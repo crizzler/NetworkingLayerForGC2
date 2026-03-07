@@ -29,14 +29,14 @@ namespace Arawn.GameCreator2.Networking
 
         private static AbilityCastRejectReason GetCastSecurityRejection(uint actorNetworkId, uint correlationId)
         {
-            return actorNetworkId == 0 || correlationId == 0
+            return SecurityIntegration.IsProtocolContextMismatch(actorNetworkId, correlationId)
                 ? AbilityCastRejectReason.ProtocolMismatch
                 : AbilityCastRejectReason.SecurityViolation;
         }
 
         private static AbilityLearnRejectReason GetLearnSecurityRejection(uint actorNetworkId, uint correlationId)
         {
-            return actorNetworkId == 0 || correlationId == 0
+            return SecurityIntegration.IsProtocolContextMismatch(actorNetworkId, correlationId)
                 ? AbilityLearnRejectReason.ProtocolMismatch
                 : AbilityLearnRejectReason.SecurityViolation;
         }

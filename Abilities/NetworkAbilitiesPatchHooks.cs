@@ -84,7 +84,13 @@ namespace Arawn.GameCreator2.Networking
         {
             m_IsServer = isServer;
             m_IsClient = isClient;
-            
+
+            if (!m_IsServer && !m_IsClient)
+            {
+                UninstallHooks();
+                return;
+            }
+
             InstallHooks();
         }
         

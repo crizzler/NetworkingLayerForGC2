@@ -385,6 +385,38 @@ namespace Arawn.GameCreator2.Networking.Melee
                 requestType);
         }
 
+        private bool ValidateActorBinding(
+            uint senderClientId,
+            uint actorNetworkId,
+            uint claimedNetworkId,
+            string requestType,
+            string claimedFieldName)
+        {
+            if (actorNetworkId == 0 || claimedNetworkId == 0)
+            {
+                SecurityIntegration.RecordViolation(
+                    senderClientId,
+                    actorNetworkId,
+                    SecurityViolationType.InvalidRequest,
+                    "Melee",
+                    $"{requestType} missing actor binding values actor={actorNetworkId}, {claimedFieldName}={claimedNetworkId}");
+                return false;
+            }
+
+            if (actorNetworkId == claimedNetworkId)
+            {
+                return true;
+            }
+
+            SecurityIntegration.RecordViolation(
+                senderClientId,
+                actorNetworkId,
+                SecurityViolationType.ProtocolMismatch,
+                "Melee",
+                $"{requestType} actor mismatch actor={actorNetworkId}, {claimedFieldName}={claimedNetworkId}");
+            return false;
+        }
+
         private bool IsQueueAtCapacity<T>(Queue<T> queue, int maxQueueLength, uint senderClientId, uint actorNetworkId, string requestType)
         {
             int safeLimit = Mathf.Max(1, maxQueueLength);
@@ -464,6 +496,7 @@ namespace Arawn.GameCreator2.Networking.Melee
 
         private void OnDisable()
         {
+            SecurityIntegration.SetModuleServerContext("Melee", false);
             if (m_PatchHooks != null)
             {
                 m_PatchHooks.Initialize(false);
@@ -481,6 +514,8 @@ namespace Arawn.GameCreator2.Networking.Melee
         {
             m_IsServer = isServer;
             m_IsClient = isClient;
+            SecurityIntegration.SetModuleServerContext("Melee", isServer);
+            SecurityIntegration.EnsureSecurityManagerInitialized(isServer, () => GetNetworkTimeFunc?.Invoke() ?? Time.time);
             SyncPatchHooks();
             
             Debug.Log($"[NetworkMeleeManager] Initialized - Server: {isServer}, Client: {isClient}");
@@ -630,6 +665,18 @@ namespace Arawn.GameCreator2.Networking.Melee
                 });
                 return;
             }
+            if (!ValidateActorBinding(clientNetworkId, request.ActorNetworkId, request.AttackerNetworkId, nameof(NetworkMeleeHitRequest), nameof(request.AttackerNetworkId)))
+            {
+                SendHitResponseToClient?.Invoke(clientNetworkId, new NetworkMeleeHitResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Validated = false,
+                    RejectionReason = MeleeHitRejectionReason.CheatSuspected
+                });
+                return;
+            }
             
             m_Stats.HitRequestsReceived++;
 
@@ -681,10 +728,22 @@ namespace Arawn.GameCreator2.Networking.Melee
         private void ProcessHitRequest(QueuedHitRequest queued)
         {
             var request = queued.Request;
+            if (request.ActorNetworkId == 0 || request.ActorNetworkId != request.AttackerNetworkId)
+            {
+                SendHitResponseToClient?.Invoke(queued.ClientNetworkId, new NetworkMeleeHitResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Validated = false,
+                    RejectionReason = MeleeHitRejectionReason.CheatSuspected
+                });
+                return;
+            }
             
             // Get attacker controller
             NetworkMeleeController attackerController = null;
-            if (m_Controllers.TryGetValue(request.AttackerNetworkId, out var ctrl))
+            if (m_Controllers.TryGetValue(request.ActorNetworkId, out var ctrl))
             {
                 attackerController = ctrl;
             }
@@ -759,7 +818,7 @@ namespace Arawn.GameCreator2.Networking.Melee
                 
                 var broadcast = new NetworkMeleeHitBroadcast
                 {
-                    AttackerNetworkId = request.AttackerNetworkId,
+                    AttackerNetworkId = request.ActorNetworkId,
                     TargetNetworkId = request.TargetNetworkId,
                     HitPoint = request.HitPoint,
                     StrikeDirection = request.StrikeDirection,
@@ -780,7 +839,7 @@ namespace Arawn.GameCreator2.Networking.Melee
                     // Create and broadcast reaction
                     var reactionBroadcast = attackerController.CreateReactionBroadcast(
                         request.TargetNetworkId,
-                        request.AttackerNetworkId,
+                        request.ActorNetworkId,
                         request.StrikeDirection,
                         response.Damage / 10f, // Normalize power
                         null // Let target pick appropriate reaction
@@ -794,7 +853,7 @@ namespace Arawn.GameCreator2.Networking.Melee
                     string blockStr = blockResult.Result != NetworkBlockResult.None 
                         ? $" (Block: {blockResult.Result})" 
                         : "";
-                    Debug.Log($"[NetworkMeleeManager] Hit broadcast: {request.AttackerNetworkId} -> {request.TargetNetworkId}{blockStr}");
+                    Debug.Log($"[NetworkMeleeManager] Hit broadcast: {request.ActorNetworkId} -> {request.TargetNetworkId}{blockStr}");
                 }
                 
                 OnHitValidated?.Invoke(broadcast);
@@ -885,7 +944,8 @@ namespace Arawn.GameCreator2.Networking.Melee
                 };
             }
             
-            var attackerNetworkChar = GetCharacterByNetworkId(request.AttackerNetworkId);
+            uint attackerNetworkId = request.ActorNetworkId != 0 ? request.ActorNetworkId : request.AttackerNetworkId;
+            var attackerNetworkChar = GetCharacterByNetworkId(attackerNetworkId);
             if (attackerNetworkChar == null)
             {
                 return new NetworkMeleeHitResponse
@@ -953,6 +1013,8 @@ namespace Arawn.GameCreator2.Networking.Melee
         
         private void ApplyDamageOnServer(NetworkMeleeHitRequest request, float damage)
         {
+            if (float.IsNaN(damage) || float.IsInfinity(damage) || damage <= 0f) return;
+
             // Get target character
             var targetNetworkChar = GetCharacterByNetworkId(request.TargetNetworkId);
             if (targetNetworkChar == null) return;
@@ -962,11 +1024,21 @@ namespace Arawn.GameCreator2.Networking.Melee
             
             if (ApplyDamageFunc != null)
             {
-                ApplyDamageFunc.Invoke(request, damage);
-                return;
+                try
+                {
+                    ApplyDamageFunc.Invoke(request, damage);
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogError(
+                        $"[NetworkMeleeManager] ApplyDamageFunc threw an exception. " +
+                        $"Falling back to built-in reaction damage path.\n{ex.Message}");
+                }
             }
 
-            var attackerNetworkChar = GetCharacterByNetworkId(request.AttackerNetworkId);
+            uint attackerNetworkId = request.ActorNetworkId != 0 ? request.ActorNetworkId : request.AttackerNetworkId;
+            var attackerNetworkChar = GetCharacterByNetworkId(attackerNetworkId);
             Vector3 incomingDirection = request.StrikeDirection.sqrMagnitude > 0.0001f
                 ? request.StrikeDirection.normalized
                 : attackerNetworkChar != null
@@ -983,9 +1055,11 @@ namespace Arawn.GameCreator2.Networking.Melee
             var args = new Args(attackerNetworkChar != null ? attackerNetworkChar.gameObject : null, targetCharacter.gameObject);
             _ = targetCharacter.Combat.GetHitReaction(reactionInput, args, null);
 
-            Debug.LogWarning(
-                $"[NetworkMeleeManager] ApplyDamageFunc not set. " +
-                $"Applied fallback hit reaction damage={damage:F2} target={targetCharacter.name}");
+            if (m_LogHitRequests)
+            {
+                Debug.Log(
+                    $"[NetworkMeleeManager] Applied built-in server reaction damage={damage:F2} target={targetCharacter.name}");
+            }
         }
         
         // ════════════════════════════════════════════════════════════════════════════════════════

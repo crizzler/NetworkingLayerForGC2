@@ -219,11 +219,12 @@ namespace Arawn.GameCreator2.Networking
 
         private void TestSecurityPassThrough()
         {
-            // With no NetworkSecurityManager singleton, all validation passes through
+            // SecurityIntegration only fails closed in authoritative server context.
+            // This runtime helper verifies the non-authoritative pass-through path.
             var ctx = NetworkRequestContext.Create(42, NetworkCorrelation.Compose(42, (ushort)1));
-            Assert("Security: null manager pass-through",
+            Assert("Security: non-authoritative pass-through",
                 SecurityIntegration.ValidateModuleRequest(1, in ctx, "Core", "Move"));
-            Assert("Security: ownership pass-through",
+            Assert("Security: ownership pass-through (non-authoritative)",
                 SecurityIntegration.ValidateOwnership(1, 1001, "Core"));
         }
 

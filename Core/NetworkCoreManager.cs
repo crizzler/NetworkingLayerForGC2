@@ -157,7 +157,41 @@ namespace Arawn.GameCreator2.Networking
 
         private static bool IsProtocolMismatch(uint actorNetworkId, uint correlationId)
         {
-            return actorNetworkId == 0 || correlationId == 0;
+            return SecurityIntegration.IsProtocolContextMismatch(actorNetworkId, correlationId);
+        }
+
+        private static bool TryValidateCoreActorBinding(
+            uint senderClientId,
+            uint actorNetworkId,
+            uint characterNetworkId,
+            string requestType,
+            out bool protocolMismatch)
+        {
+            protocolMismatch = false;
+
+            if (actorNetworkId == 0 || characterNetworkId == 0 || actorNetworkId != characterNetworkId)
+            {
+                protocolMismatch = true;
+                SecurityIntegration.RecordViolation(
+                    senderClientId,
+                    actorNetworkId,
+                    SecurityViolationType.ProtocolMismatch,
+                    "Core",
+                    $"{requestType} actor mismatch actor={actorNetworkId}, character={characterNetworkId}");
+                return false;
+            }
+
+            if (!SecurityIntegration.ValidateTargetEntityOwnership(
+                    senderClientId,
+                    actorNetworkId,
+                    characterNetworkId,
+                    "Core",
+                    requestType))
+            {
+                return false;
+            }
+
+            return true;
         }
         
         // ════════════════════════════════════════════════════════════════════════════════════════
@@ -192,6 +226,7 @@ namespace Arawn.GameCreator2.Networking
         
         private void OnDisable()
         {
+            SecurityIntegration.SetModuleServerContext("Core", false);
             UnwireController();
         }
         
@@ -211,6 +246,8 @@ namespace Arawn.GameCreator2.Networking
             }
             
             m_CoreController.Initialize(isServer, isClient);
+            SecurityIntegration.SetModuleServerContext("Core", isServer);
+            SecurityIntegration.EnsureSecurityManagerInitialized(isServer, () => GetServerTime?.Invoke() ?? Time.time);
             WireController();
             
             m_IsInitialized = true;
@@ -387,6 +424,25 @@ namespace Arawn.GameCreator2.Networking
                 });
                 return;
             }
+            if (!TryValidateCoreActorBinding(
+                    senderNetworkId,
+                    request.ActorNetworkId,
+                    request.CharacterNetworkId,
+                    nameof(NetworkRagdollRequest),
+                    out bool ragdollProtocolMismatch))
+            {
+                SendRagdollResponseToClient?.Invoke(senderNetworkId, new NetworkRagdollResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Approved = false,
+                    RejectReason = ragdollProtocolMismatch
+                        ? RagdollRejectReason.ProtocolMismatch
+                        : RagdollRejectReason.NotOwner
+                });
+                return;
+            }
             m_CoreController.ProcessRagdollRequest(senderNetworkId, request);
         }
         
@@ -437,6 +493,26 @@ namespace Arawn.GameCreator2.Networking
                 });
                 return;
             }
+            if (!TryValidateCoreActorBinding(
+                    senderNetworkId,
+                    request.ActorNetworkId,
+                    request.CharacterNetworkId,
+                    nameof(NetworkPropRequest),
+                    out bool propProtocolMismatch))
+            {
+                SendPropResponseToClient?.Invoke(senderNetworkId, new NetworkPropResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Approved = false,
+                    RejectReason = propProtocolMismatch
+                        ? PropRejectReason.ProtocolMismatch
+                        : PropRejectReason.NotOwner,
+                    PropInstanceId = 0
+                });
+                return;
+            }
             m_CoreController.ProcessPropRequest(senderNetworkId, request);
         }
         
@@ -483,6 +559,26 @@ namespace Arawn.GameCreator2.Networking
                     RejectReason = IsProtocolMismatch(request.ActorNetworkId, request.CorrelationId)
                         ? InvincibilityRejectReason.ProtocolMismatch
                         : InvincibilityRejectReason.SecurityViolation,
+                    ApprovedDuration = 0f
+                });
+                return;
+            }
+            if (!TryValidateCoreActorBinding(
+                    senderNetworkId,
+                    request.ActorNetworkId,
+                    request.CharacterNetworkId,
+                    nameof(NetworkInvincibilityRequest),
+                    out bool invincibilityProtocolMismatch))
+            {
+                SendInvincibilityResponseToClient?.Invoke(senderNetworkId, new NetworkInvincibilityResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Approved = false,
+                    RejectReason = invincibilityProtocolMismatch
+                        ? InvincibilityRejectReason.ProtocolMismatch
+                        : InvincibilityRejectReason.NotOwner,
                     ApprovedDuration = 0f
                 });
                 return;
@@ -538,6 +634,27 @@ namespace Arawn.GameCreator2.Networking
                 });
                 return;
             }
+            if (!TryValidateCoreActorBinding(
+                    senderNetworkId,
+                    request.ActorNetworkId,
+                    request.CharacterNetworkId,
+                    nameof(NetworkPoiseRequest),
+                    out bool poiseProtocolMismatch))
+            {
+                SendPoiseResponseToClient?.Invoke(senderNetworkId, new NetworkPoiseResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Approved = false,
+                    RejectReason = poiseProtocolMismatch
+                        ? PoiseRejectReason.ProtocolMismatch
+                        : PoiseRejectReason.NotOwner,
+                    CurrentPoise = 0f,
+                    IsBroken = false
+                });
+                return;
+            }
             m_CoreController.ProcessPoiseRequest(senderNetworkId, request);
         }
         
@@ -587,6 +704,25 @@ namespace Arawn.GameCreator2.Networking
                 });
                 return;
             }
+            if (!TryValidateCoreActorBinding(
+                    senderNetworkId,
+                    request.ActorNetworkId,
+                    request.CharacterNetworkId,
+                    nameof(NetworkBusyRequest),
+                    out bool busyProtocolMismatch))
+            {
+                SendBusyResponseToClient?.Invoke(senderNetworkId, new NetworkBusyResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Approved = false,
+                    RejectReason = busyProtocolMismatch
+                        ? BusyRejectReason.ProtocolMismatch
+                        : BusyRejectReason.NotOwner
+                });
+                return;
+            }
             m_CoreController.ProcessBusyRequest(senderNetworkId, request);
         }
         
@@ -633,6 +769,26 @@ namespace Arawn.GameCreator2.Networking
                     RejectReason = IsProtocolMismatch(request.ActorNetworkId, request.CorrelationId)
                         ? InteractionRejectReason.ProtocolMismatch
                         : InteractionRejectReason.SecurityViolation,
+                    ResultData = 0
+                });
+                return;
+            }
+            if (!TryValidateCoreActorBinding(
+                    senderNetworkId,
+                    request.ActorNetworkId,
+                    request.CharacterNetworkId,
+                    nameof(NetworkInteractionRequest),
+                    out bool interactionProtocolMismatch))
+            {
+                SendInteractionResponseToClient?.Invoke(senderNetworkId, new NetworkInteractionResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Approved = false,
+                    RejectReason = interactionProtocolMismatch
+                        ? InteractionRejectReason.ProtocolMismatch
+                        : InteractionRejectReason.NotOwner,
                     ResultData = 0
                 });
                 return;

@@ -370,11 +370,43 @@ namespace Arawn.GameCreator2.Networking.Security
     /// </summary>
     public class SequenceTracker
     {
-        private readonly Dictionary<uint, ushort> m_LastSequence = new(64);
-        private readonly Dictionary<uint, HashSet<ushort>> m_RecentSequences = new(64);
+        private readonly Dictionary<SequenceScopeKey, ushort> m_LastSequence = new(64);
+        private readonly Dictionary<SequenceScopeKey, HashSet<ushort>> m_RecentSequences = new(64);
         private static readonly List<ushort> s_SharedKeyBuffer = new(16);
+        private static readonly List<SequenceScopeKey> s_SharedScopeKeyBuffer = new(16);
         private const int MAX_RECENT = 32;
         private const int SEQUENCE_HALF_RANGE = 32768;
+
+        private readonly struct SequenceScopeKey : IEquatable<SequenceScopeKey>
+        {
+            public readonly uint ClientId;
+            public readonly uint ActorNetworkId;
+            public readonly string Module;
+
+            public SequenceScopeKey(uint clientId, string module, uint actorNetworkId)
+            {
+                ClientId = clientId;
+                ActorNetworkId = actorNetworkId;
+                Module = module ?? string.Empty;
+            }
+
+            public bool Equals(SequenceScopeKey other)
+            {
+                return ClientId == other.ClientId &&
+                       ActorNetworkId == other.ActorNetworkId &&
+                       string.Equals(Module, other.Module, StringComparison.Ordinal);
+            }
+
+            public override bool Equals(object obj)
+            {
+                return obj is SequenceScopeKey other && Equals(other);
+            }
+
+            public override int GetHashCode()
+            {
+                return HashCode.Combine(ClientId, ActorNetworkId, StringComparer.Ordinal.GetHashCode(Module));
+            }
+        }
         
         /// <summary>
         /// Validate a sequence number from a client.
@@ -382,10 +414,19 @@ namespace Arawn.GameCreator2.Networking.Security
         /// <returns>True if valid (not a replay), false if replay detected.</returns>
         public bool ValidateSequence(uint clientId, ushort sequence)
         {
-            if (!m_RecentSequences.TryGetValue(clientId, out var recent))
+            return ValidateSequence(clientId, string.Empty, 0u, sequence);
+        }
+
+        /// <summary>
+        /// Validate a sequence number scoped by client + module + actor.
+        /// </summary>
+        public bool ValidateSequence(uint clientId, string module, uint actorNetworkId, ushort sequence)
+        {
+            var scopeKey = new SequenceScopeKey(clientId, module, actorNetworkId);
+            if (!m_RecentSequences.TryGetValue(scopeKey, out var recent))
             {
                 recent = new HashSet<ushort>(MAX_RECENT);
-                m_RecentSequences[clientId] = recent;
+                m_RecentSequences[scopeKey] = recent;
             }
 
             // Reject duplicates immediately.
@@ -395,7 +436,7 @@ namespace Arawn.GameCreator2.Networking.Security
             }
 
             // Enforce strict monotonic progression with ushort wraparound support.
-            if (m_LastSequence.TryGetValue(clientId, out ushort lastSequence))
+            if (m_LastSequence.TryGetValue(scopeKey, out ushort lastSequence))
             {
                 if (!IsStrictlyNewer(sequence, lastSequence))
                 {
@@ -405,7 +446,7 @@ namespace Arawn.GameCreator2.Networking.Security
 
             recent.Add(sequence);
             PruneRecentWindow(recent, sequence);
-            m_LastSequence[clientId] = sequence;
+            m_LastSequence[scopeKey] = sequence;
             return true;
         }
 
@@ -440,8 +481,28 @@ namespace Arawn.GameCreator2.Networking.Security
         /// </summary>
         public void ClearClient(uint clientId)
         {
-            m_LastSequence.Remove(clientId);
-            m_RecentSequences.Remove(clientId);
+            s_SharedScopeKeyBuffer.Clear();
+            foreach (var key in m_LastSequence.Keys)
+            {
+                if (key.ClientId == clientId)
+                {
+                    s_SharedScopeKeyBuffer.Add(key);
+                }
+            }
+
+            foreach (var key in m_RecentSequences.Keys)
+            {
+                if (key.ClientId == clientId && !s_SharedScopeKeyBuffer.Contains(key))
+                {
+                    s_SharedScopeKeyBuffer.Add(key);
+                }
+            }
+
+            foreach (var key in s_SharedScopeKeyBuffer)
+            {
+                m_LastSequence.Remove(key);
+                m_RecentSequences.Remove(key);
+            }
         }
         
         /// <summary>

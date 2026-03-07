@@ -152,7 +152,10 @@ namespace Arawn.GameCreator2.Networking.Stats
             set
             {
                 m_IsServer = value;
+                SecurityIntegration.SetModuleServerContext("Stats", m_IsServer);
+                SecurityIntegration.EnsureSecurityManagerInitialized(m_IsServer, ResolveSecurityTimeProvider);
                 SyncPatchHooks();
+                if (m_IsServer) RefreshOwnedEntityMappings();
             }
         }
 
@@ -164,11 +167,14 @@ namespace Arawn.GameCreator2.Networking.Stats
         // ════════════════════════════════════════════════════════════════════════════════════════
         private void OnEnable()
         {
+            SecurityIntegration.SetModuleServerContext("Stats", m_IsServer);
+            SecurityIntegration.EnsureSecurityManagerInitialized(m_IsServer, ResolveSecurityTimeProvider);
             SyncPatchHooks();
         }
 
         private void OnDisable()
         {
+            SecurityIntegration.SetModuleServerContext("Stats", false);
             if (m_PatchHooks != null)
             {
                 m_PatchHooks.Initialize(false);
@@ -192,6 +198,7 @@ namespace Arawn.GameCreator2.Networking.Stats
             }
 
             m_Controllers[networkId] = controller;
+            RegisterOwnedEntityMapping(networkId);
 
             if (m_LogNetworkMessages)
             {
@@ -204,7 +211,13 @@ namespace Arawn.GameCreator2.Networking.Stats
         /// </summary>
         public void UnregisterController(uint networkId)
         {
-            if (m_Controllers.Remove(networkId) && m_LogNetworkMessages)
+            bool removed = m_Controllers.Remove(networkId);
+            if (removed)
+            {
+                SecurityIntegration.UnregisterEntity(networkId);
+            }
+
+            if (removed && m_LogNetworkMessages)
             {
                 Debug.Log($"[NetworkStatsManager] Unregistered controller for NetworkId={networkId}");
             }
@@ -303,9 +316,46 @@ namespace Arawn.GameCreator2.Networking.Stats
 
         private static StatRejectionReason GetSecurityRejection(uint actorNetworkId, uint correlationId)
         {
-            return actorNetworkId == 0 || correlationId == 0
+            return SecurityIntegration.IsProtocolContextMismatch(actorNetworkId, correlationId)
                 ? StatRejectionReason.ProtocolMismatch
                 : StatRejectionReason.SecurityViolation;
+        }
+
+        private void RegisterOwnedEntityMapping(uint entityNetworkId)
+        {
+            if (!m_IsServer || entityNetworkId == 0) return;
+
+            SecurityIntegration.RegisterEntityActor(entityNetworkId, entityNetworkId);
+
+            var bridge = NetworkTransportBridge.Active;
+            if (bridge != null && bridge.TryGetCharacterOwner(entityNetworkId, out uint ownerClientId) && ownerClientId != 0)
+            {
+                SecurityIntegration.RegisterEntityOwner(entityNetworkId, ownerClientId);
+            }
+        }
+
+        private void RefreshOwnedEntityMappings()
+        {
+            foreach (var kvp in m_Controllers)
+            {
+                RegisterOwnedEntityMapping(kvp.Key);
+            }
+        }
+
+        private static bool ValidateTargetOwnership(uint senderClientId, uint actorNetworkId, uint targetNetworkId, string requestType)
+        {
+            return SecurityIntegration.ValidateTargetEntityOwnership(
+                senderClientId,
+                actorNetworkId,
+                targetNetworkId,
+                "Stats",
+                requestType);
+        }
+
+        private static float ResolveSecurityTimeProvider()
+        {
+            var bridge = NetworkTransportBridge.Active;
+            return bridge != null && bridge.IsServer ? bridge.ServerTime : Time.time;
         }
 
         private void SyncPatchHooks()
@@ -353,6 +403,18 @@ namespace Arawn.GameCreator2.Networking.Stats
                     CorrelationId = request.CorrelationId,
                     Authorized = false,
                     RejectionReason = GetSecurityRejection(request.ActorNetworkId, request.CorrelationId)
+                });
+                return;
+            }
+            if (!ValidateTargetOwnership(senderClientId, request.ActorNetworkId, request.TargetNetworkId, nameof(NetworkStatModifyRequest)))
+            {
+                OnSendStatModifyResponse?.Invoke(senderClientId, new NetworkStatModifyResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Authorized = false,
+                    RejectionReason = StatRejectionReason.SecurityViolation
                 });
                 return;
             }
@@ -437,6 +499,18 @@ namespace Arawn.GameCreator2.Networking.Stats
                 });
                 return;
             }
+            if (!ValidateTargetOwnership(senderClientId, request.ActorNetworkId, request.TargetNetworkId, nameof(NetworkAttributeModifyRequest)))
+            {
+                OnSendAttributeModifyResponse?.Invoke(senderClientId, new NetworkAttributeModifyResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Authorized = false,
+                    RejectionReason = StatRejectionReason.SecurityViolation
+                });
+                return;
+            }
 
             if (!CheckAndIncrementPendingRequests(clientId))
             {
@@ -510,6 +584,18 @@ namespace Arawn.GameCreator2.Networking.Stats
                     CorrelationId = request.CorrelationId,
                     Authorized = false,
                     RejectionReason = GetSecurityRejection(request.ActorNetworkId, request.CorrelationId)
+                });
+                return;
+            }
+            if (!ValidateTargetOwnership(senderClientId, request.ActorNetworkId, request.TargetNetworkId, nameof(NetworkStatusEffectRequest)))
+            {
+                OnSendStatusEffectResponse?.Invoke(senderClientId, new NetworkStatusEffectResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Authorized = false,
+                    RejectionReason = StatRejectionReason.SecurityViolation
                 });
                 return;
             }
@@ -589,6 +675,18 @@ namespace Arawn.GameCreator2.Networking.Stats
                 });
                 return;
             }
+            if (!ValidateTargetOwnership(senderClientId, request.ActorNetworkId, request.TargetNetworkId, nameof(NetworkStatModifierRequest)))
+            {
+                OnSendStatModifierResponse?.Invoke(senderClientId, new NetworkStatModifierResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Authorized = false,
+                    RejectionReason = StatRejectionReason.SecurityViolation
+                });
+                return;
+            }
 
             if (!CheckAndIncrementPendingRequests(clientId))
             {
@@ -662,6 +760,18 @@ namespace Arawn.GameCreator2.Networking.Stats
                     CorrelationId = request.CorrelationId,
                     Authorized = false,
                     RejectionReason = GetSecurityRejection(request.ActorNetworkId, request.CorrelationId)
+                });
+                return;
+            }
+            if (!ValidateTargetOwnership(senderClientId, request.ActorNetworkId, request.TargetNetworkId, nameof(NetworkClearStatusEffectsRequest)))
+            {
+                OnSendClearStatusEffectsResponse?.Invoke(senderClientId, new NetworkClearStatusEffectsResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Authorized = false,
+                    RejectionReason = StatRejectionReason.SecurityViolation
                 });
                 return;
             }

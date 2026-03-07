@@ -651,15 +651,38 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 };
             }
 
-            // Basic server-side fire-rate throttling for impossible burst shots.
+            // Server-side fire-rate validation derived from weapon fire-rate.
             float now = Time.time;
-            if (now - m_LastServerValidatedShotTime < 0.02f)
+            float minShotInterval = GetServerMinShotInterval();
+            if (minShotInterval > 0f && now - m_LastServerValidatedShotTime < minShotInterval)
             {
                 return new NetworkShotResponse
                 {
                     RequestId = request.RequestId,
                     Validated = false,
                     RejectionReason = ShotRejectionReason.RateLimitExceeded
+                };
+            }
+
+            // Ensure lag-comp validator records this shot so subsequent hit requests can be
+            // cryptographically/structurally bound to an authoritative validated shot.
+            if (m_Validator == null)
+            {
+                m_Validator = new ShooterLagCompensationValidator(m_ValidationConfig);
+            }
+
+            ShotValidationResult shotValidation = m_Validator.ValidateShot(
+                request,
+                m_Character,
+                m_CurrentWeapon
+            );
+            if (!shotValidation.IsValid)
+            {
+                return new NetworkShotResponse
+                {
+                    RequestId = request.RequestId,
+                    Validated = false,
+                    RejectionReason = shotValidation.RejectionReason
                 };
             }
             
@@ -681,6 +704,24 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 RejectionReason = ShotRejectionReason.None,
                 AmmoRemaining = ammoRemaining
             };
+        }
+
+        private float GetServerMinShotInterval()
+        {
+            if (m_CurrentWeapon == null || m_CurrentWeaponData == null)
+            {
+                return 0.02f;
+            }
+
+            float fireRate = m_CurrentWeapon.Fire.FireRate(m_CurrentWeaponData.WeaponArgs);
+            if (float.IsNaN(fireRate) || float.IsInfinity(fireRate) || fireRate <= float.Epsilon)
+            {
+                return 0.02f;
+            }
+
+            // Allow slight tolerance for transport jitter while still blocking impossible cadence.
+            float interval = 1f / fireRate;
+            return Mathf.Clamp(interval * 0.9f, 0.01f, 2f);
         }
         
         /// <summary>
@@ -818,7 +859,35 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 };
             }
             
-            // Environment hit - always valid
+            // Environment hit - still validate against the authoritative shot trajectory.
+            if (m_Validator == null)
+            {
+                m_Validator = new ShooterLagCompensationValidator(m_ValidationConfig);
+            }
+
+            var environmentValidation = m_Validator.ValidateShotHit(
+                request,
+                m_Character,
+                m_CurrentWeapon
+            );
+
+            if (!environmentValidation.IsValid)
+            {
+                if (m_LogHits)
+                {
+                    Debug.Log($"[NetworkShooterController] Environment hit rejected: {environmentValidation}");
+                }
+
+                return new NetworkShooterHitResponse
+                {
+                    RequestId = request.RequestId,
+                    Validated = false,
+                    RejectionReason = MapValidationRejection(environmentValidation.RejectionReason),
+                    Damage = 0f,
+                    BlockResult = NetworkBlockResult.None
+                };
+            }
+
             MarkValidatedShotHitProcessed(request.SourceShotRequestId);
             return new NetworkShooterHitResponse
             {

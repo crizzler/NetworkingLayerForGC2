@@ -891,6 +891,46 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 Debug.Log($"[NetworkInventoryController] Received full snapshot: {snapshot.Cells?.Length ?? 0} cells");
             }
         }
+
+        public void ReceiveDelta(NetworkInventoryDelta delta)
+        {
+            if (m_IsServer) return;
+
+            if (delta.BagNetworkId != 0 && delta.BagNetworkId != NetworkId)
+            {
+                return;
+            }
+
+            const uint maskCells = 1u << 0;
+            const uint maskEquipment = 1u << 1;
+            const uint maskWealth = 1u << 2;
+
+            if ((delta.ChangeMask & maskCells) != 0 && delta.ChangedCells != null)
+            {
+                ApplyCellDelta(delta.ChangedCells);
+            }
+
+            if ((delta.ChangeMask & maskEquipment) != 0 && delta.ChangedEquipment != null)
+            {
+                ApplyEquipmentDelta(delta.ChangedEquipment);
+            }
+
+            if ((delta.ChangeMask & maskWealth) != 0 && delta.ChangedWealth != null)
+            {
+                ApplyWealthDelta(delta.ChangedWealth);
+            }
+
+            CacheCurrentSyncState();
+
+            if (m_LogAllChanges)
+            {
+                Debug.Log(
+                    $"[NetworkInventoryController] Applied partial delta (mask={delta.ChangeMask}) " +
+                    $"cells={delta.ChangedCells?.Length ?? 0} " +
+                    $"equipment={delta.ChangedEquipment?.Length ?? 0} " +
+                    $"wealth={delta.ChangedWealth?.Length ?? 0}");
+            }
+        }
         
         #endregion
         
@@ -906,8 +946,40 @@ namespace Arawn.GameCreator2.Networking.Inventory
         
         private void BroadcastDeltaState()
         {
-            // Implement delta tracking and broadcast
-            // This is complex due to the nature of inventory changes
+            bool cellsChanged = HasInventoryPositionStateChanged();
+            bool equipmentChanged = HasEquipmentStateChanged();
+            bool wealthChanged = HasWealthStateChanged();
+
+            if (!cellsChanged && !equipmentChanged && !wealthChanged)
+            {
+                return;
+            }
+
+            const uint maskCells = 1u << 0;
+            const uint maskEquipment = 1u << 1;
+            const uint maskWealth = 1u << 2;
+
+            var delta = new NetworkInventoryDelta
+            {
+                BagNetworkId = NetworkId,
+                Timestamp = Time.time,
+                ChangeMask = (cellsChanged ? maskCells : 0u) |
+                             (equipmentChanged ? maskEquipment : 0u) |
+                             (wealthChanged ? maskWealth : 0u),
+                ChangedCells = cellsChanged ? BuildChangedCellDelta() : Array.Empty<NetworkCell>(),
+                ChangedEquipment = equipmentChanged ? BuildChangedEquipmentDelta() : Array.Empty<NetworkEquipmentSlot>(),
+                ChangedWealth = wealthChanged ? BuildChangedWealthDelta() : Array.Empty<NetworkWealthEntry>()
+            };
+
+            NetworkInventoryManager.Instance?.BroadcastDelta(delta);
+            CacheCurrentSyncState();
+
+            if (m_LogAllChanges)
+            {
+                Debug.Log(
+                    $"[NetworkInventoryController] Broadcasted delta update (mask={delta.ChangeMask}) " +
+                    $"cells={delta.ChangedCells.Length} equipment={delta.ChangedEquipment.Length} wealth={delta.ChangedWealth.Length}");
+            }
         }
         
         /// <summary>
@@ -925,6 +997,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 if (cell == null || cell.Available) continue;
                 
                 var position = m_Bag.Content.FindPosition(cell.RootRuntimeItemID);
+                GetStackedRuntimeIdentity(cell, out long[] stackedRuntimeIds, out string[] stackedRuntimeIdStrings);
                 
                 cells.Add(new NetworkCell
                 {
@@ -932,7 +1005,8 @@ namespace Arawn.GameCreator2.Networking.Inventory
                     ItemHash = cell.Item.ID.Hash,
                     StackCount = cell.Count,
                     RootItem = ConvertToNetworkItem(cell.RootRuntimeItem),
-                    StackedRuntimeIds = GetStackedIds(cell)
+                    StackedRuntimeIds = stackedRuntimeIds,
+                    StackedRuntimeIdStrings = stackedRuntimeIdStrings
                 });
             }
             
@@ -1003,6 +1077,218 @@ namespace Arawn.GameCreator2.Networking.Inventory
             }
             foreach (var key in s_SharedKeyBuffer)
                 pending.Remove(key);
+        }
+
+        private bool HasInventoryPositionStateChanged()
+        {
+            Dictionary<long, Vector2Int> current = BuildCurrentPositionState();
+            return !DictionariesEqual(m_LastSyncedPositions, current);
+        }
+
+        private bool HasEquipmentStateChanged()
+        {
+            var current = new Dictionary<int, long>(Mathf.Max(1, m_Bag.Equipment.Count));
+            for (int i = 0; i < m_Bag.Equipment.Count; i++)
+            {
+                current[i] = m_Bag.Equipment.GetSlotRootRuntimeItemID(i).Hash;
+            }
+
+            return !DictionariesEqual(m_LastSyncedEquipment, current);
+        }
+
+        private bool HasWealthStateChanged()
+        {
+            var current = new Dictionary<int, int>(8);
+            foreach (IdString currencyId in m_Bag.Wealth.List)
+            {
+                current[currencyId.Hash] = m_Bag.Wealth.Get(currencyId);
+            }
+
+            return !DictionariesEqual(m_LastSyncedWealth, current);
+        }
+
+        private Dictionary<long, Vector2Int> BuildCurrentPositionState()
+        {
+            var current = new Dictionary<long, Vector2Int>(m_RuntimeItemMap.Count);
+            foreach (Cell cell in m_Bag.Content.CellList)
+            {
+                if (cell == null || cell.Available) continue;
+
+                Vector2Int position = m_Bag.Content.FindPosition(cell.RootRuntimeItemID);
+                foreach (IdString runtimeId in cell.List)
+                {
+                    current[runtimeId.Hash] = position;
+                }
+            }
+
+            return current;
+        }
+
+        private NetworkCell[] BuildChangedCellDelta()
+        {
+            Dictionary<long, Vector2Int> currentPositions = BuildCurrentPositionState();
+            var changedPositions = new HashSet<Vector2Int>();
+
+            foreach (KeyValuePair<long, Vector2Int> entry in currentPositions)
+            {
+                if (!m_LastSyncedPositions.TryGetValue(entry.Key, out Vector2Int previousPosition) ||
+                    previousPosition != entry.Value)
+                {
+                    changedPositions.Add(entry.Value);
+                }
+            }
+
+            foreach (KeyValuePair<long, Vector2Int> entry in m_LastSyncedPositions)
+            {
+                if (!currentPositions.ContainsKey(entry.Key))
+                {
+                    changedPositions.Add(entry.Value);
+                }
+            }
+
+            if (changedPositions.Count == 0) return Array.Empty<NetworkCell>();
+
+            var orderedPositions = new List<Vector2Int>(changedPositions);
+            orderedPositions.Sort((left, right) =>
+            {
+                int x = left.x.CompareTo(right.x);
+                return x != 0 ? x : left.y.CompareTo(right.y);
+            });
+
+            var changedCells = new List<NetworkCell>(orderedPositions.Count);
+            foreach (Vector2Int position in orderedPositions)
+            {
+                Cell cell = m_Bag.Content.GetContent(position);
+                if (cell == null || cell.Available)
+                {
+                    changedCells.Add(new NetworkCell
+                    {
+                        Position = position,
+                        ItemHash = 0,
+                        StackCount = 0,
+                        RootItem = default,
+                        StackedRuntimeIds = Array.Empty<long>(),
+                        StackedRuntimeIdStrings = Array.Empty<string>()
+                    });
+                    continue;
+                }
+
+                GetStackedRuntimeIdentity(cell, out long[] stackedRuntimeIds, out string[] stackedRuntimeIdStrings);
+                changedCells.Add(new NetworkCell
+                {
+                    Position = position,
+                    ItemHash = cell.Item.ID.Hash,
+                    StackCount = cell.Count,
+                    RootItem = ConvertToNetworkItem(cell.RootRuntimeItem),
+                    StackedRuntimeIds = stackedRuntimeIds,
+                    StackedRuntimeIdStrings = stackedRuntimeIdStrings
+                });
+            }
+
+            return changedCells.ToArray();
+        }
+
+        private NetworkEquipmentSlot[] BuildChangedEquipmentDelta()
+        {
+            var changedSlots = new List<NetworkEquipmentSlot>(Mathf.Max(1, m_Bag.Equipment.Count));
+            for (int i = 0; i < m_Bag.Equipment.Count; i++)
+            {
+                IdString slotRuntimeId = m_Bag.Equipment.GetSlotRootRuntimeItemID(i);
+                long currentRuntimeHash = slotRuntimeId.Hash;
+                if (m_LastSyncedEquipment.TryGetValue(i, out long previousRuntimeHash) &&
+                    previousRuntimeHash == currentRuntimeHash)
+                {
+                    continue;
+                }
+
+                changedSlots.Add(new NetworkEquipmentSlot
+                {
+                    SlotIndex = i,
+                    BaseItemHash = m_Bag.Equipment.GetSlotBaseID(i).Hash,
+                    IsOccupied = !string.IsNullOrEmpty(slotRuntimeId.String),
+                    EquippedRuntimeIdHash = currentRuntimeHash
+                });
+            }
+
+            return changedSlots.ToArray();
+        }
+
+        private NetworkWealthEntry[] BuildChangedWealthDelta()
+        {
+            var changedEntries = new List<NetworkWealthEntry>(m_Bag.Wealth.List.Count);
+            var seenCurrencyHashes = new HashSet<int>();
+
+            foreach (IdString currencyId in m_Bag.Wealth.List)
+            {
+                int hash = currencyId.Hash;
+                int amount = m_Bag.Wealth.Get(currencyId);
+                seenCurrencyHashes.Add(hash);
+
+                if (m_LastSyncedWealth.TryGetValue(hash, out int previousAmount) &&
+                    previousAmount == amount)
+                {
+                    continue;
+                }
+
+                changedEntries.Add(new NetworkWealthEntry
+                {
+                    CurrencyHash = hash,
+                    Amount = amount
+                });
+            }
+
+            foreach (KeyValuePair<int, int> entry in m_LastSyncedWealth)
+            {
+                if (seenCurrencyHashes.Contains(entry.Key)) continue;
+
+                changedEntries.Add(new NetworkWealthEntry
+                {
+                    CurrencyHash = entry.Key,
+                    Amount = 0
+                });
+            }
+
+            return changedEntries.ToArray();
+        }
+
+        private void CacheCurrentSyncState()
+        {
+            Dictionary<long, Vector2Int> currentPositions = BuildCurrentPositionState();
+            m_LastSyncedPositions.Clear();
+            foreach (KeyValuePair<long, Vector2Int> entry in currentPositions)
+            {
+                m_LastSyncedPositions[entry.Key] = entry.Value;
+            }
+
+            m_LastSyncedEquipment.Clear();
+            for (int i = 0; i < m_Bag.Equipment.Count; i++)
+            {
+                m_LastSyncedEquipment[i] = m_Bag.Equipment.GetSlotRootRuntimeItemID(i).Hash;
+            }
+
+            m_LastSyncedWealth.Clear();
+            foreach (IdString currencyId in m_Bag.Wealth.List)
+            {
+                m_LastSyncedWealth[currencyId.Hash] = m_Bag.Wealth.Get(currencyId);
+            }
+        }
+
+        private static bool DictionariesEqual<TKey, TValue>(
+            Dictionary<TKey, TValue> left,
+            Dictionary<TKey, TValue> right)
+        {
+            if (ReferenceEquals(left, right)) return true;
+            if (left == null || right == null) return false;
+            if (left.Count != right.Count) return false;
+
+            var comparer = EqualityComparer<TValue>.Default;
+            foreach (var entry in left)
+            {
+                if (!right.TryGetValue(entry.Key, out TValue value)) return false;
+                if (!comparer.Equals(entry.Value, value)) return false;
+            }
+
+            return true;
         }
         
         private bool TryResolveItem(int itemHash, string itemIdString, out Item item)
@@ -1118,6 +1404,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
             return new NetworkRuntimeItem
             {
                 ItemHash = runtimeItem.ItemID.Hash,
+                ItemIdString = runtimeItem.ItemID.String,
                 RuntimeIdHash = runtimeItem.RuntimeID.Hash,
                 RuntimeIdString = runtimeItem.RuntimeID.String,
                 Properties = properties.ToArray(),
@@ -1129,7 +1416,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
         {
             if (networkItem.ItemHash == 0) return null;
 
-            if (!TryResolveItem(networkItem.ItemHash, string.Empty, out Item item))
+            if (!TryResolveItem(networkItem.ItemHash, networkItem.ItemIdString, out Item item))
             {
                 return null;
             }
@@ -1183,6 +1470,109 @@ namespace Arawn.GameCreator2.Networking.Inventory
             return runtimeItem;
         }
 
+        private void ApplyCellDelta(NetworkCell[] changedCells)
+        {
+            if (changedCells == null) return;
+
+            foreach (NetworkCell cell in changedCells)
+            {
+                ClearCellAtPosition(cell.Position);
+
+                bool isDeleteEntry = cell.ItemHash == 0 || cell.StackCount <= 0 || cell.RootItem.ItemHash == 0;
+                if (isDeleteEntry)
+                {
+                    continue;
+                }
+
+                RuntimeItem rootItem = ReconstructRuntimeItem(cell.RootItem);
+                if (rootItem == null)
+                {
+                    continue;
+                }
+
+                bool addedRoot = m_Bag.Content.Add(rootItem, cell.Position, true);
+                if (!addedRoot)
+                {
+                    continue;
+                }
+
+                TrackRuntimeItemRecursive(rootItem);
+
+                int stackCount = Mathf.Max(1, cell.StackCount);
+                long[] stackedRuntimeIds = cell.StackedRuntimeIds;
+                string[] stackedRuntimeIdStrings = cell.StackedRuntimeIdStrings;
+                for (int i = 1; i < stackCount; i++)
+                {
+                    RuntimeItem stackedItem = new RuntimeItem(rootItem, true);
+                    int stackedIndex = i - 1;
+                    if (stackedRuntimeIds != null && stackedIndex < stackedRuntimeIds.Length)
+                    {
+                        string runtimeIdString = stackedRuntimeIdStrings != null && stackedIndex < stackedRuntimeIdStrings.Length
+                            ? stackedRuntimeIdStrings[stackedIndex]
+                            : null;
+                        TryApplyRuntimeId(stackedItem, runtimeIdString, stackedRuntimeIds[stackedIndex]);
+                    }
+
+                    if (m_Bag.Content.Add(stackedItem, cell.Position, true))
+                    {
+                        TrackRuntimeItemRecursive(stackedItem);
+                    }
+                }
+            }
+        }
+
+        private void ApplyEquipmentDelta(NetworkEquipmentSlot[] changedEquipment)
+        {
+            if (changedEquipment == null) return;
+
+            foreach (NetworkEquipmentSlot slot in changedEquipment)
+            {
+                if (slot.SlotIndex < 0 || slot.SlotIndex >= m_Bag.Equipment.Count)
+                {
+                    continue;
+                }
+
+                _ = m_Bag.Equipment.UnequipFromIndex(slot.SlotIndex);
+                if (!slot.IsOccupied)
+                {
+                    continue;
+                }
+
+                if (m_RuntimeItemMap.TryGetValue(slot.EquippedRuntimeIdHash, out RuntimeItem runtimeItem))
+                {
+                    _ = m_Bag.Equipment.EquipToIndex(runtimeItem, slot.SlotIndex);
+                }
+            }
+        }
+
+        private void ApplyWealthDelta(NetworkWealthEntry[] changedWealth)
+        {
+            if (changedWealth == null) return;
+
+            foreach (NetworkWealthEntry wealthEntry in changedWealth)
+            {
+                if (TryResolveCurrencyIdByHash(wealthEntry.CurrencyHash, out IdString currencyId))
+                {
+                    m_Bag.Wealth.Set(currencyId, wealthEntry.Amount);
+                }
+            }
+        }
+
+        private void ClearCellAtPosition(Vector2Int position)
+        {
+            int safety = 0;
+            while (safety++ < 256)
+            {
+                RuntimeItem removed = m_Bag.Content.Remove(position);
+                if (removed == null)
+                {
+                    break;
+                }
+
+                UntrackRuntimeItemRecursive(removed);
+            }
+        }
+
         private void ApplyFullSnapshot(NetworkInventorySnapshot snapshot)
         {
             ClearCurrentInventoryState();
@@ -1203,9 +1593,20 @@ namespace Arawn.GameCreator2.Networking.Inventory
                     TrackRuntimeItemRecursive(rootItem);
 
                     int stackCount = Mathf.Max(1, cell.StackCount);
+                    long[] stackedRuntimeIds = cell.StackedRuntimeIds;
+                    string[] stackedRuntimeIdStrings = cell.StackedRuntimeIdStrings;
                     for (int i = 1; i < stackCount; i++)
                     {
                         RuntimeItem stackedItem = new RuntimeItem(rootItem, true);
+                        int stackedIndex = i - 1;
+                        if (stackedRuntimeIds != null && stackedIndex < stackedRuntimeIds.Length)
+                        {
+                            string runtimeIdString = stackedRuntimeIdStrings != null && stackedIndex < stackedRuntimeIdStrings.Length
+                                ? stackedRuntimeIdStrings[stackedIndex]
+                                : null;
+                            TryApplyRuntimeId(stackedItem, runtimeIdString, stackedRuntimeIds[stackedIndex]);
+                        }
+
                         if (m_Bag.Content.Add(stackedItem, cell.Position, true))
                         {
                             TrackRuntimeItemRecursive(stackedItem);
@@ -1244,6 +1645,8 @@ namespace Arawn.GameCreator2.Networking.Inventory
                     }
                 }
             }
+
+            CacheCurrentSyncState();
         }
 
         private void ClearCurrentInventoryState()
@@ -1352,15 +1755,19 @@ namespace Arawn.GameCreator2.Networking.Inventory
             return false;
         }
         
-        private long[] GetStackedIds(Cell cell)
+        private static void GetStackedRuntimeIdentity(Cell cell, out long[] runtimeIds, out string[] runtimeIdStrings)
         {
             var ids = new List<long>();
+            var idStrings = new List<string>();
             foreach (var id in cell.List)
             {
-                if (id.Hash != cell.RootRuntimeItemID.Hash)
-                    ids.Add(id.Hash);
+                if (id.Hash == cell.RootRuntimeItemID.Hash) continue;
+                ids.Add(id.Hash);
+                idStrings.Add(id.String);
             }
-            return ids.ToArray();
+
+            runtimeIds = ids.ToArray();
+            runtimeIdStrings = idStrings.ToArray();
         }
     }
 }

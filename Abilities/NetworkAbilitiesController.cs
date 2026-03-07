@@ -7,6 +7,7 @@ using DaimahouGames.Runtime.Pawns;
 using DaimahouGames.Runtime.Core.Common;
 using GameCreator.Runtime.Characters;
 using GameCreator.Runtime.Common;
+using Arawn.GameCreator2.Networking.Security;
 
 // Suppress warnings for unused events and fields that are part of public API hooks
 #pragma warning disable CS0067 // Event is never used
@@ -188,6 +189,7 @@ namespace Arawn.GameCreator2.Networking
         
         // Cleanup timer
         private float m_LastCleanupTime;
+        private NetworkAbilitiesPatchHooks m_PatchHooks;
         
         // ════════════════════════════════════════════════════════════════════════════════════════
         // TRACKING STRUCTS
@@ -288,6 +290,17 @@ namespace Arawn.GameCreator2.Networking
                 CleanupExpiredEntries(currentTime);
             }
         }
+
+        protected override void OnSingletonCleanup()
+        {
+            SecurityIntegration.SetModuleServerContext("Abilities", false);
+
+            if (m_PatchHooks != null)
+            {
+                UnwirePatchHooks(m_PatchHooks);
+                m_PatchHooks.Initialize(false, false);
+            }
+        }
         
         // ════════════════════════════════════════════════════════════════════════════════════════
         // INITIALIZATION
@@ -300,8 +313,11 @@ namespace Arawn.GameCreator2.Networking
         {
             m_IsServer = true;
             m_IsClient = false;
+            SecurityIntegration.SetModuleServerContext("Abilities", true);
+            SecurityIntegration.EnsureSecurityManagerInitialized(true, () => GetServerTime?.Invoke() ?? Time.time);
             
             ClearAllState();
+            SyncPatchHooks();
             
             if (m_DebugLog)
             {
@@ -316,8 +332,11 @@ namespace Arawn.GameCreator2.Networking
         {
             m_IsServer = false;
             m_IsClient = true;
+            SecurityIntegration.SetModuleServerContext("Abilities", false);
+            SecurityIntegration.EnsureSecurityManagerInitialized(false, () => GetServerTime?.Invoke() ?? Time.time);
             
             ClearAllState();
+            SyncPatchHooks();
             
             if (m_DebugLog)
             {
@@ -332,13 +351,151 @@ namespace Arawn.GameCreator2.Networking
         {
             m_IsServer = true;
             m_IsClient = true;
+            SecurityIntegration.SetModuleServerContext("Abilities", true);
+            SecurityIntegration.EnsureSecurityManagerInitialized(true, () => GetServerTime?.Invoke() ?? Time.time);
             
             ClearAllState();
+            SyncPatchHooks();
             
             if (m_DebugLog)
             {
                 Debug.Log("[NetworkAbilitiesController] Initialized as Host");
             }
+        }
+
+        private void SyncPatchHooks()
+        {
+            bool enableHooks = m_IsServer || m_IsClient;
+            if (!enableHooks)
+            {
+                if (m_PatchHooks != null)
+                {
+                    UnwirePatchHooks(m_PatchHooks);
+                    m_PatchHooks.Initialize(false, false);
+                }
+
+                return;
+            }
+
+            if (m_PatchHooks == null)
+            {
+                m_PatchHooks = GetComponent<NetworkAbilitiesPatchHooks>();
+                if (m_PatchHooks == null)
+                {
+                    m_PatchHooks = gameObject.AddComponent<NetworkAbilitiesPatchHooks>();
+                }
+            }
+
+            WirePatchHooks(m_PatchHooks);
+            m_PatchHooks.Initialize(m_IsServer, m_IsClient);
+        }
+
+        private void WirePatchHooks(NetworkAbilitiesPatchHooks patchHooks)
+        {
+            if (patchHooks == null) return;
+
+            patchHooks.OnCastValidation = ValidatePatchedCastRequest;
+            patchHooks.OnLearnValidation = ValidatePatchedLearnRequest;
+            patchHooks.OnUnLearnValidation = ValidatePatchedUnlearnRequest;
+            patchHooks.OnCastCompleted = HandlePatchedCastCompleted;
+        }
+
+        private static void UnwirePatchHooks(NetworkAbilitiesPatchHooks patchHooks)
+        {
+            if (patchHooks == null) return;
+
+            patchHooks.OnCastValidation = null;
+            patchHooks.OnLearnValidation = null;
+            patchHooks.OnUnLearnValidation = null;
+            patchHooks.OnCastCompleted = null;
+        }
+
+        private bool ValidatePatchedCastRequest(Caster caster, Ability ability, ExtendedArgs args)
+        {
+            if (m_IsServer && args != null && args.Get<AutoConfirmInput>() != null)
+            {
+                return true;
+            }
+
+            if (!m_IsClient)
+            {
+                return m_IsServer;
+            }
+
+            uint casterNetworkId = ResolveCasterNetworkId(caster);
+            if (casterNetworkId == 0 || ability == null)
+            {
+                return m_IsServer;
+            }
+
+            Target target = args != null ? args.Get<Target>() : default;
+            RequestCastAbility(casterNetworkId, ability, target);
+            return false;
+        }
+
+        private bool ValidatePatchedLearnRequest(Caster caster, Ability ability, int slot)
+        {
+            if (!m_IsClient)
+            {
+                return m_IsServer;
+            }
+
+            uint casterNetworkId = ResolveCasterNetworkId(caster);
+            if (casterNetworkId == 0 || ability == null)
+            {
+                return m_IsServer;
+            }
+
+            RequestLearnAbility(casterNetworkId, ability, slot);
+            return false;
+        }
+
+        private bool ValidatePatchedUnlearnRequest(Caster caster, Ability ability)
+        {
+            if (!m_IsClient)
+            {
+                return m_IsServer;
+            }
+
+            uint casterNetworkId = ResolveCasterNetworkId(caster);
+            if (casterNetworkId == 0 || ability == null)
+            {
+                return m_IsServer;
+            }
+
+            int slot = caster.GetSlotFromAbility(ability);
+            if (slot < 0)
+            {
+                return m_IsServer;
+            }
+
+            RequestUnlearnAbility(casterNetworkId, slot);
+            return false;
+        }
+
+        private void HandlePatchedCastCompleted(Caster caster, Ability ability, bool success)
+        {
+            if (!m_DebugLog || caster == null || ability == null) return;
+
+            uint casterNetworkId = ResolveCasterNetworkId(caster);
+            Debug.Log($"[NetworkAbilitiesController] Patched cast completed (caster={casterNetworkId}, ability={ability.name}, success={success})");
+        }
+
+        private uint ResolveCasterNetworkId(Caster caster)
+        {
+            if (caster == null) return 0;
+
+            Pawn pawn = caster.Pawn;
+            if (pawn == null) return 0;
+
+            if (GetNetworkIdForPawn != null)
+            {
+                uint networkId = GetNetworkIdForPawn(pawn);
+                if (networkId != 0) return networkId;
+            }
+
+            var networkCharacter = pawn.GetComponent<NetworkCharacter>();
+            return networkCharacter != null ? networkCharacter.NetworkId : 0;
         }
         
         private void ClearAllState()

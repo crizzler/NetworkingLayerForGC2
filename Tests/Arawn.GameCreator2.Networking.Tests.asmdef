@@ -4,7 +4,8 @@
     "references": [
         "Arawn.GameCreator2.Networking",
         "Arawn.GameCreator2.Networking.Inventory",
-        "Arawn.GameCreator2.Networking.Stats"
+        "Arawn.GameCreator2.Networking.Stats",
+        "Arawn.GameCreator2.Networking.Editor"
     ],
     "includePlatforms": [
         "Editor"

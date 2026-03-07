@@ -17,6 +17,18 @@ namespace Arawn.GameCreator2.Networking.Tests
     /// </summary>
     public class NetworkingCoreTests
     {
+        [SetUp]
+        public void SetUp()
+        {
+            SecurityIntegration.ClearModuleServerContexts();
+        }
+
+        [TearDown]
+        public void TearDown()
+        {
+            SecurityIntegration.ClearModuleServerContexts();
+        }
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // STABLE HASH UTILITY
         // ════════════════════════════════════════════════════════════════════════════════════════
@@ -606,6 +618,24 @@ namespace Arawn.GameCreator2.Networking.Tests
         }
 
         [Test]
+        public void NetworkCorrelation_Compose_ExtractsActorSegment()
+        {
+            uint actorId = 0xABCD1234;
+            uint correlation = NetworkCorrelation.Compose(actorId, (ushort)42);
+
+            Assert.AreEqual((ushort)0x1234, NetworkCorrelation.ExtractActorSegment(correlation));
+        }
+
+        [Test]
+        public void NetworkCorrelation_MatchesActor_ReturnsFalseForDifferentActorSegment()
+        {
+            uint correlation = NetworkCorrelation.Compose(0x00001234, (ushort)9);
+
+            Assert.IsTrue(NetworkCorrelation.MatchesActor(correlation, 0xFFFF1234));
+            Assert.IsFalse(NetworkCorrelation.MatchesActor(correlation, 0xFFFF5678));
+        }
+
+        [Test]
         public void NetworkCorrelation_Next_SkipsZeroRequestId()
         {
             ushort counter = ushort.MaxValue;
@@ -613,6 +643,22 @@ namespace Arawn.GameCreator2.Networking.Tests
 
             Assert.AreEqual((ushort)1, counter);
             Assert.AreEqual((ushort)1, NetworkCorrelation.ExtractRequestId(correlation));
+        }
+
+        [Test]
+        public void SecurityIntegration_IsProtocolContextMismatch_DetectsActorSegmentMismatch()
+        {
+            uint correlation = NetworkCorrelation.Compose(0x00001234, (ushort)7);
+
+            Assert.IsTrue(SecurityIntegration.IsProtocolContextMismatch(0x00005678, correlation));
+            Assert.IsFalse(SecurityIntegration.IsProtocolContextMismatch(0xFFFF1234, correlation));
+        }
+
+        [Test]
+        public void SecurityIntegration_IsProtocolContextMismatch_DetectsZeroRequestSegment()
+        {
+            uint correlationWithZeroRequestSegment = (0x1234u << 16);
+            Assert.IsTrue(SecurityIntegration.IsProtocolContextMismatch(0x00001234, correlationWithZeroRequestSegment));
         }
 
         // ════════════════════════════════════════════════════════════════════════════════════════
@@ -712,6 +758,39 @@ namespace Arawn.GameCreator2.Networking.Tests
             Assert.IsTrue(tracker.ValidateSequence(2, 20));
         }
 
+        [Test]
+        public void SequenceTracker_ScopedByModule_AllowsSameSequenceAcrossModules()
+        {
+            var tracker = new SequenceTracker();
+            Assert.IsTrue(tracker.ValidateSequence(1, "Inventory", 1001, 1));
+            Assert.IsTrue(tracker.ValidateSequence(1, "Stats", 1001, 1));
+            Assert.IsFalse(tracker.ValidateSequence(1, "Inventory", 1001, 1));
+        }
+
+        [Test]
+        public void SequenceTracker_ScopedByActor_AllowsSameSequenceAcrossActors()
+        {
+            var tracker = new SequenceTracker();
+            Assert.IsTrue(tracker.ValidateSequence(1, "Core", 1001, 1));
+            Assert.IsTrue(tracker.ValidateSequence(1, "Core", 2002, 1));
+            Assert.IsFalse(tracker.ValidateSequence(1, "Core", 1001, 1));
+        }
+
+        [Test]
+        public void SequenceTracker_ClearClient_ClearsAllScopesForClient()
+        {
+            var tracker = new SequenceTracker();
+            Assert.IsTrue(tracker.ValidateSequence(1, "Shooter", 7001, 5));
+            Assert.IsTrue(tracker.ValidateSequence(1, "Abilities", 7001, 9));
+            Assert.IsTrue(tracker.ValidateSequence(2, "Shooter", 7001, 5));
+
+            tracker.ClearClient(1);
+
+            Assert.IsTrue(tracker.ValidateSequence(1, "Shooter", 7001, 5));
+            Assert.IsTrue(tracker.ValidateSequence(1, "Abilities", 7001, 9));
+            Assert.IsFalse(tracker.ValidateSequence(2, "Shooter", 7001, 5));
+        }
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // SECURITY PATH — REQUEST CONTEXT
         // ════════════════════════════════════════════════════════════════════════════════════════
@@ -807,47 +886,160 @@ namespace Arawn.GameCreator2.Networking.Tests
             Assert.AreEqual(7u, entityOwner);
         }
 
+        [Test]
+        public void OwnershipResolver_UnmappedEntityActorLookup_ReturnsFalse()
+        {
+            var resolver = new NetworkOwnershipResolver();
+            Assert.IsFalse(resolver.TryResolveActorNetworkIdForEntity(9999, out _));
+        }
+
+        [Test]
+        public void OwnershipResolver_EntityOwnerFallback_UsesDirectEntityOwnership()
+        {
+            var resolver = new NetworkOwnershipResolver();
+            resolver.RegisterEntityOwner(4001, 22);
+
+            Assert.IsTrue(resolver.TryResolveOwnerClientIdForEntity(4001, out uint owner));
+            Assert.AreEqual(22u, owner);
+        }
+
         // ════════════════════════════════════════════════════════════════════════════════════════
-        // SECURITY PATH — VALIDATE MODULE REQUEST (NULL MANAGER PASS-THROUGH)
+        // SECURITY PATH — VALIDATION BEHAVIOR WITH/WITHOUT SECURITY MANAGER
         // ════════════════════════════════════════════════════════════════════════════════════════
 
         [Test]
         public void SecurityIntegration_ValidateModuleRequest_NullManager_ReturnsTrue()
         {
-            // When NetworkSecurityManager.Instance is null (EditMode), all requests pass through
+            // Non-authoritative context should pass-through when manager is absent.
             var ctx = NetworkRequestContext.Create(42, NetworkCorrelation.Compose(42, (ushort)1));
             Assert.IsTrue(SecurityIntegration.ValidateModuleRequest(1, in ctx, "Core", "TestRequest"));
         }
 
         [Test]
+        public void SecurityIntegration_ValidateModuleRequest_NullManager_AuthoritativeModuleContext_ReturnsFalse()
+        {
+            SecurityIntegration.SetModuleServerContext("Core", true);
+            var ctx = NetworkRequestContext.Create(42, NetworkCorrelation.Compose(42, (ushort)1));
+
+            Assert.IsFalse(SecurityIntegration.ValidateModuleRequest(1, in ctx, "Core", "TestRequest"));
+        }
+
+        [Test]
         public void SecurityIntegration_ValidateOwnership_NullManager_ReturnsTrue()
         {
-            // When no manager exists, ownership validation passes through
+            // Non-authoritative context should pass-through when manager is absent.
             Assert.IsTrue(SecurityIntegration.ValidateOwnership(1, 1001, "Core"));
         }
 
         [Test]
-        public void SecurityIntegration_ValidateCoreRequest_NullManager_ReturnsTrue()
+        public void SecurityIntegration_ValidateOwnership_NullManager_AuthoritativeModuleContext_ReturnsFalse()
         {
-            Assert.IsTrue(SecurityIntegration.ValidateCoreRequest(1, 1001, 1, "Move"));
+            SecurityIntegration.SetModuleServerContext("Core", true);
+            Assert.IsFalse(SecurityIntegration.ValidateOwnership(1, 1001, "Core"));
         }
 
         [Test]
-        public void SecurityIntegration_ValidateStatsRequest_NullManager_ReturnsTrue()
+        public void SecurityIntegration_EnsureSecurityManagerInitialized_ServerWithoutManager_ReturnsFalse()
         {
-            Assert.IsTrue(SecurityIntegration.ValidateStatsRequest(1, 1001, 1, "ModifyStat", 42, 10f));
+            if (NetworkSecurityManager.Instance != null)
+            {
+                Assert.IsTrue(SecurityIntegration.EnsureSecurityManagerInitialized(true, () => 1f));
+                return;
+            }
+
+            Assert.IsFalse(SecurityIntegration.EnsureSecurityManagerInitialized(true, () => 1f));
         }
 
         [Test]
-        public void SecurityIntegration_ValidateMeleeRequest_NullManager_ReturnsTrue()
+        public void SecurityIntegration_EnsureSecurityManagerInitialized_InitializesExistingManager()
         {
-            Assert.IsTrue(SecurityIntegration.ValidateMeleeRequest(1, 1001, 1, "Attack"));
+            if (NetworkSecurityManager.Instance != null)
+            {
+                Assert.IsTrue(SecurityIntegration.EnsureSecurityManagerInitialized(true, () => 5f));
+                Assert.IsTrue(NetworkSecurityManager.Instance.IsInitialized);
+                Assert.IsTrue(NetworkSecurityManager.Instance.IsServer);
+                return;
+            }
+
+            var go = new UnityEngine.GameObject("SecurityManager_Test");
+            var manager = go.AddComponent<NetworkSecurityManager>();
+
+            try
+            {
+                Assert.IsFalse(manager.IsInitialized);
+                Assert.IsTrue(SecurityIntegration.EnsureSecurityManagerInitialized(true, () => 5f));
+                Assert.IsTrue(manager.IsInitialized);
+                Assert.IsTrue(manager.IsServer);
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(go);
+            }
         }
 
         [Test]
-        public void SecurityIntegration_ValidateShooterRequest_NullManager_ReturnsTrue()
+        public void SecurityIntegration_ValidateCoreRequest_NullManager_ReturnsFalse()
         {
-            Assert.IsTrue(SecurityIntegration.ValidateShooterRequest(1, 1001, 1, "Fire"));
+            if (NetworkSecurityManager.Instance != null)
+            {
+                Assert.IsTrue(SecurityIntegration.EnsureSecurityManagerInitialized(true, () => 1f));
+                Assert.IsTrue(SecurityIntegration.ValidateCoreRequest(1, 1001, 1, "Move"));
+                return;
+            }
+
+            Assert.IsFalse(SecurityIntegration.ValidateCoreRequest(1, 1001, 1, "Move"));
+        }
+
+        [Test]
+        public void SecurityIntegration_ValidateStatsRequest_NullManager_ReturnsFalse()
+        {
+            if (NetworkSecurityManager.Instance != null)
+            {
+                Assert.IsTrue(SecurityIntegration.EnsureSecurityManagerInitialized(true, () => 1f));
+                Assert.IsTrue(SecurityIntegration.ValidateStatsRequest(1, 1001, 1, "ModifyStat", 42, 10f));
+                return;
+            }
+
+            Assert.IsFalse(SecurityIntegration.ValidateStatsRequest(1, 1001, 1, "ModifyStat", 42, 10f));
+        }
+
+        [Test]
+        public void SecurityIntegration_ValidateMeleeRequest_NullManager_ReturnsFalse()
+        {
+            if (NetworkSecurityManager.Instance != null)
+            {
+                Assert.IsTrue(SecurityIntegration.EnsureSecurityManagerInitialized(true, () => 1f));
+                Assert.IsTrue(SecurityIntegration.ValidateMeleeRequest(1, 1001, 1, "Attack"));
+                return;
+            }
+
+            Assert.IsFalse(SecurityIntegration.ValidateMeleeRequest(1, 1001, 1, "Attack"));
+        }
+
+        [Test]
+        public void SecurityIntegration_ValidateShooterRequest_NullManager_ReturnsFalse()
+        {
+            if (NetworkSecurityManager.Instance != null)
+            {
+                Assert.IsTrue(SecurityIntegration.EnsureSecurityManagerInitialized(true, () => 1f));
+                Assert.IsTrue(SecurityIntegration.ValidateShooterRequest(1, 1001, 1, "Fire"));
+                return;
+            }
+
+            Assert.IsFalse(SecurityIntegration.ValidateShooterRequest(1, 1001, 1, "Fire"));
+        }
+
+        [Test]
+        public void SecurityIntegration_ValidateAbilitiesRequest_NullManager_ReturnsFalse()
+        {
+            if (NetworkSecurityManager.Instance != null)
+            {
+                Assert.IsTrue(SecurityIntegration.EnsureSecurityManagerInitialized(true, () => 1f));
+                Assert.IsTrue(SecurityIntegration.ValidateAbilitiesRequest(1, 1001, 1, "Cast"));
+                return;
+            }
+
+            Assert.IsFalse(SecurityIntegration.ValidateAbilitiesRequest(1, 1001, 1, "Cast"));
         }
 
         [Test]

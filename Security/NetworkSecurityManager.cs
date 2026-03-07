@@ -72,6 +72,7 @@ namespace Arawn.GameCreator2.Networking.Security
         // ════════════════════════════════════════════════════════════════════════════════════════
         
         private bool m_IsServer;
+        private bool m_IsInitialized;
         private Func<float> m_GetServerTime;
         
         // Per-module rate limiters
@@ -93,6 +94,7 @@ namespace Arawn.GameCreator2.Networking.Security
         public NetworkSecurityConfig GlobalConfig => m_Config;
         public SecurityStats Stats => m_Stats;
         public bool IsServer => m_IsServer;
+        public bool IsInitialized => m_IsInitialized;
         
         // ════════════════════════════════════════════════════════════════════════════════════════
         // UNITY LIFECYCLE
@@ -105,6 +107,15 @@ namespace Arawn.GameCreator2.Networking.Security
                 m_Config.ViolationThreshold,
                 m_Config.ViolationWindow
             );
+        }
+
+        protected override void OnSingletonCleanup()
+        {
+            m_IsServer = false;
+            m_IsInitialized = false;
+            m_GetServerTime = null;
+            m_RateLimiters.Clear();
+            m_SequenceTracker.Clear();
         }
         
         // ════════════════════════════════════════════════════════════════════════════════════════
@@ -120,6 +131,7 @@ namespace Arawn.GameCreator2.Networking.Security
         {
             m_IsServer = isServer;
             m_GetServerTime = getServerTime;
+            m_IsInitialized = true;
             
             // Create rate limiters for each module
             CreateRateLimiter("Core");
@@ -311,12 +323,21 @@ namespace Arawn.GameCreator2.Networking.Security
         /// </summary>
         public bool ValidateSequence(uint clientId, ushort requestId, string module)
         {
+            return ValidateSequence(clientId, 0u, requestId, module);
+        }
+
+        /// <summary>
+        /// Validate a request sequence number for replay attack prevention,
+        /// scoped to client + module + actor to avoid cross-module collisions.
+        /// </summary>
+        public bool ValidateSequence(uint clientId, uint actorNetworkId, ushort requestId, string module)
+        {
             if (!m_IsServer) return true;
             
-            if (!m_SequenceTracker.ValidateSequence(clientId, requestId))
+            if (!m_SequenceTracker.ValidateSequence(clientId, module, actorNetworkId, requestId))
             {
-                RecordViolation(clientId, 0, SecurityViolationType.ReplayAttack, module,
-                    $"Duplicate request ID: {requestId}");
+                RecordViolation(clientId, actorNetworkId, SecurityViolationType.ReplayAttack, module,
+                    $"Replay or out-of-order sequence: requestId={requestId}, actor={actorNetworkId}");
                 return false;
             }
             

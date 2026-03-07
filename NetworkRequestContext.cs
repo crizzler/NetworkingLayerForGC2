@@ -70,5 +70,15 @@ namespace Arawn.GameCreator2.Networking
         {
             return (ushort)(correlationId & 0xFFFFu);
         }
+
+        public static ushort ExtractActorSegment(uint correlationId)
+        {
+            return (ushort)((correlationId >> 16) & 0xFFFFu);
+        }
+
+        public static bool MatchesActor(uint correlationId, uint actorNetworkId)
+        {
+            return ExtractActorSegment(correlationId) == (ushort)(actorNetworkId & 0xFFFFu);
+        }
     }
 }

@@ -178,6 +178,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
     public struct NetworkRuntimeItem
     {
         public int ItemHash;                       // 4 bytes - Item.ID hash
+        public string ItemIdString;                // Variable - Deterministic item ID string
         public long RuntimeIdHash;                 // 8 bytes - RuntimeItem.RuntimeID hash (use long for uniqueness)
         public string RuntimeIdString;             // Variable - Full RuntimeID string for reconstruction
         public NetworkRuntimeProperty[] Properties; // Variable
@@ -191,6 +192,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
             get
             {
                 int size = 12; // Base fields
+                size += (ItemIdString?.Length ?? 0) * 2;
                 size += (RuntimeIdString?.Length ?? 0) * 2;
                 size += (Properties?.Length ?? 0) * 16;
                 size += (Sockets?.Length ?? 0) * 12;
@@ -210,6 +212,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public int StackCount;                     // 4 bytes
         public NetworkRuntimeItem RootItem;        // Variable - The root item of the stack
         public long[] StackedRuntimeIds;           // Variable - RuntimeIDs of stacked items
+        public string[] StackedRuntimeIdStrings;   // Variable - RuntimeID strings of stacked items
     }
     
     // ════════════════════════════════════════════════════════════════════════════════════════════

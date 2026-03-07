@@ -23,13 +23,69 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
             "Plugins/GameCreator/Packages/Inventory/Runtime/Classes/Bag/Content/TBagContent.cs",
             "Plugins/GameCreator/Packages/Inventory/Runtime/Classes/Bag/Wealth/BagWealth.cs"
         };
+
+        protected override string[] GetRequiredPatchTokens(string relativePath)
+        {
+            if (relativePath.EndsWith("TBagContent.cs"))
+            {
+                return new[]
+                {
+                    "NetworkAddValidator",
+                    "NetworkRemoveValidator",
+                    "NetworkMoveValidator",
+                    "NetworkDropValidator",
+                    "NetworkUseValidator",
+                    "UseDirect(",
+                    "DropDirect("
+                };
+            }
+
+            if (relativePath.EndsWith("BagWealth.cs"))
+            {
+                return new[]
+                {
+                    "NetworkAddValidator",
+                    "NetworkSetValidator",
+                    "SetDirect(",
+                    "AddDirect("
+                };
+            }
+
+            return base.GetRequiredPatchTokens(relativePath);
+        }
+
+        protected override System.Collections.Generic.Dictionary<string, int> GetRequiredPatchTokenCounts(string relativePath)
+        {
+            if (relativePath.EndsWith("TBagContent.cs"))
+            {
+                return new System.Collections.Generic.Dictionary<string, int>
+                {
+                    { "NetworkUseValidator.Invoke", 1 },
+                    { "NetworkDropValidator.Invoke", 1 },
+                    { "NetworkAddValidator.Invoke", 1 },
+                    { "NetworkRemoveValidator.Invoke", 1 },
+                    { "NetworkMoveValidator.Invoke", 1 }
+                };
+            }
+
+            if (relativePath.EndsWith("BagWealth.cs"))
+            {
+                return new System.Collections.Generic.Dictionary<string, int>
+                {
+                    { "NetworkSetValidator.Invoke", 1 },
+                    { "NetworkAddValidator.Invoke", 1 }
+                };
+            }
+
+            return base.GetRequiredPatchTokenCounts(relativePath);
+        }
         
         protected override bool PatchFile(string relativePath)
         {
             string content = ReadFile(relativePath);
             
             // Check if already patched
-            if (content.Contains(PatchMarker))
+            if (ContainsPatchMarker(content))
             {
                 Debug.LogWarning($"[GC2 Networking] {relativePath} already contains patch marker.");
                 return true;
@@ -99,13 +155,14 @@ namespace GameCreator.Runtime.Inventory
         // [GC2_NETWORK_PATCH_END]
 ";
 
-            if (!content.Contains(originalUsings))
+            if (!TryReplaceRequired(
+                    ref content,
+                    originalUsings,
+                    patchedUsings,
+                    "[GC2 Networking] Could not find expected using statements in TBagContent.cs."))
             {
-                Debug.LogError("[GC2 Networking] Could not find expected using statements in TBagContent.cs.");
                 return false;
             }
-            
-            content = content.Replace(originalUsings, patchedUsings);
             
             // Patch the Use(RuntimeItem) method
             string originalUse = @"        public virtual bool Use(RuntimeItem runtimeItem)
@@ -151,13 +208,14 @@ namespace GameCreator.Runtime.Inventory
         }
         // [GC2_NETWORK_PATCH_END]";
 
-            if (!content.Contains(originalUse))
+            if (!TryReplaceRequired(
+                    ref content,
+                    originalUse,
+                    patchedUse,
+                    "[GC2 Networking] Could not find expected Use method in TBagContent.cs."))
             {
-                Debug.LogError("[GC2 Networking] Could not find expected Use method in TBagContent.cs.");
                 return false;
             }
-            
-            content = content.Replace(originalUse, patchedUse);
             
             // Patch the Drop method
             string originalDrop = @"        public GameObject Drop(RuntimeItem runtimeItem, Vector3 point)
@@ -206,13 +264,14 @@ namespace GameCreator.Runtime.Inventory
         }
         // [GC2_NETWORK_PATCH_END]";
 
-            if (!content.Contains(originalDrop))
+            if (!TryReplaceRequired(
+                    ref content,
+                    originalDrop,
+                    patchedDrop,
+                    "[GC2 Networking] Could not find expected Drop method in TBagContent.cs."))
             {
-                Debug.LogError("[GC2 Networking] Could not find expected Drop method in TBagContent.cs.");
                 return false;
             }
-            
-            content = content.Replace(originalDrop, patchedDrop);
             
             // Add network-aware ExecuteEventAdd/Remove methods after the protected methods
             string originalProtectedMethods = @"        protected void ExecuteEventChange()
@@ -267,13 +326,14 @@ namespace GameCreator.Runtime.Inventory
         
         // [GC2_NETWORK_PATCH_END]";
 
-            if (!content.Contains(originalProtectedMethods))
+            if (!TryReplaceRequired(
+                    ref content,
+                    originalProtectedMethods,
+                    patchedProtectedMethods,
+                    "[GC2 Networking] Could not find expected protected methods in TBagContent.cs."))
             {
-                Debug.LogError("[GC2 Networking] Could not find expected protected methods in TBagContent.cs.");
                 return false;
             }
-            
-            content = content.Replace(originalProtectedMethods, patchedProtectedMethods);
             
             WriteFile(relativePath, content);
             Debug.Log($"[GC2 Networking] Patched {relativePath}");
@@ -323,13 +383,14 @@ namespace GameCreator.Runtime.Inventory
         // [GC2_NETWORK_PATCH_END]
 ";
 
-            if (!content.Contains(originalUsings))
+            if (!TryReplaceRequired(
+                    ref content,
+                    originalUsings,
+                    patchedUsings,
+                    "[GC2 Networking] Could not find expected using statements in BagWealth.cs."))
             {
-                Debug.LogError("[GC2 Networking] Could not find expected using statements in BagWealth.cs.");
                 return false;
             }
-            
-            content = content.Replace(originalUsings, patchedUsings);
             
             // Patch the Set method
             string originalSet = @"        public void Set(IdString currencyID, int value)
@@ -367,13 +428,14 @@ namespace GameCreator.Runtime.Inventory
         }
         // [GC2_NETWORK_PATCH_END]";
 
-            if (!content.Contains(originalSet))
+            if (!TryReplaceRequired(
+                    ref content,
+                    originalSet,
+                    patchedSet,
+                    "[GC2 Networking] Could not find expected Set method in BagWealth.cs."))
             {
-                Debug.LogError("[GC2 Networking] Could not find expected Set method in BagWealth.cs.");
                 return false;
             }
-            
-            content = content.Replace(originalSet, patchedSet);
             
             // Patch the Add method
             string originalAdd = @"        public void Add(IdString currencyID, int value)
@@ -403,13 +465,14 @@ namespace GameCreator.Runtime.Inventory
         }
         // [GC2_NETWORK_PATCH_END]";
 
-            if (!content.Contains(originalAdd))
+            if (!TryReplaceRequired(
+                    ref content,
+                    originalAdd,
+                    patchedAdd,
+                    "[GC2 Networking] Could not find expected Add method in BagWealth.cs."))
             {
-                Debug.LogError("[GC2 Networking] Could not find expected Add method in BagWealth.cs.");
                 return false;
             }
-            
-            content = content.Replace(originalAdd, patchedAdd);
             
             WriteFile(relativePath, content);
             Debug.Log($"[GC2 Networking] Patched {relativePath}");

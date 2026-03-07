@@ -259,6 +259,8 @@ namespace Arawn.GameCreator2.Networking.Inventory
             {
                 m_LastSyncedWealth[currencyId.Hash] = m_Bag.Wealth.Get(currencyId);
             }
+
+            CacheCurrentSyncState();
         }
         
         private void SubscribeToBagEvents()

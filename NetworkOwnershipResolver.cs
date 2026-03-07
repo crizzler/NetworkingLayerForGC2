@@ -47,8 +47,7 @@ namespace Arawn.GameCreator2.Networking
                 return true;
             }
 
-            actorNetworkId = entityNetworkId;
-            return true;
+            return false;
         }
 
         public bool TryResolveOwnerClientIdForEntity(uint entityNetworkId, out uint ownerClientId)
@@ -56,17 +55,32 @@ namespace Arawn.GameCreator2.Networking
             ownerClientId = 0;
             if (entityNetworkId == 0) return false;
 
+            bool hasActorMapping = TryResolveActorNetworkIdForEntity(entityNetworkId, out uint actorNetworkId);
+
+            // Prefer authoritative actor/character ownership (transport bridge).
+            if (hasActorMapping && TryResolveOwnerClientId(actorNetworkId, out ownerClientId))
+            {
+                return true;
+            }
+
+            // Fallback for entity IDs that are already actor/character IDs.
+            if (TryResolveOwnerClientId(entityNetworkId, out ownerClientId))
+            {
+                return true;
+            }
+
+            // Last-resort explicit entity owner cache.
             if (m_EntityOwnerByNetworkId.TryGetValue(entityNetworkId, out ownerClientId))
             {
                 return true;
             }
 
-            if (!TryResolveActorNetworkIdForEntity(entityNetworkId, out uint actorNetworkId))
+            if (hasActorMapping && m_EntityOwnerByNetworkId.TryGetValue(actorNetworkId, out ownerClientId))
             {
-                return false;
+                return true;
             }
 
-            return TryResolveOwnerClientId(actorNetworkId, out ownerClientId);
+            return false;
         }
 
         public bool ValidateOwnership(uint senderClientId, uint actorNetworkId, out uint resolvedOwnerClientId)

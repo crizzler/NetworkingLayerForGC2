@@ -7,6 +7,7 @@ using UnityEngine;
 using GameCreator.Runtime.Characters;
 using GameCreator.Runtime.Common;
 using GameCreator.Editor.Characters;
+using Arawn.GameCreator2.Networking.Security;
 
 #if UNITY_NETCODE
 using Unity.Netcode;
@@ -61,6 +62,7 @@ namespace Arawn.GameCreator2.Networking.Editor
 
         private bool m_CreateNetworkManager = true;
         private bool m_CreateTransportBridge = true;
+        private bool m_CreateSecurityManager = true;
         private bool m_AssignAssetsToSceneComponents = true;
 
         private bool m_CreateNetworkPlayer = true;
@@ -121,6 +123,11 @@ namespace Arawn.GameCreator2.Networking.Editor
         private static readonly GUIContent GUI_CREATE_BRIDGE = new GUIContent(
             "Ensure Netcode Transport Bridge",
             "Creates/reuses NetcodeGameObjectsTransportBridge and (if profile exists) assigns Global Session Profile."
+        );
+
+        private static readonly GUIContent GUI_CREATE_SECURITY_MANAGER = new GUIContent(
+            "Ensure Network Security Manager",
+            "Creates/reuses NetworkSecurityManager so module security validation and rate limiting can initialize safely in server mode."
         );
 
         private static readonly GUIContent GUI_TRANSPORT_MODE = new GUIContent(
@@ -369,6 +376,13 @@ namespace Arawn.GameCreator2.Networking.Editor
                 MessageType.Warning
             );
 #endif
+
+            m_CreateSecurityManager = DrawToggleWithGuidance(
+                GUI_CREATE_SECURITY_MANAGER,
+                m_CreateSecurityManager,
+                "You want server-side security validation, rate limiting, and violation tracking available by default.",
+                "Your project creates and configures NetworkSecurityManager through a custom bootstrap pipeline."
+            );
 
             m_AssignAssetsToSceneComponents = DrawToggleWithGuidance(
                 GUI_ASSIGN_SCENE_ASSETS,
@@ -625,6 +639,11 @@ namespace Arawn.GameCreator2.Networking.Editor
                 }
 #endif
 
+                if (m_CreateSecurityManager)
+                {
+                    EnsureSecurityManager(setupRoot, report);
+                }
+
                 if (m_CreateNetworkPlayer)
                 {
                     EnsureNetworkPlayerTemplate(
@@ -863,6 +882,26 @@ namespace Arawn.GameCreator2.Networking.Editor
             }
         }
 #endif
+
+        private void EnsureSecurityManager(GameObject setupRoot, SetupReport report)
+        {
+            var securityManager = FindFirstObjectByType<NetworkSecurityManager>();
+            if (securityManager == null)
+            {
+                var go = new GameObject("Network Security Manager");
+                if (setupRoot != null) go.transform.SetParent(setupRoot.transform);
+
+                securityManager = go.AddComponent<NetworkSecurityManager>();
+                Undo.RegisterCreatedObjectUndo(go, "Create Network Security Manager");
+                report.Created.AppendLine("- Scene Object: Network Security Manager");
+            }
+            else
+            {
+                report.Updated.AppendLine("- Reused existing Network Security Manager.");
+            }
+
+            EditorUtility.SetDirty(securityManager);
+        }
 
         private void EnsureNetworkPlayerTemplate(
             GameObject setupRoot,

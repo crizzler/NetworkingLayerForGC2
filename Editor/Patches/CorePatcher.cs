@@ -39,13 +39,91 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
             "Plugins/GameCreator/Packages/Core/Runtime/Characters/Features/Dash/Dash.cs",
             "Plugins/GameCreator/Packages/Core/Runtime/Characters/Components/Character.cs"
         };
+
+        protected override string[] GetRequiredPatchTokens(string relativePath)
+        {
+            if (relativePath.EndsWith("Invincibility.cs"))
+            {
+                return new[] { "NetworkSetValidator", "SetDirect(" };
+            }
+
+            if (relativePath.EndsWith("Poise.cs"))
+            {
+                return new[] { "NetworkDamageValidator", "DamageDirect(", "ResetDirect(" };
+            }
+
+            if (relativePath.EndsWith("Jump.cs"))
+            {
+                return new[] { "NetworkJumpValidator", "DoDirect(" };
+            }
+
+            if (relativePath.EndsWith("Dash.cs"))
+            {
+                return new[] { "NetworkDashValidator", "ExecuteDirect(" };
+            }
+
+            if (relativePath.EndsWith("Character.cs"))
+            {
+                return new[] { "NetworkIsDeadValidator", "SetIsDeadDirect(" };
+            }
+
+            return base.GetRequiredPatchTokens(relativePath);
+        }
+
+        protected override System.Collections.Generic.Dictionary<string, int> GetRequiredPatchTokenCounts(string relativePath)
+        {
+            if (relativePath.EndsWith("Invincibility.cs"))
+            {
+                return new System.Collections.Generic.Dictionary<string, int>
+                {
+                    { "NetworkSetValidator.Invoke", 1 }
+                };
+            }
+
+            if (relativePath.EndsWith("Poise.cs"))
+            {
+                return new System.Collections.Generic.Dictionary<string, int>
+                {
+                    { "NetworkDamageValidator.Invoke", 1 },
+                    { "NetworkSetValidator.Invoke", 1 },
+                    { "NetworkResetValidator.Invoke", 1 }
+                };
+            }
+
+            if (relativePath.EndsWith("Jump.cs"))
+            {
+                return new System.Collections.Generic.Dictionary<string, int>
+                {
+                    { "NetworkJumpValidator.Invoke", 1 },
+                    { "NetworkJumpForceValidator.Invoke", 1 }
+                };
+            }
+
+            if (relativePath.EndsWith("Dash.cs"))
+            {
+                return new System.Collections.Generic.Dictionary<string, int>
+                {
+                    { "NetworkDashValidator.Invoke", 1 }
+                };
+            }
+
+            if (relativePath.EndsWith("Character.cs"))
+            {
+                return new System.Collections.Generic.Dictionary<string, int>
+                {
+                    { "NetworkIsDeadValidator.Invoke", 1 }
+                };
+            }
+
+            return base.GetRequiredPatchTokenCounts(relativePath);
+        }
         
         protected override bool PatchFile(string relativePath)
         {
             string content = ReadFile(relativePath);
             
             // Check if already patched
-            if (content.Contains(PatchMarker))
+            if (ContainsPatchMarker(content))
             {
                 Debug.LogWarning($"[GC2 Networking] {relativePath} already contains patch marker.");
                 return true;
@@ -112,13 +190,14 @@ namespace GameCreator.Runtime.Characters
         // [GC2_NETWORK_PATCH_END]
 ";
 
-            if (!content.Contains(originalUsings))
+            if (!TryReplaceRequired(
+                    ref content,
+                    originalUsings,
+                    patchedUsings,
+                    "[GC2 Networking] Could not find expected structure in Invincibility.cs."))
             {
-                Debug.LogError("[GC2 Networking] Could not find expected structure in Invincibility.cs.");
                 return false;
             }
-            
-            content = content.Replace(originalUsings, patchedUsings);
             
             // Patch Set method
             string originalSet = @"        public void Set(float duration)
@@ -167,13 +246,14 @@ namespace GameCreator.Runtime.Characters
         }
         // [GC2_NETWORK_PATCH_END]";
 
-            if (!content.Contains(originalSet))
+            if (!TryReplaceRequired(
+                    ref content,
+                    originalSet,
+                    patchedSet,
+                    "[GC2 Networking] Could not find expected Set method in Invincibility.cs."))
             {
-                Debug.LogError("[GC2 Networking] Could not find expected Set method in Invincibility.cs.");
                 return false;
             }
-            
-            content = content.Replace(originalSet, patchedSet);
             
             WriteFile(relativePath, content);
             Debug.Log($"[GC2 Networking] Patched {relativePath}");
@@ -223,13 +303,14 @@ namespace GameCreator.Runtime.Characters
         // [GC2_NETWORK_PATCH_END]
 ";
 
-            if (!content.Contains(originalUsings))
+            if (!TryReplaceRequired(
+                    ref content,
+                    originalUsings,
+                    patchedUsings,
+                    "[GC2 Networking] Could not find expected structure in Poise.cs."))
             {
-                Debug.LogError("[GC2 Networking] Could not find expected structure in Poise.cs.");
                 return false;
             }
-            
-            content = content.Replace(originalUsings, patchedUsings);
             
             // Patch Damage method
             string originalDamage = @"        public bool Damage(float value)
@@ -285,13 +366,14 @@ namespace GameCreator.Runtime.Characters
         }
         // [GC2_NETWORK_PATCH_END]";
 
-            if (!content.Contains(originalDamage))
+            if (!TryReplaceRequired(
+                    ref content,
+                    originalDamage,
+                    patchedDamage,
+                    "[GC2 Networking] Could not find expected Damage method in Poise.cs."))
             {
-                Debug.LogError("[GC2 Networking] Could not find expected Damage method in Poise.cs.");
                 return false;
             }
-            
-            content = content.Replace(originalDamage, patchedDamage);
             
             // Patch Set method
             string originalSet = @"        public void Set(float value)
@@ -318,13 +400,14 @@ namespace GameCreator.Runtime.Characters
         }
         // [GC2_NETWORK_PATCH_END]";
 
-            if (!content.Contains(originalSet))
+            if (!TryReplaceRequired(
+                    ref content,
+                    originalSet,
+                    patchedSetMethod,
+                    "[GC2 Networking] Could not find expected Set method in Poise.cs."))
             {
-                Debug.LogError("[GC2 Networking] Could not find expected Set method in Poise.cs.");
                 return false;
             }
-            
-            content = content.Replace(originalSet, patchedSetMethod);
             
             // Patch Reset method
             string originalReset = @"        public void Reset(float value)
@@ -360,13 +443,14 @@ namespace GameCreator.Runtime.Characters
         }
         // [GC2_NETWORK_PATCH_END]";
 
-            if (!content.Contains(originalReset))
+            if (!TryReplaceRequired(
+                    ref content,
+                    originalReset,
+                    patchedReset,
+                    "[GC2 Networking] Could not find expected Reset method in Poise.cs."))
             {
-                Debug.LogError("[GC2 Networking] Could not find expected Reset method in Poise.cs.");
                 return false;
             }
-            
-            content = content.Replace(originalReset, patchedReset);
             
             WriteFile(relativePath, content);
             Debug.Log($"[GC2 Networking] Patched {relativePath}");
@@ -415,13 +499,14 @@ namespace GameCreator.Runtime.Characters
         // [GC2_NETWORK_PATCH_END]
 ";
 
-            if (!content.Contains(originalUsings))
+            if (!TryReplaceRequired(
+                    ref content,
+                    originalUsings,
+                    patchedUsings,
+                    "[GC2 Networking] Could not find expected structure in Jump.cs."))
             {
-                Debug.LogError("[GC2 Networking] Could not find expected structure in Jump.cs.");
                 return false;
             }
-            
-            content = content.Replace(originalUsings, patchedUsings);
             
             // Patch Do() method (no force)
             string originalDo = @"        public void Do()
@@ -460,13 +545,14 @@ namespace GameCreator.Runtime.Characters
         }
         // [GC2_NETWORK_PATCH_END]";
 
-            if (!content.Contains(originalDo))
+            if (!TryReplaceRequired(
+                    ref content,
+                    originalDo,
+                    patchedDo,
+                    "[GC2 Networking] Could not find expected Do() method in Jump.cs."))
             {
-                Debug.LogError("[GC2 Networking] Could not find expected Do() method in Jump.cs.");
                 return false;
             }
-            
-            content = content.Replace(originalDo, patchedDo);
             
             // Patch Do(float force) method
             string originalDoForce = @"        public void Do(float force)
@@ -505,13 +591,14 @@ namespace GameCreator.Runtime.Characters
         }
         // [GC2_NETWORK_PATCH_END]";
 
-            if (!content.Contains(originalDoForce))
+            if (!TryReplaceRequired(
+                    ref content,
+                    originalDoForce,
+                    patchedDoForce,
+                    "[GC2 Networking] Could not find expected Do(force) method in Jump.cs."))
             {
-                Debug.LogError("[GC2 Networking] Could not find expected Do(force) method in Jump.cs.");
                 return false;
             }
-            
-            content = content.Replace(originalDoForce, patchedDoForce);
             
             WriteFile(relativePath, content);
             Debug.Log($"[GC2 Networking] Patched {relativePath}");
@@ -564,13 +651,14 @@ namespace GameCreator.Runtime.Characters
         // [GC2_NETWORK_PATCH_END]
 ";
 
-            if (!content.Contains(originalUsings))
+            if (!TryReplaceRequired(
+                    ref content,
+                    originalUsings,
+                    patchedUsings,
+                    "[GC2 Networking] Could not find expected structure in Dash.cs."))
             {
-                Debug.LogError("[GC2 Networking] Could not find expected structure in Dash.cs.");
                 return false;
             }
-            
-            content = content.Replace(originalUsings, patchedUsings);
             
             // Patch Execute method - need to find it by its signature
             string originalExecute = @"        public async Task Execute(Vector3 direction, float speed, float gravity, float duration, float fade)
@@ -606,13 +694,14 @@ namespace GameCreator.Runtime.Characters
             NetworkDashStarted?.Invoke(this, direction, speed, gravity, duration, fade);
             // [GC2_NETWORK_PATCH_END]";
 
-            if (!content.Contains(originalExecute))
+            if (!TryReplaceRequired(
+                    ref content,
+                    originalExecute,
+                    patchedExecute,
+                    "[GC2 Networking] Could not find expected Execute method in Dash.cs."))
             {
-                Debug.LogError("[GC2 Networking] Could not find expected Execute method in Dash.cs.");
                 return false;
             }
-            
-            content = content.Replace(originalExecute, patchedExecute);
             
             // Patch OnDashFinish callback
             string originalFinish = @"        private void OnDashFinish(bool isComplete)
@@ -676,13 +765,14 @@ namespace GameCreator.Runtime.Characters
         }
         // [GC2_NETWORK_PATCH_END]";
 
-            if (!content.Contains(originalFinish))
+            if (!TryReplaceRequired(
+                    ref content,
+                    originalFinish,
+                    patchedFinish,
+                    "[GC2 Networking] Could not find expected OnDashFinish method in Dash.cs."))
             {
-                Debug.LogError("[GC2 Networking] Could not find expected OnDashFinish method in Dash.cs.");
                 return false;
             }
-            
-            content = content.Replace(originalFinish, patchedFinish);
             
             WriteFile(relativePath, content);
             Debug.Log($"[GC2 Networking] Patched {relativePath}");
@@ -715,13 +805,14 @@ using UnityEngine.Playables;
 namespace GameCreator.Runtime.Characters
 {";
 
-            if (!content.Contains(originalUsings))
+            if (!TryReplaceRequired(
+                    ref content,
+                    originalUsings,
+                    patchedUsings,
+                    "[GC2 Networking] Could not find expected structure in Character.cs."))
             {
-                Debug.LogError("[GC2 Networking] Could not find expected structure in Character.cs.");
                 return false;
             }
-            
-            content = content.Replace(originalUsings, patchedUsings);
             
             // Find the class opening and add static hooks
             string classStart = @"    public class Character : MonoBehaviour, ISpatialHash
@@ -755,13 +846,14 @@ namespace GameCreator.Runtime.Characters
             MoveToPosition,
         }";
 
-            if (!content.Contains(classStart))
+            if (!TryReplaceRequired(
+                    ref content,
+                    classStart,
+                    patchedClassStart,
+                    "[GC2 Networking] Could not find expected class start in Character.cs."))
             {
-                Debug.LogError("[GC2 Networking] Could not find expected class start in Character.cs.");
                 return false;
             }
-            
-            content = content.Replace(classStart, patchedClassStart);
             
             // Patch IsDead property setter
             string originalIsDead = @"        public bool IsDead
@@ -822,13 +914,14 @@ namespace GameCreator.Runtime.Characters
         }
         // [GC2_NETWORK_PATCH_END]";
 
-            if (!content.Contains(originalIsDead))
+            if (!TryReplaceRequired(
+                    ref content,
+                    originalIsDead,
+                    patchedIsDead,
+                    "[GC2 Networking] Could not find expected IsDead property in Character.cs."))
             {
-                Debug.LogError("[GC2 Networking] Could not find expected IsDead property in Character.cs.");
                 return false;
             }
-            
-            content = content.Replace(originalIsDead, patchedIsDead);
             
             WriteFile(relativePath, content);
             Debug.Log($"[GC2 Networking] Patched {relativePath}");

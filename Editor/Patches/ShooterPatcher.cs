@@ -27,13 +27,91 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
             "Plugins/GameCreator/Packages/Shooter/Editor/Editors/ReloadEditor.cs",
             "Plugins/GameCreator/Packages/Shooter/Editor/Editors/ShooterWeaponEditor.cs"
         };
+
+        protected override string[] GetRequiredPatchTokens(string relativePath)
+        {
+            if (relativePath.EndsWith("ShooterStance.cs"))
+            {
+                return new[]
+                {
+                    "NetworkPullTriggerValidator",
+                    "NetworkReleaseTriggerValidator",
+                    "NetworkReloadValidator",
+                    "PullTriggerDirect(",
+                    "ReleaseTriggerDirect(",
+                    "ReloadDirect("
+                };
+            }
+
+            if (relativePath.EndsWith("WeaponData.cs"))
+            {
+                return new[]
+                {
+                    "NetworkShootValidator",
+                    "NetworkShotFired",
+                    "ShootDirect("
+                };
+            }
+
+            return base.GetRequiredPatchTokens(relativePath);
+        }
+
+        protected override System.Collections.Generic.Dictionary<string, int> GetRequiredPatchTokenCounts(string relativePath)
+        {
+            if (relativePath.EndsWith("ShooterStance.cs"))
+            {
+                return new System.Collections.Generic.Dictionary<string, int>
+                {
+                    { "NetworkPullTriggerValidator.Invoke", 1 },
+                    { "NetworkReleaseTriggerValidator.Invoke", 1 },
+                    { "NetworkReloadValidator.Invoke", 1 }
+                };
+            }
+
+            if (relativePath.EndsWith("WeaponData.cs"))
+            {
+                return new System.Collections.Generic.Dictionary<string, int>
+                {
+                    { "NetworkShootValidator.Invoke", 1 },
+                    { "NetworkShotFired?.Invoke(this, origin, direction, chargeRation)", 1 },
+                    { "(this.Character.Time.Time - this.m_LastTriggerPull) / maxChargeTime", 1 }
+                };
+            }
+
+            return base.GetRequiredPatchTokenCounts(relativePath);
+        }
+
+        protected override System.Collections.Generic.Dictionary<string, int> GetRequiredPatchRegexTokenCounts(string relativePath)
+        {
+            if (relativePath.EndsWith("ShooterStance.cs"))
+            {
+                return new System.Collections.Generic.Dictionary<string, int>
+                {
+                    { @"(?s)\bvoid\s+PullTrigger\s*\([^)]*\)\s*\{.*?NetworkPullTriggerValidator\.Invoke", 1 },
+                    { @"(?s)\bvoid\s+ReleaseTrigger\s*\([^)]*\)\s*\{.*?NetworkReleaseTriggerValidator\.Invoke", 1 },
+                    { @"(?s)\bvoid\s+Reload\s*\([^)]*\)\s*\{.*?NetworkReloadValidator\.Invoke", 1 }
+                };
+            }
+
+            if (relativePath.EndsWith("WeaponData.cs"))
+            {
+                return new System.Collections.Generic.Dictionary<string, int>
+                {
+                    { @"(?s)\bvoid\s+Shoot\s*\([^)]*\)\s*\{.*?NetworkShootValidator\.Invoke", 1 },
+                    { @"(?s)\bvoid\s+Shoot\s*\([^)]*\)\s*\{.*?NetworkShotFired\?\.Invoke\(\s*this\s*,\s*origin\s*,\s*direction\s*,\s*chargeRation\s*\)", 1 },
+                    { @"maxChargeTime\s*>\s*0f\s*\?\s*Mathf\.Clamp01\(\(this\.Character\.Time\.Time\s*-\s*this\.m_LastTriggerPull\)\s*/\s*maxChargeTime\)", 1 }
+                };
+            }
+
+            return base.GetRequiredPatchRegexTokenCounts(relativePath);
+        }
         
         protected override bool PatchFile(string relativePath)
         {
             string content = ReadFile(relativePath);
             
-            // Check if already patched
-            if (content.Contains(PatchMarker))
+            // Check if already patched (supports legacy marker versions)
+            if (ContainsPatchMarker(content))
             {
                 Debug.LogWarning($"[GC2 Networking] {relativePath} already contains patch marker.");
                 return true;
@@ -106,13 +184,11 @@ namespace GameCreator.Runtime.Shooter
         // [GC2_NETWORK_PATCH_END]
 ";
 
-            if (!content.Contains(originalUsings))
+            if (!TryReplaceWithFlexibleWhitespace(ref content, originalUsings, patchedUsings))
             {
                 Debug.LogError("[GC2 Networking] Could not find expected using statements in ShooterStance.cs.");
                 return false;
             }
-            
-            content = content.Replace(originalUsings, patchedUsings);
             
             // Patch PullTrigger method
             string originalPullTrigger = @"        public void PullTrigger(ShooterWeapon optionalWeapon)
@@ -138,13 +214,11 @@ namespace GameCreator.Runtime.Shooter
             int shooterWeaponId = shooterWeapon.GetInstanceID();
             if (!this.m_Equipment.TryGetValue(shooterWeaponId, out WeaponData weaponData)) return;";
 
-            if (!content.Contains(originalPullTrigger))
+            if (!TryReplaceWithFlexibleWhitespace(ref content, originalPullTrigger, patchedPullTrigger))
             {
                 Debug.LogError("[GC2 Networking] Could not find expected PullTrigger method in ShooterStance.cs.");
                 return false;
             }
-            
-            content = content.Replace(originalPullTrigger, patchedPullTrigger);
             
             // Patch ReleaseTrigger method
             string originalReleaseTrigger = @"        public void ReleaseTrigger(ShooterWeapon optionalWeapon)
@@ -187,13 +261,11 @@ namespace GameCreator.Runtime.Shooter
         }
         // [GC2_NETWORK_PATCH_END]";
 
-            if (!content.Contains(originalReleaseTrigger))
+            if (!TryReplaceWithFlexibleWhitespace(ref content, originalReleaseTrigger, patchedReleaseTrigger))
             {
                 Debug.LogError("[GC2 Networking] Could not find expected ReleaseTrigger method in ShooterStance.cs.");
                 return false;
             }
-            
-            content = content.Replace(originalReleaseTrigger, patchedReleaseTrigger);
             
             // Patch Reload method
             string originalReload = @"        public async Task Reload(ShooterWeapon optionalWeapon)
@@ -228,13 +300,11 @@ namespace GameCreator.Runtime.Shooter
         }
         // [GC2_NETWORK_PATCH_END]";
 
-            if (!content.Contains(originalReload))
+            if (!TryReplaceWithFlexibleWhitespace(ref content, originalReload, patchedReload))
             {
                 Debug.LogError("[GC2 Networking] Could not find expected Reload method in ShooterStance.cs.");
                 return false;
             }
-            
-            content = content.Replace(originalReload, patchedReload);
             
             // Add direct PullTrigger after CancelTrigger
             string originalCancelTrigger = @"        public void CancelTrigger(ShooterWeapon optionalWeapon)
@@ -278,9 +348,9 @@ namespace GameCreator.Runtime.Shooter
         }
         // [GC2_NETWORK_PATCH_END]";
 
-            if (content.Contains(originalCancelTrigger))
+            if (TryReplaceWithFlexibleWhitespace(ref content, originalCancelTrigger, patchedCancelTrigger))
             {
-                content = content.Replace(originalCancelTrigger, patchedCancelTrigger);
+                Debug.Log("[GC2 Networking] Applied flexible replacement for CancelTrigger block.");
             }
             
             WriteFile(relativePath, content);
@@ -336,19 +406,30 @@ namespace GameCreator.Runtime.Shooter
         // [GC2_NETWORK_PATCH_END]
 ";
 
-            if (!content.Contains(originalUsings))
+            if (!TryReplaceWithFlexibleWhitespace(ref content, originalUsings, patchedUsings))
             {
                 Debug.LogError("[GC2 Networking] Could not find expected using statements in WeaponData.cs.");
                 return false;
             }
-            
-            content = content.Replace(originalUsings, patchedUsings);
 
             // Fix charge ratio math precedence bug:
             // (now - lastPull) / maxChargeTime
-            content = content.Replace(
-                " ? Mathf.Clamp01(this.Character.Time.Time - this.m_LastTriggerPull / maxChargeTime)",
-                " ? Mathf.Clamp01((this.Character.Time.Time - this.m_LastTriggerPull) / maxChargeTime)");
+            const string brokenChargeRatio =
+                " ? Mathf.Clamp01(this.Character.Time.Time - this.m_LastTriggerPull / maxChargeTime)";
+            const string fixedChargeRatio =
+                " ? Mathf.Clamp01((this.Character.Time.Time - this.m_LastTriggerPull) / maxChargeTime)";
+
+            if (!content.Contains(fixedChargeRatio))
+            {
+                if (!TryReplaceRequired(
+                        ref content,
+                        brokenChargeRatio,
+                        fixedChargeRatio,
+                        "[GC2 Networking] Could not find expected charge ratio expression in WeaponData.cs."))
+                {
+                    return false;
+                }
+            }
             
             // Patch the private Shoot method - insert validation at the beginning
             string originalShoot = @"        private void Shoot()
@@ -368,13 +449,11 @@ namespace GameCreator.Runtime.Shooter
             if (this.Weapon.Jam.Run(this.WeaponArgs, this.IsJammed))
             {";
 
-            if (!content.Contains(originalShoot))
+            if (!TryReplaceWithFlexibleWhitespace(ref content, originalShoot, patchedShoot))
             {
                 Debug.LogError("[GC2 Networking] Could not find expected Shoot method in WeaponData.cs.");
                 return false;
             }
-            
-            content = content.Replace(originalShoot, patchedShoot);
             
             // Find where shot is confirmed successful and add network notification
             // Look for the line after success shot happens
@@ -407,22 +486,19 @@ namespace GameCreator.Runtime.Shooter
             if (!success)
             {";
 
-            if (content.Contains(shotSuccess))
+            if (!TryReplaceRequired(
+                    ref content,
+                    shotSuccess,
+                    patchedShotSuccess,
+                    "[GC2 Networking] Could not find expected shot success block in WeaponData.cs."))
             {
-                content = content.Replace(shotSuccess, patchedShotSuccess);
+                return false;
             }
             
             // Add a direct shoot method
-            string internalShootEnd = "internal void OnShoot(float duration)";
-            int internalShootIndex = content.IndexOf(internalShootEnd);
-            if (internalShootIndex < 0)
+            if (!content.Contains("ShootDirect("))
             {
-                // Try finding another anchor point
-                string publicMethods = "// PUBLIC METHODS: ";
-                int publicIndex = content.IndexOf(publicMethods);
-                if (publicIndex > 0)
-                {
-                    string directShootMethod = @"
+                string directShootMethod = @"
         // [GC2_NETWORK_PATCH] Server-side direct shoot (bypasses validation)
         public void ShootDirect()
         {
@@ -449,10 +525,26 @@ namespace GameCreator.Runtime.Shooter
             this.m_NumShots += 1;
         }
         // [GC2_NETWORK_PATCH_END]
-        
-        " + publicMethods;
-                    
-                    content = content.Replace(publicMethods, directShootMethod);
+";
+
+                string onShootSignature = @"        internal void OnShoot(float duration)";
+                bool insertedBeforeOnShoot = TryReplaceWithFlexibleWhitespace(
+                    ref content,
+                    onShootSignature,
+                    directShootMethod + "\n" + onShootSignature);
+
+                if (!insertedBeforeOnShoot)
+                {
+                    // Fallback anchor for alternate GC2 source variants.
+                    string publicMethods = "// PUBLIC METHODS: ";
+                    if (!TryReplaceRequired(
+                            ref content,
+                            publicMethods,
+                            directShootMethod + "\n        " + publicMethods,
+                            "[GC2 Networking] Could not insert ShootDirect method in WeaponData.cs."))
+                    {
+                        return false;
+                    }
                 }
             }
             
@@ -482,7 +574,14 @@ namespace GameCreator.Runtime.Shooter
                 return true; // Not a failure, just nothing to fix
             }
             
-            content = content.Replace(obsoleteCall, fixedCall);
+            if (!TryReplaceRequired(
+                    ref content,
+                    obsoleteCall,
+                    fixedCall,
+                    $"[GC2 Networking] Could not replace obsolete API usage in {relativePath}."))
+            {
+                return false;
+            }
             
             WriteFile(relativePath, content);
             Debug.Log($"[GC2 Networking] Fixed obsolete API in {relativePath}");

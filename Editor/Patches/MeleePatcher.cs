@@ -27,13 +27,77 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
             "Plugins/GameCreator/Packages/Melee/Runtime/ScriptableObjects/Skill.cs",
             "Plugins/GameCreator/Packages/Melee/Editor/Editors/SkillEditor.cs"
         };
+
+        protected override string[] GetRequiredPatchTokens(string relativePath)
+        {
+            if (relativePath.EndsWith("MeleeStance.cs"))
+            {
+                return new[]
+                {
+                    "NetworkInputChargeValidator",
+                    "NetworkInputExecuteValidator",
+                    "NetworkPlaySkillValidator",
+                    "NetworkPlayReactionValidator",
+                    "NetworkSkillExecuted",
+                    "NetworkHitRegistered",
+                    "InputChargeDirect(",
+                    "PlaySkillDirect("
+                };
+            }
+
+            if (relativePath.EndsWith("Skill.cs"))
+            {
+                return new[] { "NetworkOnHitValidator" };
+            }
+
+            return base.GetRequiredPatchTokens(relativePath);
+        }
+
+        protected override System.Collections.Generic.Dictionary<string, int> GetRequiredPatchTokenCounts(string relativePath)
+        {
+            if (relativePath.EndsWith("MeleeStance.cs"))
+            {
+                return new System.Collections.Generic.Dictionary<string, int>
+                {
+                    { "NetworkInputChargeValidator.Invoke", 1 },
+                    { "NetworkInputExecuteValidator.Invoke", 1 },
+                    { "NetworkPlaySkillValidator.Invoke", 1 },
+                    { "NetworkPlayReactionValidator.Invoke", 1 },
+                    { "NetworkSkillExecuted?.Invoke", 1 },
+                    { "NetworkHitRegistered?.Invoke", 1 }
+                };
+            }
+
+            if (relativePath.EndsWith("Skill.cs"))
+            {
+                return new System.Collections.Generic.Dictionary<string, int>
+                {
+                    { "NetworkOnHitValidator.Invoke", 1 }
+                };
+            }
+
+            return base.GetRequiredPatchTokenCounts(relativePath);
+        }
+
+        protected override System.Collections.Generic.Dictionary<string, int> GetRequiredPatchRegexTokenCounts(string relativePath)
+        {
+            if (relativePath.EndsWith("Skill.cs"))
+            {
+                return new System.Collections.Generic.Dictionary<string, int>
+                {
+                    { @"(?s)\b(public|internal)\s+void\s+OnHit\s*\(\s*Args\s+args\s*,\s*Vector3\s+point\s*,\s*Vector3\s+direction\s*\)\s*\{.*?NetworkOnHitValidator\.Invoke", 1 }
+                };
+            }
+
+            return base.GetRequiredPatchRegexTokenCounts(relativePath);
+        }
         
         protected override bool PatchFile(string relativePath)
         {
             string content = ReadFile(relativePath);
             
-            // Check if already patched
-            if (content.Contains(PatchMarker))
+            // Check if already patched (supports legacy marker versions)
+            if (ContainsPatchMarker(content))
             {
                 Debug.LogWarning($"[GC2 Networking] {relativePath} already contains patch marker.");
                 return true;
@@ -108,13 +172,11 @@ namespace GameCreator.Runtime.Melee
         // [GC2_NETWORK_PATCH_END]
 ";
 
-            if (!content.Contains(originalUsings))
+            if (!TryReplaceWithFlexibleWhitespace(ref content, originalUsings, patchedUsings))
             {
                 Debug.LogError("[GC2 Networking] Could not find expected using statements in MeleeStance.cs.");
                 return false;
             }
-            
-            content = content.Replace(originalUsings, patchedUsings);
             
             // Patch InputCharge method
             string originalInputCharge = @"        public void InputCharge(MeleeKey key)
@@ -141,13 +203,11 @@ namespace GameCreator.Runtime.Melee
         }
         // [GC2_NETWORK_PATCH_END]";
 
-            if (!content.Contains(originalInputCharge))
+            if (!TryReplaceWithFlexibleWhitespace(ref content, originalInputCharge, patchedInputCharge))
             {
                 Debug.LogError("[GC2 Networking] Could not find expected InputCharge method in MeleeStance.cs.");
                 return false;
             }
-            
-            content = content.Replace(originalInputCharge, patchedInputCharge);
             
             // Patch InputExecute method
             string originalInputExecute = @"        public void InputExecute(MeleeKey key)
@@ -174,13 +234,11 @@ namespace GameCreator.Runtime.Melee
         }
         // [GC2_NETWORK_PATCH_END]";
 
-            if (!content.Contains(originalInputExecute))
+            if (!TryReplaceWithFlexibleWhitespace(ref content, originalInputExecute, patchedInputExecute))
             {
                 Debug.LogError("[GC2 Networking] Could not find expected InputExecute method in MeleeStance.cs.");
                 return false;
             }
-            
-            content = content.Replace(originalInputExecute, patchedInputExecute);
             
             // Patch PlaySkill method
             string originalPlaySkill = @"        public void PlaySkill(MeleeWeapon weapon, Skill skill, GameObject target)
@@ -214,13 +272,11 @@ namespace GameCreator.Runtime.Melee
         }
         // [GC2_NETWORK_PATCH_END]";
 
-            if (!content.Contains(originalPlaySkill))
+            if (!TryReplaceWithFlexibleWhitespace(ref content, originalPlaySkill, patchedPlaySkill))
             {
                 Debug.LogError("[GC2 Networking] Could not find expected PlaySkill method in MeleeStance.cs.");
                 return false;
             }
-            
-            content = content.Replace(originalPlaySkill, patchedPlaySkill);
             
             // Patch PlayReaction method
             string originalPlayReaction = @"        public void PlayReaction(GameObject from, ReactionInput input, IReaction withReaction, bool canFallback)
@@ -247,13 +303,11 @@ namespace GameCreator.Runtime.Melee
         }
         // [GC2_NETWORK_PATCH_END]";
 
-            if (!content.Contains(originalPlayReaction))
+            if (!TryReplaceWithFlexibleWhitespace(ref content, originalPlayReaction, patchedPlayReaction))
             {
                 Debug.LogError("[GC2 Networking] Could not find expected PlayReaction method in MeleeStance.cs.");
                 return false;
             }
-            
-            content = content.Replace(originalPlayReaction, patchedPlayReaction);
             
             // Patch Hit method to notify network
             string originalHit = @"        public void Hit(Character attacker, ReactionInput input, Skill skill)
@@ -325,13 +379,11 @@ namespace GameCreator.Runtime.Melee
         }
         // [GC2_NETWORK_PATCH_END]";
 
-            if (!content.Contains(originalHit))
+            if (!TryReplaceWithFlexibleWhitespace(ref content, originalHit, patchedHit))
             {
                 Debug.LogError("[GC2 Networking] Could not find expected Hit method in MeleeStance.cs.");
                 return false;
             }
-            
-            content = content.Replace(originalHit, patchedHit);
             
             WriteFile(relativePath, content);
             Debug.Log($"[GC2 Networking] Patched {relativePath}");
@@ -340,10 +392,9 @@ namespace GameCreator.Runtime.Melee
         
         private bool PatchSkill(string relativePath, string content)
         {
-            // Find the namespace
-            string namespaceStart = "namespace GameCreator.Runtime.Melee";
-            int namespaceIndex = content.IndexOf(namespaceStart);
-            if (namespaceIndex < 0)
+            // Find namespace anchor with regex to support spacing/access variations.
+            Match namespaceMatch = Regex.Match(content, @"(?m)^namespace\s+GameCreator\.Runtime\.Melee\b");
+            if (!namespaceMatch.Success)
             {
                 Debug.LogError("[GC2 Networking] Could not find namespace in Skill.cs");
                 return false;
@@ -356,18 +407,21 @@ namespace GameCreator.Runtime.Melee
 // Use Tools > Game Creator 2 Networking > Patches > Melee > Unpatch to restore.
 
 ";
-            content = content.Insert(namespaceIndex, patchHeader);
+            content = content.Insert(namespaceMatch.Index, patchHeader);
             
-            // Find OnHit method and add static hook if possible
-            // Look for class declaration
-            string classDecl = "class Skill :";
-            int classIndex = content.IndexOf(classDecl);
-            if (classIndex > 0)
+            // Add static hooks after Skill class opening brace.
+            if (!content.Contains("NetworkOnHitValidator"))
             {
-                int braceIndex = content.IndexOf('{', classIndex);
-                if (braceIndex > 0)
+                Match classMatch = Regex.Match(
+                    content,
+                    @"(?m)^(\s*)(public\s+)?(?:(?:sealed|partial|abstract)\s+)*class\s+Skill\b[^{]*\{");
+                if (!classMatch.Success)
                 {
-                    string staticHooks = @"
+                    Debug.LogError("[GC2 Networking] Could not find Skill class declaration in Skill.cs.");
+                    return false;
+                }
+
+                string staticHooks = @"
         // [GC2_NETWORK_PATCH] Static hooks for server-authoritative networking
         
         /// <summary>Called before OnHit is executed for network validation.</summary>
@@ -378,8 +432,8 @@ namespace GameCreator.Runtime.Melee
         
         // [GC2_NETWORK_PATCH_END]
 ";
-                    content = content.Insert(braceIndex + 1, staticHooks);
-                }
+                int classInsertIndex = classMatch.Index + classMatch.Length;
+                content = content.Insert(classInsertIndex, staticHooks);
             }
             
             // Patch OnHit method if found (supports internal/public + whitespace variants)
@@ -401,6 +455,11 @@ namespace GameCreator.Runtime.Melee
 
                     int insertIndex = onHitMatch.Index + onHitMatch.Length;
                     content = content.Insert(insertIndex, validationCheck);
+                }
+                else
+                {
+                    Debug.LogError("[GC2 Networking] Could not find OnHit method in Skill.cs.");
+                    return false;
                 }
             }
             
@@ -430,7 +489,14 @@ namespace GameCreator.Runtime.Melee
                 return true; // Not a failure, just nothing to fix
             }
             
-            content = content.Replace(obsoleteCall, fixedCall);
+            if (!TryReplaceRequired(
+                    ref content,
+                    obsoleteCall,
+                    fixedCall,
+                    $"[GC2 Networking] Could not replace obsolete API usage in {relativePath}."))
+            {
+                return false;
+            }
             
             WriteFile(relativePath, content);
             Debug.Log($"[GC2 Networking] Fixed obsolete API in {relativePath}");
