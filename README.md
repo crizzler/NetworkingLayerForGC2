@@ -2,6 +2,8 @@
 
 Transport-agnostic, server-authoritative multiplayer layer for Game Creator 2.
 
+<img width="880" height="1163" alt="image" src="https://github.com/user-attachments/assets/53739b39-dbab-4222-9d33-98d0b3c18254" />
+
 ## What This Package Is
 
 - A runtime networking layer for GC2 that is **not bound to one networking SDK**.
