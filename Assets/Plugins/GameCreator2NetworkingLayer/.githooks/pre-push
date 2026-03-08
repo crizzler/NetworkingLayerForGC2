@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ALLOWED_PREFIX="Assets/Plugins/GameCreator2NetworkingLayer/"
+ZERO_SHA="0000000000000000000000000000000000000000"
+
+declare -A seen_paths=()
+declare -a violations=()
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+    # Ignore empty lines and tag updates
+    if [[ -z "${local_ref:-}" ]] || [[ "${remote_ref:-}" == refs/tags/* ]]; then
+        continue
+    fi
+
+    # Ignore branch deletions
+    if [[ "$local_sha" == "$ZERO_SHA" ]]; then
+        continue
+    fi
+
+    if [[ "$remote_sha" == "$ZERO_SHA" ]]; then
+        commits=$(git rev-list "$local_sha" --not --remotes)
+    else
+        commits=$(git rev-list "$remote_sha..$local_sha")
+    fi
+
+    if [[ -z "$commits" ]]; then
+        continue
+    fi
+
+    while IFS= read -r commit; do
+        [[ -z "$commit" ]] && continue
+
+        while IFS= read -r path; do
+            [[ -z "$path" ]] && continue
+            [[ -n "${seen_paths[$path]+x}" ]] && continue
+            seen_paths["$path"]=1
+
+            case "$path" in
+                "$ALLOWED_PREFIX"*) ;;
+                *) violations+=("$path") ;;
+            esac
+        done < <(git diff-tree --root --no-commit-id --name-only -r "$commit")
+    done <<< "$commits"
+done
+
+if (( ${#violations[@]} > 0 )); then
+    mapfile -t unique_violations < <(printf '%s\n' "${violations[@]}" | sort -u)
+    max_lines=50
+    remaining=$(( ${#unique_violations[@]} - max_lines ))
+
+    {
+        echo "Push blocked: only '$ALLOWED_PREFIX' can be pushed from this repo."
+        echo "The following paths are outside the allowed scope:"
+
+        limit=${#unique_violations[@]}
+        if (( limit > max_lines )); then
+            limit=$max_lines
+        fi
+
+        for ((i = 0; i < limit; i++)); do
+            printf '  - %s\n' "${unique_violations[$i]}"
+        done
+
+        if (( remaining > 0 )); then
+            printf '  ... and %d more\n' "$remaining"
+        fi
+
+        echo
+        echo "If this is intentional, use a separate repository for those paths."
+    } >&2
+    exit 1
+fi
+
+exit 0
