@@ -3,7 +3,6 @@
     "rootNamespace": "Arawn.GameCreator2.Networking.Abilities",
     "references": [
         "Arawn.GameCreator2.Networking",
-        "Arawn.NetworkingCore.Runtime",
         "GameCreator.Runtime.Core",
         "Daimahou.Runtime.Core",
         "DaimahouGames.Runtime.Abilities"

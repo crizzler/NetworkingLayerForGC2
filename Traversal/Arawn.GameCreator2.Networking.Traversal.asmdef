@@ -3,7 +3,6 @@
     "rootNamespace": "Arawn.GameCreator2.Networking.Traversal",
     "references": [
         "Arawn.GameCreator2.Networking",
-        "Arawn.NetworkingCore.Runtime",
         "GameCreator.Runtime.Core",
         "GameCreator.Runtime.Characters",
         "GameCreator.Runtime.Traversal"

@@ -3,7 +3,6 @@
     "rootNamespace": "Arawn.GameCreator2.Networking.Quests",
     "references": [
         "Arawn.GameCreator2.Networking",
-        "Arawn.NetworkingCore.Runtime",
         "GameCreator.Runtime.Core",
         "GameCreator.Runtime.Quests"
     ],

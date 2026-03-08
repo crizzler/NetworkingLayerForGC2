@@ -2,7 +2,6 @@
     "name": "Arawn.GameCreator2.Networking",
     "rootNamespace": "Arawn.GameCreator2.Networking",
     "references": [
-        "Arawn.NetworkingCore.Runtime",
         "GameCreator.Runtime.Core",
         "Unity.InputSystem"
     ],
