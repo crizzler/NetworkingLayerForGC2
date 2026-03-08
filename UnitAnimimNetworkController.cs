@@ -55,6 +55,7 @@ namespace Arawn.GameCreator2.Networking
         // Animation lookup for remotes (maps hash to clip)
         private Dictionary<int, AnimationClip> m_ClipCache;
         private Dictionary<int, State> m_StateCache;
+        private Dictionary<int, RuntimeAnimatorController> m_ControllerCache;
         
         // EVENTS: --------------------------------------------------------------------------------
         
@@ -113,6 +114,7 @@ namespace Arawn.GameCreator2.Networking
             
             m_ClipCache = new Dictionary<int, AnimationClip>();
             m_StateCache = new Dictionary<int, State>();
+            m_ControllerCache = new Dictionary<int, RuntimeAnimatorController>();
             
             m_IsInitialized = true;
         }
@@ -202,6 +204,47 @@ namespace Arawn.GameCreator2.Networking
             catch (Exception ex)
             {
                 Debug.LogError($"[NetworkAnimim] SetState(asset) failed: {ex.Message}\n{ex.StackTrace}");
+            }
+        }
+
+        /// <summary>
+        /// Set a runtime animator controller on a layer and broadcast to network.
+        /// </summary>
+        public async Task SetState(
+            RuntimeAnimatorController controller,
+            AvatarMask mask,
+            int layer,
+            BlendMode blendMode,
+            ConfigState config)
+        {
+            if (!m_EnableSync || !m_IsInitialized) return;
+            if (controller == null) return;
+
+            try
+            {
+                if (m_Character?.States != null)
+                {
+                    await m_Character.States.SetState(controller, mask, layer, blendMode, config);
+                }
+
+                if (m_IsLocalPlayer && CanSendState())
+                {
+                    int controllerHash = StableHashUtility.GetStableHash(controller);
+                    var command = NetworkStateCommand.Create(
+                        controllerHash,
+                        NetworkStateType.RuntimeController,
+                        layer,
+                        blendMode,
+                        config
+                    );
+
+                    OnStateCommandReady?.Invoke(command);
+                    m_LastStateTime = Time.time;
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[NetworkAnimim] SetState(controller) failed: {ex.Message}\n{ex.StackTrace}");
             }
         }
         
@@ -339,8 +382,12 @@ namespace Arawn.GameCreator2.Networking
                         break;
                         
                     case NetworkStateType.RuntimeController:
-                        // RuntimeController sync would need additional registry support
-                        Debug.LogWarning("[NetworkAnimim] RuntimeController sync not implemented");
+                        if (TryGetRuntimeController(command.AnimationId, out var controller))
+                        {
+                            await m_Character.States.SetState(
+                                controller, null, command.Layer, command.BlendMode, config
+                            );
+                        }
                         break;
                 }
             }
@@ -422,6 +469,16 @@ namespace Arawn.GameCreator2.Networking
             int hash = StableHashUtility.GetStableHash(state);
             m_StateCache[hash] = state;
         }
+
+        /// <summary>
+        /// Register a RuntimeAnimatorController so remotes can look it up by hash.
+        /// </summary>
+        public void RegisterRuntimeController(RuntimeAnimatorController controller)
+        {
+            if (controller == null) return;
+            int hash = StableHashUtility.GetStableHash(controller);
+            m_ControllerCache[hash] = controller;
+        }
         
         /// <summary>
         /// Register multiple clips at once.
@@ -442,6 +499,17 @@ namespace Arawn.GameCreator2.Networking
             foreach (var state in states)
             {
                 RegisterState(state);
+            }
+        }
+
+        /// <summary>
+        /// Register multiple RuntimeAnimatorController assets at once.
+        /// </summary>
+        public void RegisterRuntimeControllers(IEnumerable<RuntimeAnimatorController> controllers)
+        {
+            foreach (var controller in controllers)
+            {
+                RegisterRuntimeController(controller);
             }
         }
         
@@ -502,6 +570,28 @@ namespace Arawn.GameCreator2.Networking
             }
             
             state = null;
+            return false;
+        }
+
+        private bool TryGetRuntimeController(int hash, out RuntimeAnimatorController controller)
+        {
+            if (m_ControllerCache.TryGetValue(hash, out controller))
+            {
+                return controller != null;
+            }
+
+            if (m_AnimationRegistry != null &&
+                m_AnimationRegistry.TryGetEntry(hash, out var entry))
+            {
+                controller = entry.Controller;
+                if (controller != null)
+                {
+                    m_ControllerCache[hash] = controller;
+                    return true;
+                }
+            }
+
+            controller = null;
             return false;
         }
     }

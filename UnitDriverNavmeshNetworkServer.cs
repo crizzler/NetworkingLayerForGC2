@@ -269,7 +269,7 @@ namespace Arawn.GameCreator2.Networking
                 return;
             }
             
-            // Legacy fallback for custom INavMeshTraverseLink without controller
+            // Fallback for custom INavMeshTraverseLink when no link controller is installed.
             if (this.m_Agent.isOnOffMeshLink && 
                 this.m_Agent.currentOffMeshLinkData.owner is INavMeshTraverseLink navMeshLink)
             {

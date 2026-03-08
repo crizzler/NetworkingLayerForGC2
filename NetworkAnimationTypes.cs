@@ -355,6 +355,12 @@ namespace Arawn.GameCreator2.Networking
             if (m_HashToId == null) BuildLookups();
             return m_HashToId.TryGetValue(StableHashUtility.GetStableHash(state), out networkId);
         }
+
+        public bool TryGetNetworkId(RuntimeAnimatorController controller, out int networkId)
+        {
+            if (m_HashToId == null) BuildLookups();
+            return m_HashToId.TryGetValue(StableHashUtility.GetStableHash(controller), out networkId);
+        }
         
         public int GetClipHash(AnimationClip clip) => StableHashUtility.GetStableHash(clip);
         public int GetStateHash(State state) => StableHashUtility.GetStableHash(state);

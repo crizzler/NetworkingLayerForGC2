@@ -9,10 +9,6 @@ using GameCreator.Runtime.Shooter;
 using Arawn.GameCreator2.Networking;
 using Arawn.GameCreator2.Networking.Security;
 
-#if UNITY_NETCODE
-using Unity.Netcode;
-#endif
-
 namespace Arawn.GameCreator2.Networking.Shooter
 {
     /// <summary>
@@ -31,7 +27,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
     /// </remarks>
     [AddComponentMenu("Game Creator/Network/Shooter/Network Shooter Manager")]
     [DefaultExecutionOrder(ApplicationManager.EXECUTION_ORDER_DEFAULT - 10)]
-    public class NetworkShooterManager : NetworkSingleton<NetworkShooterManager>
+    public partial class NetworkShooterManager : NetworkSingleton<NetworkShooterManager>
     {
         // ════════════════════════════════════════════════════════════════════════════════════════
         // CONFIGURATION
@@ -73,6 +69,10 @@ namespace Arawn.GameCreator2.Networking.Shooter
 
         [Tooltip("How long a validated shot reference remains valid for hit binding.")]
         [SerializeField] private float m_ValidatedShotLifetime = 2f;
+
+        [Tooltip("Maximum accepted hit confirmations per projectile for one validated shot.")]
+        [Min(1)]
+        [SerializeField] private int m_MaxValidatedHitsPerProjectile = 4;
         
         [Tooltip("Maximum time in the past for shot validation (seconds).")]
         [SerializeField] private float m_MaxRewindTime = 0.5f;
@@ -233,6 +233,9 @@ namespace Arawn.GameCreator2.Networking.Shooter
         {
             public float ValidatedTime;
             public int WeaponHash;
+            public int MaxAcceptedHits;
+            public int AcceptedHitCount;
+            public HashSet<uint> AcceptedCharacterTargets;
         }
 
         private readonly Dictionary<ulong, ValidatedShotReference> m_ValidatedShotReferences = new(128);
@@ -354,152 +357,6 @@ namespace Arawn.GameCreator2.Networking.Shooter
             public float ReceivedTime;
         }
 
-        private static NetworkRequestContext BuildContext(uint actorNetworkId, uint correlationId)
-        {
-            return NetworkRequestContext.Create(actorNetworkId, correlationId);
-        }
-
-        private bool ValidateShooterRequest(uint senderClientId, uint actorNetworkId, uint correlationId, string requestType)
-        {
-            return SecurityIntegration.ValidateModuleRequest(
-                senderClientId,
-                BuildContext(actorNetworkId, correlationId),
-                "Shooter",
-                requestType);
-        }
-
-        private bool ValidateActorBinding(
-            uint senderClientId,
-            uint actorNetworkId,
-            uint claimedNetworkId,
-            string requestType,
-            string claimedFieldName)
-        {
-            if (actorNetworkId == 0 || claimedNetworkId == 0)
-            {
-                SecurityIntegration.RecordViolation(
-                    senderClientId,
-                    actorNetworkId,
-                    SecurityViolationType.InvalidRequest,
-                    "Shooter",
-                    $"{requestType} missing actor binding values actor={actorNetworkId}, {claimedFieldName}={claimedNetworkId}");
-                return false;
-            }
-
-            if (actorNetworkId == claimedNetworkId)
-            {
-                return true;
-            }
-
-            SecurityIntegration.RecordViolation(
-                senderClientId,
-                actorNetworkId,
-                SecurityViolationType.ProtocolMismatch,
-                "Shooter",
-                $"{requestType} actor mismatch actor={actorNetworkId}, {claimedFieldName}={claimedNetworkId}");
-            return false;
-        }
-
-        private static ulong ComposeShotKey(uint shooterNetworkId, ushort shotRequestId)
-        {
-            return ((ulong)shooterNetworkId << 16) | shotRequestId;
-        }
-
-        private bool IsQueueAtCapacity<T>(Queue<T> queue, int maxQueueLength, uint senderClientId, uint actorNetworkId, string requestType)
-        {
-            int safeLimit = Mathf.Max(1, maxQueueLength);
-            if (queue.Count < safeLimit) return false;
-
-            SecurityIntegration.RecordViolation(
-                senderClientId,
-                actorNetworkId,
-                SecurityViolationType.RateLimitExceeded,
-                "Shooter",
-                $"{requestType} queue capacity reached ({queue.Count}/{safeLimit})");
-
-            if (m_LogShotRequests || m_LogHitRequests || m_LogBroadcasts)
-            {
-                Debug.LogWarning(
-                    $"[NetworkShooterManager] Dropped {requestType}: queue full ({queue.Count}/{safeLimit})");
-            }
-
-            return true;
-        }
-
-        private static int DropStaleRequests<T>(Queue<T> queue, float maxAgeSeconds, Func<T, float> getReceivedTime)
-        {
-            if (queue.Count == 0) return 0;
-
-            float now = Time.time;
-            int dropped = 0;
-            while (queue.Count > 0)
-            {
-                T queued = queue.Peek();
-                if (now - getReceivedTime(queued) <= maxAgeSeconds) break;
-
-                queue.Dequeue();
-                dropped++;
-            }
-
-            return dropped;
-        }
-
-        private bool ValidateHitSourceShot(NetworkShooterHitRequest request)
-        {
-            if (request.SourceShotRequestId == 0) return false;
-
-            uint shooterNetworkId = request.ActorNetworkId != 0 ? request.ActorNetworkId : request.ShooterNetworkId;
-            ulong shotKey = ComposeShotKey(shooterNetworkId, request.SourceShotRequestId);
-            if (!m_ValidatedShotReferences.TryGetValue(shotKey, out var shotReference))
-            {
-                return false;
-            }
-
-            if (shotReference.WeaponHash != 0 && shotReference.WeaponHash != request.WeaponHash)
-            {
-                return false;
-            }
-
-            if (Time.time - shotReference.ValidatedTime > m_ValidatedShotLifetime)
-            {
-                m_ValidatedShotReferences.Remove(shotKey);
-                return false;
-            }
-
-            return true;
-        }
-
-        private void RecordValidatedShot(NetworkShotRequest request)
-        {
-            uint shooterNetworkId = request.ActorNetworkId != 0 ? request.ActorNetworkId : request.ShooterNetworkId;
-            ulong shotKey = ComposeShotKey(shooterNetworkId, request.RequestId);
-            m_ValidatedShotReferences[shotKey] = new ValidatedShotReference
-            {
-                ValidatedTime = Time.time,
-                WeaponHash = request.WeaponHash
-            };
-        }
-
-        private void CleanupStaleValidatedShotReferences()
-        {
-            if (m_ValidatedShotReferences.Count == 0) return;
-
-            float now = Time.time;
-            s_SharedValidatedShotKeyBuffer.Clear();
-            foreach (var entry in m_ValidatedShotReferences)
-            {
-                if (now - entry.Value.ValidatedTime > m_ValidatedShotLifetime)
-                {
-                    s_SharedValidatedShotKeyBuffer.Add(entry.Key);
-                }
-            }
-
-            foreach (ulong key in s_SharedValidatedShotKeyBuffer)
-            {
-                m_ValidatedShotReferences.Remove(key);
-            }
-        }
-        
         /// <summary>Network statistics.</summary>
         [Serializable]
         public struct ShooterNetworkStats
@@ -549,137 +406,6 @@ namespace Arawn.GameCreator2.Networking.Shooter
             }
         }
 
-        private void OnDisable()
-        {
-            SecurityIntegration.SetModuleServerContext("Shooter", false);
-            m_ValidatedShotReferences.Clear();
-
-            if (m_PatchHooks != null)
-            {
-                m_PatchHooks.Initialize(false);
-            }
-        }
-        
-        // ════════════════════════════════════════════════════════════════════════════════════════
-        // INITIALIZATION
-        // ════════════════════════════════════════════════════════════════════════════════════════
-        
-        /// <summary>
-        /// Initialize the manager with network role.
-        /// </summary>
-        public void Initialize(bool isServer, bool isClient)
-        {
-            m_IsServer = isServer;
-            m_IsClient = isClient;
-            SecurityIntegration.SetModuleServerContext("Shooter", isServer);
-            SecurityIntegration.EnsureSecurityManagerInitialized(isServer, () => GetNetworkTimeFunc?.Invoke() ?? Time.time);
-            SyncPatchHooks();
-            
-            Debug.Log($"[NetworkShooterManager] Initialized - Server: {isServer}, Client: {isClient}");
-        }
-
-        private void SyncPatchHooks()
-        {
-            if (!m_IsServer)
-            {
-                if (m_PatchHooks != null) m_PatchHooks.Initialize(false);
-                return;
-            }
-
-            if (m_PatchHooks == null)
-            {
-                m_PatchHooks = GetComponent<NetworkShooterPatchHooks>();
-                if (m_PatchHooks == null)
-                {
-                    m_PatchHooks = gameObject.AddComponent<NetworkShooterPatchHooks>();
-                }
-            }
-
-            m_PatchHooks.Initialize(true);
-        }
-        
-        // ════════════════════════════════════════════════════════════════════════════════════════
-        // CONTROLLER REGISTRATION
-        // ════════════════════════════════════════════════════════════════════════════════════════
-        
-        /// <summary>
-        /// Register a NetworkShooterController for a character.
-        /// </summary>
-        public void RegisterController(uint networkId, NetworkShooterController controller)
-        {
-            if (controller == null) return;
-            
-            m_Controllers[networkId] = controller;
-            
-            // Subscribe to controller events
-            controller.OnShotRequestSent += OnControllerShotRequestSent;
-            controller.OnHitDetected += OnControllerHitDetected;
-        }
-        
-        /// <summary>
-        /// Unregister a controller.
-        /// </summary>
-        public void UnregisterController(uint networkId)
-        {
-            if (m_Controllers.TryGetValue(networkId, out var controller))
-            {
-                controller.OnShotRequestSent -= OnControllerShotRequestSent;
-                controller.OnHitDetected -= OnControllerHitDetected;
-                m_Controllers.Remove(networkId);
-            }
-        }
-        
-        /// <summary>
-        /// Get a NetworkCharacter by network ID.
-        /// </summary>
-        public NetworkCharacter GetCharacterByNetworkId(uint networkId)
-        {
-            if (GetCharacterByNetworkIdFunc != null)
-            {
-                return GetCharacterByNetworkIdFunc(networkId);
-            }
-            
-            if (m_Controllers.TryGetValue(networkId, out var controller))
-            {
-                return controller.GetComponent<NetworkCharacter>();
-            }
-            
-            return null;
-        }
-        
-        // ════════════════════════════════════════════════════════════════════════════════════════
-        // CLIENT-SIDE: SENDING REQUESTS
-        // ════════════════════════════════════════════════════════════════════════════════════════
-        
-        private void OnControllerShotRequestSent(NetworkShotRequest request)
-        {
-            if (!m_IsClient) return;
-            
-            if (m_LogShotRequests)
-            {
-                Debug.Log($"[NetworkShooterManager] Shot request: Shooter={request.ShooterNetworkId}, " +
-                         $"Pos={request.MuzzlePosition}, Dir={request.ShotDirection}");
-            }
-            
-            SendShotRequestToServer?.Invoke(request);
-            m_Stats.ShotRequestsSent++;
-            
-            OnShotRequestSent?.Invoke(request);
-        }
-        
-        private void OnControllerHitDetected(NetworkShooterHitRequest request)
-        {
-            if (!m_IsClient) return;
-            
-            if (m_LogHitRequests)
-            {
-                Debug.Log($"[NetworkShooterManager] Hit request: Target={request.TargetNetworkId}, " +
-                         $"Point={request.HitPoint}");
-            }
-            
-            SendHitRequestToServer?.Invoke(request);
-        }
-        
         // ════════════════════════════════════════════════════════════════════════════════════════
         // SERVER-SIDE: RECEIVING & PROCESSING REQUESTS
         // ════════════════════════════════════════════════════════════════════════════════════════
@@ -857,15 +583,26 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 return;
             }
             
-            if (m_Controllers.TryGetValue(request.ActorNetworkId, out var controller))
+            if (!TryGetActorController(
+                    queued.ClientNetworkId,
+                    request.ActorNetworkId,
+                    nameof(NetworkShotRequest),
+                    out var controller))
             {
-                response = controller.ProcessShotRequest(request, queued.ClientNetworkId);
-            }
-            else
-            {
-                response = ValidateShotRequest(request);
+                response = new NetworkShotResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Validated = false,
+                    RejectionReason = ShotRejectionReason.ShooterNotFound
+                };
+
+                SendShotResponseToClient?.Invoke(queued.ClientNetworkId, response);
+                return;
             }
 
+            response = controller.ProcessShotRequest(request, queued.ClientNetworkId);
             response.ActorNetworkId = request.ActorNetworkId;
             response.CorrelationId = request.CorrelationId;
             
@@ -916,6 +653,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
             var request = queued.Request;
             
             NetworkShooterHitResponse response;
+            ulong sourceShotKey = 0;
             if (request.ActorNetworkId == 0 || request.ActorNetworkId != request.ShooterNetworkId)
             {
                 response = new NetworkShooterHitResponse
@@ -930,7 +668,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 return;
             }
 
-            if (!ValidateHitSourceShot(request))
+            if (!ValidateHitSourceShot(request, out sourceShotKey, out HitRejectionReason shotBindingRejection))
             {
                 response = new NetworkShooterHitResponse
                 {
@@ -938,16 +676,27 @@ namespace Arawn.GameCreator2.Networking.Shooter
                     ActorNetworkId = request.ActorNetworkId,
                     CorrelationId = request.CorrelationId,
                     Validated = false,
-                    RejectionReason = HitRejectionReason.ShotNotValidated
+                    RejectionReason = shotBindingRejection
                 };
             }
-            else if (m_Controllers.TryGetValue(request.ActorNetworkId, out var controller))
+            else if (!TryGetActorController(
+                         queued.ClientNetworkId,
+                         request.ActorNetworkId,
+                         nameof(NetworkShooterHitRequest),
+                         out var controller))
             {
-                response = controller.ProcessHitRequest(request, queued.ClientNetworkId);
+                response = new NetworkShooterHitResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Validated = false,
+                    RejectionReason = HitRejectionReason.ShooterNotFound
+                };
             }
             else
             {
-                response = ValidateHitRequest(request);
+                response = controller.ProcessHitRequest(request, queued.ClientNetworkId);
             }
 
             response.ActorNetworkId = request.ActorNetworkId;
@@ -958,6 +707,9 @@ namespace Arawn.GameCreator2.Networking.Shooter
             if (response.Validated)
             {
                 m_Stats.HitsValidated++;
+
+                // Consume one authoritative hit claim from this validated shot.
+                RecordValidatedHitClaim(sourceShotKey, request);
                 
                 // Apply damage on server
                 ApplyDamageOnServer(request, response.Damage);
@@ -1233,730 +985,6 @@ namespace Arawn.GameCreator2.Networking.Shooter
             if (m_Controllers.TryGetValue(broadcast.TargetNetworkId, out var targetCtrl))
             {
                 targetCtrl.ReceiveHitBroadcast(broadcast);
-            }
-        }
-        
-        // ════════════════════════════════════════════════════════════════════════════════════════
-        // RELOAD NETWORKING
-        // ════════════════════════════════════════════════════════════════════════════════════════
-        
-        /// <summary>
-        /// [Server] Called when a reload request is received from a client.
-        /// </summary>
-        public void ReceiveReloadRequest(uint clientNetworkId, NetworkReloadRequest request)
-        {
-            if (!m_IsServer) return;
-            if (!ValidateShooterRequest(clientNetworkId, request.ActorNetworkId, request.CorrelationId, nameof(NetworkReloadRequest)))
-            {
-                SendReloadResponseToClient?.Invoke(clientNetworkId, new NetworkReloadResponse
-                {
-                    RequestId = request.RequestId,
-                    ActorNetworkId = request.ActorNetworkId,
-                    CorrelationId = request.CorrelationId,
-                    Validated = false,
-                    RejectionReason = ReloadRejectionReason.CheatSuspected
-                });
-                return;
-            }
-            if (!ValidateActorBinding(clientNetworkId, request.ActorNetworkId, request.CharacterNetworkId, nameof(NetworkReloadRequest), nameof(request.CharacterNetworkId)))
-            {
-                SendReloadResponseToClient?.Invoke(clientNetworkId, new NetworkReloadResponse
-                {
-                    RequestId = request.RequestId,
-                    ActorNetworkId = request.ActorNetworkId,
-                    CorrelationId = request.CorrelationId,
-                    Validated = false,
-                    RejectionReason = ReloadRejectionReason.CheatSuspected
-                });
-                return;
-            }
-            
-            m_Stats.ReloadRequestsReceived++;
-
-            if (IsQueueAtCapacity(
-                    m_ServerReloadQueue,
-                    m_MaxReloadQueueLength,
-                    clientNetworkId,
-                    request.ActorNetworkId,
-                    nameof(NetworkReloadRequest)))
-            {
-                SendReloadResponseToClient?.Invoke(clientNetworkId, new NetworkReloadResponse
-                {
-                    RequestId = request.RequestId,
-                    ActorNetworkId = request.ActorNetworkId,
-                    CorrelationId = request.CorrelationId,
-                    Validated = false,
-                    RejectionReason = ReloadRejectionReason.RateLimitExceeded
-                });
-                return;
-            }
-            
-            m_ServerReloadQueue.Enqueue(new QueuedReloadRequest
-            {
-                ClientNetworkId = clientNetworkId,
-                Request = request,
-                ReceivedTime = Time.time
-            });
-        }
-        
-        private void ProcessServerReloadQueue()
-        {
-            int staleDropped = DropStaleRequests(m_ServerReloadQueue, m_MaxQueueAgeSeconds, queued => queued.ReceivedTime);
-            if (staleDropped > 0 && (m_LogShotRequests || m_LogBroadcasts))
-            {
-                Debug.LogWarning($"[NetworkShooterManager] Dropped {staleDropped} stale reload requests");
-            }
-
-            while (m_ServerReloadQueue.Count > 0)
-            {
-                var queued = m_ServerReloadQueue.Dequeue();
-                ProcessReloadRequest(queued);
-            }
-        }
-        
-        private void ProcessReloadRequest(QueuedReloadRequest queued)
-        {
-            var request = queued.Request;
-            NetworkReloadResponse response;
-            if (request.ActorNetworkId == 0 || request.ActorNetworkId != request.CharacterNetworkId)
-            {
-                response = new NetworkReloadResponse
-                {
-                    RequestId = request.RequestId,
-                    ActorNetworkId = request.ActorNetworkId,
-                    CorrelationId = request.CorrelationId,
-                    Validated = false,
-                    RejectionReason = ReloadRejectionReason.CheatSuspected
-                };
-                SendReloadResponseToClient?.Invoke(queued.ClientNetworkId, response);
-                return;
-            }
-            
-            if (m_Controllers.TryGetValue(request.ActorNetworkId, out var controller))
-            {
-                response = controller.ProcessReloadRequest(request, queued.ClientNetworkId);
-            }
-            else
-            {
-                response = new NetworkReloadResponse
-                {
-                    RequestId = request.RequestId,
-                    Validated = false,
-                    RejectionReason = ReloadRejectionReason.CharacterNotFound
-                };
-            }
-
-            response.ActorNetworkId = request.ActorNetworkId;
-            response.CorrelationId = request.CorrelationId;
-            
-            SendReloadResponseToClient?.Invoke(queued.ClientNetworkId, response);
-            
-            if (response.Validated)
-            {
-                m_Stats.ReloadsValidated++;
-                
-                // Broadcast reload started
-                var broadcast = new NetworkReloadBroadcast
-                {
-                    CharacterNetworkId = request.ActorNetworkId,
-                    WeaponHash = request.WeaponHash,
-                    NewAmmoCount = 0,
-                    EventType = ReloadEventType.Started
-                };
-                
-                BroadcastReloadToAllClients?.Invoke(broadcast);
-                OnReloadValidated?.Invoke(broadcast);
-                
-                if (m_LogBroadcasts)
-                {
-                    Debug.Log($"[NetworkShooterManager] Reload broadcast: {request.ActorNetworkId}");
-                }
-            }
-        }
-        
-        /// <summary>
-        /// [Client] Called when server sends a reload response.
-        /// </summary>
-        public void ReceiveReloadResponse(NetworkReloadResponse response)
-        {
-            if (response.ActorNetworkId != 0 && m_Controllers.TryGetValue(response.ActorNetworkId, out var controller))
-            {
-                controller.ReceiveReloadResponse(response);
-            }
-        }
-        
-        /// <summary>
-        /// [Client] Called when server broadcasts a reload event.
-        /// </summary>
-        public void ReceiveReloadBroadcast(NetworkReloadBroadcast broadcast)
-        {
-            if (m_LogBroadcasts)
-            {
-                Debug.Log($"[NetworkShooterManager] Received reload broadcast: {broadcast.CharacterNetworkId}, Event: {broadcast.EventType}");
-            }
-            
-            if (m_Controllers.TryGetValue(broadcast.CharacterNetworkId, out var controller))
-            {
-                controller.ReceiveReloadBroadcast(broadcast);
-            }
-        }
-        
-        // ════════════════════════════════════════════════════════════════════════════════════════
-        // JAM / FIX NETWORKING
-        // ════════════════════════════════════════════════════════════════════════════════════════
-        
-        /// <summary>
-        /// [Server] Called when a fix jam request is received from a client.
-        /// </summary>
-        public void ReceiveFixJamRequest(uint clientNetworkId, NetworkFixJamRequest request)
-        {
-            if (!m_IsServer) return;
-            if (!ValidateShooterRequest(clientNetworkId, request.ActorNetworkId, request.CorrelationId, nameof(NetworkFixJamRequest)))
-            {
-                SendFixJamResponseToClient?.Invoke(clientNetworkId, new NetworkFixJamResponse
-                {
-                    RequestId = request.RequestId,
-                    ActorNetworkId = request.ActorNetworkId,
-                    CorrelationId = request.CorrelationId,
-                    Validated = false,
-                    RejectionReason = FixJamRejectionReason.CheatSuspected
-                });
-                return;
-            }
-            if (!ValidateActorBinding(clientNetworkId, request.ActorNetworkId, request.CharacterNetworkId, nameof(NetworkFixJamRequest), nameof(request.CharacterNetworkId)))
-            {
-                SendFixJamResponseToClient?.Invoke(clientNetworkId, new NetworkFixJamResponse
-                {
-                    RequestId = request.RequestId,
-                    ActorNetworkId = request.ActorNetworkId,
-                    CorrelationId = request.CorrelationId,
-                    Validated = false,
-                    RejectionReason = FixJamRejectionReason.CheatSuspected
-                });
-                return;
-            }
-            
-            m_Stats.FixJamRequestsReceived++;
-
-            if (IsQueueAtCapacity(
-                    m_ServerFixJamQueue,
-                    m_MaxFixJamQueueLength,
-                    clientNetworkId,
-                    request.ActorNetworkId,
-                    nameof(NetworkFixJamRequest)))
-            {
-                SendFixJamResponseToClient?.Invoke(clientNetworkId, new NetworkFixJamResponse
-                {
-                    RequestId = request.RequestId,
-                    ActorNetworkId = request.ActorNetworkId,
-                    CorrelationId = request.CorrelationId,
-                    Validated = false,
-                    RejectionReason = FixJamRejectionReason.RateLimitExceeded
-                });
-                return;
-            }
-            
-            m_ServerFixJamQueue.Enqueue(new QueuedFixJamRequest
-            {
-                ClientNetworkId = clientNetworkId,
-                Request = request,
-                ReceivedTime = Time.time
-            });
-        }
-        
-        private void ProcessServerFixJamQueue()
-        {
-            int staleDropped = DropStaleRequests(m_ServerFixJamQueue, m_MaxQueueAgeSeconds, queued => queued.ReceivedTime);
-            if (staleDropped > 0 && (m_LogShotRequests || m_LogBroadcasts))
-            {
-                Debug.LogWarning($"[NetworkShooterManager] Dropped {staleDropped} stale fix-jam requests");
-            }
-
-            while (m_ServerFixJamQueue.Count > 0)
-            {
-                var queued = m_ServerFixJamQueue.Dequeue();
-                ProcessFixJamRequest(queued);
-            }
-        }
-        
-        private void ProcessFixJamRequest(QueuedFixJamRequest queued)
-        {
-            var request = queued.Request;
-            NetworkFixJamResponse response;
-            if (request.ActorNetworkId == 0 || request.ActorNetworkId != request.CharacterNetworkId)
-            {
-                response = new NetworkFixJamResponse
-                {
-                    RequestId = request.RequestId,
-                    ActorNetworkId = request.ActorNetworkId,
-                    CorrelationId = request.CorrelationId,
-                    Validated = false,
-                    RejectionReason = FixJamRejectionReason.CheatSuspected
-                };
-                SendFixJamResponseToClient?.Invoke(queued.ClientNetworkId, response);
-                return;
-            }
-            
-            if (m_Controllers.TryGetValue(request.ActorNetworkId, out var controller))
-            {
-                response = controller.ProcessFixJamRequest(request, queued.ClientNetworkId);
-            }
-            else
-            {
-                response = new NetworkFixJamResponse
-                {
-                    RequestId = request.RequestId,
-                    Validated = false,
-                    RejectionReason = FixJamRejectionReason.CharacterNotFound
-                };
-            }
-
-            response.ActorNetworkId = request.ActorNetworkId;
-            response.CorrelationId = request.CorrelationId;
-            
-            SendFixJamResponseToClient?.Invoke(queued.ClientNetworkId, response);
-            
-            if (response.Validated)
-            {
-                m_Stats.FixJamsValidated++;
-                
-                if (m_LogBroadcasts)
-                {
-                    Debug.Log($"[NetworkShooterManager] Fix jam validated: {request.ActorNetworkId}");
-                }
-            }
-        }
-        
-        /// <summary>
-        /// [Server] Broadcast that a weapon has jammed.
-        /// Call this when server determines a jam occurs (e.g., during shot processing).
-        /// </summary>
-        public void BroadcastJam(uint characterNetworkId, int weaponHash)
-        {
-            if (!m_IsServer) return;
-            
-            var broadcast = new NetworkJamBroadcast
-            {
-                CharacterNetworkId = characterNetworkId,
-                WeaponHash = weaponHash
-            };
-            
-            BroadcastJamToAllClients?.Invoke(broadcast);
-            OnWeaponJammed?.Invoke(broadcast);
-            
-            if (m_LogBroadcasts)
-            {
-                Debug.Log($"[NetworkShooterManager] Jam broadcast: {characterNetworkId}");
-            }
-        }
-        
-        /// <summary>
-        /// [Server] Broadcast that a jam fix has completed.
-        /// </summary>
-        public void BroadcastFixJamComplete(uint characterNetworkId, int weaponHash, bool success)
-        {
-            if (!m_IsServer) return;
-            
-            var broadcast = new NetworkFixJamBroadcast
-            {
-                CharacterNetworkId = characterNetworkId,
-                WeaponHash = weaponHash,
-                Success = success
-            };
-            
-            BroadcastFixJamToAllClients?.Invoke(broadcast);
-            OnJamFixed?.Invoke(broadcast);
-            
-            if (m_LogBroadcasts)
-            {
-                Debug.Log($"[NetworkShooterManager] Fix jam complete broadcast: {characterNetworkId}, Success: {success}");
-            }
-        }
-        
-        /// <summary>
-        /// [Client] Called when server sends a fix jam response.
-        /// </summary>
-        public void ReceiveFixJamResponse(NetworkFixJamResponse response)
-        {
-            if (response.ActorNetworkId != 0 && m_Controllers.TryGetValue(response.ActorNetworkId, out var controller))
-            {
-                controller.ReceiveFixJamResponse(response);
-            }
-        }
-        
-        /// <summary>
-        /// [Client] Called when server broadcasts a weapon jam.
-        /// </summary>
-        public void ReceiveJamBroadcast(NetworkJamBroadcast broadcast)
-        {
-            if (m_LogBroadcasts)
-            {
-                Debug.Log($"[NetworkShooterManager] Received jam broadcast: {broadcast.CharacterNetworkId}");
-            }
-            
-            if (m_Controllers.TryGetValue(broadcast.CharacterNetworkId, out var controller))
-            {
-                controller.ReceiveJamBroadcast(broadcast);
-            }
-        }
-        
-        /// <summary>
-        /// [Client] Called when server broadcasts a jam fix complete.
-        /// </summary>
-        public void ReceiveFixJamBroadcast(NetworkFixJamBroadcast broadcast)
-        {
-            if (m_LogBroadcasts)
-            {
-                Debug.Log($"[NetworkShooterManager] Received fix jam broadcast: {broadcast.CharacterNetworkId}, Success: {broadcast.Success}");
-            }
-            
-            if (m_Controllers.TryGetValue(broadcast.CharacterNetworkId, out var controller))
-            {
-                controller.ReceiveFixJamBroadcast(broadcast);
-            }
-        }
-        
-        // ════════════════════════════════════════════════════════════════════════════════════════
-        // CHARGE NETWORKING
-        // ════════════════════════════════════════════════════════════════════════════════════════
-        
-        /// <summary>
-        /// [Server] Called when a charge start request is received from a client.
-        /// </summary>
-        public void ReceiveChargeStartRequest(uint clientNetworkId, NetworkChargeStartRequest request)
-        {
-            if (!m_IsServer) return;
-            if (!ValidateShooterRequest(clientNetworkId, request.ActorNetworkId, request.CorrelationId, nameof(NetworkChargeStartRequest)))
-            {
-                SendChargeStartResponseToClient?.Invoke(clientNetworkId, new NetworkChargeStartResponse
-                {
-                    RequestId = request.RequestId,
-                    ActorNetworkId = request.ActorNetworkId,
-                    CorrelationId = request.CorrelationId,
-                    Validated = false,
-                    RejectionReason = ChargeRejectionReason.CheatSuspected
-                });
-                return;
-            }
-            if (!ValidateActorBinding(clientNetworkId, request.ActorNetworkId, request.CharacterNetworkId, nameof(NetworkChargeStartRequest), nameof(request.CharacterNetworkId)))
-            {
-                SendChargeStartResponseToClient?.Invoke(clientNetworkId, new NetworkChargeStartResponse
-                {
-                    RequestId = request.RequestId,
-                    ActorNetworkId = request.ActorNetworkId,
-                    CorrelationId = request.CorrelationId,
-                    Validated = false,
-                    RejectionReason = ChargeRejectionReason.CheatSuspected
-                });
-                return;
-            }
-            
-            m_Stats.ChargeRequestsReceived++;
-
-            if (IsQueueAtCapacity(
-                    m_ServerChargeQueue,
-                    m_MaxChargeQueueLength,
-                    clientNetworkId,
-                    request.ActorNetworkId,
-                    nameof(NetworkChargeStartRequest)))
-            {
-                SendChargeStartResponseToClient?.Invoke(clientNetworkId, new NetworkChargeStartResponse
-                {
-                    RequestId = request.RequestId,
-                    ActorNetworkId = request.ActorNetworkId,
-                    CorrelationId = request.CorrelationId,
-                    Validated = false,
-                    RejectionReason = ChargeRejectionReason.InvalidState
-                });
-                return;
-            }
-            
-            m_ServerChargeQueue.Enqueue(new QueuedChargeRequest
-            {
-                ClientNetworkId = clientNetworkId,
-                Request = request,
-                ReceivedTime = Time.time
-            });
-        }
-        
-        private void ProcessServerChargeQueue()
-        {
-            int staleDropped = DropStaleRequests(m_ServerChargeQueue, m_MaxQueueAgeSeconds, queued => queued.ReceivedTime);
-            if (staleDropped > 0 && (m_LogShotRequests || m_LogBroadcasts))
-            {
-                Debug.LogWarning($"[NetworkShooterManager] Dropped {staleDropped} stale charge requests");
-            }
-
-            while (m_ServerChargeQueue.Count > 0)
-            {
-                var queued = m_ServerChargeQueue.Dequeue();
-                ProcessChargeRequest(queued);
-            }
-        }
-        
-        private void ProcessChargeRequest(QueuedChargeRequest queued)
-        {
-            var request = queued.Request;
-            NetworkChargeStartResponse response;
-            if (request.ActorNetworkId == 0 || request.ActorNetworkId != request.CharacterNetworkId)
-            {
-                response = new NetworkChargeStartResponse
-                {
-                    RequestId = request.RequestId,
-                    ActorNetworkId = request.ActorNetworkId,
-                    CorrelationId = request.CorrelationId,
-                    Validated = false,
-                    RejectionReason = ChargeRejectionReason.CheatSuspected
-                };
-                SendChargeStartResponseToClient?.Invoke(queued.ClientNetworkId, response);
-                return;
-            }
-            
-            if (m_Controllers.TryGetValue(request.ActorNetworkId, out var controller))
-            {
-                response = controller.ProcessChargeStartRequest(request, queued.ClientNetworkId);
-            }
-            else
-            {
-                response = new NetworkChargeStartResponse
-                {
-                    RequestId = request.RequestId,
-                    Validated = false,
-                    RejectionReason = ChargeRejectionReason.CharacterNotFound
-                };
-            }
-
-            response.ActorNetworkId = request.ActorNetworkId;
-            response.CorrelationId = request.CorrelationId;
-            
-            SendChargeStartResponseToClient?.Invoke(queued.ClientNetworkId, response);
-            
-            if (response.Validated)
-            {
-                m_Stats.ChargesValidated++;
-                
-                // Broadcast charge started
-                var broadcast = new NetworkChargeBroadcast
-                {
-                    CharacterNetworkId = request.ActorNetworkId,
-                    WeaponHash = request.WeaponHash,
-                    ChargeRatio = 0,
-                    EventType = ChargeEventType.Started
-                };
-                
-                BroadcastChargeToAllClients?.Invoke(broadcast);
-                OnChargeStateChanged?.Invoke(broadcast);
-                
-                if (m_LogBroadcasts)
-                {
-                    Debug.Log($"[NetworkShooterManager] Charge start broadcast: {request.ActorNetworkId}");
-                }
-            }
-        }
-        
-        /// <summary>
-        /// [Server] Broadcast charge state update.
-        /// Call this periodically while a character is charging.
-        /// </summary>
-        public void BroadcastChargeState(uint characterNetworkId, int weaponHash, float chargeRatio, ChargeEventType eventType)
-        {
-            if (!m_IsServer) return;
-            
-            var broadcast = new NetworkChargeBroadcast
-            {
-                CharacterNetworkId = characterNetworkId,
-                WeaponHash = weaponHash,
-                ChargeRatio = (byte)(chargeRatio * 255f),
-                EventType = eventType
-            };
-            
-            BroadcastChargeToAllClients?.Invoke(broadcast);
-            OnChargeStateChanged?.Invoke(broadcast);
-        }
-        
-        /// <summary>
-        /// [Client] Called when server sends a charge start response.
-        /// </summary>
-        public void ReceiveChargeStartResponse(NetworkChargeStartResponse response)
-        {
-            if (response.ActorNetworkId != 0 && m_Controllers.TryGetValue(response.ActorNetworkId, out var controller))
-            {
-                controller.ReceiveChargeStartResponse(response);
-            }
-        }
-        
-        /// <summary>
-        /// [Client] Called when server broadcasts a charge state.
-        /// </summary>
-        public void ReceiveChargeBroadcast(NetworkChargeBroadcast broadcast)
-        {
-            if (m_Controllers.TryGetValue(broadcast.CharacterNetworkId, out var controller))
-            {
-                controller.ReceiveChargeBroadcast(broadcast);
-            }
-        }
-        
-        // ════════════════════════════════════════════════════════════════════════════════════════
-        // SIGHT SWITCH NETWORKING
-        // ════════════════════════════════════════════════════════════════════════════════════════
-        
-        /// <summary>
-        /// [Server] Called when a sight switch request is received from a client.
-        /// </summary>
-        public void ReceiveSightSwitchRequest(uint clientNetworkId, NetworkSightSwitchRequest request)
-        {
-            if (!m_IsServer) return;
-            if (!ValidateShooterRequest(clientNetworkId, request.ActorNetworkId, request.CorrelationId, nameof(NetworkSightSwitchRequest)))
-            {
-                SendSightSwitchResponseToClient?.Invoke(clientNetworkId, new NetworkSightSwitchResponse
-                {
-                    RequestId = request.RequestId,
-                    ActorNetworkId = request.ActorNetworkId,
-                    CorrelationId = request.CorrelationId,
-                    Validated = false,
-                    RejectionReason = SightSwitchRejectionReason.CheatSuspected
-                });
-                return;
-            }
-            if (!ValidateActorBinding(clientNetworkId, request.ActorNetworkId, request.CharacterNetworkId, nameof(NetworkSightSwitchRequest), nameof(request.CharacterNetworkId)))
-            {
-                SendSightSwitchResponseToClient?.Invoke(clientNetworkId, new NetworkSightSwitchResponse
-                {
-                    RequestId = request.RequestId,
-                    ActorNetworkId = request.ActorNetworkId,
-                    CorrelationId = request.CorrelationId,
-                    Validated = false,
-                    RejectionReason = SightSwitchRejectionReason.CheatSuspected
-                });
-                return;
-            }
-            
-            m_Stats.SightSwitchRequestsReceived++;
-
-            if (IsQueueAtCapacity(
-                    m_ServerSightSwitchQueue,
-                    m_MaxSightSwitchQueueLength,
-                    clientNetworkId,
-                    request.ActorNetworkId,
-                    nameof(NetworkSightSwitchRequest)))
-            {
-                SendSightSwitchResponseToClient?.Invoke(clientNetworkId, new NetworkSightSwitchResponse
-                {
-                    RequestId = request.RequestId,
-                    ActorNetworkId = request.ActorNetworkId,
-                    CorrelationId = request.CorrelationId,
-                    Validated = false,
-                    RejectionReason = SightSwitchRejectionReason.RateLimitExceeded
-                });
-                return;
-            }
-            
-            m_ServerSightSwitchQueue.Enqueue(new QueuedSightSwitchRequest
-            {
-                ClientNetworkId = clientNetworkId,
-                Request = request,
-                ReceivedTime = Time.time
-            });
-        }
-        
-        private void ProcessServerSightSwitchQueue()
-        {
-            int staleDropped = DropStaleRequests(m_ServerSightSwitchQueue, m_MaxQueueAgeSeconds, queued => queued.ReceivedTime);
-            if (staleDropped > 0 && (m_LogShotRequests || m_LogBroadcasts))
-            {
-                Debug.LogWarning($"[NetworkShooterManager] Dropped {staleDropped} stale sight-switch requests");
-            }
-
-            while (m_ServerSightSwitchQueue.Count > 0)
-            {
-                var queued = m_ServerSightSwitchQueue.Dequeue();
-                ProcessSightSwitchRequest(queued);
-            }
-        }
-        
-        private void ProcessSightSwitchRequest(QueuedSightSwitchRequest queued)
-        {
-            var request = queued.Request;
-            NetworkSightSwitchResponse response;
-            if (request.ActorNetworkId == 0 || request.ActorNetworkId != request.CharacterNetworkId)
-            {
-                response = new NetworkSightSwitchResponse
-                {
-                    RequestId = request.RequestId,
-                    ActorNetworkId = request.ActorNetworkId,
-                    CorrelationId = request.CorrelationId,
-                    Validated = false,
-                    RejectionReason = SightSwitchRejectionReason.CheatSuspected
-                };
-                SendSightSwitchResponseToClient?.Invoke(queued.ClientNetworkId, response);
-                return;
-            }
-            
-            if (m_Controllers.TryGetValue(request.ActorNetworkId, out var controller))
-            {
-                response = controller.ProcessSightSwitchRequest(request, queued.ClientNetworkId);
-            }
-            else
-            {
-                response = new NetworkSightSwitchResponse
-                {
-                    RequestId = request.RequestId,
-                    Validated = false,
-                    RejectionReason = SightSwitchRejectionReason.CharacterNotFound
-                };
-            }
-
-            response.ActorNetworkId = request.ActorNetworkId;
-            response.CorrelationId = request.CorrelationId;
-            
-            SendSightSwitchResponseToClient?.Invoke(queued.ClientNetworkId, response);
-            
-            if (response.Validated)
-            {
-                m_Stats.SightSwitchesValidated++;
-                
-                // Broadcast sight switch
-                var broadcast = new NetworkSightSwitchBroadcast
-                {
-                    CharacterNetworkId = request.ActorNetworkId,
-                    WeaponHash = request.WeaponHash,
-                    NewSightHash = request.NewSightHash
-                };
-                
-                BroadcastSightSwitchToAllClients?.Invoke(broadcast);
-                OnSightSwitched?.Invoke(broadcast);
-                
-                if (m_LogBroadcasts)
-                {
-                    Debug.Log($"[NetworkShooterManager] Sight switch broadcast: {request.ActorNetworkId}");
-                }
-            }
-        }
-        
-        /// <summary>
-        /// [Client] Called when server sends a sight switch response.
-        /// </summary>
-        public void ReceiveSightSwitchResponse(NetworkSightSwitchResponse response)
-        {
-            if (response.ActorNetworkId != 0 && m_Controllers.TryGetValue(response.ActorNetworkId, out var controller))
-            {
-                controller.ReceiveSightSwitchResponse(response);
-            }
-        }
-        
-        /// <summary>
-        /// [Client] Called when server broadcasts a sight switch.
-        /// </summary>
-        public void ReceiveSightSwitchBroadcast(NetworkSightSwitchBroadcast broadcast)
-        {
-            if (m_LogBroadcasts)
-            {
-                Debug.Log($"[NetworkShooterManager] Received sight switch broadcast: {broadcast.CharacterNetworkId}");
-            }
-            
-            if (m_Controllers.TryGetValue(broadcast.CharacterNetworkId, out var controller))
-            {
-                controller.ReceiveSightSwitchBroadcast(broadcast);
             }
         }
     }

@@ -1,0 +1,28 @@
+{
+    "name": "Arawn.GameCreator2.Networking.Abilities",
+    "rootNamespace": "Arawn.GameCreator2.Networking.Abilities",
+    "references": [
+        "Arawn.GameCreator2.Networking",
+        "Arawn.NetworkingCore.Runtime",
+        "GameCreator.Runtime.Core",
+        "Daimahou.Runtime.Core",
+        "DaimahouGames.Runtime.Abilities"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [
+        "GC2_ABILITIES"
+    ],
+    "versionDefines": [
+        {
+            "name": "com.daimahougames.abilities",
+            "expression": "",
+            "define": "GC2_ABILITIES"
+        }
+    ],
+    "noEngineReferences": false
+}

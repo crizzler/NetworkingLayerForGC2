@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using UnityEngine;
 using GameCreator.Runtime.Characters;
+using Arawn.GameCreator2.Networking.Security;
 
 namespace Arawn.GameCreator2.Networking
 {
@@ -36,6 +37,10 @@ namespace Arawn.GameCreator2.Networking
     public abstract class NetworkTransportBridge : MonoBehaviour, INetworkTransportBridge
     {
         private static NetworkTransportBridge s_Active;
+        /// <summary>
+        /// Sentinel value used when an inbound transport client ID cannot be represented in this layer.
+        /// </summary>
+        public const uint InvalidClientId = uint.MaxValue;
 
         [Header("Global Session Profile")]
         [SerializeField] private NetworkSessionProfile m_GlobalSessionProfile;
@@ -44,11 +49,14 @@ namespace Arawn.GameCreator2.Networking
         [Tooltip("When true, unknown character ownership can be learned from first valid input (compatibility mode). Disable for strict server-validated ownership.")]
         [SerializeField] private bool m_AllowOwnershipLearningWhenMissing = false;
 
+        [Tooltip("When true, ownership learning is allowed only while no server-initialized NetworkSecurityManager is present. Keeps competitive authoritative sessions strict by default.")]
+        [SerializeField] private bool m_AllowOwnershipLearningOnlyWithoutSecurityManager = true;
+
         [Header("Character Registry")]
         [Tooltip("When enabled, character resolution only uses the runtime registry (O(1)). Missing entries are not recovered through scene scans.")]
         [SerializeField] private bool m_StrictRegistryLookup = true;
 
-        [Tooltip("When enabled on server, characters receive transport-issued runtime IDs when available (for NGO this maps to NetworkObjectId).")]
+        [Tooltip("When enabled on server, characters receive transport-issued runtime IDs when available .")]
         [SerializeField] private bool m_UseServerIssuedIdsWhenAvailable = true;
 
         [Tooltip("If no transport-issued ID is available, server can allocate runtime IDs from this bridge. Leave OFF unless your custom transport also replicates these IDs to clients.")]
@@ -83,6 +91,31 @@ namespace Arawn.GameCreator2.Networking
 
         public NetworkSessionProfile GlobalSessionProfile => m_GlobalSessionProfile;
         public Func<uint, uint, bool> RecipientRelevanceFilter { get; set; }
+
+        /// <summary>
+        /// Convert a transport sender ID into the GC2 networking client ID domain.
+        /// Use this for every inbound transport callback before validation.
+        /// </summary>
+        public static bool TryConvertSenderClientId(ulong rawSenderClientId, out uint senderClientId)
+        {
+            if (rawSenderClientId > uint.MaxValue)
+            {
+                senderClientId = InvalidClientId;
+                return false;
+            }
+
+            senderClientId = (uint)rawSenderClientId;
+            return true;
+        }
+
+        /// <summary>
+        /// Returns true when a client ID is representable and usable by this layer.
+        /// Client ID 0 is valid (for zero-based transports); only <see cref="InvalidClientId"/> is rejected.
+        /// </summary>
+        public static bool IsValidClientId(uint clientId)
+        {
+            return clientId != InvalidClientId;
+        }
 
         public event Action<uint, uint, NetworkInputState[]> OnInputReceivedServer;
         public event Action<uint, NetworkPositionState, float> OnStateReceivedClient;
@@ -123,6 +156,16 @@ namespace Arawn.GameCreator2.Networking
             if (s_Active == this)
             {
                 s_Active = null;
+            }
+
+            foreach (uint characterNetworkId in m_CharacterOwners.Keys)
+            {
+                SecurityIntegration.UnregisterActorOwnership(characterNetworkId);
+            }
+
+            foreach (uint characterNetworkId in m_CharacterRegistry.Keys)
+            {
+                NetworkCorrelation.ClearComposeState(characterNetworkId);
             }
 
             m_CharacterRegistry.Clear();
@@ -216,6 +259,24 @@ namespace Arawn.GameCreator2.Networking
             return m_CharacterOwners.TryGetValue(characterNetworkId, out ownerClientId);
         }
 
+        /// <summary>
+        /// Authoritatively verify ownership for an actor against transport state.
+        /// Override in transport implementations to query native owner state when
+        /// ownership caches are not yet warmed up.
+        /// </summary>
+        public virtual bool TryVerifyActorOwnership(uint senderClientId, uint actorNetworkId, out uint ownerClientId)
+        {
+            ownerClientId = 0;
+            if (!IsValidClientId(senderClientId) || actorNetworkId == 0) return false;
+
+            if (!TryGetCharacterOwner(actorNetworkId, out ownerClientId) || !IsValidClientId(ownerClientId))
+            {
+                return false;
+            }
+
+            return ownerClientId == senderClientId;
+        }
+
         public bool TryGetRepresentativeCharacterId(uint ownerClientId, out uint characterNetworkId)
         {
             characterNetworkId = 0;
@@ -238,15 +299,26 @@ namespace Arawn.GameCreator2.Networking
             return false;
         }
 
+        /// <summary>
+        /// Set/refresh owner mapping for a character.
+        /// Client ID 0 is valid; pass <see cref="InvalidClientId"/> (or call <see cref="ClearCharacterOwner"/>)
+        /// to clear ownership.
+        /// </summary>
         public void SetCharacterOwner(uint characterNetworkId, uint ownerClientId)
         {
             if (characterNetworkId == 0) return;
+            if (!IsValidClientId(ownerClientId))
+            {
+                ClearCharacterOwner(characterNetworkId);
+                return;
+            }
 
             if (m_CharacterOwners.TryGetValue(characterNetworkId, out uint previousOwner))
             {
                 if (previousOwner == ownerClientId)
                 {
                     m_UnknownOwnershipWarned.Remove(characterNetworkId);
+                    SecurityIntegration.RegisterActorOwnership(characterNetworkId, ownerClientId);
                     return;
                 }
 
@@ -262,6 +334,7 @@ namespace Arawn.GameCreator2.Networking
 
             ownedCharacters.Add(characterNetworkId);
             m_UnknownOwnershipWarned.Remove(characterNetworkId);
+            SecurityIntegration.RegisterActorOwnership(characterNetworkId, ownerClientId);
         }
 
         public void ClearCharacterOwner(uint characterNetworkId)
@@ -271,12 +344,14 @@ namespace Arawn.GameCreator2.Networking
             if (!m_CharacterOwners.TryGetValue(characterNetworkId, out uint previousOwner))
             {
                 m_UnknownOwnershipWarned.Remove(characterNetworkId);
+                NetworkCorrelation.ClearComposeState(characterNetworkId);
                 return;
             }
 
             m_CharacterOwners.Remove(characterNetworkId);
             RemoveOwnedCharacter(previousOwner, characterNetworkId);
             m_UnknownOwnershipWarned.Remove(characterNetworkId);
+            SecurityIntegration.UnregisterActorOwnership(characterNetworkId);
         }
 
         protected bool TryResolveNetworkCharacter(uint networkId, out NetworkCharacter networkCharacter)
@@ -336,6 +411,22 @@ namespace Arawn.GameCreator2.Networking
                 }
 
                 return false;
+            }
+
+            if (m_AllowOwnershipLearningOnlyWithoutSecurityManager)
+            {
+                NetworkSecurityManager securityManager = NetworkSecurityManager.Instance;
+                if (securityManager != null && securityManager.IsServer)
+                {
+                    if (m_UnknownOwnershipWarned.Add(characterNetworkId))
+                    {
+                        Debug.LogWarning(
+                            $"[NetworkTransportBridge] Rejected ownership learning for character {characterNetworkId} " +
+                            $"from client {senderClientId} because NetworkSecurityManager is active in server mode.");
+                    }
+
+                    return false;
+                }
             }
 
             SetCharacterOwner(characterNetworkId, senderClientId);

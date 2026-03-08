@@ -10,11 +10,15 @@ namespace Arawn.GameCreator2.Networking.Security
     /// This class provides validation wrappers that can be called from controllers
     /// to add rate limiting, sequence validation, and state tracking.
     /// </summary>
-    public static class SecurityIntegration
+    public static partial class SecurityIntegration
     {
         private static INetworkOwnershipResolver s_OwnershipResolver = new NetworkOwnershipResolver();
         private static readonly HashSet<string> s_ServerModules = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private static bool s_MissingSecurityManagerWarningLogged;
+        private static bool s_EnforceSecurityManagerForServerLikeRequests = true;
+        private const int DEFAULT_MAX_INVENTORY_QUANTITY_PER_REQUEST = 99;
+        private const float DEFAULT_MAX_MELEE_DAMAGE_PER_REQUEST = 10000f;
+        private const float DEFAULT_MAX_SHOOTER_DAMAGE_PER_REQUEST = 100000f;
 
         private static bool IsAuthoritativeServerContext()
         {
@@ -60,6 +64,17 @@ namespace Arawn.GameCreator2.Networking.Security
         {
             s_ServerModules.Clear();
             s_MissingSecurityManagerWarningLogged = false;
+            s_EnforceSecurityManagerForServerLikeRequests = true;
+        }
+
+        /// <summary>
+        /// When enabled (default), requests that look server-side (non-zero sender + actor)
+        /// fail closed if no server-initialized security manager is present.
+        /// </summary>
+        public static bool EnforceSecurityManagerForServerLikeRequests
+        {
+            get => s_EnforceSecurityManagerForServerLikeRequests;
+            set => s_EnforceSecurityManagerForServerLikeRequests = value;
         }
 
         /// <summary>
@@ -90,9 +105,21 @@ namespace Arawn.GameCreator2.Networking.Security
             return true;
         }
 
-        private static bool ShouldFailClosedNoSecurityManager(NetworkSecurityManager manager, string module, string requestType)
+        private static bool ShouldFailClosedNoSecurityManager(
+            NetworkSecurityManager manager,
+            string module,
+            string requestType,
+            uint senderClientId = NetworkTransportBridge.InvalidClientId,
+            uint actorNetworkId = 0)
         {
-            if (!IsAuthoritativeServerContext())
+            bool hasAuthoritativeContext = IsAuthoritativeServerContext();
+            bool hasSenderContext = NetworkTransportBridge.IsValidClientId(senderClientId);
+            bool looksLikeServerRequest =
+                hasSenderContext &&
+                (actorNetworkId != 0 || !string.IsNullOrWhiteSpace(module));
+
+            if (!hasAuthoritativeContext &&
+                (!s_EnforceSecurityManagerForServerLikeRequests || !looksLikeServerRequest))
             {
                 return false;
             }
@@ -130,14 +157,34 @@ namespace Arawn.GameCreator2.Networking.Security
             OwnershipResolver.RegisterEntityOwner(entityNetworkId, ownerClientId);
         }
 
+        public static void RegisterActorOwnership(uint actorNetworkId, uint ownerClientId)
+        {
+            if (actorNetworkId == 0 || !NetworkTransportBridge.IsValidClientId(ownerClientId)) return;
+
+            OwnershipResolver.RegisterEntityActor(actorNetworkId, actorNetworkId);
+            OwnershipResolver.RegisterEntityOwner(actorNetworkId, ownerClientId);
+        }
+
         public static void RegisterEntityActor(uint entityNetworkId, uint actorNetworkId)
         {
             OwnershipResolver.RegisterEntityActor(entityNetworkId, actorNetworkId);
         }
 
+        public static bool TryResolveActorOwner(uint actorNetworkId, out uint ownerClientId)
+        {
+            return OwnershipResolver.TryResolveOwnerClientId(actorNetworkId, out ownerClientId);
+        }
+
         public static void UnregisterEntity(uint entityNetworkId)
         {
             OwnershipResolver.UnregisterEntity(entityNetworkId);
+        }
+
+        public static void UnregisterActorOwnership(uint actorNetworkId)
+        {
+            if (actorNetworkId == 0) return;
+            OwnershipResolver.UnregisterEntity(actorNetworkId);
+            NetworkCorrelation.ClearComposeState(actorNetworkId);
         }
 
         /// <summary>
@@ -176,7 +223,12 @@ namespace Arawn.GameCreator2.Networking.Security
             string requestType)
         {
             var manager = NetworkSecurityManager.Instance;
-            if (ShouldFailClosedNoSecurityManager(manager, module, requestType))
+            if (ShouldFailClosedNoSecurityManager(
+                    manager,
+                    module,
+                    requestType,
+                    senderClientId,
+                    context.ActorNetworkId))
             {
                 return false;
             }
@@ -185,7 +237,7 @@ namespace Arawn.GameCreator2.Networking.Security
 
             if (IsProtocolContextMismatch(in context))
             {
-                ushort actorSegment = NetworkCorrelation.ExtractActorSegment(context.CorrelationId);
+                ushort actorSignature = NetworkCorrelation.ExtractActorSegment(context.CorrelationId);
                 ushort requestSegment = NetworkCorrelation.ExtractRequestId(context.CorrelationId);
                 manager.RecordViolation(
                     senderClientId,
@@ -194,7 +246,7 @@ namespace Arawn.GameCreator2.Networking.Security
                     module,
                     $"Invalid protocol v2 context for {requestType}: " +
                     $"actor={context.ActorNetworkId}, correlation={context.CorrelationId}, " +
-                    $"corrActorSegment={actorSegment}, corrRequestSegment={requestSegment}");
+                    $"corrActorSignature={actorSignature}, corrRequestSegment={requestSegment}");
                 return false;
             }
 
@@ -203,8 +255,9 @@ namespace Arawn.GameCreator2.Networking.Security
                 return false;
             }
 
-            ushort sequence = NetworkCorrelation.ExtractRequestId(context.CorrelationId);
-            if (!manager.ValidateSequence(senderClientId, context.ActorNetworkId, sequence, module))
+            uint sequenceKey = NetworkCorrelation.ExtractSequenceKey(context.CorrelationId);
+            uint sequenceMask = NetworkCorrelation.GetSequenceMask();
+            if (!manager.ValidateSequence(senderClientId, context.ActorNetworkId, sequenceKey, module, sequenceMask))
             {
                 return false;
             }
@@ -218,14 +271,19 @@ namespace Arawn.GameCreator2.Networking.Security
         public static bool ValidateOwnership(uint senderClientId, uint actorNetworkId, string module)
         {
             var manager = NetworkSecurityManager.Instance;
-            if (ShouldFailClosedNoSecurityManager(manager, module, "ValidateOwnership"))
+            if (ShouldFailClosedNoSecurityManager(
+                    manager,
+                    module,
+                    "ValidateOwnership",
+                    senderClientId,
+                    actorNetworkId))
             {
                 return false;
             }
 
             if (manager == null || !manager.IsServer) return true;
 
-            if (senderClientId == 0 || actorNetworkId == 0)
+            if (!NetworkTransportBridge.IsValidClientId(senderClientId) || actorNetworkId == 0)
             {
                 manager.RecordViolation(
                     senderClientId,
@@ -238,17 +296,32 @@ namespace Arawn.GameCreator2.Networking.Security
 
             if (!OwnershipResolver.TryResolveOwnerClientId(actorNetworkId, out uint ownerClientId))
             {
-                manager.RecordViolation(
-                    senderClientId,
-                    actorNetworkId,
-                    SecurityViolationType.InvalidTarget,
-                    module,
-                    $"Unresolved ownership for actor {actorNetworkId}");
-                return false;
+                if (!TryPrimeOwnershipFromTransport(senderClientId, actorNetworkId, out ownerClientId))
+                {
+                    manager.RecordViolation(
+                        senderClientId,
+                        actorNetworkId,
+                        SecurityViolationType.InvalidTarget,
+                        module,
+                        $"Unresolved ownership for actor {actorNetworkId}. " +
+                        "Register actor ownership through SecurityIntegration.RegisterActorOwnership " +
+                        "from your transport bridge before gameplay requests are processed.");
+                    return false;
+                }
             }
 
             if (ownerClientId != senderClientId)
             {
+                if (TryPrimeOwnershipFromTransport(senderClientId, actorNetworkId, out uint refreshedOwnerClientId))
+                {
+                    ownerClientId = refreshedOwnerClientId;
+                }
+
+                if (ownerClientId == senderClientId)
+                {
+                    return true;
+                }
+
                 manager.RecordViolation(
                     senderClientId,
                     actorNetworkId,
@@ -261,13 +334,41 @@ namespace Arawn.GameCreator2.Networking.Security
             return true;
         }
 
+        /// <summary>
+        /// Attempts to bootstrap actor ownership from the active transport bridge using
+        /// strict sender+actor verification. This does not trust sender claims directly.
+        /// </summary>
+        public static bool TryPrimeOwnershipFromTransport(uint senderClientId, uint actorNetworkId, out uint ownerClientId)
+        {
+            ownerClientId = 0;
+            if (!NetworkTransportBridge.IsValidClientId(senderClientId) || actorNetworkId == 0)
+            {
+                return false;
+            }
+
+            NetworkTransportBridge bridge = NetworkTransportBridge.Active;
+            if (bridge == null)
+            {
+                return false;
+            }
+
+            if (!bridge.TryVerifyActorOwnership(senderClientId, actorNetworkId, out ownerClientId) ||
+                !NetworkTransportBridge.IsValidClientId(ownerClientId))
+            {
+                return false;
+            }
+
+            RegisterActorOwnership(actorNetworkId, ownerClientId);
+            return true;
+        }
+
         public static bool ValidateOwnership(ulong senderClientId, uint actorNetworkId, string module)
         {
-            if (senderClientId > uint.MaxValue)
+            if (!NetworkTransportBridge.TryConvertSenderClientId(senderClientId, out uint convertedClientId))
             {
                 var manager = NetworkSecurityManager.Instance;
                 manager?.RecordViolation(
-                    0,
+                    NetworkTransportBridge.InvalidClientId,
                     actorNetworkId,
                     SecurityViolationType.InvalidTarget,
                     module,
@@ -275,7 +376,7 @@ namespace Arawn.GameCreator2.Networking.Security
                 return false;
             }
 
-            return ValidateOwnership((uint)senderClientId, actorNetworkId, module);
+            return ValidateOwnership(convertedClientId, actorNetworkId, module);
         }
 
         /// <summary>
@@ -289,7 +390,12 @@ namespace Arawn.GameCreator2.Networking.Security
             string requestType)
         {
             var manager = NetworkSecurityManager.Instance;
-            if (ShouldFailClosedNoSecurityManager(manager, module, requestType))
+            if (ShouldFailClosedNoSecurityManager(
+                    manager,
+                    module,
+                    requestType,
+                    senderClientId,
+                    actorNetworkId))
             {
                 return false;
             }
@@ -309,13 +415,35 @@ namespace Arawn.GameCreator2.Networking.Security
 
             if (!OwnershipResolver.TryResolveOwnerClientIdForEntity(targetEntityNetworkId, out uint ownerClientId))
             {
-                manager.RecordViolation(
-                    senderClientId,
-                    actorNetworkId,
-                    SecurityViolationType.InvalidTarget,
-                    module,
-                    $"Unresolved target ownership entity={targetEntityNetworkId} for {requestType}");
-                return false;
+                bool primedFromTransport = false;
+                if (actorNetworkId != 0)
+                {
+                    bool targetMapsToActor = targetEntityNetworkId == actorNetworkId;
+                    if (!targetMapsToActor &&
+                        OwnershipResolver.TryResolveActorNetworkIdForEntity(targetEntityNetworkId, out uint mappedTargetActorNetworkId))
+                    {
+                        targetMapsToActor = mappedTargetActorNetworkId == actorNetworkId;
+                    }
+
+                    if (targetMapsToActor &&
+                        TryPrimeOwnershipFromTransport(senderClientId, actorNetworkId, out ownerClientId))
+                    {
+                        OwnershipResolver.RegisterEntityActor(targetEntityNetworkId, actorNetworkId);
+                        OwnershipResolver.RegisterEntityOwner(targetEntityNetworkId, ownerClientId);
+                        primedFromTransport = true;
+                    }
+                }
+
+                if (!primedFromTransport && !OwnershipResolver.TryResolveOwnerClientIdForEntity(targetEntityNetworkId, out ownerClientId))
+                {
+                    manager.RecordViolation(
+                        senderClientId,
+                        actorNetworkId,
+                        SecurityViolationType.InvalidTarget,
+                        module,
+                        $"Unresolved target ownership entity={targetEntityNetworkId} for {requestType}");
+                    return false;
+                }
             }
 
             if (ownerClientId != senderClientId)
@@ -346,474 +474,36 @@ namespace Arawn.GameCreator2.Networking.Security
             return true;
         }
 
-        private static NetworkRequestContext BuildLegacyContext(uint actorNetworkId, ushort requestId)
-        {
-            uint correlationId = actorNetworkId != 0 && requestId != 0
-                ? NetworkCorrelation.Compose(actorNetworkId, requestId)
-                : 0u;
-
-            return NetworkRequestContext.Create(actorNetworkId, correlationId);
-        }
-
-        private static bool RequireLegacyServerSecurityManager(
+        private static float ResolveConfiguredMaxValue(
+            NetworkSecurityManager manager,
             string module,
-            string requestType,
-            out NetworkSecurityManager manager)
+            float fallback)
         {
-            manager = NetworkSecurityManager.Instance;
-            if (manager == null)
+            if (manager == null) return fallback;
+
+            NetworkSecurityConfig config = manager.GetConfigForModule(module);
+            if (config != null && config.MaxValueChangePerRequest > 0f)
             {
-                Debug.LogError(
-                    $"[SecurityIntegration] Rejecting legacy {module}/{requestType}: " +
-                    "NetworkSecurityManager is missing.");
-                return false;
+                return config.MaxValueChangePerRequest;
             }
 
-            if (!manager.IsServer)
-            {
-                Debug.LogError(
-                    $"[SecurityIntegration] Rejecting legacy {module}/{requestType}: " +
-                    "NetworkSecurityManager is not initialized for server mode.");
-                return false;
-            }
-
-            return true;
+            return fallback;
         }
 
-        // ════════════════════════════════════════════════════════════════════════════════════════
-        // CORE MODULE INTEGRATION
-        // ════════════════════════════════════════════════════════════════════════════════════════
-        
-        /// <summary>
-        /// Validate a Core module request (movement, position sync).
-        /// </summary>
-        public static bool ValidateCoreRequest(
-            uint clientId, 
-            uint characterNetworkId,
-            ushort requestId, 
-            string requestType)
+        private static int ResolveConfiguredMaxQuantity(
+            NetworkSecurityManager manager,
+            string module,
+            int fallback)
         {
-            if (!RequireLegacyServerSecurityManager("Core", requestType, out _))
+            float configured = ResolveConfiguredMaxValue(manager, module, fallback);
+            if (float.IsNaN(configured) || float.IsInfinity(configured) || configured <= 0f)
             {
-                return false;
+                return fallback;
             }
 
-            var context = BuildLegacyContext(characterNetworkId, requestId);
-            return ValidateModuleRequest(clientId, in context, "Core", requestType);
+            return Mathf.Max(1, Mathf.RoundToInt(configured));
         }
-        
-        /// <summary>
-        /// Validate a Core module position update.
-        /// </summary>
-        public static bool ValidateCorePositionUpdate(
-            uint clientId,
-            uint characterNetworkId,
-            Vector3 position,
-            Vector3 velocity,
-            float maxSpeed = 50f)
-        {
-            var manager = NetworkSecurityManager.Instance;
-            if (ShouldFailClosedNoSecurityManager(manager, "Core", nameof(ValidateCorePositionUpdate)))
-            {
-                return false;
-            }
 
-            if (manager == null || !manager.IsServer) return true;
-            
-            // Position validation
-            if (!manager.ValidatePosition(clientId, "Core", position))
-            {
-                return false;
-            }
-            
-            // Velocity magnitude check
-            if (!manager.ValidateValueRange(clientId, "Core", "velocity", velocity.magnitude, 0f, maxSpeed))
-            {
-                return false;
-            }
-            
-            return true;
-        }
-        
-        // ════════════════════════════════════════════════════════════════════════════════════════
-        // STATS MODULE INTEGRATION
-        // ════════════════════════════════════════════════════════════════════════════════════════
-        
-        /// <summary>
-        /// Validate a Stats module modification request.
-        /// </summary>
-        public static bool ValidateStatsRequest(
-            uint clientId,
-            uint characterNetworkId,
-            ushort requestId,
-            string requestType,
-            int statHash,
-            float value)
-        {
-            if (!RequireLegacyServerSecurityManager("Stats", requestType, out var manager))
-            {
-                return false;
-            }
-
-            var context = BuildLegacyContext(characterNetworkId, requestId);
-            if (!ValidateModuleRequest(clientId, in context, "Stats", requestType))
-            {
-                return false;
-            }
-            
-            // Value bounds check (configurable max stat change)
-            var config = manager.GetConfigForModule("Stats");
-            float maxChange = config.MaxValueChangePerRequest;
-            
-            if (maxChange > 0 && !manager.ValidateValueRange(clientId, "Stats", $"statChange_{statHash}", 
-                Mathf.Abs(value), 0f, maxChange))
-            {
-                return false;
-            }
-            
-            return true;
-        }
-        
-        /// <summary>
-        /// Record a Stats state for validation.
-        /// </summary>
-        public static void RecordStatsState(
-            uint characterNetworkId, 
-            int statHash, 
-            float baseValue, 
-            float computedValue)
-        {
-            // State recording is handled by the NetworkSecurityManager's state validators
-            // This method is a convenience wrapper that can be extended
-            var manager = NetworkSecurityManager.Instance;
-            if (manager == null || !manager.IsServer) return;
-            
-            // Log state change for debugging
-            if (manager.GlobalConfig.EnableStateValidation)
-            {
-                Debug.Log($"[SecurityIntegration] Recording stat state: char={characterNetworkId}, stat={statHash}, base={baseValue}, computed={computedValue}");
-            }
-        }
-        
-        // ════════════════════════════════════════════════════════════════════════════════════════
-        // INVENTORY MODULE INTEGRATION
-        // ════════════════════════════════════════════════════════════════════════════════════════
-        
-        /// <summary>
-        /// Validate an Inventory module request.
-        /// </summary>
-        public static bool ValidateInventoryRequest(
-            uint clientId,
-            uint characterNetworkId,
-            ushort requestId,
-            string requestType)
-        {
-            if (!RequireLegacyServerSecurityManager("Inventory", requestType, out _))
-            {
-                return false;
-            }
-
-            var context = BuildLegacyContext(characterNetworkId, requestId);
-            return ValidateModuleRequest(clientId, in context, "Inventory", requestType);
-        }
-        
-        /// <summary>
-        /// Validate an item transfer (add/remove).
-        /// </summary>
-        public static bool ValidateItemTransfer(
-            uint clientId,
-            uint characterNetworkId,
-            int itemHash,
-            int quantity,
-            bool isAdd)
-        {
-            var manager = NetworkSecurityManager.Instance;
-            if (ShouldFailClosedNoSecurityManager(manager, "Inventory", nameof(ValidateItemTransfer)))
-            {
-                return false;
-            }
-
-            if (manager == null || !manager.IsServer) return true;
-            
-            // Check for negative quantities
-            if (quantity < 0)
-            {
-                manager.RecordViolation(clientId, characterNetworkId, 
-                    SecurityViolationType.OutOfBoundsValue, "Inventory",
-                    $"Negative quantity: {quantity}");
-                return false;
-            }
-            
-            // Check for excessively large quantities
-            var config = manager.GetConfigForModule("Inventory");
-            int maxItemsPerRequest = 99; // Configurable
-            
-            if (quantity > maxItemsPerRequest)
-            {
-                manager.RecordViolation(clientId, characterNetworkId,
-                    SecurityViolationType.OutOfBoundsValue, "Inventory",
-                    $"Excessive quantity: {quantity} (max: {maxItemsPerRequest})");
-                return false;
-            }
-            
-            return true;
-        }
-        
-        // ════════════════════════════════════════════════════════════════════════════════════════
-        // MELEE MODULE INTEGRATION
-        // ════════════════════════════════════════════════════════════════════════════════════════
-        
-        /// <summary>
-        /// Validate a Melee module combat request.
-        /// </summary>
-        public static bool ValidateMeleeRequest(
-            uint clientId,
-            uint characterNetworkId,
-            ushort requestId,
-            string requestType)
-        {
-            if (!RequireLegacyServerSecurityManager("Melee", requestType, out _))
-            {
-                return false;
-            }
-
-            var context = BuildLegacyContext(characterNetworkId, requestId);
-            return ValidateModuleRequest(clientId, in context, "Melee", requestType);
-        }
-        
-        /// <summary>
-        /// Validate a melee hit.
-        /// </summary>
-        public static bool ValidateMeleeHit(
-            uint attackerClientId,
-            uint attackerCharacterId,
-            uint victimCharacterId,
-            int skillHash,
-            float damage,
-            Vector3 hitPoint)
-        {
-            var manager = NetworkSecurityManager.Instance;
-            if (ShouldFailClosedNoSecurityManager(manager, "Melee", nameof(ValidateMeleeHit)))
-            {
-                return false;
-            }
-
-            if (manager == null || !manager.IsServer) return true;
-            
-            // Position validation
-            if (!manager.ValidatePosition(attackerClientId, "Melee", hitPoint, 1000f))
-            {
-                return false;
-            }
-            
-            // Damage bounds check
-            var config = manager.GetConfigForModule("Melee");
-            float maxDamage = 10000f; // Should be configurable
-            
-            if (!manager.ValidateValueRange(attackerClientId, "Melee", "damage", damage, 0f, maxDamage))
-            {
-                return false;
-            }
-
-            // Basic target sanity
-            if (attackerCharacterId == 0 || victimCharacterId == 0 || attackerCharacterId == victimCharacterId)
-            {
-                manager.RecordViolation(attackerClientId, attackerCharacterId,
-                    SecurityViolationType.InvalidTarget, "Melee",
-                    $"Invalid melee target pair attacker={attackerCharacterId}, victim={victimCharacterId}");
-                return false;
-            }
-
-            // Skill hash must be present for deterministic validation.
-            if (skillHash == 0)
-            {
-                manager.RecordViolation(attackerClientId, attackerCharacterId,
-                    SecurityViolationType.InvalidRequest, "Melee",
-                    "Missing skill hash in melee hit validation");
-                return false;
-            }
-
-            if (float.IsNaN(damage) || float.IsInfinity(damage))
-            {
-                manager.RecordViolation(attackerClientId, attackerCharacterId,
-                    SecurityViolationType.OutOfBoundsValue, "Melee",
-                    $"Invalid damage value: {damage}");
-                return false;
-            }
-            
-            return true;
-        }
-        
-        // ════════════════════════════════════════════════════════════════════════════════════════
-        // SHOOTER MODULE INTEGRATION
-        // ════════════════════════════════════════════════════════════════════════════════════════
-        
-        /// <summary>
-        /// Validate a Shooter module request.
-        /// </summary>
-        public static bool ValidateShooterRequest(
-            uint clientId,
-            uint characterNetworkId,
-            ushort requestId,
-            string requestType)
-        {
-            if (!RequireLegacyServerSecurityManager("Shooter", requestType, out _))
-            {
-                return false;
-            }
-
-            var context = BuildLegacyContext(characterNetworkId, requestId);
-            return ValidateModuleRequest(clientId, in context, "Shooter", requestType);
-        }
-        
-        /// <summary>
-        /// Validate a shot/projectile.
-        /// </summary>
-        public static bool ValidateShot(
-            uint shooterClientId,
-            uint shooterCharacterId,
-            int weaponHash,
-            Vector3 origin,
-            Vector3 direction,
-            float chargeRatio)
-        {
-            var manager = NetworkSecurityManager.Instance;
-            if (ShouldFailClosedNoSecurityManager(manager, "Shooter", nameof(ValidateShot)))
-            {
-                return false;
-            }
-
-            if (manager == null || !manager.IsServer) return true;
-            
-            // Position validation
-            if (!manager.ValidatePosition(shooterClientId, "Shooter", origin, 1000f))
-            {
-                return false;
-            }
-            
-            // Direction validation (should be normalized)
-            if (direction.sqrMagnitude < 0.5f || direction.sqrMagnitude > 1.5f)
-            {
-                manager.RecordViolation(shooterClientId, shooterCharacterId,
-                    SecurityViolationType.OutOfBoundsValue, "Shooter",
-                    $"Invalid shot direction magnitude: {direction.magnitude}");
-                return false;
-            }
-            
-            // Charge ratio validation
-            if (!manager.ValidateValueRange(shooterClientId, "Shooter", "chargeRatio", 
-                chargeRatio, 0f, 1f))
-            {
-                return false;
-            }
-            
-            return true;
-        }
-        
-        /// <summary>
-        /// Validate a projectile hit.
-        /// </summary>
-        public static bool ValidateProjectileHit(
-            uint shooterClientId,
-            uint shooterCharacterId,
-            uint victimCharacterId,
-            int weaponHash,
-            float damage,
-            Vector3 hitPoint)
-        {
-            var manager = NetworkSecurityManager.Instance;
-            if (ShouldFailClosedNoSecurityManager(manager, "Shooter", nameof(ValidateProjectileHit)))
-            {
-                return false;
-            }
-
-            if (manager == null || !manager.IsServer) return true;
-            
-            // Position validation
-            if (!manager.ValidatePosition(shooterClientId, "Shooter", hitPoint, 10000f))
-            {
-                return false;
-            }
-            
-            // Damage bounds check
-            float maxDamage = 100000f; // Should be configurable
-            
-            if (!manager.ValidateValueRange(shooterClientId, "Shooter", "damage", damage, 0f, maxDamage))
-            {
-                return false;
-            }
-            
-            return true;
-        }
-        
-        // ════════════════════════════════════════════════════════════════════════════════════════
-        // ABILITIES MODULE INTEGRATION
-        // ════════════════════════════════════════════════════════════════════════════════════════
-        
-        /// <summary>
-        /// Validate an Abilities module request.
-        /// </summary>
-        public static bool ValidateAbilitiesRequest(
-            uint clientId,
-            uint characterNetworkId,
-            ushort requestId,
-            string requestType)
-        {
-            if (!RequireLegacyServerSecurityManager("Abilities", requestType, out _))
-            {
-                return false;
-            }
-
-            var context = BuildLegacyContext(characterNetworkId, requestId);
-            return ValidateModuleRequest(clientId, in context, "Abilities", requestType);
-        }
-        
-        /// <summary>
-        /// Validate an ability cast.
-        /// </summary>
-        public static bool ValidateAbilityCast(
-            uint casterClientId,
-            uint casterCharacterId,
-            int abilityHash,
-            Vector3 targetPosition,
-            uint targetCharacterId)
-        {
-            var manager = NetworkSecurityManager.Instance;
-            if (ShouldFailClosedNoSecurityManager(manager, "Abilities", nameof(ValidateAbilityCast)))
-            {
-                return false;
-            }
-
-            if (manager == null || !manager.IsServer) return true;
-            
-            // Position validation (if targeting a position)
-            if (targetCharacterId == 0 && targetPosition != Vector3.zero)
-            {
-                if (!manager.ValidatePosition(casterClientId, "Abilities", targetPosition, 1000f))
-                {
-                    return false;
-                }
-            }
-
-            if (casterCharacterId == 0 || abilityHash == 0)
-            {
-                manager.RecordViolation(casterClientId, casterCharacterId,
-                    SecurityViolationType.InvalidRequest, "Abilities",
-                    $"Invalid ability cast payload caster={casterCharacterId}, ability={abilityHash}");
-                return false;
-            }
-
-            if (targetCharacterId != 0 && targetCharacterId == casterCharacterId)
-            {
-                manager.RecordViolation(casterClientId, casterCharacterId,
-                    SecurityViolationType.InvalidTarget, "Abilities",
-                    $"Self-targeted cast rejected for ability={abilityHash}");
-                return false;
-            }
-            
-            return true;
-        }
-        
         // ════════════════════════════════════════════════════════════════════════════════════════
         // GENERIC VIOLATION RECORDING
         // ════════════════════════════════════════════════════════════════════════════════════════

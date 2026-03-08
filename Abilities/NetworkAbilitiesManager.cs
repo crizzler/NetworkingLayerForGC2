@@ -410,6 +410,16 @@ namespace Arawn.GameCreator2.Networking
                     break;
                     
                 // Cooldowns
+                case MessageTypes.CooldownRequest:
+                    if (data is NetworkCooldownRequest cooldownReq)
+                        controller.ProcessCooldownRequest(senderId, cooldownReq);
+                    break;
+
+                case MessageTypes.CooldownResponse:
+                    if (data is NetworkCooldownResponse cooldownResp)
+                        controller.ReceiveCooldownResponse(cooldownResp);
+                    break;
+
                 case MessageTypes.CooldownBroadcast:
                     if (data is NetworkCooldownBroadcast cooldownBroadcast)
                         controller.ReceiveCooldownBroadcast(cooldownBroadcast);
@@ -429,6 +439,17 @@ namespace Arawn.GameCreator2.Networking
                 case MessageTypes.AbilityLearnBroadcast:
                     if (data is NetworkAbilityLearnBroadcast learnBroadcast)
                         controller.ReceiveLearnBroadcast(learnBroadcast);
+                    break;
+
+                // Cancel
+                case MessageTypes.CastCancelRequest:
+                    if (data is NetworkCastCancelRequest cancelReq)
+                        controller.ProcessCancelRequest(senderId, cancelReq);
+                    break;
+
+                case MessageTypes.CastCancelResponse:
+                    if (data is NetworkCastCancelResponse cancelResp)
+                        controller.ReceiveCancelResponse(cancelResp);
                     break;
                     
                 // Projectiles

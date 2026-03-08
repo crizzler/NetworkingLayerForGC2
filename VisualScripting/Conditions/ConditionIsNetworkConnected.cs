@@ -28,13 +28,10 @@ namespace Arawn.GameCreator2.Networking
 
         protected override bool Run(Args args)
         {
-#if UNITY_NETCODE
-            var nm = Unity.Netcode.NetworkManager.Singleton;
-            if (nm != null)
-                return nm.IsListening;
-#endif
+            if (!NetworkTransportBridge.HasActive) return false;
 
-            return false;
+            var bridge = NetworkTransportBridge.Active;
+            return bridge.IsServer || bridge.IsClient;
         }
     }
 }

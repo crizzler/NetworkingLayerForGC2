@@ -33,13 +33,6 @@ namespace Arawn.GameCreator2.Networking
             if (netChar != null)
                 return netChar.IsLocalPlayer;
 
-            // Fallback: check Netcode directly
-#if UNITY_NETCODE
-            var netObj = args.Self.GetComponent<Unity.Netcode.NetworkObject>();
-            if (netObj != null)
-                return netObj.IsOwner;
-#endif
-
             return false;
         }
     }

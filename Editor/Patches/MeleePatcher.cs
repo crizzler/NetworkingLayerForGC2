@@ -10,7 +10,7 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
     public class MeleePatcher : GC2PatcherBase
     {
         public override string ModuleName => "Melee";
-        public override string PatchVersion => "1.0.0";
+        public override string PatchVersion => "2.1.0-melee";
         public override string DisplayName => "Melee (Game Creator 2)";
         
         public override string PatchDescription =>
@@ -27,6 +27,14 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
             "Plugins/GameCreator/Packages/Melee/Runtime/ScriptableObjects/Skill.cs",
             "Plugins/GameCreator/Packages/Melee/Editor/Editors/SkillEditor.cs"
         };
+
+        protected override VersionCompatibilityRequirement[] GetVersionCompatibilityRequirements()
+        {
+            return new[]
+            {
+                VersionRequirement("Plugins/GameCreator/Packages/Melee/Editor/Version.txt", "2.2.*")
+            };
+        }
 
         protected override string[] GetRequiredPatchTokens(string relativePath)
         {
@@ -95,13 +103,10 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
         protected override bool PatchFile(string relativePath)
         {
             string content = ReadFile(relativePath);
-            
-            // Check if already patched (supports legacy marker versions)
-            if (ContainsPatchMarker(content))
-            {
-                Debug.LogWarning($"[GC2 Networking] {relativePath} already contains patch marker.");
-                return true;
-            }
+
+            ExistingPatchState existingPatchState = PrepareContentForPatch(relativePath, ref content);
+            if (existingPatchState == ExistingPatchState.SkipAlreadyPatched) return true;
+            if (existingPatchState == ExistingPatchState.Failed) return false;
             
             if (relativePath.EndsWith("MeleeStance.cs"))
             {
@@ -140,7 +145,7 @@ using UnityEngine;
 " + PatchMarker + @"
 // This file has been patched for GC2 Networking server authority.
 // Do not modify the patched sections manually.
-// Use Tools > Game Creator 2 Networking > Patches > Melee > Unpatch to restore.
+// Use Game Creator > Networking Layer > Patches > Melee > Unpatch to restore.
 
 namespace GameCreator.Runtime.Melee
 {
@@ -404,7 +409,7 @@ namespace GameCreator.Runtime.Melee
             string patchHeader = PatchMarker + @"
 // This file has been patched for GC2 Networking server authority.
 // Do not modify the patched sections manually.
-// Use Tools > Game Creator 2 Networking > Patches > Melee > Unpatch to restore.
+// Use Game Creator > Networking Layer > Patches > Melee > Unpatch to restore.
 
 ";
             content = content.Insert(namespaceMatch.Index, patchHeader);
@@ -470,36 +475,27 @@ namespace GameCreator.Runtime.Melee
         
         private bool PatchSkillEditor(string relativePath, string content)
         {
-            // Fix obsolete API: EditorUtility.InstanceIDToObject -> EditorUtility.EntityIdToObject
-            // This is a GC2 bug that we fix as part of our patch
-            
-            string obsoleteCall = "EditorUtility.InstanceIDToObject(instanceID)";
-            string fixedCall = "EditorUtility.EntityIdToObject(instanceID)";
-            
-            if (content.Contains(fixedCall))
+            // Fix obsolete API: EditorUtility.InstanceIDToObject(...) -> EditorUtility.EntityIdToObject(...)
+            // Handle both legacy (instanceID) and modern (entityId) parameter names.
+            const string obsoleteCallPrefix = "EditorUtility.InstanceIDToObject(";
+            const string fixedCallPrefix = "EditorUtility.EntityIdToObject(";
+
+            if (content.Contains(fixedCallPrefix))
             {
-                // Already fixed
-                Debug.Log($"[GC2 Networking] {relativePath} already has the API fix.");
+                Debug.Log($"[GC2 Networking] {relativePath} already uses EntityIdToObject.");
                 return true;
             }
-            
-            if (!content.Contains(obsoleteCall))
+
+            if (!content.Contains(obsoleteCallPrefix))
             {
-                Debug.LogWarning($"[GC2 Networking] Could not find obsolete InstanceIDToObject call in {relativePath}.");
-                return true; // Not a failure, just nothing to fix
+                Debug.Log($"[GC2 Networking] {relativePath} has no OnOpenAsset API migration needed.");
+                return true;
             }
-            
-            if (!TryReplaceRequired(
-                    ref content,
-                    obsoleteCall,
-                    fixedCall,
-                    $"[GC2 Networking] Could not replace obsolete API usage in {relativePath}."))
-            {
-                return false;
-            }
-            
+
+            content = content.Replace(obsoleteCallPrefix, fixedCallPrefix);
+
             WriteFile(relativePath, content);
-            Debug.Log($"[GC2 Networking] Fixed obsolete API in {relativePath}");
+            Debug.Log($"[GC2 Networking] Migrated OnOpenAsset API usage in {relativePath}");
             return true;
         }
     }

@@ -42,6 +42,8 @@ namespace Arawn.GameCreator2.Networking
     )]
     public class NetworkSessionProfile : ScriptableObject
     {
+        [NonSerialized] private bool m_RuntimeTierOrderingValidated;
+
         [Header("Preset")]
         [SerializeField] private NetworkSessionPreset m_Preset = NetworkSessionPreset.Standard;
         [SerializeField] private bool m_AutoApplyPreset = true;
@@ -130,6 +132,7 @@ namespace Arawn.GameCreator2.Networking
 
         public NetworkRelevanceTier GetTier(float distance)
         {
+            EnsureTierOrdering(logWarnings: Application.isPlaying);
             if (distance <= nearDistance) return NetworkRelevanceTier.Near;
             if (distance <= midDistance) return NetworkRelevanceTier.Mid;
             return NetworkRelevanceTier.Far;
@@ -137,6 +140,7 @@ namespace Arawn.GameCreator2.Networking
 
         public NetworkRelevanceSettings GetTierSettings(NetworkRelevanceTier tier)
         {
+            EnsureTierOrdering(logWarnings: Application.isPlaying);
             return tier switch
             {
                 NetworkRelevanceTier.Near => near,
@@ -148,6 +152,7 @@ namespace Arawn.GameCreator2.Networking
         public void ApplyPreset(NetworkSessionPreset preset)
         {
             m_Preset = preset;
+            m_RuntimeTierOrderingValidated = false;
 
             switch (preset)
             {
@@ -272,23 +277,54 @@ namespace Arawn.GameCreator2.Networking
                 default:
                     break;
             }
+
+            EnsureTierOrdering(logWarnings: false);
         }
 
         private void OnValidate()
         {
-            if (midDistance < nearDistance + 1f)
-            {
-                midDistance = nearDistance + 1f;
-            }
-
-            if (cullDistance < midDistance + 1f)
-            {
-                cullDistance = midDistance + 1f;
-            }
-
             if (m_AutoApplyPreset && m_Preset != NetworkSessionPreset.Custom)
             {
                 ApplyPreset(m_Preset);
+            }
+
+            EnsureTierOrdering(logWarnings: false);
+            m_RuntimeTierOrderingValidated = false;
+        }
+
+        private void EnsureTierOrdering(bool logWarnings)
+        {
+            if (m_RuntimeTierOrderingValidated && Application.isPlaying) return;
+
+            float minMidDistance = nearDistance + 1f;
+            if (midDistance < minMidDistance)
+            {
+                if (logWarnings)
+                {
+                    Debug.LogWarning(
+                        $"[NetworkSessionProfile] Tier distances were invalid in '{name}'. " +
+                        $"Clamping midDistance from {midDistance:F2} to {minMidDistance:F2}.");
+                }
+
+                midDistance = minMidDistance;
+            }
+
+            float minCullDistance = midDistance + 1f;
+            if (cullDistance < minCullDistance)
+            {
+                if (logWarnings)
+                {
+                    Debug.LogWarning(
+                        $"[NetworkSessionProfile] Cull distance was invalid in '{name}'. " +
+                        $"Clamping cullDistance from {cullDistance:F2} to {minCullDistance:F2}.");
+                }
+
+                cullDistance = minCullDistance;
+            }
+
+            if (Application.isPlaying)
+            {
+                m_RuntimeTierOrderingValidated = true;
             }
         }
     }

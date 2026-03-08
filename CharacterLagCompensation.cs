@@ -16,7 +16,7 @@ namespace Arawn.GameCreator2.Networking
     /// The component automatically registers with the LagCompensationManager.
     /// </para>
     /// <para>
-    /// This component is network-agnostic. Works with NGO, Photon, FishNet, Mirror, etc.
+    /// This component is network-agnostic. Works with NGO, FishNet, Mirror, Photon, or custom transports.
     /// </para>
     /// </remarks>
     [RequireComponent(typeof(Character))]

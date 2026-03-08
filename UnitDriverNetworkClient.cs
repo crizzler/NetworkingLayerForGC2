@@ -36,7 +36,9 @@ namespace Arawn.GameCreator2.Networking
         [NonSerialized] protected AnimVector3 m_FloorNormal;
         
         // Prediction and reconciliation
-        [NonSerialized] private List<PredictedState> m_PredictionHistory;
+        [NonSerialized] private PredictedState[] m_PredictionHistory;
+        [NonSerialized] private int m_PredictionHistoryStart;
+        [NonSerialized] private int m_PredictionHistoryCount;
         [NonSerialized] private ushort m_CurrentSequence;
         [NonSerialized] private ushort m_LastAcknowledgedSequence;
         [NonSerialized] private Vector3 m_ReconciliationTarget;
@@ -133,6 +135,8 @@ namespace Arawn.GameCreator2.Networking
             public NetworkInputState input;
         }
 
+        private const int PREDICTION_HISTORY_CAPACITY = 128;
+
         // INITIALIZERS: --------------------------------------------------------------------------
 
         public UnitDriverNetworkClient()
@@ -146,7 +150,9 @@ namespace Arawn.GameCreator2.Networking
             base.OnStartup(character);
 
             this.m_FloorNormal = new AnimVector3(Vector3.up, 0.15f);
-            this.m_PredictionHistory = new List<PredictedState>(128);
+            this.m_PredictionHistory = new PredictedState[PREDICTION_HISTORY_CAPACITY];
+            this.m_PredictionHistoryStart = 0;
+            this.m_PredictionHistoryCount = 0;
             this.m_UnacknowledgedInputs = new List<NetworkInputState>(32);
             this.m_CurrentSequence = 0;
             this.m_LastAcknowledgedSequence = 0;
@@ -226,7 +232,7 @@ namespace Arawn.GameCreator2.Networking
                 ApplyInputPrediction(input, cameraTransform);
                 
                 // Store predicted state
-                m_PredictionHistory.Add(new PredictedState
+                AppendPredictionState(new PredictedState
                 {
                     sequence = m_CurrentSequence,
                     position = this.Transform.position,
@@ -327,9 +333,9 @@ namespace Arawn.GameCreator2.Networking
             
             // Find the predicted state at this sequence
             int predictedIndex = -1;
-            for (int i = 0; i < m_PredictionHistory.Count; i++)
+            for (int i = 0; i < m_PredictionHistoryCount; i++)
             {
-                if (m_PredictionHistory[i].sequence == serverState.lastProcessedInput)
+                if (GetPredictionState(i).sequence == serverState.lastProcessedInput)
                 {
                     predictedIndex = i;
                     break;
@@ -339,7 +345,7 @@ namespace Arawn.GameCreator2.Networking
             if (predictedIndex >= 0)
             {
                 Vector3 serverPosition = serverState.GetPosition();
-                Vector3 predictedPosition = m_PredictionHistory[predictedIndex].position;
+                Vector3 predictedPosition = GetPredictionState(predictedIndex).position;
                 float positionError = Vector3.Distance(serverPosition, predictedPosition);
                 
                 if (positionError > m_Config.reconciliationThreshold)
@@ -362,14 +368,8 @@ namespace Arawn.GameCreator2.Networking
                 // Remove old prediction history
                 if (predictedIndex > 0)
                 {
-                    m_PredictionHistory.RemoveRange(0, predictedIndex);
+                    RemoveOldestPredictionStates(predictedIndex);
                 }
-            }
-            
-            // Trim history to prevent unbounded growth
-            while (m_PredictionHistory.Count > 128)
-            {
-                m_PredictionHistory.RemoveAt(0);
             }
         }
 
@@ -382,20 +382,20 @@ namespace Arawn.GameCreator2.Networking
             TeleportTo(serverPosition, serverRotationY, serverVerticalSpeed);
             
             // Re-apply all inputs after this point (standard CSP replay)
-            for (int i = fromIndex + 1; i < m_PredictionHistory.Count; i++)
+            for (int i = fromIndex + 1; i < m_PredictionHistoryCount; i++)
             {
-                var state = m_PredictionHistory[i];
+                var state = GetPredictionState(i);
                 ApplyInputPrediction(state.input, null); // Re-predict without camera (already transformed)
                 
                 // Update the stored prediction
-                m_PredictionHistory[i] = new PredictedState
+                SetPredictionState(i, new PredictedState
                 {
                     sequence = state.sequence,
                     position = this.Transform.position,
                     rotationY = this.Transform.eulerAngles.y,
                     verticalSpeed = m_VerticalSpeed,
                     input = state.input
-                };
+                });
             }
             
             // Calculate visual offset: the difference between where the player WAS visually
@@ -466,6 +466,55 @@ namespace Arawn.GameCreator2.Networking
             
             bool inCoyoteTime = timeSinceGrounded < COYOTE_TIME || framesSinceGrounded < COYOTE_FRAMES;
             return IsGrounded || inCoyoteTime;
+        }
+
+        private int GetPredictionBufferIndex(int logicalIndex)
+        {
+            return (m_PredictionHistoryStart + logicalIndex) % PREDICTION_HISTORY_CAPACITY;
+        }
+
+        private PredictedState GetPredictionState(int logicalIndex)
+        {
+            return m_PredictionHistory[GetPredictionBufferIndex(logicalIndex)];
+        }
+
+        private void SetPredictionState(int logicalIndex, PredictedState state)
+        {
+            m_PredictionHistory[GetPredictionBufferIndex(logicalIndex)] = state;
+        }
+
+        private void AppendPredictionState(PredictedState state)
+        {
+            if (m_PredictionHistoryCount < PREDICTION_HISTORY_CAPACITY)
+            {
+                int writeIndex = GetPredictionBufferIndex(m_PredictionHistoryCount);
+                m_PredictionHistory[writeIndex] = state;
+                m_PredictionHistoryCount++;
+                return;
+            }
+
+            // Ring buffer full: overwrite oldest entry.
+            m_PredictionHistory[m_PredictionHistoryStart] = state;
+            m_PredictionHistoryStart = (m_PredictionHistoryStart + 1) % PREDICTION_HISTORY_CAPACITY;
+        }
+
+        private void RemoveOldestPredictionStates(int count)
+        {
+            if (count <= 0 || m_PredictionHistoryCount == 0)
+            {
+                return;
+            }
+
+            if (count >= m_PredictionHistoryCount)
+            {
+                m_PredictionHistoryStart = 0;
+                m_PredictionHistoryCount = 0;
+                return;
+            }
+
+            m_PredictionHistoryStart =
+                (m_PredictionHistoryStart + count) % PREDICTION_HISTORY_CAPACITY;
+            m_PredictionHistoryCount -= count;
         }
 
         private static bool IsSequenceNewer(ushort a, ushort b)

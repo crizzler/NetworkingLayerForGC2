@@ -143,8 +143,9 @@ namespace Arawn.GameCreator2.Networking
         {
             m_IsServer = isServer;
             m_IsClient = isClient;
-            
-            InstallHooks();
+
+            if (m_IsServer) InstallHooks();
+            else UninstallHooks();
         }
         
         /// <summary>
@@ -154,11 +155,49 @@ namespace Arawn.GameCreator2.Networking
         {
             try
             {
-                // Check Character class for the patch
-                var characterType = typeof(Character);
-                var field = characterType.GetField("NetworkIsDeadValidator",
-                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
-                return field != null;
+                bool hasInvincibilityHooks =
+                    HasPublicStaticField(typeof(Invincibility), "NetworkSetValidator", typeof(Func<Invincibility, float, bool>)) &&
+                    HasPublicStaticField(typeof(Invincibility), "NetworkInvincibilitySet", typeof(Action<Invincibility, float>)) &&
+                    HasPublicStaticProperty(typeof(Invincibility), "IsNetworkingActive", typeof(bool)) &&
+                    HasInstanceMethod(typeof(Invincibility), "SetDirect", typeof(float));
+
+                bool hasPoiseHooks =
+                    HasPublicStaticField(typeof(Poise), "NetworkDamageValidator", typeof(Func<Poise, float, bool>)) &&
+                    HasPublicStaticField(typeof(Poise), "NetworkSetValidator", typeof(Func<Poise, float, bool>)) &&
+                    HasPublicStaticField(typeof(Poise), "NetworkResetValidator", typeof(Func<Poise, float, bool>)) &&
+                    HasPublicStaticField(typeof(Poise), "NetworkPoiseDamaged", typeof(Action<Poise, float, bool>)) &&
+                    HasPublicStaticProperty(typeof(Poise), "IsNetworkingActive", typeof(bool)) &&
+                    HasInstanceMethod(typeof(Poise), "DamageDirect", typeof(float)) &&
+                    HasInstanceMethod(typeof(Poise), "SetDirect", typeof(float)) &&
+                    HasInstanceMethod(typeof(Poise), "ResetDirect", typeof(float));
+
+                bool hasJumpHooks =
+                    HasPublicStaticField(typeof(Jump), "NetworkJumpValidator", typeof(Func<Jump, bool>)) &&
+                    HasPublicStaticField(typeof(Jump), "NetworkJumpForceValidator", typeof(Func<Jump, float, bool>)) &&
+                    HasPublicStaticField(typeof(Jump), "NetworkJumpExecuted", typeof(Action<Jump, float>)) &&
+                    HasPublicStaticProperty(typeof(Jump), "IsNetworkingActive", typeof(bool)) &&
+                    (HasInstanceMethod(typeof(Jump), "DoDirect") || HasInstanceMethod(typeof(Jump), "DoDirect", typeof(float)));
+
+                bool hasDashHooks =
+                    HasPublicStaticField(
+                        typeof(Dash),
+                        "NetworkDashValidator",
+                        typeof(Func<Dash, Vector3, float, float, float, float, bool>)) &&
+                    HasPublicStaticField(
+                        typeof(Dash),
+                        "NetworkDashStarted",
+                        typeof(Action<Dash, Vector3, float, float, float, float>)) &&
+                    HasPublicStaticField(typeof(Dash), "NetworkDashFinished", typeof(Action<Dash>)) &&
+                    HasPublicStaticProperty(typeof(Dash), "IsNetworkingActive", typeof(bool)) &&
+                    HasInstanceMethod(typeof(Dash), "ExecuteDirect", typeof(Vector3), typeof(float), typeof(float), typeof(float), typeof(float));
+
+                bool hasCharacterHooks =
+                    HasPublicStaticField(typeof(Character), "NetworkIsDeadValidator", typeof(Func<Character, bool, bool>)) &&
+                    HasPublicStaticField(typeof(Character), "NetworkDeathStateChanged", typeof(Action<Character, bool>)) &&
+                    HasPublicStaticProperty(typeof(Character), "IsNetworkingActive", typeof(bool)) &&
+                    HasInstanceMethod(typeof(Character), "SetIsDeadDirect", typeof(bool));
+
+                return hasInvincibilityHooks && hasPoiseHooks && hasJumpHooks && hasDashHooks && hasCharacterHooks;
             }
             catch
             {
@@ -174,9 +213,13 @@ namespace Arawn.GameCreator2.Networking
             try
             {
                 var type = typeof(T);
-                var field = type.GetField("IsNetworkingActive",
-                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
-                return field != null;
+                return
+                    type.GetProperty(
+                        "IsNetworkingActive",
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static) != null ||
+                    type.GetField(
+                        "IsNetworkingActive",
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static) != null;
             }
             catch
             {
@@ -205,7 +248,7 @@ namespace Arawn.GameCreator2.Networking
         /// <summary>
         /// Force poise damage to be applied locally (server use only).
         /// </summary>
-        public bool DamagePoiseDirectory(Poise poise, float value)
+        public bool DamagePoiseDirect(Poise poise, float value)
         {
             if (!m_IsServer)
             {
@@ -414,7 +457,14 @@ namespace Arawn.GameCreator2.Networking
             {
                 var field = typeof(T).GetField(fieldName,
                     System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
-                field?.SetValue(null, value);
+                if (field == null)
+                {
+                    Debug.LogWarning(
+                        $"[NetworkCorePatchHooks] Missing patched field {typeof(T).Name}.{fieldName}. GC2 update likely changed signatures.");
+                    return;
+                }
+
+                field.SetValue(null, value);
             }
             catch (Exception e)
             {
@@ -427,8 +477,17 @@ namespace Arawn.GameCreator2.Networking
             try
             {
                 var method = typeof(T).GetMethod(methodName,
-                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
-                method?.Invoke(instance, args);
+                    System.Reflection.BindingFlags.Public |
+                    System.Reflection.BindingFlags.NonPublic |
+                    System.Reflection.BindingFlags.Instance);
+                if (method == null)
+                {
+                    Debug.LogWarning(
+                        $"[NetworkCorePatchHooks] Missing method {typeof(T).Name}.{methodName}. GC2 update likely changed signatures.");
+                    return;
+                }
+
+                method.Invoke(instance, args);
             }
             catch (Exception e)
             {
@@ -441,17 +500,54 @@ namespace Arawn.GameCreator2.Networking
             try
             {
                 var method = instance.GetType().GetMethod(methodName,
-                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                    System.Reflection.BindingFlags.Public |
+                    System.Reflection.BindingFlags.NonPublic |
+                    System.Reflection.BindingFlags.Instance);
                 if (method != null)
                 {
                     return (TResult)method.Invoke(instance, args);
                 }
+
+                Debug.LogWarning(
+                    $"[NetworkCorePatchHooks] Missing method {instance.GetType().Name}.{methodName}. GC2 update likely changed signatures.");
             }
             catch (Exception e)
             {
                 Debug.LogWarning($"[NetworkCorePatchHooks] Could not call {instance.GetType().Name}.{methodName}: {e.Message}");
             }
             return default;
+        }
+
+        private static bool HasPublicStaticField(Type type, string fieldName, Type expectedFieldType)
+        {
+            var field = type.GetField(
+                fieldName,
+                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+
+            return field != null && expectedFieldType.IsAssignableFrom(field.FieldType);
+        }
+
+        private static bool HasPublicStaticProperty(Type type, string propertyName, Type expectedPropertyType)
+        {
+            var property = type.GetProperty(
+                propertyName,
+                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+
+            return property != null && expectedPropertyType.IsAssignableFrom(property.PropertyType);
+        }
+
+        private static bool HasInstanceMethod(Type type, string methodName, params Type[] parameterTypes)
+        {
+            var method = type.GetMethod(
+                methodName,
+                System.Reflection.BindingFlags.Public |
+                System.Reflection.BindingFlags.NonPublic |
+                System.Reflection.BindingFlags.Instance,
+                null,
+                parameterTypes,
+                null);
+
+            return method != null;
         }
     }
 }

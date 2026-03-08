@@ -57,6 +57,13 @@ Reserved range: **200-229**
 
 ## Usage
 
+### Where To Add Components
+
+- Add `NetworkCoreManager` to a single bootstrap object in your scene (or use the Setup Wizard scene step).
+- `NetworkCoreController` should live on the same GameObject as `NetworkCoreManager`.
+- `NetworkCoreManager` auto-ensures `NetworkCoreController` on itself at runtime if it is missing.
+- For character-side core hooks, `NetworkCharacter` can also add/use a local `NetworkCoreController` when `Use Core Networking` is enabled.
+
 ### Setup
 
 ```csharp
@@ -65,8 +72,7 @@ var coreManager = NetworkCoreManager.Instance;
 
 // Wire up network delegates
 coreManager.SendRagdollRequestToServer = request => {
-    // Send via your network layer
-    NetworkManager.Send(MessageTypes.RagdollRequest, request);
+    SendToServer(NetworkCoreManager.MessageTypes.RagdollRequest, request);
 };
 
 coreManager.GetCharacterByNetworkId = networkId => {
@@ -76,6 +82,8 @@ coreManager.GetCharacterByNetworkId = networkId => {
 
 // Initialize
 coreManager.Initialize(isServer: true, isClient: true);
+
+void SendToServer<TPayload>(byte messageType, TPayload payload) { /* transport send C->S */ }
 ```
 
 ### Client Requests
@@ -154,23 +162,23 @@ void OnNetworkMessage(byte messageType, uint senderId, byte[] data)
     switch (messageType)
     {
         // Server receives
-        case MessageTypes.RagdollRequest:
+        case NetworkCoreManager.MessageTypes.RagdollRequest:
             var ragdollReq = Deserialize<NetworkRagdollRequest>(data);
             manager.ReceiveRagdollRequest(senderId, ragdollReq);
             break;
             
         // Client receives
-        case MessageTypes.RagdollResponse:
+        case NetworkCoreManager.MessageTypes.RagdollResponse:
             var ragdollResp = Deserialize<NetworkRagdollResponse>(data);
             manager.ReceiveRagdollResponse(ragdollResp);
             break;
             
-        case MessageTypes.RagdollBroadcast:
+        case NetworkCoreManager.MessageTypes.RagdollBroadcast:
             var ragdollBc = Deserialize<NetworkRagdollBroadcast>(data);
             manager.ReceiveRagdollBroadcast(ragdollBc);
             break;
             
-        // ... similar for other message types
+        // Add cases for every enabled core message type (Prop/Invincibility/Poise/Busy/Interaction/CoreStateSync).
     }
 }
 ```

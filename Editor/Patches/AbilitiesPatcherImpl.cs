@@ -10,7 +10,7 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
     public class AbilitiesPatcherImpl : GC2PatcherBase
     {
         public override string ModuleName => "Abilities";
-        public override string PatchVersion => "1.0.0";
+        public override string PatchVersion => "2.1.0-abilities";
         public override string DisplayName => "Abilities (DaimahouGames)";
         
         public override string PatchDescription =>
@@ -61,17 +61,14 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
         protected override bool PatchFile(string relativePath)
         {
             string content = ReadFile(relativePath);
-            
-            // Check if already patched
-            if (ContainsPatchMarker(content))
-            {
-                Debug.LogWarning($"[GC2 Networking] {relativePath} already contains patch marker.");
-                return true;
-            }
+
+            ExistingPatchState existingPatchState = PrepareContentForPatch(relativePath, ref content);
+            if (existingPatchState == ExistingPatchState.SkipAlreadyPatched) return true;
+            if (existingPatchState == ExistingPatchState.Failed) return false;
             
             // Add patch marker and network hooks after usings
             string originalUsings = @"using System;
-using System.Collections.Generic;
+	using System.Collections.Generic;
 using System.Threading.Tasks;
 using DaimahouGames.Runtime.Core;
 using DaimahouGames.Runtime.Core.Common;
@@ -94,7 +91,7 @@ using UnityEngine;
 " + PatchMarker + @"
 // This file has been patched for GC2 Networking server authority.
 // Do not modify the patched sections manually.
-// Use Tools > Game Creator 2 Networking > Patches > Abilities > Unpatch to restore.
+// Use Game Creator > Networking Layer > Patches > Abilities > Unpatch to restore.
 
 namespace DaimahouGames.Runtime.Abilities
 {";

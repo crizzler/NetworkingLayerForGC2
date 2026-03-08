@@ -30,7 +30,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
     
     [Parameter("Apply Optimistic Effects", "If true, local client sees hit effects immediately before server confirmation")]
 
-    [Keywords("Network", "Shooter", "Combat", "Hit", "Server", "Authoritative", "Netcode", "Projectile", "Raycast")]
+    [Keywords("Network", "Shooter", "Combat", "Hit", "Server", "Authoritative", "Projectile", "Raycast")]
     
     [Image(typeof(IconBullsEye), ColorTheme.Type.Blue)]
     [Serializable]
@@ -76,10 +76,14 @@ namespace Arawn.GameCreator2.Networking.Shooter
             
             // Try to get more accurate data from ShotData
             ShooterWeapon weapon = GetCurrentWeapon(args.Self.Get<Character>());
-            if (weapon != null && weapon.LastShotData != null)
+            if (weapon != null)
             {
-                hitPoint = weapon.LastShotData.HitPoint;
-                distance = weapon.LastShotData.Distance;
+                ShotData shotData = ShooterWeapon.LastShotData;
+                if (shotData.Source != null)
+                {
+                    hitPoint = shotData.HitPoint;
+                    distance = shotData.Distance;
+                }
             }
             
             // Intercept the hit
@@ -105,9 +109,9 @@ namespace Arawn.GameCreator2.Networking.Shooter
             if (shooterStance == null) return null;
             
             // Try to find equipped shooter weapon
-            foreach (var slot in character.Combat.Slots)
+            foreach (var equipped in character.Combat.Weapons)
             {
-                if (slot.Weapon is ShooterWeapon shooterWeapon)
+                if (equipped?.Asset is ShooterWeapon shooterWeapon)
                 {
                     return shooterWeapon;
                 }

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Reflection;
 using UnityEngine;
 using GameCreator.Runtime.Variables;
 
@@ -89,6 +90,12 @@ namespace Arawn.GameCreator2.Networking
         private bool m_IsApplyingNetworkChange;
         private Action<string> m_NameChangeCallback;
         private Action<ListVariableRuntime.Change, int> m_ListChangeCallback;
+        private bool m_HasLoggedMissingNameRuntimeField;
+
+        private static readonly FieldInfo s_LocalNameRuntimeField = typeof(LocalNameVariables).GetField(
+            "m_Runtime",
+            BindingFlags.NonPublic | BindingFlags.Instance
+        );
 
         // ════════════════════════════════════════════════════════════════════
         // EVENTS
@@ -327,7 +334,7 @@ namespace Arawn.GameCreator2.Networking
         {
             if (m_NameVariables == null) return Array.Empty<NameVariableChange>();
 
-            // Use reflection to get all variable names from the NameVariableRuntime
+            // Access the LocalNameVariables runtime and enumerate NameVariable entries.
             var runtime = GetNameRuntime();
             if (runtime == null) return Array.Empty<NameVariableChange>();
 
@@ -565,53 +572,37 @@ namespace Arawn.GameCreator2.Networking
         // REFLECTION HELPERS
         // ════════════════════════════════════════════════════════════════════
 
-        private object GetNameRuntime()
+        private NameVariableRuntime GetNameRuntime()
         {
             if (m_NameVariables == null) return null;
 
-            var field = typeof(LocalNameVariables).GetField(
-                "m_Runtime",
-                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance
-            );
-            return field?.GetValue(m_NameVariables);
+            if (s_LocalNameRuntimeField == null)
+            {
+                if (!m_HasLoggedMissingNameRuntimeField)
+                {
+                    m_HasLoggedMissingNameRuntimeField = true;
+                    Debug.LogWarning(
+                        "[VariableSync] Could not access LocalNameVariables.m_Runtime. " +
+                        "Name snapshot broadcast is unavailable until signatures are updated.");
+                }
+
+                return null;
+            }
+
+            return s_LocalNameRuntimeField.GetValue(m_NameVariables) as NameVariableRuntime;
         }
 
-        private string[] GetNameVariableNames(object runtime)
+        private static string[] GetNameVariableNames(NameVariableRuntime runtime)
         {
             if (runtime == null) return null;
 
-            // NameVariableRuntime stores data in a Dictionary<string, NameVariable>
-            var dataField = runtime.GetType().GetField(
-                "m_Map",
-                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance
-            );
-
-            if (dataField == null)
-            {
-                // Try alternative field name
-                dataField = runtime.GetType().GetField(
-                    "m_Data",
-                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance
-                );
-            }
-
-            if (dataField == null) return null;
-
-            var dict = dataField.GetValue(runtime);
-            if (dict == null) return null;
-
-            // Get keys from the dictionary
-            var keysProperty = dict.GetType().GetProperty("Keys");
-            if (keysProperty == null) return null;
-
-            var keys = keysProperty.GetValue(dict) as System.Collections.ICollection;
-            if (keys == null) return null;
-
             var nameList = new List<string>();
-            foreach (var key in keys)
+            foreach (NameVariable variable in runtime)
             {
-                if (key is string name)
-                    nameList.Add(name);
+                if (variable == null) continue;
+                if (string.IsNullOrEmpty(variable.Name)) continue;
+
+                nameList.Add(variable.Name);
             }
 
             return nameList.ToArray();

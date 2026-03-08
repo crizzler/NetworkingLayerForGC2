@@ -121,21 +121,24 @@ public struct LateJoinBundle
 The singleton orchestrator. Server collects, client applies:
 
 ```csharp
-// Server: wire to your connect callback
-NetworkManager.Singleton.OnClientConnectedCallback += clientId =>
+// Server: wire to your transport's client-connected callback
+SubscribeToClientConnected(clientId =>
 {
     NetworkLateJoinCoordinator.Instance.SendLateJoinBundle(clientId);
-};
+});
 
-// Server: wire the send delegate to your RPC system
+// Server: wire the send delegate to your transport adapter
 coordinator.OnSendBundleToClient = (clientId, bundle) =>
 {
     // Serialize bundle and send via your networking solution
-    MyRpcSystem.SendToClient(clientId, bundle);
+    SendBundleToClient(clientId, bundle);
 };
 
 // Client: call when you receive the bundle
 coordinator.ReceiveLateJoinBundle(receivedBundle);
+
+void SubscribeToClientConnected(System.Action<ulong> callback) { /* transport hookup */ }
+void SendBundleToClient(ulong clientId, LateJoinBundle bundle) { /* transport send */ }
 ```
 
 ## Priority System
@@ -422,8 +425,10 @@ coordinator.ChunkSizeBytes = 32768; // 32 KB per chunk
 coordinator.OnSendChunkToClient = (clientId, chunk) =>
 {
     // Send via reliable-ordered channel
-    MyRpcSystem.SendReliableOrdered(clientId, chunk);
+    SendChunkToClientReliableOrdered(clientId, chunk);
 };
+
+void SendChunkToClientReliableOrdered(ulong clientId, LateJoinChunk chunk) { /* transport send */ }
 ```
 
 ### Client-side reassembly:
@@ -445,7 +450,6 @@ Set `ChunkSizeBytes = 0` to disable chunking entirely (sends the full bundle in 
 
 ```csharp
 using Arawn.GameCreator2.Networking;
-using Unity.Netcode;
 using UnityEngine;
 
 public class MyNetworkManager : MonoBehaviour
@@ -463,13 +467,12 @@ public class MyNetworkManager : MonoBehaviour
             Debug.Log($"Sent {size} bytes of late-join data to client {clientId}");
         };
         
-        // Listen for client connections
-        NetworkManager.Singleton.OnClientConnectedCallback += OnClientConnected;
+        SubscribeToClientConnected(OnClientConnected);
     }
     
     private void OnClientConnected(ulong clientId)
     {
-        if (!NetworkManager.Singleton.IsServer) return;
+        if (!IsServer()) return;
         
         // The coordinator respects SendDelay (default 0.5s)
         // to let the client's objects spawn first
@@ -478,15 +481,35 @@ public class MyNetworkManager : MonoBehaviour
     
     private void SendBundleRpc(ulong clientId, LateJoinBundle bundle)
     {
-        // Serialize and send via your RPC system
         string json = JsonUtility.ToJson(bundle);
-        // ... send to clientId ...
+        TransportSendReliable(clientId, json);
     }
     
     private void SendChunkRpc(ulong clientId, LateJoinChunk chunk)
     {
         string json = JsonUtility.ToJson(chunk);
-        // ... send to clientId via reliable-ordered channel ...
+        TransportSendReliableOrdered(clientId, json);
+    }
+
+    private void TransportSendReliable(ulong clientId, string payloadJson)
+    {
+        // Serialize to bytes and send with your transport's reliable channel.
+    }
+
+    private void TransportSendReliableOrdered(ulong clientId, string payloadJson)
+    {
+        // Serialize to bytes and send with your transport's reliable-ordered channel.
+    }
+
+    private void SubscribeToClientConnected(System.Action<ulong> callback)
+    {
+        // Hook into your transport's client-connected event here.
+    }
+
+    private bool IsServer()
+    {
+        // Return current session role from your transport bootstrap.
+        return true;
     }
 }
 ```

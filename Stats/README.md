@@ -9,7 +9,7 @@ This module provides:
 - **Anti-Cheat Protection** - Rate limiting, change validation, unauthorized modification rejection
 - **Optimistic Updates** - Responsive client-side feedback with server reconciliation
 - **Bandwidth Efficiency** - Delta sync, bitmask compression, minimal data structures
-- **Transport Agnostic** - Works with Netcode for GameObjects, FishNet, Mirror, etc.
+- **Transport Agnostic** - Works with NGO, FishNet, Mirror, custom stacks, etc.
 
 ## Architecture
 
@@ -60,7 +60,7 @@ Add `NetworkStatsManager` component to a persistent GameObject in your scene:
 ```csharp
 // Usually on NetworkManager or similar
 gameObject.AddComponent<NetworkStatsManager>();
-NetworkStatsManager.Instance.IsServer = NetworkManager.Singleton.IsServer;
+NetworkStatsManager.Instance.IsServer = isServerSession;
 ```
 
 ### 2. Add Controller to Characters
@@ -79,29 +79,35 @@ NetworkStatsManager.Instance.RegisterController(networkId, statsController);
 Connect the manager's delegates to your networking solution:
 
 ```csharp
-// Example with Netcode for GameObjects
+// Example with a transport adapter wrapper
 void SetupNetworkDelegates()
 {
     var manager = NetworkStatsManager.Instance;
     
     // Client → Server
     manager.OnSendStatModifyRequest = (request) => 
-        SendStatModifyRequestServerRpc(request);
+        SendStatModifyRequestToServer(request);
     
     manager.OnSendAttributeModifyRequest = (request) =>
-        SendAttributeModifyRequestServerRpc(request);
+        SendAttributeModifyRequestToServer(request);
     
     // Server → All Clients
     manager.OnBroadcastStatChange = (broadcast) =>
-        BroadcastStatChangeClientRpc(broadcast);
+        BroadcastStatChangeToClients(broadcast);
     
     manager.OnBroadcastAttributeChange = (broadcast) =>
-        BroadcastAttributeChangeClientRpc(broadcast);
+        BroadcastAttributeChangeToClients(broadcast);
     
     // Server → Single Client
     manager.OnSendStatModifyResponse = (networkId, response) =>
-        SendStatModifyResponseClientRpc(response, GetClientRpcParams(networkId));
+        SendStatModifyResponseToClient(networkId, response);
 }
+
+void SendStatModifyRequestToServer(NetworkStatModifyRequest request) { /* serialize + send C->S */ }
+void SendAttributeModifyRequestToServer(NetworkAttributeModifyRequest request) { /* serialize + send C->S */ }
+void BroadcastStatChangeToClients(NetworkStatChangeBroadcast broadcast) { /* send S->all */ }
+void BroadcastAttributeChangeToClients(NetworkAttributeChangeBroadcast broadcast) { /* send S->all */ }
+void SendStatModifyResponseToClient(uint clientId, NetworkStatModifyResponse response) { /* send S->C target */ }
 ```
 
 ## Usage
@@ -286,7 +292,7 @@ NetworkStatsManager.Instance.m_LogNetworkMessages = true;
 
 - Unity 2021.3+
 - Game Creator 2 Stats module
-- Compatible networking solution (Netcode, FishNet, Mirror, etc.)
+- Compatible networking solution (NGO, FishNet, Mirror, or custom adapter)
 
 ## Module Dependencies
 

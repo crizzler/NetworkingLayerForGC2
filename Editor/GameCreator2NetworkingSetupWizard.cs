@@ -9,12 +9,6 @@ using GameCreator.Runtime.Common;
 using GameCreator.Editor.Characters;
 using Arawn.GameCreator2.Networking.Security;
 
-#if UNITY_NETCODE
-using Unity.Netcode;
-using Unity.Netcode.Transports.SinglePlayer;
-using Unity.Netcode.Transports.UTP;
-#endif
-
 namespace Arawn.GameCreator2.Networking.Editor
 {
     /// <summary>
@@ -41,14 +35,6 @@ namespace Arawn.GameCreator2.Networking.Editor
             SandboxPrototype
         }
 
-#if UNITY_NETCODE
-        private enum NetcodeTransportMode
-        {
-            UnityTransport,
-            SinglePlayerTransport
-        }
-#endif
-
         private const string DEFAULT_OUTPUT_FOLDER = "Assets/GameCreator2Networking";
         private const string FOOTSTEPS_PATH = RuntimePaths.CHARACTERS + "Assets/3D/Footsteps.asset";
         private const string RTC_PATH = RuntimePaths.CHARACTERS + "Assets/Controllers/CompleteLocomotion.controller";
@@ -60,9 +46,33 @@ namespace Arawn.GameCreator2.Networking.Editor
         private bool m_CreateOffMeshLinkRegistry = true;
         private bool m_CreateAnimationRegistry = false;
 
-        private bool m_CreateNetworkManager = true;
         private bool m_CreateTransportBridge = true;
         private bool m_CreateSecurityManager = true;
+        private bool m_CreateCoreManager = true;
+#if GC2_INVENTORY
+        private bool m_CreateInventoryManager = true;
+#endif
+#if GC2_STATS
+        private bool m_CreateStatsManager = true;
+#endif
+#if GC2_SHOOTER
+        private bool m_CreateShooterManager = true;
+#endif
+#if GC2_MELEE
+        private bool m_CreateMeleeManager = true;
+#endif
+#if GC2_QUESTS
+        private bool m_CreateQuestsManager = true;
+#endif
+#if GC2_DIALOGUE
+        private bool m_CreateDialogueManager = true;
+#endif
+#if GC2_TRAVERSAL
+        private bool m_CreateTraversalManager = true;
+#endif
+#if GC2_ABILITIES
+        private bool m_CreateAbilitiesController = true;
+#endif
         private bool m_AssignAssetsToSceneComponents = true;
 
         private bool m_CreateNetworkPlayer = true;
@@ -80,10 +90,6 @@ namespace Arawn.GameCreator2.Networking.Editor
         private SetupStep m_CurrentStep = SetupStep.Scenario;
 
         private const int TOTAL_STEPS = 5;
-
-#if UNITY_NETCODE
-        private NetcodeTransportMode m_TransportMode = NetcodeTransportMode.UnityTransport;
-#endif
 
         private static readonly GUIContent GUI_GAME_TYPE = new GUIContent(
             "Game Type",
@@ -115,14 +121,9 @@ namespace Arawn.GameCreator2.Networking.Editor
             "Creates a Network Animation Registry asset for stable animation ID mapping when you use animation command sync."
         );
 
-        private static readonly GUIContent GUI_CREATE_NET_MANAGER = new GUIContent(
-            "Ensure NetworkManager + Selected Transport",
-            "Creates/reuses scene NetworkManager and ensures the selected transport exists and is assigned in NetworkConfig."
-        );
-
-        private static readonly GUIContent GUI_CREATE_BRIDGE = new GUIContent(
-            "Ensure Netcode Transport Bridge",
-            "Creates/reuses NetcodeGameObjectsTransportBridge and (if profile exists) assigns Global Session Profile."
+        private static readonly GUIContent GUI_TRANSPORT_AGNOSTIC_BRIDGE = new GUIContent(
+            "Create Transport Bridge Scaffold",
+            "Creates/reuses a custom bridge placeholder so you can wire your own transport implementation."
         );
 
         private static readonly GUIContent GUI_CREATE_SECURITY_MANAGER = new GUIContent(
@@ -130,12 +131,66 @@ namespace Arawn.GameCreator2.Networking.Editor
             "Creates/reuses NetworkSecurityManager so module security validation and rate limiting can initialize safely in server mode."
         );
 
-        private static readonly GUIContent GUI_TRANSPORT_MODE = new GUIContent(
-            "Transport Mode",
-            "Select which NGO transport to create/assign on the NetworkManager.\n\n" +
-            "UnityTransport: real network sockets (LAN/internet multiplayer).\n" +
-            "SinglePlayerTransport: local host-only transport for offline testing with no remote clients."
+        private static readonly GUIContent GUI_CREATE_CORE_MANAGER = new GUIContent(
+            "Ensure NetworkCoreManager",
+            "Creates/reuses the core manager that routes core gameplay networking messages."
         );
+
+#if GC2_INVENTORY
+        private static readonly GUIContent GUI_CREATE_INVENTORY_MANAGER = new GUIContent(
+            "Ensure NetworkInventoryManager",
+            "Creates/reuses inventory networking manager (only when GC2 Inventory module is installed)."
+        );
+#endif
+
+#if GC2_STATS
+        private static readonly GUIContent GUI_CREATE_STATS_MANAGER = new GUIContent(
+            "Ensure NetworkStatsManager",
+            "Creates/reuses stats networking manager (only when GC2 Stats module is installed)."
+        );
+#endif
+
+#if GC2_SHOOTER
+        private static readonly GUIContent GUI_CREATE_SHOOTER_MANAGER = new GUIContent(
+            "Ensure NetworkShooterManager",
+            "Creates/reuses shooter networking manager (only when GC2 Shooter module is installed)."
+        );
+#endif
+
+#if GC2_MELEE
+        private static readonly GUIContent GUI_CREATE_MELEE_MANAGER = new GUIContent(
+            "Ensure NetworkMeleeManager",
+            "Creates/reuses melee networking manager (only when GC2 Melee module is installed)."
+        );
+#endif
+
+#if GC2_QUESTS
+        private static readonly GUIContent GUI_CREATE_QUESTS_MANAGER = new GUIContent(
+            "Ensure NetworkQuestsManager",
+            "Creates/reuses quests networking manager (only when GC2 Quests module is installed)."
+        );
+#endif
+
+#if GC2_DIALOGUE
+        private static readonly GUIContent GUI_CREATE_DIALOGUE_MANAGER = new GUIContent(
+            "Ensure NetworkDialogueManager",
+            "Creates/reuses dialogue networking manager (only when GC2 Dialogue module is installed)."
+        );
+#endif
+
+#if GC2_TRAVERSAL
+        private static readonly GUIContent GUI_CREATE_TRAVERSAL_MANAGER = new GUIContent(
+            "Ensure NetworkTraversalManager",
+            "Creates/reuses traversal networking manager (only when GC2 Traversal module is installed)."
+        );
+#endif
+
+#if GC2_ABILITIES
+        private static readonly GUIContent GUI_CREATE_ABILITIES_CONTROLLER = new GUIContent(
+            "Ensure NetworkAbilitiesController",
+            "Creates/reuses network abilities controller for Daimahou Abilities integration."
+        );
+#endif
 
         private static readonly GUIContent GUI_ASSIGN_SCENE_ASSETS = new GUIContent(
             "Assign created registry assets to matching scene components",
@@ -160,7 +215,8 @@ namespace Arawn.GameCreator2.Networking.Editor
 
         private static readonly GUIContent GUI_CREATE_PLAYER = new GUIContent(
             "Create / Ensure GC2 Network Player object",
-            "Creates (or reuses) a player template object with Character + NetworkCharacter and network-ready kernel defaults."
+            "Creates (or reuses) a player template object with Character + NetworkCharacter, " +
+            "network-ready kernel defaults, and selected per-character module controllers."
         );
 
         private static readonly GUIContent GUI_ASSIGN_PROFILE_OVERRIDE = new GUIContent(
@@ -193,10 +249,10 @@ namespace Arawn.GameCreator2.Networking.Editor
             "Project-relative folder under Assets where generated registry/profile assets will be stored."
         );
 
-        [MenuItem("Tools/Game Creator 2/Networking/Setup Wizard", priority = 0)]
+        [MenuItem("Game Creator/Networking Layer/Scene Setup Wizard", priority = 0)]
         public static void OpenWizard()
         {
-            var window = GetWindow<GameCreator2NetworkingSetupWizard>(true, "GC2 Networking Setup Wizard");
+            var window = GetWindow<GameCreator2NetworkingSetupWizard>(true, "GC2 Networking Layer Scene Setup Wizard");
             window.minSize = new Vector2(720f, 760f);
             window.maxSize = new Vector2(960f, 1000f);
             window.Show();
@@ -207,7 +263,7 @@ namespace Arawn.GameCreator2.Networking.Editor
             m_Scroll = EditorGUILayout.BeginScrollView(m_Scroll);
 
             EditorGUILayout.Space(8);
-            EditorGUILayout.LabelField("Game Creator 2 Networking Setup", EditorStyles.boldLabel);
+            EditorGUILayout.LabelField("Game Creator 2 Networking Layer Scene Setup", EditorStyles.boldLabel);
             EditorGUILayout.HelpBox(
                 "Creates scene-level networking scaffolding and optional assets for the GC2 networking layer. " +
                 "You can run this multiple times; existing objects/assets are reused when possible.",
@@ -350,32 +406,12 @@ namespace Arawn.GameCreator2.Networking.Editor
             EditorGUILayout.Space(10);
             EditorGUILayout.LabelField("3) Scene Objects", EditorStyles.boldLabel);
 
-#if UNITY_NETCODE
-            m_CreateNetworkManager = DrawToggleWithGuidance(
-                GUI_CREATE_NET_MANAGER,
-                m_CreateNetworkManager,
-                "This scene should be playable as an NGO session and you want a valid transport explicitly assigned.",
-                "Another bootstrap scene or framework owns NetworkManager lifecycle and this scene must stay manager-free."
-            );
-
-            using (new EditorGUI.DisabledScope(!m_CreateNetworkManager))
-            {
-                m_TransportMode = (NetcodeTransportMode)EditorGUILayout.EnumPopup(GUI_TRANSPORT_MODE, m_TransportMode);
-                EditorGUILayout.HelpBox(GetTransportModeContext(m_TransportMode), MessageType.Info);
-            }
-
             m_CreateTransportBridge = DrawToggleWithGuidance(
-                GUI_CREATE_BRIDGE,
+                GUI_TRANSPORT_AGNOSTIC_BRIDGE,
                 m_CreateTransportBridge,
-                "You use NGO and want movement transport wired through the bridge abstraction (recommended).",
-                "You are testing a different custom transport bridge and do not want an NGO bridge instance in-scene."
+                "You want a placeholder object to wire your custom NetworkTransportBridge implementation.",
+                "Your transport bridge is created by another bootstrap pipeline."
             );
-#else
-            EditorGUILayout.HelpBox(
-                "UNITY_NETCODE is not enabled. Netcode-specific scene setup options are hidden.",
-                MessageType.Warning
-            );
-#endif
 
             m_CreateSecurityManager = DrawToggleWithGuidance(
                 GUI_CREATE_SECURITY_MANAGER,
@@ -383,6 +419,81 @@ namespace Arawn.GameCreator2.Networking.Editor
                 "You want server-side security validation, rate limiting, and violation tracking available by default.",
                 "Your project creates and configures NetworkSecurityManager through a custom bootstrap pipeline."
             );
+
+            EditorGUILayout.Space(6);
+            EditorGUILayout.LabelField("Module Managers / Controllers", EditorStyles.boldLabel);
+
+            m_CreateCoreManager = DrawToggleWithGuidance(
+                GUI_CREATE_CORE_MANAGER,
+                m_CreateCoreManager,
+                "You want ready-to-wire core message routing in scene bootstrap.",
+                "You spawn and own this manager from your own bootstrap system."
+            );
+
+#if GC2_INVENTORY
+            m_CreateInventoryManager = DrawToggleWithGuidance(
+                GUI_CREATE_INVENTORY_MANAGER,
+                m_CreateInventoryManager,
+                "You installed GC2 Inventory and want inventory networking available immediately.",
+                "Inventory manager is created by your custom bootstrap pipeline."
+            );
+#endif
+#if GC2_STATS
+            m_CreateStatsManager = DrawToggleWithGuidance(
+                GUI_CREATE_STATS_MANAGER,
+                m_CreateStatsManager,
+                "You installed GC2 Stats and want stats networking available immediately.",
+                "Stats manager is created by your custom bootstrap pipeline."
+            );
+#endif
+#if GC2_SHOOTER
+            m_CreateShooterManager = DrawToggleWithGuidance(
+                GUI_CREATE_SHOOTER_MANAGER,
+                m_CreateShooterManager,
+                "You installed GC2 Shooter and want shooter request/response routing ready.",
+                "Shooter manager is created by your custom bootstrap pipeline."
+            );
+#endif
+#if GC2_MELEE
+            m_CreateMeleeManager = DrawToggleWithGuidance(
+                GUI_CREATE_MELEE_MANAGER,
+                m_CreateMeleeManager,
+                "You installed GC2 Melee and want melee request/response routing ready.",
+                "Melee manager is created by your custom bootstrap pipeline."
+            );
+#endif
+#if GC2_QUESTS
+            m_CreateQuestsManager = DrawToggleWithGuidance(
+                GUI_CREATE_QUESTS_MANAGER,
+                m_CreateQuestsManager,
+                "You installed GC2 Quests and need synchronized quest flows.",
+                "Quests manager is created by your custom bootstrap pipeline."
+            );
+#endif
+#if GC2_DIALOGUE
+            m_CreateDialogueManager = DrawToggleWithGuidance(
+                GUI_CREATE_DIALOGUE_MANAGER,
+                m_CreateDialogueManager,
+                "You installed GC2 Dialogue and need synchronized dialogue flows.",
+                "Dialogue manager is created by your custom bootstrap pipeline."
+            );
+#endif
+#if GC2_TRAVERSAL
+            m_CreateTraversalManager = DrawToggleWithGuidance(
+                GUI_CREATE_TRAVERSAL_MANAGER,
+                m_CreateTraversalManager,
+                "You installed GC2 Traversal and need synchronized traversal state/events.",
+                "Traversal manager is created by your custom bootstrap pipeline."
+            );
+#endif
+#if GC2_ABILITIES
+            m_CreateAbilitiesController = DrawToggleWithGuidance(
+                GUI_CREATE_ABILITIES_CONTROLLER,
+                m_CreateAbilitiesController,
+                "You use the Abilities integration and need a shared network controller in scene.",
+                "Abilities controller is created by your custom bootstrap pipeline."
+            );
+#endif
 
             m_AssignAssetsToSceneComponents = DrawToggleWithGuidance(
                 GUI_ASSIGN_SCENE_ASSETS,
@@ -461,6 +572,16 @@ namespace Arawn.GameCreator2.Networking.Editor
                 "Animation locomotion state affects gameplay timing/validation and needs authoritative sync.",
                 "Animation state is cosmetic and local derivation from movement is enough."
             );
+
+            if (m_CreateNetworkPlayer)
+            {
+                EditorGUILayout.HelpBox(
+                    "The created/reused player template receives selected per-character controllers " +
+                    "(Inventory/Stats/Shooter/Melee/Quests/Traversal). " +
+                    "Dialogue and Abilities remain scene-driven and should be wired explicitly where needed.",
+                    MessageType.Info
+                );
+            }
         }
 
         private void DrawOutputSection()
@@ -541,27 +662,6 @@ namespace Arawn.GameCreator2.Networking.Editor
             }
         }
 
-#if UNITY_NETCODE
-        private static string GetTransportModeContext(NetcodeTransportMode mode)
-        {
-            switch (mode)
-            {
-                case NetcodeTransportMode.SinglePlayerTransport:
-                    return "SinglePlayerTransport (local-only):\n" +
-                        "Enable when: you are running offline/local simulation and do not need remote peers.\n" +
-                        "Keep OFF when: you need LAN/internet clients, dedicated server flow, or true multiplayer transport behavior.\n" +
-                        "Constraint: it only supports Host startup (not pure Client or pure Server).";
-
-                case NetcodeTransportMode.UnityTransport:
-                default:
-                    return "UnityTransport (real networking):\n" +
-                        "Enable when: you need actual networked sessions with remote clients (LAN/internet, production-like path).\n" +
-                        "Keep OFF when: your target is purely local single-player without opening/listening on network transport.\n" +
-                        "Note: configure address/port and connection policy for your environment.";
-            }
-        }
-#endif
-
         private void DrawRecommendationSection()
         {
             EditorGUILayout.Space(12);
@@ -622,27 +722,17 @@ namespace Arawn.GameCreator2.Networking.Editor
 
                 EditorUtility.DisplayProgressBar("GC2 Networking Setup", "Creating scene objects...", 0.6f);
 
-#if UNITY_NETCODE
-                if (m_CreateNetworkManager)
-                {
-                    EnsureNetworkManager(m_TransportMode, report);
-                }
-
                 if (m_CreateTransportBridge)
                 {
-                    EnsureTransportBridge(setupRoot, sessionProfile, report);
+                    EnsureCustomTransportBridgePlaceholder(setupRoot, report);
                 }
-#else
-                if (m_CreateNetworkManager || m_CreateTransportBridge)
-                {
-                    report.Warnings.AppendLine("- UNITY_NETCODE is not enabled; skipped NetworkManager/Bridge setup.");
-                }
-#endif
 
                 if (m_CreateSecurityManager)
                 {
                     EnsureSecurityManager(setupRoot, report);
                 }
+
+                EnsureSelectedModuleManagers(setupRoot, report);
 
                 if (m_CreateNetworkPlayer)
                 {
@@ -765,123 +855,39 @@ namespace Arawn.GameCreator2.Networking.Editor
             return registry;
         }
 
-#if UNITY_NETCODE
-        private NetworkManager EnsureNetworkManager(NetcodeTransportMode transportMode, SetupReport report)
+        private void EnsureCustomTransportBridgePlaceholder(GameObject setupRoot, SetupReport report)
         {
-            var manager = FindFirstObjectByType<NetworkManager>();
-            if (manager == null)
+            var placeholder = FindFirstObjectByType<CustomTransportBridgePlaceholder>();
+            if (placeholder == null)
             {
-                var go = new GameObject("NetworkManager");
-                manager = go.AddComponent<NetworkManager>();
-
-                Undo.RegisterCreatedObjectUndo(go, "Create NetworkManager");
-                report.Created.AppendLine("- Scene Object: NetworkManager at scene root");
-            }
-            else
-            {
-                report.Updated.AppendLine("- Reused existing NetworkManager.");
-            }
-
-            // NGO requires NetworkManager to not be nested in hierarchy.
-            if (manager.transform.parent != null)
-            {
-                Undo.SetTransformParent(manager.transform, null, "Unparent NetworkManager");
-                report.Updated.AppendLine("- Unparented NetworkManager to scene root (fixed nested manager warning).");
-            }
-
-            EnsureAndAssignTransport(manager, transportMode, report);
-            return manager;
-        }
-
-        private static NetworkTransport EnsureAndAssignTransport(
-            NetworkManager manager,
-            NetcodeTransportMode transportMode,
-            SetupReport report
-        )
-        {
-            NetworkTransport selectedTransport;
-            switch (transportMode)
-            {
-                case NetcodeTransportMode.SinglePlayerTransport:
-                {
-                    var singlePlayer = manager.GetComponent<SinglePlayerTransport>();
-                    if (singlePlayer == null)
-                    {
-                        singlePlayer = manager.gameObject.AddComponent<SinglePlayerTransport>();
-                        report.Updated.AppendLine("- Added SinglePlayerTransport to NetworkManager.");
-                    }
-
-                    selectedTransport = singlePlayer;
-                    break;
-                }
-
-                case NetcodeTransportMode.UnityTransport:
-                default:
-                {
-                    var unityTransport = manager.GetComponent<UnityTransport>();
-                    if (unityTransport == null)
-                    {
-                        unityTransport = manager.gameObject.AddComponent<UnityTransport>();
-                        report.Updated.AppendLine("- Added UnityTransport to NetworkManager.");
-                    }
-
-                    selectedTransport = unityTransport;
-                    break;
-                }
-            }
-
-            if (manager.NetworkConfig == null)
-            {
-                manager.NetworkConfig = new NetworkConfig();
-                report.Updated.AppendLine("- Initialized NetworkManager.NetworkConfig.");
-            }
-
-            if (manager.NetworkConfig.NetworkTransport != selectedTransport)
-            {
-                manager.NetworkConfig.NetworkTransport = selectedTransport;
-                report.Updated.AppendLine($"- Assigned {selectedTransport.GetType().Name} to NetworkManager.NetworkConfig.NetworkTransport.");
-            }
-
-            EditorUtility.SetDirty(manager);
-            EditorUtility.SetDirty(selectedTransport);
-            return selectedTransport;
-        }
-
-        private void EnsureTransportBridge(
-            GameObject setupRoot,
-            NetworkSessionProfile sessionProfile,
-            SetupReport report
-        )
-        {
-            var bridge = FindFirstObjectByType<NetcodeGameObjectsTransportBridge>();
-            if (bridge == null)
-            {
-                var go = new GameObject("Netcode Transport Bridge");
+                var go = new GameObject("Custom Transport Bridge Placeholder");
                 if (setupRoot != null) go.transform.SetParent(setupRoot.transform);
 
-                bridge = go.AddComponent<NetcodeGameObjectsTransportBridge>();
-                Undo.RegisterCreatedObjectUndo(go, "Create Netcode Transport Bridge");
-                report.Created.AppendLine("- Scene Object: Netcode Transport Bridge");
+                placeholder = go.AddComponent<CustomTransportBridgePlaceholder>();
+                Undo.RegisterCreatedObjectUndo(go, "Create Custom Transport Bridge Placeholder");
+                report.Created.AppendLine("- Scene Object: Custom Transport Bridge Placeholder");
             }
             else
             {
-                report.Updated.AppendLine("- Reused existing Netcode Transport Bridge.");
+                report.Updated.AppendLine("- Reused existing Custom Transport Bridge Placeholder.");
             }
 
-            if (sessionProfile != null)
+            var serialized = new SerializedObject(placeholder);
+            SerializedProperty assignedBridge = serialized.FindProperty("m_AssignedBridge");
+            if (assignedBridge != null && assignedBridge.objectReferenceValue == null && NetworkTransportBridge.Active != null)
             {
-                var bridgeSo = new SerializedObject(bridge);
-                SerializedProperty globalProfile = bridgeSo.FindProperty("m_GlobalSessionProfile");
-                if (globalProfile != null)
-                {
-                    globalProfile.objectReferenceValue = sessionProfile;
-                    bridgeSo.ApplyModifiedPropertiesWithoutUndo();
-                    EditorUtility.SetDirty(bridge);
-                    report.Updated.AppendLine("- Assigned Global Session Profile on transport bridge.");
-                }
+                assignedBridge.objectReferenceValue = NetworkTransportBridge.Active;
+                serialized.ApplyModifiedPropertiesWithoutUndo();
+                report.Updated.AppendLine("- Linked placeholder to active NetworkTransportBridge instance.");
             }
+
+            if (!placeholder.HasAssignedBridge)
+            {
+                report.Warnings.AppendLine("- Custom transport placeholder has no assigned bridge yet. Add your concrete NetworkTransportBridge implementation.");
+            }
+
+            EditorUtility.SetDirty(placeholder);
         }
-#endif
 
         private void EnsureSecurityManager(GameObject setupRoot, SetupReport report)
         {
@@ -901,6 +907,149 @@ namespace Arawn.GameCreator2.Networking.Editor
             }
 
             EditorUtility.SetDirty(securityManager);
+        }
+
+        private void EnsureSelectedModuleManagers(GameObject setupRoot, SetupReport report)
+        {
+            if (m_CreateCoreManager)
+            {
+                EnsureSingletonComponent<NetworkCoreManager>("Network Core Manager", setupRoot, report);
+            }
+
+#if GC2_INVENTORY
+            if (m_CreateInventoryManager)
+            {
+                EnsureSingletonComponentByTypeName(
+                    "Arawn.GameCreator2.Networking.Inventory.NetworkInventoryManager, Arawn.GameCreator2.Networking.Inventory",
+                    "Network Inventory Manager",
+                    setupRoot,
+                    report);
+            }
+#endif
+#if GC2_STATS
+            if (m_CreateStatsManager)
+            {
+                EnsureSingletonComponentByTypeName(
+                    "Arawn.GameCreator2.Networking.Stats.NetworkStatsManager, Arawn.GameCreator2.Networking.Stats",
+                    "Network Stats Manager",
+                    setupRoot,
+                    report);
+            }
+#endif
+#if GC2_SHOOTER
+            if (m_CreateShooterManager)
+            {
+                EnsureSingletonComponentByTypeName(
+                    "Arawn.GameCreator2.Networking.Shooter.NetworkShooterManager, Arawn.GameCreator2.Networking.Shooter",
+                    "Network Shooter Manager",
+                    setupRoot,
+                    report);
+            }
+#endif
+#if GC2_MELEE
+            if (m_CreateMeleeManager)
+            {
+                EnsureSingletonComponentByTypeName(
+                    "Arawn.GameCreator2.Networking.Melee.NetworkMeleeManager, Arawn.GameCreator2.Networking.Melee",
+                    "Network Melee Manager",
+                    setupRoot,
+                    report);
+            }
+#endif
+#if GC2_QUESTS
+            if (m_CreateQuestsManager)
+            {
+                EnsureSingletonComponentByTypeName(
+                    "Arawn.GameCreator2.Networking.Quests.NetworkQuestsManager, Arawn.GameCreator2.Networking.Quests",
+                    "Network Quests Manager",
+                    setupRoot,
+                    report);
+            }
+#endif
+#if GC2_DIALOGUE
+            if (m_CreateDialogueManager)
+            {
+                EnsureSingletonComponentByTypeName(
+                    "Arawn.GameCreator2.Networking.Dialogue.NetworkDialogueManager, Arawn.GameCreator2.Networking.Dialogue",
+                    "Network Dialogue Manager",
+                    setupRoot,
+                    report);
+            }
+#endif
+#if GC2_TRAVERSAL
+            if (m_CreateTraversalManager)
+            {
+                EnsureSingletonComponentByTypeName(
+                    "Arawn.GameCreator2.Networking.Traversal.NetworkTraversalManager, Arawn.GameCreator2.Networking.Traversal",
+                    "Network Traversal Manager",
+                    setupRoot,
+                    report);
+            }
+#endif
+#if GC2_ABILITIES
+            if (m_CreateAbilitiesController)
+            {
+                EnsureSingletonComponentByTypeName(
+                    "Arawn.GameCreator2.Networking.NetworkAbilitiesController, Arawn.GameCreator2.Networking.Abilities",
+                    "Network Abilities Controller",
+                    setupRoot,
+                    report);
+            }
+#endif
+        }
+
+        private static void EnsureSingletonComponent<T>(
+            string objectName,
+            GameObject setupRoot,
+            SetupReport report) where T : Component
+        {
+            var component = FindFirstObjectByType<T>();
+            if (component == null)
+            {
+                var go = new GameObject(objectName);
+                if (setupRoot != null) go.transform.SetParent(setupRoot.transform);
+
+                component = go.AddComponent<T>();
+                Undo.RegisterCreatedObjectUndo(go, $"Create {objectName}");
+                report.Created.AppendLine($"- Scene Object: {objectName}");
+            }
+            else
+            {
+                report.Updated.AppendLine($"- Reused existing {typeof(T).Name}.");
+            }
+
+            EditorUtility.SetDirty(component);
+        }
+
+        private static void EnsureSingletonComponentByTypeName(
+            string assemblyQualifiedTypeName,
+            string objectName,
+            GameObject setupRoot,
+            SetupReport report)
+        {
+            Type componentType = Type.GetType(assemblyQualifiedTypeName);
+            if (componentType == null || !typeof(Component).IsAssignableFrom(componentType))
+            {
+                report.Warnings.AppendLine($"- Could not resolve component type '{assemblyQualifiedTypeName}'.");
+                return;
+            }
+
+            var component = UnityEngine.Object.FindFirstObjectByType(componentType) as Component;
+            if (component == null)
+            {
+                var go = new GameObject(objectName);
+                if (setupRoot != null) go.transform.SetParent(setupRoot.transform);
+
+                component = go.AddComponent(componentType);
+                Undo.RegisterCreatedObjectUndo(go, $"Create {objectName}");
+                report.Created.AppendLine($"- Scene Object: {objectName}");
+            }
+            else
+            {
+                report.Updated.AppendLine($"- Reused existing {componentType.Name}.");
+            }
+
+            EditorUtility.SetDirty(component);
         }
 
         private void EnsureNetworkPlayerTemplate(
@@ -928,13 +1077,6 @@ namespace Arawn.GameCreator2.Networking.Editor
                     m_UseNetworkAnimimUnit
                 );
 
-#if UNITY_NETCODE
-                if (go.GetComponent<NetworkObject>() == null)
-                {
-                    go.AddComponent<NetworkObject>();
-                }
-#endif
-
                 networkCharacter = go.AddComponent<NetworkCharacter>();
                 Undo.RegisterCreatedObjectUndo(go, "Create Network Player");
                 report.Created.AppendLine("- Scene Object: Network Player");
@@ -954,14 +1096,6 @@ namespace Arawn.GameCreator2.Networking.Editor
                     );
                 }
 
-#if UNITY_NETCODE
-                if (go.GetComponent<NetworkObject>() == null)
-                {
-                    go.AddComponent<NetworkObject>();
-                    report.Updated.AppendLine("- Added NetworkObject to existing player template.");
-                }
-#endif
-
                 report.Updated.AppendLine("- Reused existing Network Player template.");
             }
 
@@ -971,6 +1105,8 @@ namespace Arawn.GameCreator2.Networking.Editor
                 m_AssignProfileOverrideToCreatedPlayer,
                 m_HostOwnerUsesClientPrediction
             );
+
+            EnsureSelectedPlayerControllers(go, report);
 
             if (m_CreateAnimationRegistry && animationRegistry != null)
             {
@@ -990,6 +1126,102 @@ namespace Arawn.GameCreator2.Networking.Editor
                     EditorUtility.SetDirty(animController);
                 }
             }
+        }
+
+        private void EnsureSelectedPlayerControllers(GameObject player, SetupReport report)
+        {
+            if (player == null) return;
+
+#if GC2_INVENTORY
+            if (m_CreateInventoryManager)
+            {
+                EnsurePlayerControllerByTypeName(
+                    player,
+                    "Arawn.GameCreator2.Networking.Inventory.NetworkInventoryController, Arawn.GameCreator2.Networking.Inventory",
+                    "NetworkInventoryController",
+                    report);
+            }
+#endif
+
+#if GC2_STATS
+            if (m_CreateStatsManager)
+            {
+                EnsurePlayerControllerByTypeName(
+                    player,
+                    "Arawn.GameCreator2.Networking.Stats.NetworkStatsController, Arawn.GameCreator2.Networking.Stats",
+                    "NetworkStatsController",
+                    report);
+            }
+#endif
+
+#if GC2_SHOOTER
+            if (m_CreateShooterManager)
+            {
+                EnsurePlayerControllerByTypeName(
+                    player,
+                    "Arawn.GameCreator2.Networking.Shooter.NetworkShooterController, Arawn.GameCreator2.Networking.Shooter",
+                    "NetworkShooterController",
+                    report);
+            }
+#endif
+
+#if GC2_MELEE
+            if (m_CreateMeleeManager)
+            {
+                EnsurePlayerControllerByTypeName(
+                    player,
+                    "Arawn.GameCreator2.Networking.Melee.NetworkMeleeController, Arawn.GameCreator2.Networking.Melee",
+                    "NetworkMeleeController",
+                    report);
+            }
+#endif
+
+#if GC2_QUESTS
+            if (m_CreateQuestsManager)
+            {
+                EnsurePlayerControllerByTypeName(
+                    player,
+                    "Arawn.GameCreator2.Networking.Quests.NetworkQuestsController, Arawn.GameCreator2.Networking.Quests",
+                    "NetworkQuestsController",
+                    report);
+            }
+#endif
+
+#if GC2_TRAVERSAL
+            if (m_CreateTraversalManager)
+            {
+                EnsurePlayerControllerByTypeName(
+                    player,
+                    "Arawn.GameCreator2.Networking.Traversal.NetworkTraversalController, Arawn.GameCreator2.Networking.Traversal",
+                    "NetworkTraversalController",
+                    report);
+            }
+#endif
+        }
+
+        private static void EnsurePlayerControllerByTypeName(
+            GameObject player,
+            string assemblyQualifiedTypeName,
+            string componentName,
+            SetupReport report)
+        {
+            Type componentType = Type.GetType(assemblyQualifiedTypeName);
+            if (componentType == null || !typeof(Component).IsAssignableFrom(componentType))
+            {
+                report.Warnings.AppendLine($"- Could not resolve player controller type '{assemblyQualifiedTypeName}'.");
+                return;
+            }
+
+            var existing = player.GetComponent(componentType) as Component;
+            if (existing != null)
+            {
+                EditorUtility.SetDirty(existing);
+                return;
+            }
+
+            Component created = Undo.AddComponent(player, componentType);
+            report.Updated.AppendLine($"- Added {componentName} to Network Player template.");
+            EditorUtility.SetDirty(created);
         }
 
         private void ConfigureCharacterDefaults(Character character)

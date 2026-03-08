@@ -68,6 +68,13 @@ namespace Arawn.GameCreator2.Networking
         
         [Tooltip("Projectile cleanup interval in seconds.")]
         [SerializeField] private float m_ProjectileCleanupInterval = 5f;
+
+        [Header("Client Reliability")]
+        [Tooltip("Seconds before unresolved client requests are timed out and dropped.")]
+        [SerializeField] private float m_ClientPendingRequestTimeoutSeconds = 8f;
+
+        [Tooltip("How often pending client requests are scanned for timeout.")]
+        [SerializeField] private float m_ClientPendingCleanupIntervalSeconds = 1f;
         
         [Header("Impact Settings")]
         [Tooltip("Maximum concurrent impacts.")]
@@ -98,6 +105,7 @@ namespace Arawn.GameCreator2.Networking
         public event Action<NetworkImpactHitBroadcast> OnImpactHitReceived;
         
         // Cooldown Events
+        public event Action<NetworkCooldownResponse> OnCooldownResponseReceived;
         public event Action<NetworkCooldownBroadcast> OnCooldownBroadcastReceived;
         
         // Learn Events
@@ -131,6 +139,7 @@ namespace Arawn.GameCreator2.Networking
         public Action<NetworkImpactHitBroadcast> BroadcastImpactHitToClients;
         
         // Cooldowns
+        public Action<NetworkCooldownRequest> SendCooldownRequestToServer;
         public Action<NetworkCooldownBroadcast> BroadcastCooldownToClients;
         public Action<uint, NetworkCooldownResponse> SendCooldownResponseToClient;
         
@@ -168,12 +177,35 @@ namespace Arawn.GameCreator2.Networking
         private uint m_NextCastInstanceId = 1;
         private uint m_NextProjectileId = 1;
         private uint m_NextImpactId = 1;
+
+        private ushort GetNextRequestId()
+        {
+            if (m_NextRequestId == 0)
+            {
+                m_NextRequestId = 1;
+            }
+
+            ushort requestId = m_NextRequestId;
+            m_NextRequestId++;
+            if (m_NextRequestId == 0)
+            {
+                m_NextRequestId = 1;
+            }
+
+            return requestId;
+        }
+
+        private static ulong GetPendingKey(uint actorNetworkId, uint correlationId, ushort requestId)
+        {
+            uint pendingCorrelation = correlationId != 0 ? correlationId : requestId;
+            return ((ulong)actorNetworkId << 32) | pendingCorrelation;
+        }
         
         // Pending requests (client-side)
-        private readonly Dictionary<uint, PendingCastRequest> m_PendingCastRequests = new(16);
-        private readonly Dictionary<uint, PendingLearnRequest> m_PendingLearnRequests = new(16);
-        private readonly Dictionary<uint, PendingCooldownRequest> m_PendingCooldownRequests = new(16);
-        private readonly Dictionary<uint, PendingCancelRequest> m_PendingCancelRequests = new(16);
+        private readonly Dictionary<ulong, PendingCastRequest> m_PendingCastRequests = new(16);
+        private readonly Dictionary<ulong, PendingLearnRequest> m_PendingLearnRequests = new(16);
+        private readonly Dictionary<ulong, PendingCooldownRequest> m_PendingCooldownRequests = new(16);
+        private readonly Dictionary<ulong, PendingCancelRequest> m_PendingCancelRequests = new(16);
         
         // Server-side tracking
         private readonly Dictionary<uint, CasterState> m_CasterStates = new(64);
@@ -189,39 +221,110 @@ namespace Arawn.GameCreator2.Networking
         
         // Cleanup timer
         private float m_LastCleanupTime;
+        private float m_LastClientPendingCleanupTime;
         private NetworkAbilitiesPatchHooks m_PatchHooks;
+        private static readonly List<ulong> s_SharedPendingCleanupKeys = new(16);
         
         // ════════════════════════════════════════════════════════════════════════════════════════
         // TRACKING STRUCTS
         // ════════════════════════════════════════════════════════════════════════════════════════
         
-        private struct PendingCastRequest
+        private struct PendingCastRequest : ITimeoutAwarePendingRequest
         {
             public NetworkAbilityCastRequest Request;
             public float SentTime;
             public Action<NetworkAbilityCastResponse> Callback;
             public Ability Ability;
+            public float PendingSentTime => SentTime;
+
+            public bool TryInvokeTimeout()
+            {
+                if (Callback == null) return false;
+
+                Callback.Invoke(new NetworkAbilityCastResponse
+                {
+                    RequestId = Request.RequestId,
+                    ActorNetworkId = Request.ActorNetworkId,
+                    CorrelationId = Request.CorrelationId,
+                    CastInstanceId = 0u,
+                    Approved = false,
+                    RejectReason = AbilityCastRejectReason.Timeout,
+                    CooldownEndTime = 0f
+                });
+                return true;
+            }
         }
         
-        private struct PendingLearnRequest
+        private struct PendingLearnRequest : ITimeoutAwarePendingRequest
         {
             public NetworkAbilityLearnRequest Request;
             public float SentTime;
             public Action<NetworkAbilityLearnResponse> Callback;
+            public float PendingSentTime => SentTime;
+
+            public bool TryInvokeTimeout()
+            {
+                if (Callback == null) return false;
+
+                Callback.Invoke(new NetworkAbilityLearnResponse
+                {
+                    RequestId = Request.RequestId,
+                    ActorNetworkId = Request.ActorNetworkId,
+                    CorrelationId = Request.CorrelationId,
+                    Approved = false,
+                    RejectReason = AbilityLearnRejectReason.Timeout
+                });
+                return true;
+            }
         }
         
-        private struct PendingCooldownRequest
+        private struct PendingCooldownRequest : ITimeoutAwarePendingRequest
         {
             public NetworkCooldownRequest Request;
             public float SentTime;
             public Action<NetworkCooldownResponse> Callback;
+            public float PendingSentTime => SentTime;
+
+            public bool TryInvokeTimeout()
+            {
+                if (Callback == null) return false;
+
+                Callback.Invoke(new NetworkCooldownResponse
+                {
+                    RequestId = Request.RequestId,
+                    ActorNetworkId = Request.ActorNetworkId,
+                    CorrelationId = Request.CorrelationId,
+                    IsOnCooldown = false,
+                    CooldownEndTime = 0f,
+                    TotalDuration = 0f,
+                    TimedOut = true
+                });
+                return true;
+            }
         }
         
-        private struct PendingCancelRequest
+        private struct PendingCancelRequest : ITimeoutAwarePendingRequest
         {
             public NetworkCastCancelRequest Request;
             public float SentTime;
             public Action<NetworkCastCancelResponse> Callback;
+            public float PendingSentTime => SentTime;
+
+            public bool TryInvokeTimeout()
+            {
+                if (Callback == null) return false;
+
+                Callback.Invoke(new NetworkCastCancelResponse
+                {
+                    RequestId = Request.RequestId,
+                    ActorNetworkId = Request.ActorNetworkId,
+                    CorrelationId = Request.CorrelationId,
+                    Approved = false,
+                    CastInstanceId = 0u,
+                    TimedOut = true
+                });
+                return true;
+            }
         }
         
         private class CasterState
@@ -273,21 +376,32 @@ namespace Arawn.GameCreator2.Networking
             public float EndTime;
             public float TotalDuration;
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // LIFECYCLE
         // ════════════════════════════════════════════════════════════════════════════════════════
         
         private void Update()
         {
-            if (!m_IsServer) return;
-            
-            // Periodic cleanup
-            float currentTime = GetServerTime?.Invoke() ?? Time.time;
-            if (currentTime - m_LastCleanupTime > m_ProjectileCleanupInterval)
+            if (m_IsServer)
             {
-                m_LastCleanupTime = currentTime;
-                CleanupExpiredEntries(currentTime);
+                float currentTime = GetServerTime?.Invoke() ?? Time.time;
+                if (currentTime - m_LastCleanupTime > m_ProjectileCleanupInterval)
+                {
+                    m_LastCleanupTime = currentTime;
+                    CleanupExpiredEntries(currentTime);
+                }
+            }
+
+            if (m_IsClient)
+            {
+                float now = Time.time;
+                float cleanupInterval = Mathf.Max(0.1f, m_ClientPendingCleanupIntervalSeconds);
+                if (now - m_LastClientPendingCleanupTime >= cleanupInterval)
+                {
+                    m_LastClientPendingCleanupTime = now;
+                    CleanupTimedOutClientRequests(now);
+                }
             }
         }
 
@@ -510,6 +624,38 @@ namespace Arawn.GameCreator2.Networking
             m_ActiveImpacts.Clear();
             m_Cooldowns.Clear();
             m_Stats = default;
+            m_LastCleanupTime = Time.time;
+            m_LastClientPendingCleanupTime = Time.time;
+        }
+
+        private void CleanupTimedOutClientRequests(float now)
+        {
+            float timeout = Mathf.Max(0.25f, m_ClientPendingRequestTimeoutSeconds);
+            CleanupPendingMap(m_PendingCastRequests, now, timeout, "cast");
+            CleanupPendingMap(m_PendingLearnRequests, now, timeout, "learn");
+            CleanupPendingMap(m_PendingCooldownRequests, now, timeout, "cooldown");
+            CleanupPendingMap(m_PendingCancelRequests, now, timeout, "cancel");
+        }
+
+        private void CleanupPendingMap<T>(Dictionary<ulong, T> pending, float now, float timeout, string requestType)
+            where T : struct, ITimeoutAwarePendingRequest
+        {
+            if (pending.Count == 0) return;
+
+            int removedCount = PendingRequestCleanup.RemoveTimedOut(
+                pending,
+                s_SharedPendingCleanupKeys,
+                now,
+                timeout,
+                timedOut => timedOut.TryInvokeTimeout(),
+                exception => Debug.LogError(
+                    $"[NetworkAbilitiesController] Timeout callback for {requestType} request threw: {exception}"));
+
+            if (removedCount > 0 && m_DebugLog)
+            {
+                Debug.LogWarning(
+                    $"[NetworkAbilitiesController] Timed out {removedCount} pending {requestType} request(s) after {timeout:F1}s.");
+            }
         }
         
         
@@ -561,7 +707,10 @@ namespace Arawn.GameCreator2.Networking
                 ActiveProjectiles = m_ActiveProjectiles.Count,
                 ActiveImpacts = m_ActiveImpacts.Count,
                 TrackedCooldowns = m_Cooldowns.Count,
-                PendingRequests = m_PendingCastRequests.Count + m_PendingLearnRequests.Count
+                PendingRequests = m_PendingCastRequests.Count +
+                                  m_PendingLearnRequests.Count +
+                                  m_PendingCooldownRequests.Count +
+                                  m_PendingCancelRequests.Count
             };
         }
     }

@@ -86,7 +86,7 @@ namespace Arawn.GameCreator2.Networking
         public bool ValidateOwnership(uint senderClientId, uint actorNetworkId, out uint resolvedOwnerClientId)
         {
             resolvedOwnerClientId = 0;
-            if (senderClientId == 0 || actorNetworkId == 0)
+            if (!NetworkTransportBridge.IsValidClientId(senderClientId) || actorNetworkId == 0)
             {
                 return false;
             }
@@ -101,7 +101,7 @@ namespace Arawn.GameCreator2.Networking
 
         public void RegisterEntityOwner(uint entityNetworkId, uint ownerClientId)
         {
-            if (entityNetworkId == 0 || ownerClientId == 0) return;
+            if (entityNetworkId == 0 || !NetworkTransportBridge.IsValidClientId(ownerClientId)) return;
             m_EntityOwnerByNetworkId[entityNetworkId] = ownerClientId;
         }
 
@@ -110,7 +110,8 @@ namespace Arawn.GameCreator2.Networking
             if (entityNetworkId == 0 || actorNetworkId == 0) return;
             m_EntityActorByNetworkId[entityNetworkId] = actorNetworkId;
 
-            if (TryResolveOwnerClientId(actorNetworkId, out uint ownerClientId) && ownerClientId != 0)
+            if (TryResolveOwnerClientId(actorNetworkId, out uint ownerClientId) &&
+                NetworkTransportBridge.IsValidClientId(ownerClientId))
             {
                 m_EntityOwnerByNetworkId[entityNetworkId] = ownerClientId;
             }

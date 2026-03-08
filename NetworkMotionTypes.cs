@@ -312,6 +312,7 @@ namespace Arawn.GameCreator2.Networking
         public const byte REJECT_TOO_FAR = 3;
         public const byte REJECT_BLOCKED = 4;
         public const byte REJECT_NOT_ALLOWED = 5;
+        public const byte REJECT_TIMEOUT = 6;
         
         public static NetworkMotionResult Approved(ushort sequence)
         {

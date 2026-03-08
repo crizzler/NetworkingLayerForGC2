@@ -118,7 +118,8 @@ namespace Arawn.GameCreator2.Networking
         Cooldown = 5,
         NotOwner = 6,
         ProtocolMismatch = 7,
-        SecurityViolation = 8
+        SecurityViolation = 8,
+        Timeout = 9
     }
     
     // ════════════════════════════════════════════════════════════════════════════════════════
@@ -286,7 +287,8 @@ namespace Arawn.GameCreator2.Networking
         MaxPropsReached = 7,
         NotOwner = 8,
         ProtocolMismatch = 9,
-        SecurityViolation = 10
+        SecurityViolation = 10,
+        Timeout = 11
     }
     
     // ════════════════════════════════════════════════════════════════════════════════════════
@@ -376,7 +378,8 @@ namespace Arawn.GameCreator2.Networking
         OnCooldown = 6,
         NotOwner = 7,
         ProtocolMismatch = 8,
-        SecurityViolation = 9
+        SecurityViolation = 9,
+        Timeout = 10
     }
     
     // ════════════════════════════════════════════════════════════════════════════════════════
@@ -491,7 +494,8 @@ namespace Arawn.GameCreator2.Networking
         NotAuthorized = 4,
         NotOwner = 5,
         ProtocolMismatch = 6,
-        SecurityViolation = 7
+        SecurityViolation = 7,
+        Timeout = 8
     }
     
     // ════════════════════════════════════════════════════════════════════════════════════════
@@ -592,7 +596,8 @@ namespace Arawn.GameCreator2.Networking
         NotAuthorized = 4,
         NotOwner = 5,
         ProtocolMismatch = 6,
-        SecurityViolation = 7
+        SecurityViolation = 7,
+        Timeout = 8
     }
     
     // ════════════════════════════════════════════════════════════════════════════════════════
@@ -741,7 +746,8 @@ namespace Arawn.GameCreator2.Networking
         OnCooldown = 8,
         NotOwner = 9,
         ProtocolMismatch = 10,
-        SecurityViolation = 11
+        SecurityViolation = 11,
+        Timeout = 12
     }
     
     // ════════════════════════════════════════════════════════════════════════════════════════

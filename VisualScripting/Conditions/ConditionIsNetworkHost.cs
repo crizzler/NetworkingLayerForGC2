@@ -27,13 +27,16 @@ namespace Arawn.GameCreator2.Networking
 
         protected override bool Run(Args args)
         {
-#if UNITY_NETCODE
-            var nm = Unity.Netcode.NetworkManager.Singleton;
-            if (nm != null)
-                return nm.IsHost;
-#endif
+            if (args.Self != null)
+            {
+                var netChar = args.Self.Get<NetworkCharacter>();
+                if (netChar != null)
+                {
+                    return netChar.IsHostInstance;
+                }
+            }
 
-            return false;
+            return NetworkTransportBridge.HasActive && NetworkTransportBridge.Active.IsHost;
         }
     }
 }

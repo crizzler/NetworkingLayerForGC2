@@ -52,7 +52,7 @@ namespace GameCreator.Runtime.Characters
         [NonSerialized] private Vector3 m_LastCommandDestination;
         [NonSerialized] private bool m_HasPendingCommand;
         
-        // Network identity (set by NetworkCharacterManager)
+        // Network identity (set by NetworkCharacter/transport bridge setup)
         [NonSerialized] private ulong m_NetworkId;
         [NonSerialized] private bool m_IsLocalPlayer;
 

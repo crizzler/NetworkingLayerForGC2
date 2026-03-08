@@ -9,10 +9,6 @@ using GameCreator.Runtime.Melee;
 using Arawn.GameCreator2.Networking;
 using Arawn.GameCreator2.Networking.Security;
 
-#if UNITY_NETCODE
-using Unity.Netcode;
-#endif
-
 namespace Arawn.GameCreator2.Networking.Melee
 {
     /// <summary>
@@ -417,6 +413,33 @@ namespace Arawn.GameCreator2.Networking.Melee
             return false;
         }
 
+        private bool TryGetActorController(
+            uint senderClientId,
+            uint actorNetworkId,
+            string requestType,
+            out NetworkMeleeController controller)
+        {
+            if (m_Controllers.TryGetValue(actorNetworkId, out controller))
+            {
+                return true;
+            }
+
+            SecurityIntegration.RecordViolation(
+                senderClientId,
+                actorNetworkId,
+                SecurityViolationType.InvalidTarget,
+                "Melee",
+                $"{requestType} rejected: no registered controller for actor {actorNetworkId}");
+
+            if (m_LogHitRequests || m_LogHitBroadcasts)
+            {
+                Debug.LogWarning(
+                    $"[NetworkMeleeManager] {requestType} rejected: missing controller for actor {actorNetworkId}");
+            }
+
+            return false;
+        }
+
         private bool IsQueueAtCapacity<T>(Queue<T> queue, int maxQueueLength, uint senderClientId, uint actorNetworkId, string requestType)
         {
             int safeLimit = Mathf.Max(1, maxQueueLength);
@@ -741,26 +764,24 @@ namespace Arawn.GameCreator2.Networking.Melee
                 return;
             }
             
-            // Get attacker controller
-            NetworkMeleeController attackerController = null;
-            if (m_Controllers.TryGetValue(request.ActorNetworkId, out var ctrl))
+            if (!TryGetActorController(
+                    queued.ClientNetworkId,
+                    request.ActorNetworkId,
+                    nameof(NetworkMeleeHitRequest),
+                    out var attackerController))
             {
-                attackerController = ctrl;
-            }
-            
-            NetworkMeleeHitResponse response;
-            
-            if (attackerController != null)
-            {
-                // Use controller's validation logic
-                response = attackerController.ProcessHitRequest(request, queued.ClientNetworkId);
-            }
-            else
-            {
-                // Fallback validation
-                response = ValidateHitRequest(request);
+                SendHitResponseToClient?.Invoke(queued.ClientNetworkId, new NetworkMeleeHitResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Validated = false,
+                    RejectionReason = MeleeHitRejectionReason.AttackerNotFound
+                });
+                return;
             }
 
+            NetworkMeleeHitResponse response = attackerController.ProcessHitRequest(request, queued.ClientNetworkId);
             response.ActorNetworkId = request.ActorNetworkId;
             response.CorrelationId = request.CorrelationId;
             

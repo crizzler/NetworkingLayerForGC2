@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using UnityEngine;
 using GameCreator.Runtime.Common;
 using GameCreator.Runtime.Characters;
+using Arawn.GameCreator2.Networking.Security;
 
 namespace Arawn.GameCreator2.Networking
 {
@@ -39,8 +40,16 @@ namespace Arawn.GameCreator2.Networking
         [SerializeField] private bool m_IsServer = false;
         [SerializeField] private float m_MaxTeleportDistance = 50f;
         [SerializeField] private float m_MaxDashDistance = 20f;
+        [SerializeField] private int m_MaxPendingCallbacks = 128;
+        [SerializeField] private float m_PendingCallbackTimeoutSeconds = 8f;
 
         // MEMBERS: -------------------------------------------------------------------------------
+
+        private struct PendingCallbackEntry
+        {
+            public Action<NetworkMotionResult> Callback;
+            public float CreatedAt;
+        }
 
         [NonSerialized] private byte m_ConfigVersion;
         [NonSerialized] private NetworkMotionConfig m_LastSentConfig;
@@ -48,7 +57,8 @@ namespace Arawn.GameCreator2.Networking
         [NonSerialized] private ushort m_CommandSequence;
         [NonSerialized] private float m_LastDashTime;
         [NonSerialized] private int m_DashesUsed;
-        [NonSerialized] private Dictionary<ushort, Action<NetworkMotionResult>> m_PendingCallbacks;
+        [NonSerialized] private Dictionary<ushort, PendingCallbackEntry> m_PendingCallbacks;
+        [NonSerialized] private List<ushort> m_PendingCallbackRemovalBuffer;
 
         // EVENTS: --------------------------------------------------------------------------------
 
@@ -297,7 +307,8 @@ namespace Arawn.GameCreator2.Networking
             this.m_Jump = new MotionJump();
             this.m_Dash = new MotionDash();
             this.m_PendingCommands = new Queue<NetworkMotionCommand>(16);
-            this.m_PendingCallbacks = new Dictionary<ushort, Action<NetworkMotionResult>>(16);
+            this.m_PendingCallbacks = new Dictionary<ushort, PendingCallbackEntry>(16);
+            this.m_PendingCallbackRemovalBuffer = new List<ushort>(8);
         }
 
         // INITIALIZERS: --------------------------------------------------------------------------
@@ -305,10 +316,12 @@ namespace Arawn.GameCreator2.Networking
         public override void OnStartup(Character character)
         {
             base.OnStartup(character);
+            EnsureRuntimeStateInitialized();
             this.m_ConfigVersion = 0;
-            this.m_CommandSequence = 0;
+            this.m_CommandSequence = 1;
             this.m_LastDashTime = -1000f;
             this.m_DashesUsed = 0;
+            this.m_PendingCallbacks.Clear();
             
             // Send initial config
             SendConfigUpdate();
@@ -406,15 +419,9 @@ namespace Arawn.GameCreator2.Networking
         public void RequestDash(Vector3 direction, float speed, float duration, float fade, 
             Action<NetworkMotionResult> callback = null)
         {
+            ushort sequence = NextCommandSequence(!m_IsServer && callback != null);
             var command = NetworkMotionCommand.CreateDash(
-                direction.normalized, speed, duration, fade, m_CommandSequence);
-            
-            if (callback != null)
-            {
-                m_PendingCallbacks[m_CommandSequence] = callback;
-            }
-            
-            m_CommandSequence++;
+                direction.normalized, speed, duration, fade, sequence);
             
             if (m_IsServer)
             {
@@ -430,6 +437,7 @@ namespace Arawn.GameCreator2.Networking
             else
             {
                 // Client sends to server for validation
+                RegisterPendingCallback(sequence, callback);
                 OnSendCommand?.Invoke(command);
             }
         }
@@ -444,14 +452,8 @@ namespace Arawn.GameCreator2.Networking
                 ? this.Character.transform.eulerAngles.y 
                 : rotationY;
             
-            var command = NetworkMotionCommand.CreateTeleport(position, rotation, m_CommandSequence);
-            
-            if (callback != null)
-            {
-                m_PendingCallbacks[m_CommandSequence] = callback;
-            }
-            
-            m_CommandSequence++;
+            ushort sequence = NextCommandSequence(!m_IsServer && callback != null);
+            var command = NetworkMotionCommand.CreateTeleport(position, rotation, sequence);
             
             if (m_IsServer)
             {
@@ -465,6 +467,7 @@ namespace Arawn.GameCreator2.Networking
             }
             else
             {
+                RegisterPendingCallback(sequence, callback);
                 OnSendCommand?.Invoke(command);
             }
         }
@@ -476,6 +479,8 @@ namespace Arawn.GameCreator2.Networking
         /// </summary>
         public override void MoveToDirection(Vector3 velocity, Space space, int priority)
         {
+            ushort sequence = NextCommandSequence(false);
+
             if (m_IsServer)
             {
                 // Server applies directly
@@ -483,14 +488,14 @@ namespace Arawn.GameCreator2.Networking
                 
                 // Broadcast to clients
                 var command = NetworkMotionCommand.CreateMoveToDirection(
-                    velocity, space == Space.World, priority, m_CommandSequence++);
+                    velocity, space == Space.World, priority, sequence);
                 OnBroadcastCommand?.Invoke(command);
             }
             else
             {
                 // Client sends to server
                 var command = NetworkMotionCommand.CreateMoveToDirection(
-                    velocity, space == Space.World, priority, m_CommandSequence++);
+                    velocity, space == Space.World, priority, sequence);
                 OnSendCommand?.Invoke(command);
                 
                 // Optionally apply locally for prediction (commented out for strict server-authority)
@@ -506,19 +511,20 @@ namespace Arawn.GameCreator2.Networking
             Action<Character, bool> onFinish, int priority)
         {
             Vector3 targetPosition = location.GetPosition(this.Character.gameObject);
+            ushort sequence = NextCommandSequence(false);
             
             if (m_IsServer)
             {
                 base.MoveToLocation(location, stopDistance, onFinish, priority);
                 
                 var command = NetworkMotionCommand.CreateMoveToPosition(
-                    targetPosition, stopDistance, priority, m_CommandSequence++);
+                    targetPosition, stopDistance, priority, sequence);
                 OnBroadcastCommand?.Invoke(command);
             }
             else
             {
                 var command = NetworkMotionCommand.CreateMoveToPosition(
-                    targetPosition, stopDistance, priority, m_CommandSequence++);
+                    targetPosition, stopDistance, priority, sequence);
                 OnSendCommand?.Invoke(command);
                 
                 // Store callback for when server confirms
@@ -529,9 +535,9 @@ namespace Arawn.GameCreator2.Networking
         // SERVER-SIDE VALIDATION: ----------------------------------------------------------------
 
         /// <summary>
-        /// Process a command received from a client (server-side only).
+        /// Process a command received from a client (server-side only) with strict sender validation.
         /// </summary>
-        public NetworkMotionResult ProcessClientCommand(NetworkMotionCommand command)
+        public NetworkMotionResult ProcessClientCommand(NetworkMotionCommand command, uint senderClientId)
         {
             if (!m_IsServer)
             {
@@ -539,18 +545,54 @@ namespace Arawn.GameCreator2.Networking
                     NetworkMotionResult.REJECT_NOT_ALLOWED);
             }
 
-            NetworkMotionResult result;
+            uint actorNetworkId = ResolveActorNetworkId();
+            if (!NetworkTransportBridge.IsValidClientId(senderClientId) || actorNetworkId == 0)
+            {
+                SecurityIntegration.RecordViolation(
+                    senderClientId,
+                    actorNetworkId,
+                    SecurityViolationType.InvalidTarget,
+                    "Core",
+                    $"Motion command rejected: missing sender/actor context. sender={senderClientId}, actor={actorNetworkId}");
 
+                NetworkMotionResult rejected = NetworkMotionResult.Rejected(
+                    command.sequenceNumber,
+                    NetworkMotionResult.REJECT_NOT_ALLOWED);
+                OnSendResult?.Invoke(rejected);
+                return rejected;
+            }
+
+            uint correlationId = NetworkCorrelation.Compose(actorNetworkId, (uint)command.sequenceNumber);
+            if (!SecurityIntegration.ValidateCoreRequest(
+                    senderClientId,
+                    actorNetworkId,
+                    correlationId,
+                    command.commandType.ToString()))
+            {
+                NetworkMotionResult rejected = NetworkMotionResult.Rejected(
+                    command.sequenceNumber,
+                    NetworkMotionResult.REJECT_NOT_ALLOWED);
+                OnSendResult?.Invoke(rejected);
+                return rejected;
+            }
+
+            NetworkMotionResult result = ProcessValidatedClientCommand(command);
+            OnSendResult?.Invoke(result);
+            return result;
+        }
+
+        private NetworkMotionResult ProcessValidatedClientCommand(NetworkMotionCommand command)
+        {
             switch (command.commandType)
             {
                 case NetworkMotionCommandType.Dash:
-                    result = ValidateDashCommand(command);
+                    NetworkMotionResult result = ValidateDashCommand(command);
                     if (result.approved)
                     {
                         ApplyDashLocally(command);
                         OnBroadcastCommand?.Invoke(command);
                     }
-                    break;
+                    return result;
 
                 case NetworkMotionCommandType.Teleport:
                     result = ValidateTeleportCommand(command);
@@ -559,7 +601,7 @@ namespace Arawn.GameCreator2.Networking
                         ApplyTeleportLocally(command);
                         OnBroadcastCommand?.Invoke(command);
                     }
-                    break;
+                    return result;
 
                 case NetworkMotionCommandType.MoveToDirection:
                     result = ValidateMoveDirectionCommand(command);
@@ -570,7 +612,7 @@ namespace Arawn.GameCreator2.Networking
                         base.MoveToDirection(velocity, space, command.priority);
                         OnBroadcastCommand?.Invoke(command);
                     }
-                    break;
+                    return result;
 
                 case NetworkMotionCommandType.MoveToPosition:
                     result = ValidateMovePositionCommand(command);
@@ -582,7 +624,7 @@ namespace Arawn.GameCreator2.Networking
                         base.MoveToLocation(loc, stopDist, null, command.priority);
                         OnBroadcastCommand?.Invoke(command);
                     }
-                    break;
+                    return result;
 
                 case NetworkMotionCommandType.Jump:
                 case NetworkMotionCommandType.ForceJump:
@@ -596,22 +638,18 @@ namespace Arawn.GameCreator2.Networking
                             base.Jump(force);
                         OnBroadcastCommand?.Invoke(command);
                     }
-                    break;
+                    return result;
 
                 case NetworkMotionCommandType.StopDirection:
                     result = NetworkMotionResult.Approved(command.sequenceNumber);
                     base.StopToDirection(command.priority);
                     OnBroadcastCommand?.Invoke(command);
-                    break;
+                    return result;
 
                 default:
-                    result = NetworkMotionResult.Rejected(command.sequenceNumber, 
+                    return NetworkMotionResult.Rejected(command.sequenceNumber, 
                         NetworkMotionResult.REJECT_NOT_ALLOWED);
-                    break;
             }
-
-            OnSendResult?.Invoke(result);
-            return result;
         }
 
         /// <summary>
@@ -661,9 +699,11 @@ namespace Arawn.GameCreator2.Networking
         /// </summary>
         public void HandleCommandResult(NetworkMotionResult result)
         {
-            if (m_PendingCallbacks.TryGetValue(result.commandSequence, out var callback))
+            PruneExpiredPendingCallbacks(Time.time);
+
+            if (m_PendingCallbacks.TryGetValue(result.commandSequence, out PendingCallbackEntry pending))
             {
-                callback?.Invoke(result);
+                pending.Callback?.Invoke(result);
                 m_PendingCallbacks.Remove(result.commandSequence);
             }
         }
@@ -790,6 +830,141 @@ namespace Arawn.GameCreator2.Networking
             
             this.Character.Driver.SetPosition(position, true);
             this.Character.Driver.SetRotation(Quaternion.Euler(0f, rotationY, 0f));
+        }
+
+        private uint ResolveActorNetworkId()
+        {
+            if (this.Character == null) return 0;
+
+            var networkCharacter = this.Character.GetComponent<NetworkCharacter>();
+            if (networkCharacter == null) return 0;
+            return networkCharacter.NetworkId;
+        }
+
+        private void EnsureRuntimeStateInitialized()
+        {
+            m_PendingCommands ??= new Queue<NetworkMotionCommand>(16);
+            m_PendingCallbacks ??= new Dictionary<ushort, PendingCallbackEntry>(16);
+            m_PendingCallbackRemovalBuffer ??= new List<ushort>(8);
+        }
+
+        private ushort NextCommandSequence(bool reservePendingSlot)
+        {
+            EnsureRuntimeStateInitialized();
+            PruneExpiredPendingCallbacks(Time.time);
+
+            const int maxAttempts = ushort.MaxValue;
+            for (int i = 0; i < maxAttempts; i++)
+            {
+                ushort sequence = m_CommandSequence;
+                m_CommandSequence++;
+
+                if (sequence == 0)
+                {
+                    continue;
+                }
+
+                if (!reservePendingSlot || !m_PendingCallbacks.ContainsKey(sequence))
+                {
+                    return sequence;
+                }
+            }
+
+            if (reservePendingSlot)
+            {
+                EvictOldestPendingCallback();
+
+                for (int i = 0; i < maxAttempts; i++)
+                {
+                    ushort sequence = m_CommandSequence;
+                    m_CommandSequence++;
+
+                    if (sequence == 0) continue;
+                    if (!m_PendingCallbacks.ContainsKey(sequence))
+                    {
+                        return sequence;
+                    }
+                }
+            }
+
+            return 1;
+        }
+
+        private void RegisterPendingCallback(ushort sequence, Action<NetworkMotionResult> callback)
+        {
+            if (callback == null) return;
+
+            EnsureRuntimeStateInitialized();
+            PruneExpiredPendingCallbacks(Time.time);
+
+            int maxPending = Mathf.Max(1, m_MaxPendingCallbacks);
+            if (m_PendingCallbacks.Count >= maxPending)
+            {
+                EvictOldestPendingCallback();
+            }
+
+            m_PendingCallbacks[sequence] = new PendingCallbackEntry
+            {
+                Callback = callback,
+                CreatedAt = Time.time
+            };
+        }
+
+        private void PruneExpiredPendingCallbacks(float now)
+        {
+            EnsureRuntimeStateInitialized();
+            if (m_PendingCallbacks.Count == 0) return;
+
+            float timeout = Mathf.Max(0.25f, m_PendingCallbackTimeoutSeconds);
+            m_PendingCallbackRemovalBuffer.Clear();
+
+            foreach (KeyValuePair<ushort, PendingCallbackEntry> entry in m_PendingCallbacks)
+            {
+                if (now - entry.Value.CreatedAt >= timeout)
+                {
+                    m_PendingCallbackRemovalBuffer.Add(entry.Key);
+                }
+            }
+
+            for (int i = 0; i < m_PendingCallbackRemovalBuffer.Count; i++)
+            {
+                ushort sequence = m_PendingCallbackRemovalBuffer[i];
+                if (!m_PendingCallbacks.TryGetValue(sequence, out PendingCallbackEntry pending))
+                {
+                    continue;
+                }
+
+                m_PendingCallbacks.Remove(sequence);
+                pending.Callback?.Invoke(NetworkMotionResult.Rejected(sequence, NetworkMotionResult.REJECT_TIMEOUT));
+            }
+        }
+
+        private void EvictOldestPendingCallback()
+        {
+            EnsureRuntimeStateInitialized();
+            if (m_PendingCallbacks.Count == 0) return;
+
+            ushort oldestSequence = 0;
+            float oldestTime = float.MaxValue;
+            bool found = false;
+
+            foreach (KeyValuePair<ushort, PendingCallbackEntry> entry in m_PendingCallbacks)
+            {
+                if (!found || entry.Value.CreatedAt < oldestTime)
+                {
+                    found = true;
+                    oldestSequence = entry.Key;
+                    oldestTime = entry.Value.CreatedAt;
+                }
+            }
+
+            if (!found) return;
+
+            if (m_PendingCallbacks.TryGetValue(oldestSequence, out PendingCallbackEntry pending))
+            {
+                m_PendingCallbacks.Remove(oldestSequence);
+                pending.Callback?.Invoke(NetworkMotionResult.Rejected(oldestSequence, NetworkMotionResult.REJECT_TIMEOUT));
+            }
         }
     }
 }

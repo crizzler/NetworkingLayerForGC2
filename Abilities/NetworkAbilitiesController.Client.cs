@@ -40,7 +40,7 @@ namespace Arawn.GameCreator2.Networking
                 return;
             }
             
-            ushort requestId = m_NextRequestId++;
+            ushort requestId = GetNextRequestId();
             
             var request = new NetworkAbilityCastRequest
             {
@@ -59,7 +59,8 @@ namespace Arawn.GameCreator2.Networking
             if (m_IsClient && !m_IsServer)
             {
                 // Client-only: store pending and send to server
-                m_PendingCastRequests[request.CorrelationId] = new PendingCastRequest
+                ulong pendingKey = GetPendingKey(request.ActorNetworkId, request.CorrelationId, request.RequestId);
+                m_PendingCastRequests[pendingKey] = new PendingCastRequest
                 {
                     Request = request,
                     SentTime = Time.time,
@@ -100,7 +101,7 @@ namespace Arawn.GameCreator2.Networking
                 return;
             }
             
-            ushort requestId = m_NextRequestId++;
+            ushort requestId = GetNextRequestId();
             
             byte targetType = (byte)(targetNetworkId != 0 ? 2 : 1);
             
@@ -120,7 +121,8 @@ namespace Arawn.GameCreator2.Networking
             
             if (m_IsClient && !m_IsServer)
             {
-                m_PendingCastRequests[request.CorrelationId] = new PendingCastRequest
+                ulong pendingKey = GetPendingKey(request.ActorNetworkId, request.CorrelationId, request.RequestId);
+                m_PendingCastRequests[pendingKey] = new PendingCastRequest
                 {
                     Request = request,
                     SentTime = Time.time,
@@ -154,7 +156,7 @@ namespace Arawn.GameCreator2.Networking
             if (!m_IsClient && !m_IsServer) return;
             if (ability == null) return;
             
-            ushort requestId = m_NextRequestId++;
+            ushort requestId = GetNextRequestId();
             
             var request = new NetworkAbilityLearnRequest
             {
@@ -169,7 +171,8 @@ namespace Arawn.GameCreator2.Networking
             
             if (m_IsClient && !m_IsServer)
             {
-                m_PendingLearnRequests[request.CorrelationId] = new PendingLearnRequest
+                ulong pendingKey = GetPendingKey(request.ActorNetworkId, request.CorrelationId, request.RequestId);
+                m_PendingLearnRequests[pendingKey] = new PendingLearnRequest
                 {
                     Request = request,
                     SentTime = Time.time,
@@ -195,7 +198,7 @@ namespace Arawn.GameCreator2.Networking
         {
             if (!m_IsClient && !m_IsServer) return;
             
-            ushort requestId = m_NextRequestId++;
+            ushort requestId = GetNextRequestId();
             
             var request = new NetworkAbilityLearnRequest
             {
@@ -210,7 +213,8 @@ namespace Arawn.GameCreator2.Networking
             
             if (m_IsClient && !m_IsServer)
             {
-                m_PendingLearnRequests[request.CorrelationId] = new PendingLearnRequest
+                ulong pendingKey = GetPendingKey(request.ActorNetworkId, request.CorrelationId, request.RequestId);
+                m_PendingLearnRequests[pendingKey] = new PendingLearnRequest
                 {
                     Request = request,
                     SentTime = Time.time,
@@ -222,6 +226,88 @@ namespace Arawn.GameCreator2.Networking
             else if (m_IsServer)
             {
                 ProcessLearnRequest(characterNetworkId, request);
+            }
+        }
+
+        // ════════════════════════════════════════════════════════════════════════════════════════
+        // CLIENT-SIDE: COOLDOWN / CANCEL REQUESTS
+        // ════════════════════════════════════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// Request authoritative cooldown state for an ability.
+        /// </summary>
+        public void RequestCooldownState(
+            uint casterNetworkId,
+            Ability ability,
+            Action<NetworkCooldownResponse> callback = null)
+        {
+            if (!m_IsClient && !m_IsServer) return;
+            if (ability == null) return;
+
+            ushort requestId = GetNextRequestId();
+            var request = new NetworkCooldownRequest
+            {
+                RequestId = requestId,
+                ActorNetworkId = casterNetworkId,
+                CorrelationId = NetworkCorrelation.Compose(casterNetworkId, requestId),
+                CasterNetworkId = casterNetworkId,
+                AbilityIdHash = ability.ID.Hash
+            };
+
+            if (m_IsClient && !m_IsServer)
+            {
+                ulong pendingKey = GetPendingKey(request.ActorNetworkId, request.CorrelationId, request.RequestId);
+                m_PendingCooldownRequests[pendingKey] = new PendingCooldownRequest
+                {
+                    Request = request,
+                    SentTime = Time.time,
+                    Callback = callback
+                };
+
+                SendCooldownRequestToServer?.Invoke(request);
+            }
+            else if (m_IsServer)
+            {
+                ProcessCooldownRequest(casterNetworkId, request);
+            }
+        }
+
+        /// <summary>
+        /// Request cancelation of an active cast.
+        /// </summary>
+        public void RequestCancelCast(
+            uint casterNetworkId,
+            uint castInstanceId = 0,
+            Action<NetworkCastCancelResponse> callback = null)
+        {
+            if (!m_IsClient && !m_IsServer) return;
+
+            ushort requestId = GetNextRequestId();
+            var request = new NetworkCastCancelRequest
+            {
+                RequestId = requestId,
+                ActorNetworkId = casterNetworkId,
+                CorrelationId = NetworkCorrelation.Compose(casterNetworkId, requestId),
+                CasterNetworkId = casterNetworkId,
+                CastInstanceId = castInstanceId
+            };
+
+            if (m_IsClient && !m_IsServer)
+            {
+                ulong pendingKey = GetPendingKey(request.ActorNetworkId, request.CorrelationId, request.RequestId);
+                m_PendingCancelRequests[pendingKey] = new PendingCancelRequest
+                {
+                    Request = request,
+                    SentTime = Time.time,
+                    Callback = callback
+                };
+
+                SendCancelRequestToServer?.Invoke(request);
+                OnCancelRequestSent?.Invoke(request);
+            }
+            else if (m_IsServer)
+            {
+                ProcessCancelRequest(casterNetworkId, request);
             }
         }
         
@@ -238,7 +324,7 @@ namespace Arawn.GameCreator2.Networking
             
             OnCastResponseReceived?.Invoke(response);
             
-            uint pendingKey = response.CorrelationId != 0 ? response.CorrelationId : response.RequestId;
+            ulong pendingKey = GetPendingKey(response.ActorNetworkId, response.CorrelationId, response.RequestId);
             if (m_PendingCastRequests.TryGetValue(pendingKey, out var pending))
             {
                 m_PendingCastRequests.Remove(pendingKey);
@@ -335,6 +421,23 @@ namespace Arawn.GameCreator2.Networking
                 }
             }
         }
+
+        /// <summary>
+        /// Client receives cooldown response from server.
+        /// </summary>
+        public void ReceiveCooldownResponse(NetworkCooldownResponse response)
+        {
+            if (!m_IsClient) return;
+
+            OnCooldownResponseReceived?.Invoke(response);
+
+            ulong pendingKey = GetPendingKey(response.ActorNetworkId, response.CorrelationId, response.RequestId);
+            if (m_PendingCooldownRequests.TryGetValue(pendingKey, out var pending))
+            {
+                m_PendingCooldownRequests.Remove(pendingKey);
+                pending.Callback?.Invoke(response);
+            }
+        }
         
         /// <summary>
         /// Client receives learn response.
@@ -345,10 +448,27 @@ namespace Arawn.GameCreator2.Networking
             
             OnLearnResponseReceived?.Invoke(response);
             
-            uint pendingKey = response.CorrelationId != 0 ? response.CorrelationId : response.RequestId;
+            ulong pendingKey = GetPendingKey(response.ActorNetworkId, response.CorrelationId, response.RequestId);
             if (m_PendingLearnRequests.TryGetValue(pendingKey, out var pending))
             {
                 m_PendingLearnRequests.Remove(pendingKey);
+                pending.Callback?.Invoke(response);
+            }
+        }
+
+        /// <summary>
+        /// Client receives cast cancel response from server.
+        /// </summary>
+        public void ReceiveCancelResponse(NetworkCastCancelResponse response)
+        {
+            if (!m_IsClient) return;
+
+            OnCancelResponseReceived?.Invoke(response);
+
+            ulong pendingKey = GetPendingKey(response.ActorNetworkId, response.CorrelationId, response.RequestId);
+            if (m_PendingCancelRequests.TryGetValue(pendingKey, out var pending))
+            {
+                m_PendingCancelRequests.Remove(pendingKey);
                 pending.Callback?.Invoke(response);
             }
         }

@@ -35,14 +35,8 @@ namespace Arawn.GameCreator2.Networking
                     return netChar.IsServerInstance;
             }
 
-            // Fallback: check Netcode NetworkManager directly
-#if UNITY_NETCODE
-            var nm = Unity.Netcode.NetworkManager.Singleton;
-            if (nm != null)
-                return nm.IsServer;
-#endif
-
-            return false;
+            // Generic fallback through active transport bridge.
+            return NetworkTransportBridge.HasActive && NetworkTransportBridge.Active.IsServer;
         }
     }
 }

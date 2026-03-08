@@ -4,8 +4,7 @@
     "references": [
         "Arawn.GameCreator2.Networking",
         "GameCreator.Runtime.Core",
-        "GameCreator.Editor.Core",
-        "Unity.Netcode.Runtime"
+        "GameCreator.Editor.Core"
     ],
     "includePlatforms": [
         "Editor"
@@ -16,12 +15,6 @@
     "precompiledReferences": [],
     "autoReferenced": true,
     "defineConstraints": [],
-    "versionDefines": [
-        {
-            "name": "com.unity.netcode.gameobjects",
-            "expression": "",
-            "define": "UNITY_NETCODE"
-        }
-    ],
+    "versionDefines": [],
     "noEngineReferences": false
 }

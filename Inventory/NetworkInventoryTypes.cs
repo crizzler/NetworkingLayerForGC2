@@ -110,7 +110,8 @@ namespace Arawn.GameCreator2.Networking.Inventory
         ProtocolMismatch = 27,
         SecurityViolation = 28,
         IdentityMismatch = 29,
-        InternalError = 30
+        InternalError = 30,
+        RequestTimeout = 31
     }
     
     /// <summary>

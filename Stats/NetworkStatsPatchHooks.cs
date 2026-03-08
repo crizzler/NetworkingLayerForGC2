@@ -29,14 +29,44 @@ namespace Arawn.GameCreator2.Networking.Stats
 
         public static bool IsStatsPatched()
         {
-            return typeof(RuntimeStatData).GetField("NetworkBaseValidator", BindingFlags.Public | BindingFlags.Static) != null &&
-                   typeof(RuntimeAttributeData).GetField("NetworkValueValidator", BindingFlags.Public | BindingFlags.Static) != null;
+            return
+                HasPublicStaticField(
+                    typeof(RuntimeStatData),
+                    "NetworkBaseValidator",
+                    typeof(Func<RuntimeStatData, double, bool>)) &&
+                HasPublicStaticField(
+                    typeof(RuntimeStatData),
+                    "NetworkAddModifierValidator",
+                    typeof(Func<RuntimeStatData, ModifierType, double, bool>)) &&
+                HasPublicStaticField(
+                    typeof(RuntimeStatData),
+                    "NetworkRemoveModifierValidator",
+                    typeof(Func<RuntimeStatData, ModifierType, double, bool>)) &&
+                HasPublicStaticField(
+                    typeof(RuntimeStatData),
+                    "NetworkClearModifiersValidator",
+                    typeof(Func<RuntimeStatData, bool>)) &&
+                HasPublicStaticField(
+                    typeof(RuntimeAttributeData),
+                    "NetworkValueValidator",
+                    typeof(Func<RuntimeAttributeData, double, bool>)) &&
+                HasPublicStaticProperty(typeof(RuntimeStatData), "IsNetworkingActive", typeof(bool)) &&
+                HasPublicStaticProperty(typeof(RuntimeAttributeData), "IsNetworkingActive", typeof(bool)) &&
+                HasInstanceMethod(typeof(RuntimeStatData), "SetBaseDirect", typeof(double)) &&
+                HasInstanceMethod(typeof(RuntimeStatData), "AddModifierDirect", typeof(ModifierType), typeof(double)) &&
+                HasInstanceMethod(typeof(RuntimeStatData), "RemoveModifierDirect", typeof(ModifierType), typeof(double)) &&
+                HasInstanceMethod(typeof(RuntimeStatData), "ClearModifiersDirect") &&
+                HasInstanceMethod(typeof(RuntimeAttributeData), "SetValueDirect", typeof(double));
         }
 
         private void InstallHooks()
         {
             if (m_Installed) return;
-            if (!IsStatsPatched()) return;
+            if (!IsStatsPatched())
+            {
+                UnityEngine.Debug.LogWarning("[NetworkStatsPatchHooks] Stats runtime patch markers were not detected. Falling back to interception mode.");
+                return;
+            }
 
             SetStaticField(typeof(RuntimeStatData), "NetworkBaseValidator", new Func<RuntimeStatData, double, bool>(ValidateBase));
             SetStaticField(typeof(RuntimeStatData), "NetworkAddModifierValidator", new Func<RuntimeStatData, ModifierType, double, bool>(ValidateAddModifier));
@@ -69,7 +99,37 @@ namespace Arawn.GameCreator2.Networking.Stats
         private static void SetStaticField(Type type, string fieldName, object value)
         {
             FieldInfo field = type.GetField(fieldName, BindingFlags.Public | BindingFlags.Static);
-            field?.SetValue(null, value);
+            if (field == null)
+            {
+                UnityEngine.Debug.LogWarning($"[NetworkStatsPatchHooks] Missing patched field {type.Name}.{fieldName}. GC2 update likely changed signatures.");
+                return;
+            }
+
+            field.SetValue(null, value);
+        }
+
+        private static bool HasPublicStaticField(Type type, string fieldName, Type expectedFieldType)
+        {
+            FieldInfo field = type.GetField(fieldName, BindingFlags.Public | BindingFlags.Static);
+            return field != null && expectedFieldType.IsAssignableFrom(field.FieldType);
+        }
+
+        private static bool HasPublicStaticProperty(Type type, string propertyName, Type expectedPropertyType)
+        {
+            PropertyInfo property = type.GetProperty(propertyName, BindingFlags.Public | BindingFlags.Static);
+            return property != null && expectedPropertyType.IsAssignableFrom(property.PropertyType);
+        }
+
+        private static bool HasInstanceMethod(Type type, string methodName, params Type[] parameterTypes)
+        {
+            MethodInfo method = type.GetMethod(
+                methodName,
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance,
+                null,
+                parameterTypes,
+                null);
+
+            return method != null;
         }
     }
 }

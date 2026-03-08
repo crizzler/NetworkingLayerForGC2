@@ -25,6 +25,8 @@ namespace Arawn.GameCreator2.Networking.Security
         [SerializeField] private NetworkSecurityConfig m_CoreConfig;
         [SerializeField] private NetworkSecurityConfig m_StatsConfig;
         [SerializeField] private NetworkSecurityConfig m_InventoryConfig;
+        [SerializeField] private NetworkSecurityConfig m_QuestsConfig;
+        [SerializeField] private NetworkSecurityConfig m_DialogueConfig;
         [SerializeField] private NetworkSecurityConfig m_MeleeConfig;
         [SerializeField] private NetworkSecurityConfig m_ShooterConfig;
         [SerializeField] private NetworkSecurityConfig m_AbilitiesConfig;
@@ -76,7 +78,7 @@ namespace Arawn.GameCreator2.Networking.Security
         private Func<float> m_GetServerTime;
         
         // Per-module rate limiters
-        private readonly Dictionary<string, RateLimiter> m_RateLimiters = new(8);
+        private readonly Dictionary<string, RateLimiter> m_RateLimiters = new(10);
         
         // Global violation tracker
         private ViolationTracker m_ViolationTracker;
@@ -137,6 +139,8 @@ namespace Arawn.GameCreator2.Networking.Security
             CreateRateLimiter("Core");
             CreateRateLimiter("Stats");
             CreateRateLimiter("Inventory");
+            CreateRateLimiter("Quests");
+            CreateRateLimiter("Dialogue");
             CreateRateLimiter("Melee");
             CreateRateLimiter("Shooter");
             CreateRateLimiter("Abilities");
@@ -168,6 +172,8 @@ namespace Arawn.GameCreator2.Networking.Security
                 "Core" => m_CoreConfig ?? m_Config,
                 "Stats" => m_StatsConfig ?? m_Config,
                 "Inventory" => m_InventoryConfig ?? m_Config,
+                "Quests" => m_QuestsConfig ?? m_Config,
+                "Dialogue" => m_DialogueConfig ?? m_Config,
                 "Melee" => m_MeleeConfig ?? m_Config,
                 "Shooter" => m_ShooterConfig ?? m_Config,
                 "Abilities" => m_AbilitiesConfig ?? m_Config,
@@ -323,21 +329,34 @@ namespace Arawn.GameCreator2.Networking.Security
         /// </summary>
         public bool ValidateSequence(uint clientId, ushort requestId, string module)
         {
-            return ValidateSequence(clientId, 0u, requestId, module);
+            return ValidateSequence(clientId, 0u, (uint)requestId, module, 0x0000FFFFu);
         }
 
         /// <summary>
         /// Validate a request sequence number for replay attack prevention,
         /// scoped to client + module + actor to avoid cross-module collisions.
         /// </summary>
-        public bool ValidateSequence(uint clientId, uint actorNetworkId, ushort requestId, string module)
+        public bool ValidateSequence(uint clientId, uint actorNetworkId, uint requestSequence, string module)
+        {
+            return ValidateSequence(clientId, actorNetworkId, requestSequence, module, uint.MaxValue);
+        }
+
+        /// <summary>
+        /// Validate a request sequence number for replay attack prevention with explicit sequence mask.
+        /// </summary>
+        public bool ValidateSequence(
+            uint clientId,
+            uint actorNetworkId,
+            uint requestSequence,
+            string module,
+            uint sequenceMask)
         {
             if (!m_IsServer) return true;
             
-            if (!m_SequenceTracker.ValidateSequence(clientId, module, actorNetworkId, requestId))
+            if (!m_SequenceTracker.ValidateSequence(clientId, module, actorNetworkId, requestSequence, sequenceMask))
             {
                 RecordViolation(clientId, actorNetworkId, SecurityViolationType.ReplayAttack, module,
-                    $"Replay or out-of-order sequence: requestId={requestId}, actor={actorNetworkId}");
+                    $"Replay or out-of-order sequence: requestSequence={requestSequence}, actor={actorNetworkId}");
                 return false;
             }
             

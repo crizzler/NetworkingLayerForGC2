@@ -33,9 +33,9 @@ namespace Arawn.GameCreator2.Networking.Inventory
             
             var request = new NetworkContentAddRequest
             {
-                RequestId = m_NextRequestId++,
+                RequestId = GetNextRequestId(),
                 ActorNetworkId = NetworkId,
-                CorrelationId = NetworkCorrelation.Compose(NetworkId, (ushort)(m_NextRequestId - 1)),
+                CorrelationId = NetworkCorrelation.Compose(NetworkId, m_LastIssuedRequestId),
                 TargetBagNetworkId = NetworkId,
                 ItemHash = item.ID.Hash,
                 ItemIdString = item.ID.String,
@@ -45,7 +45,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 SourceHash = sourceHash
             };
             
-            m_PendingAdds[GetPendingKey(request.CorrelationId, request.RequestId)] = new PendingContentAdd
+            m_PendingAdds[GetPendingKey(request.ActorNetworkId, request.CorrelationId, request.RequestId)] = new PendingContentAdd
             {
                 Request = request,
                 SentTime = Time.time
@@ -97,9 +97,9 @@ namespace Arawn.GameCreator2.Networking.Inventory
 
             var request = new NetworkContentAddRequest
             {
-                RequestId = m_NextRequestId++,
+                RequestId = GetNextRequestId(),
                 ActorNetworkId = NetworkId,
-                CorrelationId = NetworkCorrelation.Compose(NetworkId, (ushort)(m_NextRequestId - 1)),
+                CorrelationId = NetworkCorrelation.Compose(NetworkId, m_LastIssuedRequestId),
                 TargetBagNetworkId = NetworkId,
                 // Server-authorized flow resolves by deterministic item hash.
                 ItemHash = runtimeItem.ItemHash,
@@ -111,7 +111,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 SourceHash = sourceHash
             };
             
-            m_PendingAdds[GetPendingKey(request.CorrelationId, request.RequestId)] = new PendingContentAdd
+            m_PendingAdds[GetPendingKey(request.ActorNetworkId, request.CorrelationId, request.RequestId)] = new PendingContentAdd
             {
                 Request = request,
                 SentTime = Time.time
@@ -139,16 +139,16 @@ namespace Arawn.GameCreator2.Networking.Inventory
             
             var request = new NetworkContentRemoveRequest
             {
-                RequestId = m_NextRequestId++,
+                RequestId = GetNextRequestId(),
                 ActorNetworkId = NetworkId,
-                CorrelationId = NetworkCorrelation.Compose(NetworkId, (ushort)(m_NextRequestId - 1)),
+                CorrelationId = NetworkCorrelation.Compose(NetworkId, m_LastIssuedRequestId),
                 TargetBagNetworkId = NetworkId,
                 RuntimeIdHash = runtimeItem.RuntimeID.Hash,
                 UsePosition = false,
                 Source = source
             };
             
-            m_PendingRemoves[GetPendingKey(request.CorrelationId, request.RequestId)] = new PendingContentRemove
+            m_PendingRemoves[GetPendingKey(request.ActorNetworkId, request.CorrelationId, request.RequestId)] = new PendingContentRemove
             {
                 Request = request,
                 RemovedItem = runtimeItem,
@@ -180,16 +180,16 @@ namespace Arawn.GameCreator2.Networking.Inventory
             
             var request = new NetworkContentRemoveRequest
             {
-                RequestId = m_NextRequestId++,
+                RequestId = GetNextRequestId(),
                 ActorNetworkId = NetworkId,
-                CorrelationId = NetworkCorrelation.Compose(NetworkId, (ushort)(m_NextRequestId - 1)),
+                CorrelationId = NetworkCorrelation.Compose(NetworkId, m_LastIssuedRequestId),
                 TargetBagNetworkId = NetworkId,
                 Position = position,
                 UsePosition = true,
                 Source = source
             };
             
-            m_PendingRemoves[GetPendingKey(request.CorrelationId, request.RequestId)] = new PendingContentRemove
+            m_PendingRemoves[GetPendingKey(request.ActorNetworkId, request.CorrelationId, request.RequestId)] = new PendingContentRemove
             {
                 Request = request,
                 SentTime = Time.time
@@ -219,16 +219,16 @@ namespace Arawn.GameCreator2.Networking.Inventory
             
             var request = new NetworkContentMoveRequest
             {
-                RequestId = m_NextRequestId++,
+                RequestId = GetNextRequestId(),
                 ActorNetworkId = NetworkId,
-                CorrelationId = NetworkCorrelation.Compose(NetworkId, (ushort)(m_NextRequestId - 1)),
+                CorrelationId = NetworkCorrelation.Compose(NetworkId, m_LastIssuedRequestId),
                 TargetBagNetworkId = NetworkId,
                 FromPosition = fromPosition,
                 ToPosition = toPosition,
                 AllowStack = allowStack
             };
             
-            m_PendingMoves[GetPendingKey(request.CorrelationId, request.RequestId)] = new PendingContentMove
+            m_PendingMoves[GetPendingKey(request.ActorNetworkId, request.CorrelationId, request.RequestId)] = new PendingContentMove
             {
                 Request = request,
                 SentTime = Time.time
@@ -259,9 +259,9 @@ namespace Arawn.GameCreator2.Networking.Inventory
             
             var request = new NetworkContentUseRequest
             {
-                RequestId = m_NextRequestId++,
+                RequestId = GetNextRequestId(),
                 ActorNetworkId = NetworkId,
-                CorrelationId = NetworkCorrelation.Compose(NetworkId, (ushort)(m_NextRequestId - 1)),
+                CorrelationId = NetworkCorrelation.Compose(NetworkId, m_LastIssuedRequestId),
                 TargetBagNetworkId = NetworkId,
                 RuntimeIdHash = runtimeItem.RuntimeID.Hash,
                 UsePosition = false
@@ -292,9 +292,9 @@ namespace Arawn.GameCreator2.Networking.Inventory
             
             var request = new NetworkContentDropRequest
             {
-                RequestId = m_NextRequestId++,
+                RequestId = GetNextRequestId(),
                 ActorNetworkId = NetworkId,
-                CorrelationId = NetworkCorrelation.Compose(NetworkId, (ushort)(m_NextRequestId - 1)),
+                CorrelationId = NetworkCorrelation.Compose(NetworkId, m_LastIssuedRequestId),
                 TargetBagNetworkId = NetworkId,
                 RuntimeIdHash = runtimeItem.RuntimeID.Hash,
                 DropPosition = dropPosition,
@@ -328,16 +328,16 @@ namespace Arawn.GameCreator2.Networking.Inventory
             
             var request = new NetworkEquipmentRequest
             {
-                RequestId = m_NextRequestId++,
+                RequestId = GetNextRequestId(),
                 ActorNetworkId = NetworkId,
-                CorrelationId = NetworkCorrelation.Compose(NetworkId, (ushort)(m_NextRequestId - 1)),
+                CorrelationId = NetworkCorrelation.Compose(NetworkId, m_LastIssuedRequestId),
                 TargetBagNetworkId = NetworkId,
                 RuntimeIdHash = runtimeItem.RuntimeID.Hash,
                 Action = slot >= 0 ? EquipmentAction.EquipToSlot : EquipmentAction.Equip,
                 SlotOrIndex = slot
             };
             
-            m_PendingEquipment[GetPendingKey(request.CorrelationId, request.RequestId)] = new PendingEquipment
+            m_PendingEquipment[GetPendingKey(request.ActorNetworkId, request.CorrelationId, request.RequestId)] = new PendingEquipment
             {
                 Request = request,
                 SentTime = Time.time
@@ -365,16 +365,16 @@ namespace Arawn.GameCreator2.Networking.Inventory
             
             var request = new NetworkEquipmentRequest
             {
-                RequestId = m_NextRequestId++,
+                RequestId = GetNextRequestId(),
                 ActorNetworkId = NetworkId,
-                CorrelationId = NetworkCorrelation.Compose(NetworkId, (ushort)(m_NextRequestId - 1)),
+                CorrelationId = NetworkCorrelation.Compose(NetworkId, m_LastIssuedRequestId),
                 TargetBagNetworkId = NetworkId,
                 RuntimeIdHash = runtimeItem.RuntimeID.Hash,
                 Action = EquipmentAction.Unequip,
                 SlotOrIndex = -1
             };
             
-            m_PendingEquipment[GetPendingKey(request.CorrelationId, request.RequestId)] = new PendingEquipment
+            m_PendingEquipment[GetPendingKey(request.ActorNetworkId, request.CorrelationId, request.RequestId)] = new PendingEquipment
             {
                 Request = request,
                 SentTime = Time.time
@@ -401,16 +401,16 @@ namespace Arawn.GameCreator2.Networking.Inventory
             
             var request = new NetworkEquipmentRequest
             {
-                RequestId = m_NextRequestId++,
+                RequestId = GetNextRequestId(),
                 ActorNetworkId = NetworkId,
-                CorrelationId = NetworkCorrelation.Compose(NetworkId, (ushort)(m_NextRequestId - 1)),
+                CorrelationId = NetworkCorrelation.Compose(NetworkId, m_LastIssuedRequestId),
                 TargetBagNetworkId = NetworkId,
                 RuntimeIdHash = 0,
                 Action = EquipmentAction.UnequipFromIndex,
                 SlotOrIndex = index
             };
             
-            m_PendingEquipment[GetPendingKey(request.CorrelationId, request.RequestId)] = new PendingEquipment
+            m_PendingEquipment[GetPendingKey(request.ActorNetworkId, request.CorrelationId, request.RequestId)] = new PendingEquipment
             {
                 Request = request,
                 SentTime = Time.time
@@ -442,9 +442,9 @@ namespace Arawn.GameCreator2.Networking.Inventory
             
             var request = new NetworkSocketRequest
             {
-                RequestId = m_NextRequestId++,
+                RequestId = GetNextRequestId(),
                 ActorNetworkId = NetworkId,
-                CorrelationId = NetworkCorrelation.Compose(NetworkId, (ushort)(m_NextRequestId - 1)),
+                CorrelationId = NetworkCorrelation.Compose(NetworkId, m_LastIssuedRequestId),
                 TargetBagNetworkId = NetworkId,
                 ParentRuntimeIdHash = parent.RuntimeID.Hash,
                 AttachmentRuntimeIdHash = attachment.RuntimeID.Hash,
@@ -478,9 +478,9 @@ namespace Arawn.GameCreator2.Networking.Inventory
             
             var request = new NetworkSocketRequest
             {
-                RequestId = m_NextRequestId++,
+                RequestId = GetNextRequestId(),
                 ActorNetworkId = NetworkId,
-                CorrelationId = NetworkCorrelation.Compose(NetworkId, (ushort)(m_NextRequestId - 1)),
+                CorrelationId = NetworkCorrelation.Compose(NetworkId, m_LastIssuedRequestId),
                 TargetBagNetworkId = NetworkId,
                 ParentRuntimeIdHash = parent.RuntimeID.Hash,
                 SocketHash = socketId.Hash,
@@ -518,9 +518,9 @@ namespace Arawn.GameCreator2.Networking.Inventory
             
             var request = new NetworkWealthRequest
             {
-                RequestId = m_NextRequestId++,
+                RequestId = GetNextRequestId(),
                 ActorNetworkId = NetworkId,
-                CorrelationId = NetworkCorrelation.Compose(NetworkId, (ushort)(m_NextRequestId - 1)),
+                CorrelationId = NetworkCorrelation.Compose(NetworkId, m_LastIssuedRequestId),
                 TargetBagNetworkId = NetworkId,
                 CurrencyHash = currency.ID.Hash,
                 CurrencyIdString = currency.ID.String,
@@ -532,7 +532,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
             
             int originalValue = m_Bag.Wealth.Get(currency);
             
-            m_PendingWealth[GetPendingKey(request.CorrelationId, request.RequestId)] = new PendingWealth
+            m_PendingWealth[GetPendingKey(request.ActorNetworkId, request.CorrelationId, request.RequestId)] = new PendingWealth
             {
                 Request = request,
                 OriginalValue = originalValue,
@@ -564,7 +564,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
         
         public void ReceiveContentAddResponse(NetworkContentAddResponse response)
         {
-            uint key = GetPendingKey(response.CorrelationId, response.RequestId);
+            ulong key = GetPendingKey(response.ActorNetworkId, response.CorrelationId, response.RequestId);
             if (!m_PendingAdds.TryGetValue(key, out var pending))
                 return;
             
@@ -580,7 +580,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
         
         public void ReceiveContentRemoveResponse(NetworkContentRemoveResponse response)
         {
-            uint key = GetPendingKey(response.CorrelationId, response.RequestId);
+            ulong key = GetPendingKey(response.ActorNetworkId, response.CorrelationId, response.RequestId);
             if (!m_PendingRemoves.TryGetValue(key, out var pending))
                 return;
             
@@ -596,7 +596,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
         
         public void ReceiveContentMoveResponse(NetworkContentMoveResponse response)
         {
-            uint key = GetPendingKey(response.CorrelationId, response.RequestId);
+            ulong key = GetPendingKey(response.ActorNetworkId, response.CorrelationId, response.RequestId);
             if (!m_PendingMoves.TryGetValue(key, out var pending))
                 return;
             
@@ -632,7 +632,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
         
         public void ReceiveEquipmentResponse(NetworkEquipmentResponse response)
         {
-            uint key = GetPendingKey(response.CorrelationId, response.RequestId);
+            ulong key = GetPendingKey(response.ActorNetworkId, response.CorrelationId, response.RequestId);
             if (!m_PendingEquipment.TryGetValue(key, out var pending))
                 return;
             
@@ -658,7 +658,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
         
         public void ReceiveWealthResponse(NetworkWealthResponse response)
         {
-            uint key = GetPendingKey(response.CorrelationId, response.RequestId);
+            ulong key = GetPendingKey(response.ActorNetworkId, response.CorrelationId, response.RequestId);
             if (!m_PendingWealth.TryGetValue(key, out var pending))
                 return;
             

@@ -1,0 +1,27 @@
+{
+    "name": "Arawn.GameCreator2.Networking.Quests",
+    "rootNamespace": "Arawn.GameCreator2.Networking.Quests",
+    "references": [
+        "Arawn.GameCreator2.Networking",
+        "Arawn.NetworkingCore.Runtime",
+        "GameCreator.Runtime.Core",
+        "GameCreator.Runtime.Quests"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [
+        "GC2_QUESTS"
+    ],
+    "versionDefines": [
+        {
+            "name": "com.gamecreator.quests",
+            "expression": "",
+            "define": "GC2_QUESTS"
+        }
+    ],
+    "noEngineReferences": false
+}

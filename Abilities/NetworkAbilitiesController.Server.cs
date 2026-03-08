@@ -912,6 +912,194 @@ namespace Arawn.GameCreator2.Networking
             };
             SendLearnResponseToClient?.Invoke(clientId, learnRejectResponse);
         }
+
+        // ════════════════════════════════════════════════════════════════════════════════════════
+        // SERVER-SIDE: COOLDOWN / CANCEL REQUESTS
+        // ════════════════════════════════════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// Process cooldown query request on server.
+        /// </summary>
+        public void ProcessCooldownRequest(uint clientId, NetworkCooldownRequest request)
+        {
+            if (!m_IsServer) return;
+
+            if (!ValidateAbilitiesRequest(clientId, request.ActorNetworkId, request.CorrelationId, nameof(NetworkCooldownRequest)) ||
+                request.CasterNetworkId == 0 ||
+                request.CasterNetworkId != request.ActorNetworkId)
+            {
+                SendCooldownResponseToClient?.Invoke(clientId, new NetworkCooldownResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    IsOnCooldown = false,
+                    CooldownEndTime = 0f,
+                    TotalDuration = 0f
+                });
+                return;
+            }
+
+            uint casterNetworkId = request.ActorNetworkId;
+            Pawn casterPawn = GetPawnByNetworkId?.Invoke(casterNetworkId);
+            if (casterPawn == null)
+            {
+                SendCooldownResponseToClient?.Invoke(clientId, new NetworkCooldownResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    IsOnCooldown = false,
+                    CooldownEndTime = 0f,
+                    TotalDuration = 0f
+                });
+                return;
+            }
+
+            float serverTime = GetServerTime?.Invoke() ?? Time.time;
+            var cooldownKey = (casterNetworkId, request.AbilityIdHash);
+            bool isOnCooldown = false;
+            float cooldownEndTime = 0f;
+            float totalDuration = 0f;
+
+            if (m_Cooldowns.TryGetValue(cooldownKey, out CooldownData cooldownData))
+            {
+                if (serverTime < cooldownData.EndTime)
+                {
+                    isOnCooldown = true;
+                    cooldownEndTime = cooldownData.EndTime;
+                    totalDuration = cooldownData.TotalDuration;
+                }
+                else
+                {
+                    m_Cooldowns.Remove(cooldownKey);
+                }
+            }
+
+            SendCooldownResponseToClient?.Invoke(clientId, new NetworkCooldownResponse
+            {
+                RequestId = request.RequestId,
+                ActorNetworkId = request.ActorNetworkId,
+                CorrelationId = request.CorrelationId,
+                IsOnCooldown = isOnCooldown,
+                CooldownEndTime = cooldownEndTime,
+                TotalDuration = totalDuration
+            });
+        }
+
+        /// <summary>
+        /// Process cast cancel request on server.
+        /// </summary>
+        public void ProcessCancelRequest(uint clientId, NetworkCastCancelRequest request)
+        {
+            if (!m_IsServer) return;
+
+            if (!ValidateAbilitiesRequest(clientId, request.ActorNetworkId, request.CorrelationId, nameof(NetworkCastCancelRequest)) ||
+                request.CasterNetworkId == 0 ||
+                request.CasterNetworkId != request.ActorNetworkId)
+            {
+                SendCancelResponseToClient?.Invoke(clientId, new NetworkCastCancelResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Approved = false,
+                    CastInstanceId = 0
+                });
+                return;
+            }
+
+            uint casterNetworkId = request.ActorNetworkId;
+            if (!m_CasterStates.TryGetValue(casterNetworkId, out CasterState casterState) ||
+                casterState == null ||
+                casterState.Caster == null)
+            {
+                SendCancelResponseToClient?.Invoke(clientId, new NetworkCastCancelResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Approved = false,
+                    CastInstanceId = 0
+                });
+                return;
+            }
+
+            uint castInstanceId = request.CastInstanceId;
+            ActiveCast activeCast = null;
+            if (castInstanceId != 0)
+            {
+                if (!m_ActiveCasts.TryGetValue(castInstanceId, out activeCast) ||
+                    activeCast == null ||
+                    activeCast.CasterNetworkId != casterNetworkId)
+                {
+                    SendCancelResponseToClient?.Invoke(clientId, new NetworkCastCancelResponse
+                    {
+                        RequestId = request.RequestId,
+                        ActorNetworkId = request.ActorNetworkId,
+                        CorrelationId = request.CorrelationId,
+                        Approved = false,
+                        CastInstanceId = 0
+                    });
+                    return;
+                }
+            }
+            else
+            {
+                for (int i = casterState.ActiveCastIds.Count - 1; i >= 0; i--)
+                {
+                    uint activeId = casterState.ActiveCastIds[i];
+                    if (!m_ActiveCasts.TryGetValue(activeId, out ActiveCast candidate) ||
+                        candidate == null)
+                    {
+                        continue;
+                    }
+
+                    activeCast = candidate;
+                    castInstanceId = activeId;
+                    break;
+                }
+
+                if (activeCast == null)
+                {
+                    SendCancelResponseToClient?.Invoke(clientId, new NetworkCastCancelResponse
+                    {
+                        RequestId = request.RequestId,
+                        ActorNetworkId = request.ActorNetworkId,
+                        CorrelationId = request.CorrelationId,
+                        Approved = false,
+                        CastInstanceId = 0
+                    });
+                    return;
+                }
+            }
+
+            if (casterState.Pawn != null)
+            {
+                CastState castState = casterState.Pawn.GetState<CastState>();
+                if (castState != null)
+                {
+                    castState.Cancel();
+                }
+                else
+                {
+                    activeCast.RuntimeAbility?.Cancel();
+                }
+            }
+            else
+            {
+                activeCast.RuntimeAbility?.Cancel();
+            }
+
+            SendCancelResponseToClient?.Invoke(clientId, new NetworkCastCancelResponse
+            {
+                RequestId = request.RequestId,
+                ActorNetworkId = request.ActorNetworkId,
+                CorrelationId = request.CorrelationId,
+                Approved = true,
+                CastInstanceId = castInstanceId
+            });
+        }
         
         // ════════════════════════════════════════════════════════════════════════════════════════
         // HELPER METHODS

@@ -1,13 +1,9 @@
 using NUnit.Framework;
+using System;
 using System.Reflection;
+using System.Threading;
 using Arawn.GameCreator2.Networking;
 using Arawn.GameCreator2.Networking.Security;
-#if GC2_INVENTORY
-using Arawn.GameCreator2.Networking.Inventory;
-#endif
-#if GC2_STATS
-using Arawn.GameCreator2.Networking.Stats;
-#endif
 
 namespace Arawn.GameCreator2.Networking.Tests
 {
@@ -21,12 +17,78 @@ namespace Arawn.GameCreator2.Networking.Tests
         public void SetUp()
         {
             SecurityIntegration.ClearModuleServerContexts();
+            NetworkCorrelation.ResetComposeState();
         }
 
         [TearDown]
         public void TearDown()
         {
             SecurityIntegration.ClearModuleServerContexts();
+            NetworkCorrelation.ResetComposeState();
+        }
+
+        private static UnityEngine.GameObject EnsureSecurityManagerForServerTests()
+        {
+            if (NetworkSecurityManager.Instance != null)
+            {
+                SecurityIntegration.EnsureSecurityManagerInitialized(true, () => 1f);
+                return null;
+            }
+
+            var go = new UnityEngine.GameObject("SecurityManager_Test_Runtime");
+            go.AddComponent<NetworkSecurityManager>();
+            SecurityIntegration.EnsureSecurityManagerInitialized(true, () => 1f);
+            return go;
+        }
+
+        private static void DestroySecurityManagerIfCreated(UnityEngine.GameObject securityManagerGo)
+        {
+            if (securityManagerGo != null)
+            {
+                UnityEngine.Object.DestroyImmediate(securityManagerGo);
+            }
+        }
+
+        private sealed class OwnershipBootstrapTestBridge : NetworkTransportBridge
+        {
+            public bool VerifyCalled { get; private set; }
+            public bool VerifyResult { get; set; } = true;
+            public uint VerifiedOwnerClientId { get; set; } = 7;
+
+            public override bool IsServer => true;
+            public override bool IsClient => false;
+            public override bool IsHost => false;
+            public override float ServerTime => 1f;
+
+            public override void SendToServer(uint characterNetworkId, NetworkInputState[] inputs)
+            {
+            }
+
+            public override void SendToOwner(uint ownerClientId, uint characterNetworkId, NetworkPositionState state, float serverTime)
+            {
+            }
+
+            public override void Broadcast(
+                uint characterNetworkId,
+                NetworkPositionState state,
+                float serverTime,
+                uint excludeClientId = uint.MaxValue,
+                NetworkRecipientFilter relevanceFilter = null)
+            {
+            }
+
+            public override bool TryVerifyActorOwnership(uint senderClientId, uint actorNetworkId, out uint ownerClientId)
+            {
+                VerifyCalled = true;
+                ownerClientId = VerifiedOwnerClientId;
+                if (!VerifyResult || senderClientId != VerifiedOwnerClientId || actorNetworkId == 0)
+                {
+                    return false;
+                }
+
+                SetCharacterOwner(actorNetworkId, ownerClientId);
+                return true;
+            }
         }
 
         // ════════════════════════════════════════════════════════════════════════════════════════
@@ -618,21 +680,55 @@ namespace Arawn.GameCreator2.Networking.Tests
         }
 
         [Test]
-        public void NetworkCorrelation_Compose_ExtractsActorSegment()
+        public void NetworkCorrelation_Compose_MatchesActorAndExtractsRequestId()
         {
             uint actorId = 0xABCD1234;
-            uint correlation = NetworkCorrelation.Compose(actorId, (ushort)42);
+            uint correlationA = NetworkCorrelation.Compose(actorId, (ushort)42);
+            uint correlationB = NetworkCorrelation.Compose(actorId, (ushort)99);
 
-            Assert.AreEqual((ushort)0x1234, NetworkCorrelation.ExtractActorSegment(correlation));
+            Assert.AreEqual((ushort)42, NetworkCorrelation.ExtractRequestId(correlationA));
+            Assert.AreEqual((ushort)99, NetworkCorrelation.ExtractRequestId(correlationB));
+            Assert.IsTrue(NetworkCorrelation.MatchesActor(correlationA, actorId));
+            Assert.IsTrue(NetworkCorrelation.MatchesActor(correlationB, actorId));
+        }
+
+        [Test]
+        public void NetworkCorrelation_GetSequenceMask_Uses20BitMask()
+        {
+            Assert.AreEqual(0x000FFFFFu, NetworkCorrelation.GetSequenceMask());
+        }
+
+        [Test]
+        public void NetworkCorrelation_ComposeFromCounter_ExtractsWideGeneration()
+        {
+            uint actorId = 0x1234ABCD;
+            uint localCounter = 0x0012DEF1u; // generation(high nibble mask)=0x2, request=0xDEF1
+            uint correlation = NetworkCorrelation.Compose(actorId, localCounter);
+
+            Assert.AreEqual((ushort)0xDEF1, NetworkCorrelation.ExtractRequestId(correlation));
+            Assert.AreEqual((ushort)0x0002, NetworkCorrelation.ExtractGenerationWide(correlation));
+
+            uint expectedSequence = ((0x0002u << 16) | 0xDEF1u) & NetworkCorrelation.GetSequenceMask();
+            Assert.AreEqual(expectedSequence, NetworkCorrelation.ExtractSequenceKey(correlation));
+            Assert.IsTrue(NetworkCorrelation.MatchesActor(correlation, actorId));
         }
 
         [Test]
         public void NetworkCorrelation_MatchesActor_ReturnsFalseForDifferentActorSegment()
         {
-            uint correlation = NetworkCorrelation.Compose(0x00001234, (ushort)9);
+            uint actorId = 0x00001234;
+            uint correlation = NetworkCorrelation.Compose(actorId, (ushort)9);
 
-            Assert.IsTrue(NetworkCorrelation.MatchesActor(correlation, 0xFFFF1234));
-            Assert.IsFalse(NetworkCorrelation.MatchesActor(correlation, 0xFFFF5678));
+            Assert.IsTrue(NetworkCorrelation.MatchesActor(correlation, actorId));
+
+            uint differentActorId = actorId + 1;
+            int safety = 0;
+            while (NetworkCorrelation.MatchesActor(correlation, differentActorId) && safety++ < 100000)
+            {
+                differentActorId++;
+            }
+
+            Assert.IsFalse(NetworkCorrelation.MatchesActor(correlation, differentActorId));
         }
 
         [Test]
@@ -646,12 +742,77 @@ namespace Arawn.GameCreator2.Networking.Tests
         }
 
         [Test]
+        public void NetworkCorrelation_Compose_ReusedRequestIdIncrementsGeneration()
+        {
+            uint actorId = 0x12345678;
+            uint correlationA = NetworkCorrelation.Compose(actorId, (ushort)7);
+            uint correlationB = NetworkCorrelation.Compose(actorId, (ushort)7);
+
+            Assert.AreNotEqual(correlationA, correlationB);
+            Assert.AreEqual((ushort)7, NetworkCorrelation.ExtractRequestId(correlationA));
+            Assert.AreEqual((ushort)7, NetworkCorrelation.ExtractRequestId(correlationB));
+            Assert.AreNotEqual(NetworkCorrelation.ExtractGeneration(correlationA), NetworkCorrelation.ExtractGeneration(correlationB));
+        }
+
+        [Test]
+        public void NetworkCorrelation_ClearComposeState_ResetsOnlySpecifiedActor()
+        {
+            uint actorA = 0x00112233;
+            uint actorB = 0x00445566;
+
+            uint aFirst = NetworkCorrelation.Compose(actorA, (ushort)12);
+            uint bFirst = NetworkCorrelation.Compose(actorB, (ushort)12);
+            uint aSecond = NetworkCorrelation.Compose(actorA, (ushort)12);
+            uint bSecond = NetworkCorrelation.Compose(actorB, (ushort)12);
+
+            Assert.AreNotEqual(
+                NetworkCorrelation.ExtractGeneration(aFirst),
+                NetworkCorrelation.ExtractGeneration(aSecond));
+            Assert.AreNotEqual(
+                NetworkCorrelation.ExtractGeneration(bFirst),
+                NetworkCorrelation.ExtractGeneration(bSecond));
+
+            NetworkCorrelation.ClearComposeState(actorA);
+
+            uint aAfterClear = NetworkCorrelation.Compose(actorA, (ushort)12);
+            uint bAfterClear = NetworkCorrelation.Compose(actorB, (ushort)12);
+
+            Assert.AreEqual(
+                NetworkCorrelation.ExtractGeneration(aFirst),
+                NetworkCorrelation.ExtractGeneration(aAfterClear));
+            Assert.AreNotEqual(
+                NetworkCorrelation.ExtractGeneration(bFirst),
+                NetworkCorrelation.ExtractGeneration(bAfterClear));
+        }
+
+        [Test]
+        public void NetworkCorrelation_ExtractSequenceKey_ChangesAcrossGenerations()
+        {
+            uint actorId = 0x0000ABCD;
+            uint correlationA = NetworkCorrelation.Compose(actorId, (ushort)1);
+            uint correlationB = NetworkCorrelation.Compose(actorId, (ushort)1);
+
+            Assert.AreNotEqual(
+                NetworkCorrelation.ExtractSequenceKey(correlationA),
+                NetworkCorrelation.ExtractSequenceKey(correlationB));
+        }
+
+        [Test]
         public void SecurityIntegration_IsProtocolContextMismatch_DetectsActorSegmentMismatch()
         {
-            uint correlation = NetworkCorrelation.Compose(0x00001234, (ushort)7);
+            uint actorId = 0x00001234;
+            uint correlation = NetworkCorrelation.Compose(actorId, (ushort)7);
 
-            Assert.IsTrue(SecurityIntegration.IsProtocolContextMismatch(0x00005678, correlation));
-            Assert.IsFalse(SecurityIntegration.IsProtocolContextMismatch(0xFFFF1234, correlation));
+            Assert.IsFalse(SecurityIntegration.IsProtocolContextMismatch(actorId, correlation));
+
+            uint mismatchedActor = actorId + 1;
+            int safety = 0;
+            while (!SecurityIntegration.IsProtocolContextMismatch(mismatchedActor, correlation) && safety++ < 100000)
+            {
+                mismatchedActor++;
+            }
+
+            Assert.IsTrue(SecurityIntegration.IsProtocolContextMismatch(mismatchedActor, correlation));
         }
 
         [Test]
@@ -694,6 +855,43 @@ namespace Arawn.GameCreator2.Networking.Tests
         {
             var resolver = new NetworkOwnershipResolver();
             Assert.IsFalse(resolver.ValidateOwnership(1, 9999, out _));
+        }
+
+        [Test]
+        public void SecurityIntegration_RegisterActorOwnership_ResolvesAndClearsOwner()
+        {
+            var originalResolver = SecurityIntegration.OwnershipResolver;
+            try
+            {
+                SecurityIntegration.OwnershipResolver = new NetworkOwnershipResolver();
+
+                SecurityIntegration.RegisterActorOwnership(4001, 77);
+                Assert.IsTrue(SecurityIntegration.TryResolveActorOwner(4001, out uint ownerClientId));
+                Assert.AreEqual(77u, ownerClientId);
+
+                SecurityIntegration.UnregisterActorOwnership(4001);
+                Assert.IsFalse(SecurityIntegration.TryResolveActorOwner(4001, out _));
+            }
+            finally
+            {
+                SecurityIntegration.OwnershipResolver = originalResolver;
+            }
+        }
+
+        [Test]
+        public void SecurityIntegration_UnregisterActorOwnership_ClearsCorrelationComposeState()
+        {
+            uint actorId = 0x00004001;
+            uint correlationA = NetworkCorrelation.Compose(actorId, (ushort)21);
+            uint correlationB = NetworkCorrelation.Compose(actorId, (ushort)21);
+            Assert.AreNotEqual(correlationA, correlationB);
+
+            SecurityIntegration.UnregisterActorOwnership(actorId);
+
+            uint correlationAfterClear = NetworkCorrelation.Compose(actorId, (ushort)21);
+            Assert.AreEqual(
+                NetworkCorrelation.ExtractGeneration(correlationA),
+                NetworkCorrelation.ExtractGeneration(correlationAfterClear));
         }
 
         // ════════════════════════════════════════════════════════════════════════════════════════
@@ -774,6 +972,69 @@ namespace Arawn.GameCreator2.Networking.Tests
             Assert.IsTrue(tracker.ValidateSequence(1, "Core", 1001, 1));
             Assert.IsTrue(tracker.ValidateSequence(1, "Core", 2002, 1));
             Assert.IsFalse(tracker.ValidateSequence(1, "Core", 1001, 1));
+        }
+
+        [Test]
+        public void SequenceTracker_MaskedSequence_AcceptsGenerationWrapAndRejectsStaleReplay()
+        {
+            var tracker = new SequenceTracker();
+            uint sequenceMask = NetworkCorrelation.GetSequenceMask();
+
+            uint topMinusOne = (sequenceMask - 1u) & sequenceMask;
+            uint top = sequenceMask;
+            Assert.IsTrue(tracker.ValidateSequence(1, "Core", 9001, topMinusOne, sequenceMask));
+            Assert.IsTrue(tracker.ValidateSequence(1, "Core", 9001, top, sequenceMask));
+            Assert.IsTrue(tracker.ValidateSequence(1, "Core", 9001, 0x00000001u, sequenceMask)); // wrapped forward
+
+            Assert.IsFalse(tracker.ValidateSequence(1, "Core", 9001, top, sequenceMask)); // stale after wrap
+        }
+
+        [Test]
+        public void SequenceTracker_ConcurrentValidationAcrossClients_DoesNotThrow()
+        {
+            var tracker = new SequenceTracker();
+            uint sequenceMask = NetworkCorrelation.GetSequenceMask();
+
+            Exception workerAError = null;
+            Exception workerBError = null;
+
+            Thread workerA = new Thread(() =>
+            {
+                try
+                {
+                    for (uint i = 1; i < 2000; i++)
+                    {
+                        tracker.ValidateSequence(1, "Core", 7001, i, sequenceMask);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    workerAError = ex;
+                }
+            });
+
+            Thread workerB = new Thread(() =>
+            {
+                try
+                {
+                    for (uint i = 1; i < 2000; i++)
+                    {
+                        tracker.ValidateSequence(2, "Core", 7001, i, sequenceMask);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    workerBError = ex;
+                }
+            });
+
+            workerA.Start();
+            workerB.Start();
+            workerA.Join();
+            workerB.Join();
+
+            Assert.IsNull(workerAError);
+            Assert.IsNull(workerBError);
         }
 
         [Test]
@@ -908,11 +1169,11 @@ namespace Arawn.GameCreator2.Networking.Tests
         // ════════════════════════════════════════════════════════════════════════════════════════
 
         [Test]
-        public void SecurityIntegration_ValidateModuleRequest_NullManager_ReturnsTrue()
+        public void SecurityIntegration_ValidateModuleRequest_NullManager_NoSenderContext_ReturnsTrue()
         {
-            // Non-authoritative context should pass-through when manager is absent.
+            // Non-server-like context should pass-through when manager is absent.
             var ctx = NetworkRequestContext.Create(42, NetworkCorrelation.Compose(42, (ushort)1));
-            Assert.IsTrue(SecurityIntegration.ValidateModuleRequest(1, in ctx, "Core", "TestRequest"));
+            Assert.IsTrue(SecurityIntegration.ValidateModuleRequest(NetworkTransportBridge.InvalidClientId, in ctx, "Core", "TestRequest"));
         }
 
         [Test]
@@ -925,10 +1186,10 @@ namespace Arawn.GameCreator2.Networking.Tests
         }
 
         [Test]
-        public void SecurityIntegration_ValidateOwnership_NullManager_ReturnsTrue()
+        public void SecurityIntegration_ValidateOwnership_NullManager_NoSenderContext_ReturnsTrue()
         {
-            // Non-authoritative context should pass-through when manager is absent.
-            Assert.IsTrue(SecurityIntegration.ValidateOwnership(1, 1001, "Core"));
+            // Non-server-like context should pass-through when manager is absent.
+            Assert.IsTrue(SecurityIntegration.ValidateOwnership(NetworkTransportBridge.InvalidClientId, 1001, "Core"));
         }
 
         [Test]
@@ -936,6 +1197,103 @@ namespace Arawn.GameCreator2.Networking.Tests
         {
             SecurityIntegration.SetModuleServerContext("Core", true);
             Assert.IsFalse(SecurityIntegration.ValidateOwnership(1, 1001, "Core"));
+        }
+
+        [Test]
+        public void SecurityIntegration_ValidateOwnership_UnresolvedOwner_PrimesFromTransportVerification()
+        {
+            var originalResolver = SecurityIntegration.OwnershipResolver;
+            UnityEngine.GameObject securityGo = EnsureSecurityManagerForServerTests();
+            var bridgeGo = new UnityEngine.GameObject("OwnershipBootstrapBridge");
+            var bridge = bridgeGo.AddComponent<OwnershipBootstrapTestBridge>();
+
+            try
+            {
+                SecurityIntegration.SetModuleServerContext("Core", true);
+                SecurityIntegration.OwnershipResolver = new NetworkOwnershipResolver();
+
+                Assert.IsTrue(SecurityIntegration.ValidateOwnership(7, 1001, "Core"));
+                Assert.IsTrue(bridge.VerifyCalled, "Transport verification should be used to bootstrap unresolved ownership.");
+                Assert.IsTrue(SecurityIntegration.TryResolveActorOwner(1001, out uint ownerClientId));
+                Assert.AreEqual(7u, ownerClientId);
+            }
+            finally
+            {
+                SecurityIntegration.OwnershipResolver = originalResolver;
+                UnityEngine.Object.DestroyImmediate(bridgeGo);
+                DestroySecurityManagerIfCreated(securityGo);
+            }
+        }
+
+        [Test]
+        public void SecurityIntegration_ValidateOwnership_StaleMismatch_RefreshesFromTransportVerification()
+        {
+            var originalResolver = SecurityIntegration.OwnershipResolver;
+            UnityEngine.GameObject securityGo = EnsureSecurityManagerForServerTests();
+            var bridgeGo = new UnityEngine.GameObject("OwnershipMismatchBridge");
+            var bridge = bridgeGo.AddComponent<OwnershipBootstrapTestBridge>();
+
+            try
+            {
+                SecurityIntegration.SetModuleServerContext("Core", true);
+                SecurityIntegration.OwnershipResolver = new NetworkOwnershipResolver();
+
+                // Simulate stale ownership cache that points to an old owner.
+                SecurityIntegration.RegisterActorOwnership(2002, 99);
+                bridge.VerifiedOwnerClientId = 7;
+                bridge.VerifyResult = true;
+
+                Assert.IsTrue(SecurityIntegration.ValidateOwnership(7, 2002, "Core"));
+                Assert.IsTrue(bridge.VerifyCalled, "Transport verification should refresh stale ownership mismatches.");
+                Assert.IsTrue(SecurityIntegration.TryResolveActorOwner(2002, out uint ownerClientId));
+                Assert.AreEqual(7u, ownerClientId);
+            }
+            finally
+            {
+                SecurityIntegration.OwnershipResolver = originalResolver;
+                UnityEngine.Object.DestroyImmediate(bridgeGo);
+                DestroySecurityManagerIfCreated(securityGo);
+            }
+        }
+
+        [Test]
+        public void SecurityIntegration_ValidateTargetEntityOwnership_UnresolvedEntity_PrimesFromTransportVerification()
+        {
+            var originalResolver = SecurityIntegration.OwnershipResolver;
+            UnityEngine.GameObject securityGo = EnsureSecurityManagerForServerTests();
+            var bridgeGo = new UnityEngine.GameObject("TargetOwnershipBootstrapBridge");
+            var bridge = bridgeGo.AddComponent<OwnershipBootstrapTestBridge>();
+
+            try
+            {
+                SecurityIntegration.SetModuleServerContext("Core", true);
+                SecurityIntegration.OwnershipResolver = new NetworkOwnershipResolver();
+                bridge.VerifiedOwnerClientId = 7;
+                bridge.VerifyResult = true;
+
+                const uint actorNetworkId = 3001;
+                const uint targetEntityNetworkId = 7001;
+
+                // Target entity is linked to actor, but no explicit owner is registered yet.
+                SecurityIntegration.RegisterEntityActor(targetEntityNetworkId, actorNetworkId);
+
+                Assert.IsTrue(SecurityIntegration.ValidateTargetEntityOwnership(
+                    7,
+                    actorNetworkId,
+                    targetEntityNetworkId,
+                    "Core",
+                    "TargetOwnershipTest"));
+
+                Assert.IsTrue(bridge.VerifyCalled, "Transport verification should prime unresolved target ownership.");
+                Assert.IsTrue(SecurityIntegration.OwnershipResolver.TryResolveOwnerClientIdForEntity(targetEntityNetworkId, out uint ownerClientId));
+                Assert.AreEqual(7u, ownerClientId);
+            }
+            finally
+            {
+                SecurityIntegration.OwnershipResolver = originalResolver;
+                UnityEngine.Object.DestroyImmediate(bridgeGo);
+                DestroySecurityManagerIfCreated(securityGo);
+            }
         }
 
         [Test]
@@ -980,66 +1338,71 @@ namespace Arawn.GameCreator2.Networking.Tests
         [Test]
         public void SecurityIntegration_ValidateCoreRequest_NullManager_ReturnsFalse()
         {
+            uint correlationId = NetworkCorrelation.Compose(1001, 1);
             if (NetworkSecurityManager.Instance != null)
             {
                 Assert.IsTrue(SecurityIntegration.EnsureSecurityManagerInitialized(true, () => 1f));
-                Assert.IsTrue(SecurityIntegration.ValidateCoreRequest(1, 1001, 1, "Move"));
+                Assert.IsTrue(SecurityIntegration.ValidateCoreRequest(1, 1001, correlationId, "Move"));
                 return;
             }
 
-            Assert.IsFalse(SecurityIntegration.ValidateCoreRequest(1, 1001, 1, "Move"));
+            Assert.IsFalse(SecurityIntegration.ValidateCoreRequest(1, 1001, correlationId, "Move"));
         }
 
         [Test]
         public void SecurityIntegration_ValidateStatsRequest_NullManager_ReturnsFalse()
         {
+            uint correlationId = NetworkCorrelation.Compose(1001, 1);
             if (NetworkSecurityManager.Instance != null)
             {
                 Assert.IsTrue(SecurityIntegration.EnsureSecurityManagerInitialized(true, () => 1f));
-                Assert.IsTrue(SecurityIntegration.ValidateStatsRequest(1, 1001, 1, "ModifyStat", 42, 10f));
+                Assert.IsTrue(SecurityIntegration.ValidateStatsRequest(1, 1001, correlationId, "ModifyStat", 42, 10f));
                 return;
             }
 
-            Assert.IsFalse(SecurityIntegration.ValidateStatsRequest(1, 1001, 1, "ModifyStat", 42, 10f));
+            Assert.IsFalse(SecurityIntegration.ValidateStatsRequest(1, 1001, correlationId, "ModifyStat", 42, 10f));
         }
 
         [Test]
         public void SecurityIntegration_ValidateMeleeRequest_NullManager_ReturnsFalse()
         {
+            uint correlationId = NetworkCorrelation.Compose(1001, 1);
             if (NetworkSecurityManager.Instance != null)
             {
                 Assert.IsTrue(SecurityIntegration.EnsureSecurityManagerInitialized(true, () => 1f));
-                Assert.IsTrue(SecurityIntegration.ValidateMeleeRequest(1, 1001, 1, "Attack"));
+                Assert.IsTrue(SecurityIntegration.ValidateMeleeRequest(1, 1001, correlationId, "Attack"));
                 return;
             }
 
-            Assert.IsFalse(SecurityIntegration.ValidateMeleeRequest(1, 1001, 1, "Attack"));
+            Assert.IsFalse(SecurityIntegration.ValidateMeleeRequest(1, 1001, correlationId, "Attack"));
         }
 
         [Test]
         public void SecurityIntegration_ValidateShooterRequest_NullManager_ReturnsFalse()
         {
+            uint correlationId = NetworkCorrelation.Compose(1001, 1);
             if (NetworkSecurityManager.Instance != null)
             {
                 Assert.IsTrue(SecurityIntegration.EnsureSecurityManagerInitialized(true, () => 1f));
-                Assert.IsTrue(SecurityIntegration.ValidateShooterRequest(1, 1001, 1, "Fire"));
+                Assert.IsTrue(SecurityIntegration.ValidateShooterRequest(1, 1001, correlationId, "Fire"));
                 return;
             }
 
-            Assert.IsFalse(SecurityIntegration.ValidateShooterRequest(1, 1001, 1, "Fire"));
+            Assert.IsFalse(SecurityIntegration.ValidateShooterRequest(1, 1001, correlationId, "Fire"));
         }
 
         [Test]
         public void SecurityIntegration_ValidateAbilitiesRequest_NullManager_ReturnsFalse()
         {
+            uint correlationId = NetworkCorrelation.Compose(1001, 1);
             if (NetworkSecurityManager.Instance != null)
             {
                 Assert.IsTrue(SecurityIntegration.EnsureSecurityManagerInitialized(true, () => 1f));
-                Assert.IsTrue(SecurityIntegration.ValidateAbilitiesRequest(1, 1001, 1, "Cast"));
+                Assert.IsTrue(SecurityIntegration.ValidateAbilitiesRequest(1, 1001, correlationId, "Cast"));
                 return;
             }
 
-            Assert.IsFalse(SecurityIntegration.ValidateAbilitiesRequest(1, 1001, 1, "Cast"));
+            Assert.IsFalse(SecurityIntegration.ValidateAbilitiesRequest(1, 1001, correlationId, "Cast"));
         }
 
         [Test]
@@ -1060,136 +1423,6 @@ namespace Arawn.GameCreator2.Networking.Tests
                 SecurityIntegration.OwnershipResolver = original;
             }
         }
-
-#if GC2_INVENTORY
-        [Test]
-        public void InventoryManager_CheckRateLimit_Decrement_AllowsNewRequest()
-        {
-            var go = new UnityEngine.GameObject("InventoryManager_Test");
-            var manager = go.AddComponent<NetworkInventoryManager>();
-
-            try
-            {
-                FieldInfo maxPendingField = typeof(NetworkInventoryManager).GetField(
-                    "m_MaxPendingRequestsPerPlayer",
-                    BindingFlags.NonPublic | BindingFlags.Instance
-                );
-                Assert.NotNull(maxPendingField);
-                maxPendingField.SetValue(manager, 1);
-
-                MethodInfo checkRateLimitMethod = typeof(NetworkInventoryManager).GetMethod(
-                    "CheckRateLimit",
-                    BindingFlags.NonPublic | BindingFlags.Instance
-                );
-                MethodInfo decrementPendingMethod = typeof(NetworkInventoryManager).GetMethod(
-                    "DecrementPendingRequests",
-                    BindingFlags.NonPublic | BindingFlags.Instance
-                );
-
-                Assert.NotNull(checkRateLimitMethod);
-                Assert.NotNull(decrementPendingMethod);
-
-                Assert.IsTrue((bool)checkRateLimitMethod.Invoke(manager, new object[] { 7ul }));
-                Assert.IsFalse((bool)checkRateLimitMethod.Invoke(manager, new object[] { 7ul }));
-
-                decrementPendingMethod.Invoke(manager, new object[] { 7ul });
-                Assert.IsTrue((bool)checkRateLimitMethod.Invoke(manager, new object[] { 7ul }));
-            }
-            finally
-            {
-                UnityEngine.Object.DestroyImmediate(go);
-            }
-        }
-#endif
-
-#if GC2_STATS
-        [Test]
-        public void StatsManager_ReceiveStatModifierRequest_TargetNotFound_SendsResponse()
-        {
-            var go = new UnityEngine.GameObject("StatsManager_Modifier_Test");
-            var manager = go.AddComponent<NetworkStatsManager>();
-
-            try
-            {
-                manager.IsServer = true;
-
-                bool sent = false;
-                uint targetClient = 0;
-                StatRejectionReason reason = StatRejectionReason.None;
-
-                manager.OnSendStatModifierResponse += (clientId, response) =>
-                {
-                    sent = true;
-                    targetClient = clientId;
-                    reason = response.RejectionReason;
-                };
-
-                var request = new NetworkStatModifierRequest
-                {
-                    RequestId = 11,
-                    ActorNetworkId = 1001,
-                    CorrelationId = NetworkCorrelation.Compose(1001, 11),
-                    TargetNetworkId = 9999, // Unregistered -> TargetNotFound path
-                    StatHash = 42,
-                    Action = ModifierAction.Add,
-                    ModifierType = NetworkModifierType.Constant,
-                    Value = 10f
-                };
-
-                manager.ReceiveStatModifierRequest(request, 7ul);
-
-                Assert.IsTrue(sent);
-                Assert.AreEqual(7u, targetClient);
-                Assert.AreEqual(StatRejectionReason.TargetNotFound, reason);
-            }
-            finally
-            {
-                UnityEngine.Object.DestroyImmediate(go);
-            }
-        }
-
-        [Test]
-        public void StatsManager_ReceiveClearStatusEffectsRequest_TargetNotFound_SendsResponse()
-        {
-            var go = new UnityEngine.GameObject("StatsManager_ClearStatus_Test");
-            var manager = go.AddComponent<NetworkStatsManager>();
-
-            try
-            {
-                manager.IsServer = true;
-
-                bool sent = false;
-                uint targetClient = 0;
-                StatRejectionReason reason = StatRejectionReason.None;
-
-                manager.OnSendClearStatusEffectsResponse += (clientId, response) =>
-                {
-                    sent = true;
-                    targetClient = clientId;
-                    reason = response.RejectionReason;
-                };
-
-                var request = new NetworkClearStatusEffectsRequest
-                {
-                    RequestId = 12,
-                    ActorNetworkId = 1001,
-                    CorrelationId = NetworkCorrelation.Compose(1001, 12),
-                    TargetNetworkId = 9999, // Unregistered -> TargetNotFound path
-                    TypeMask = 0xFF
-                };
-
-                manager.ReceiveClearStatusEffectsRequest(request, 7ul);
-
-                Assert.IsTrue(sent);
-                Assert.AreEqual(7u, targetClient);
-                Assert.AreEqual(StatRejectionReason.TargetNotFound, reason);
-            }
-            finally
-            {
-                UnityEngine.Object.DestroyImmediate(go);
-            }
-        }
-#endif
 
         // ════════════════════════════════════════════════════════════════════════════════════════
         // CONTROLLER LOGIC — POSITION STATE
@@ -1564,8 +1797,10 @@ namespace Arawn.GameCreator2.Networking.Tests
         public void Integration_OwnershipResolver_SecurityIntegration_EndToEnd()
         {
             var original = SecurityIntegration.OwnershipResolver;
+            UnityEngine.GameObject securityManagerGo = null;
             try
             {
+                securityManagerGo = EnsureSecurityManagerForServerTests();
                 var resolver = new NetworkOwnershipResolver();
                 resolver.RegisterEntityOwner(1001, 7);
                 SecurityIntegration.OwnershipResolver = resolver;
@@ -1574,10 +1809,10 @@ namespace Arawn.GameCreator2.Networking.Tests
                 SecurityIntegration.RegisterEntityOwner(2001, 11);
                 SecurityIntegration.RegisterEntityActor(3001, 2001);
 
-                // ValidateOwnership goes through the injected resolver
-                // (null manager → always true in EditMode), but we verify the resolver wiring
+                // ValidateOwnership goes through the injected resolver with a live security manager.
                 Assert.IsTrue(SecurityIntegration.ValidateOwnership(7, 1001, "Test"));
                 Assert.IsTrue(SecurityIntegration.ValidateOwnership(11, 2001, "Test"));
+                Assert.IsFalse(SecurityIntegration.ValidateOwnership(8, 1001, "Test"));
 
                 // Cleanup through SecurityIntegration
                 SecurityIntegration.UnregisterEntity(2001);
@@ -1585,11 +1820,12 @@ namespace Arawn.GameCreator2.Networking.Tests
             finally
             {
                 SecurityIntegration.OwnershipResolver = original;
+                DestroySecurityManagerIfCreated(securityManagerGo);
             }
         }
 
         [Test]
-        public void Integration_FullRequestValidation_NullManager_PassesThrough()
+        public void Integration_FullRequestValidation_NullManager_FailsClosedForServerLikeRequests()
         {
             // End-to-end: create correlation → build context → validate full request
             uint actorId = 42;
@@ -1598,11 +1834,30 @@ namespace Arawn.GameCreator2.Networking.Tests
             uint correlation = NetworkCorrelation.Next(actorId, ref counter);
             var ctx = NetworkRequestContext.Create(actorId, correlation);
 
-            // With no NetworkSecurityManager, everything passes
-            Assert.IsTrue(SecurityIntegration.ValidateModuleRequest(1, in ctx, "Core", "Move"));
-            Assert.IsTrue(SecurityIntegration.ValidateModuleRequest(1, in ctx, "Stats", "ModifyStat"));
-            Assert.IsTrue(SecurityIntegration.ValidateModuleRequest(1, in ctx, "Melee", "Attack"));
-            Assert.IsTrue(SecurityIntegration.ValidateModuleRequest(1, in ctx, "Shooter", "Fire"));
+            // With no NetworkSecurityManager, server-like requests fail closed by default.
+            Assert.IsFalse(SecurityIntegration.ValidateModuleRequest(1, in ctx, "Core", "Move"));
+            Assert.IsFalse(SecurityIntegration.ValidateModuleRequest(1, in ctx, "Stats", "ModifyStat"));
+            Assert.IsFalse(SecurityIntegration.ValidateModuleRequest(1, in ctx, "Melee", "Attack"));
+            Assert.IsFalse(SecurityIntegration.ValidateModuleRequest(1, in ctx, "Shooter", "Fire"));
+        }
+
+        [Test]
+        public void Integration_FullRequestValidation_NullManager_CompatibilityToggle_PassesThrough()
+        {
+            uint actorId = 42;
+            ushort counter = 0;
+            uint correlation = NetworkCorrelation.Next(actorId, ref counter);
+            var ctx = NetworkRequestContext.Create(actorId, correlation);
+
+            SecurityIntegration.EnforceSecurityManagerForServerLikeRequests = false;
+            try
+            {
+                Assert.IsTrue(SecurityIntegration.ValidateModuleRequest(1, in ctx, "Core", "Move"));
+            }
+            finally
+            {
+                SecurityIntegration.EnforceSecurityManagerForServerLikeRequests = true;
+            }
         }
 
         // ════════════════════════════════════════════════════════════════════════════════════════

@@ -1,15 +1,8 @@
 using System;
+using System.Reflection;
 using UnityEngine;
 using GameCreator.Runtime.Characters;
 using GameCreator.Runtime.Common;
-
-#if GC2_MELEE
-using GameCreator.Runtime.Melee;
-#endif
-
-#if GC2_SHOOTER
-using GameCreator.Runtime.Shooter;
-#endif
 
 namespace Arawn.GameCreator2.Networking
 {
@@ -168,16 +161,16 @@ namespace Arawn.GameCreator2.Networking
         // MELEE INTERCEPTION
         // ════════════════════════════════════════════════════════════════════════════════════════
         
-#if GC2_MELEE
         /// <summary>
-        /// Intercept a melee strike hit. Call this from your striker component.
+        /// Intercept a melee strike hit. Works with any skill object that exposes
+        /// either <c>Id.Hash</c> or <c>Weapon.Id.Hash</c>.
         /// </summary>
         /// <param name="target">The character that was hit.</param>
         /// <param name="hitPoint">World position of the hit.</param>
         /// <param name="strikeDirection">Direction of the strike.</param>
-        /// <param name="skill">The melee skill being used.</param>
+        /// <param name="skill">The melee skill object (optional, reflection-based).</param>
         /// <returns>True if the hit should be processed locally, false if intercepted.</returns>
-        public bool InterceptMeleeStrike(Character target, Vector3 hitPoint, Vector3 strikeDirection, Skill skill)
+        public bool InterceptMeleeStrike(Character target, Vector3 hitPoint, Vector3 strikeDirection, object skill = null)
         {
             if (!m_InterceptMelee) return true;
             if (m_CombatController == null) return true;
@@ -195,7 +188,7 @@ namespace Arawn.GameCreator2.Networking
             }
             
             // Local client - send to server
-            int weaponHash = skill?.Weapon?.Id.Hash ?? m_CurrentWeaponHash;
+            int weaponHash = ResolveWeaponHash(skill, m_CurrentWeaponHash);
             
             m_CombatController.RequestMeleeHit(
                 target,
@@ -217,39 +210,41 @@ namespace Arawn.GameCreator2.Networking
         }
         
         /// <summary>
-        /// Intercept a melee strike output from the striker system.
+        /// Intercept a melee strike output object from striker systems.
+        /// Supports payloads with members <c>Target</c>, <c>Point</c>, and <c>Direction</c>.
         /// </summary>
-        public bool InterceptStrikeOutput(StrikeOutput output, Skill skill)
+        public bool InterceptStrikeOutput(object output, object skill = null)
         {
             if (!m_InterceptMelee) return true;
-            if (output.Target == null) return true;
+            if (output == null) return true;
             
-            var targetCharacter = output.Target.GetComponent<Character>();
-            if (targetCharacter == null) return true;
+            if (!TryResolveStrikeOutput(output, out Character targetCharacter, out Vector3 point, out Vector3 direction))
+            {
+                return true;
+            }
             
             return InterceptMeleeStrike(
                 targetCharacter,
-                output.Point,
-                output.Direction,
+                point,
+                direction,
                 skill
             );
         }
-#endif
         
         // ════════════════════════════════════════════════════════════════════════════════════════
         // SHOOTER INTERCEPTION
         // ════════════════════════════════════════════════════════════════════════════════════════
         
-#if GC2_SHOOTER
         /// <summary>
-        /// Intercept a projectile/raycast hit. Call this from your shooter weapon.
+        /// Intercept a projectile/raycast hit. Works with any weapon object exposing
+        /// <c>Id.Hash</c> via reflection.
         /// </summary>
         /// <param name="target">The character that was hit.</param>
         /// <param name="hitPoint">World position of the hit.</param>
         /// <param name="shootDirection">Direction of the shot.</param>
-        /// <param name="weapon">The shooter weapon used.</param>
+        /// <param name="weapon">The shooter weapon object (optional, reflection-based).</param>
         /// <returns>True if the hit should be processed locally, false if intercepted.</returns>
-        public bool InterceptProjectileHit(Character target, Vector3 hitPoint, Vector3 shootDirection, ShooterWeapon weapon)
+        public bool InterceptProjectileHit(Character target, Vector3 hitPoint, Vector3 shootDirection, object weapon = null)
         {
             if (!m_InterceptShooter) return true;
             if (m_CombatController == null) return true;
@@ -267,7 +262,7 @@ namespace Arawn.GameCreator2.Networking
             }
             
             // Local client - send to server
-            int weaponHash = weapon?.Id.Hash ?? m_CurrentWeaponHash;
+            int weaponHash = ResolveWeaponHash(weapon, m_CurrentWeaponHash);
             
             m_CombatController.RequestProjectileHit(
                 target,
@@ -286,7 +281,6 @@ namespace Arawn.GameCreator2.Networking
             // Return false to prevent local damage application
             return m_AllowLocalDetection;
         }
-#endif
         
         // ════════════════════════════════════════════════════════════════════════════════════════
         // GENERIC INTERCEPTION (For custom combat systems)
@@ -335,6 +329,148 @@ namespace Arawn.GameCreator2.Networking
             OnHitIntercepted?.Invoke(target, hitPoint, hitDirection);
             
             return m_AllowLocalDetection;
+        }
+
+        private static int ResolveWeaponHash(object source, int fallback)
+        {
+            if (source == null) return fallback;
+
+            if (TryResolveNestedInt(source, "Id", "Hash", out int directHash) && directHash != 0)
+            {
+                return directHash;
+            }
+
+            if (TryResolveNestedInt(source, "Weapon", "Id", "Hash", out int weaponHash) && weaponHash != 0)
+            {
+                return weaponHash;
+            }
+
+            return fallback;
+        }
+
+        private static bool TryResolveStrikeOutput(
+            object output,
+            out Character targetCharacter,
+            out Vector3 point,
+            out Vector3 direction)
+        {
+            targetCharacter = null;
+            point = Vector3.zero;
+            direction = Vector3.forward;
+
+            if (output == null) return false;
+
+            if (!TryGetMemberValue(output, "Target", out object targetObj) || targetObj == null)
+            {
+                return false;
+            }
+
+            if (targetObj is Character directCharacter)
+            {
+                targetCharacter = directCharacter;
+            }
+            else if (targetObj is Component component)
+            {
+                targetCharacter = component.GetComponent<Character>();
+            }
+            else if (targetObj is GameObject gameObject)
+            {
+                targetCharacter = gameObject.GetComponent<Character>();
+            }
+
+            if (targetCharacter == null) return false;
+            if (!TryGetMemberValue(output, "Point", out point)) return false;
+            if (!TryGetMemberValue(output, "Direction", out direction)) return false;
+
+            return true;
+        }
+
+        private static bool TryResolveNestedInt(
+            object source,
+            string first,
+            string second,
+            out int value)
+        {
+            value = 0;
+            if (source == null) return false;
+
+            if (!TryGetMemberValue(source, first, out object nested) || nested == null) return false;
+            if (!TryGetMemberValue(nested, second, out value)) return false;
+            return true;
+        }
+
+        private static bool TryResolveNestedInt(
+            object source,
+            string first,
+            string second,
+            string third,
+            out int value)
+        {
+            value = 0;
+            if (source == null) return false;
+
+            if (!TryGetMemberValue(source, first, out object nested) || nested == null) return false;
+            if (!TryResolveNestedInt(nested, second, third, out value)) return false;
+            return true;
+        }
+
+        private static bool TryGetMemberValue<T>(object source, string memberName, out T value)
+        {
+            value = default;
+            if (source == null || string.IsNullOrEmpty(memberName)) return false;
+
+            Type type = source.GetType();
+            const BindingFlags FLAGS = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+
+            PropertyInfo property = type.GetProperty(memberName, FLAGS);
+            if (property != null)
+            {
+                object raw = property.GetValue(source);
+                if (TryConvertValue(raw, out value))
+                {
+                    return true;
+                }
+            }
+
+            FieldInfo field = type.GetField(memberName, FLAGS);
+            if (field != null)
+            {
+                object raw = field.GetValue(source);
+                if (TryConvertValue(raw, out value))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool TryConvertValue<T>(object raw, out T value)
+        {
+            value = default;
+            if (raw == null) return false;
+
+            if (raw is T typed)
+            {
+                value = typed;
+                return true;
+            }
+
+            try
+            {
+                object converted = Convert.ChangeType(raw, typeof(T));
+                if (converted is T changeTypeValue)
+                {
+                    value = changeTypeValue;
+                    return true;
+                }
+            }
+            catch
+            {
+                // Ignore conversion failures and return false.
+            }
+
+            return false;
         }
         
         // ════════════════════════════════════════════════════════════════════════════════════════

@@ -143,7 +143,8 @@ namespace Arawn.GameCreator2.Networking
         InternalError = 9,
         NotOwner = 10,
         ProtocolMismatch = 11,
-        SecurityViolation = 12
+        SecurityViolation = 12,
+        Timeout = 13
     }
     
     // ════════════════════════════════════════════════════════════════════════════════════════
@@ -384,8 +385,11 @@ namespace Arawn.GameCreator2.Networking
         
         /// <summary>Total cooldown duration.</summary>
         public float TotalDuration;
+
+        /// <summary>True when no authoritative response was received before local timeout.</summary>
+        public bool TimedOut;
         
-        public const int SIZE_BYTES = 12;
+        public const int SIZE_BYTES = 13;
     }
     
     /// <summary>
@@ -510,7 +514,8 @@ namespace Arawn.GameCreator2.Networking
         NotAuthorized = 6,
         NotOwner = 7,
         ProtocolMismatch = 8,
-        SecurityViolation = 9
+        SecurityViolation = 9,
+        Timeout = 10
     }
     
     // ════════════════════════════════════════════════════════════════════════════════════════
@@ -553,8 +558,11 @@ namespace Arawn.GameCreator2.Networking
         
         /// <summary>The cast instance that was canceled.</summary>
         public uint CastInstanceId;
+
+        /// <summary>True when no authoritative response was received before local timeout.</summary>
+        public bool TimedOut;
         
-        public const int SIZE_BYTES = 7;
+        public const int SIZE_BYTES = 8;
     }
     
     // ════════════════════════════════════════════════════════════════════════════════════════

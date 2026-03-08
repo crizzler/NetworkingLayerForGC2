@@ -21,12 +21,12 @@ namespace Arawn.GameCreator2.Networking
     /// - Interaction validation
     /// </para>
     /// <para>
-    /// Network implementations (Netcode, Mirror, etc.) should subscribe to the send delegates
+    /// Network implementations (transport, Mirror, etc.) should subscribe to the send delegates
     /// and call the receive methods when messages arrive.
     /// </para>
     /// </remarks>
     [AddComponentMenu("Game Creator/Network/Network Core Manager")]
-    public class NetworkCoreManager : NetworkSingleton<NetworkCoreManager>
+    public partial class NetworkCoreManager : NetworkSingleton<NetworkCoreManager>
     {
         // ════════════════════════════════════════════════════════════════════════════════════════
         // CONFIGURATION
@@ -148,52 +148,11 @@ namespace Arawn.GameCreator2.Networking
         
         private Dictionary<int, GameObject> m_PropHashToPrefab;
         private Dictionary<int, Transform> m_BoneHashCache;
+        private NetworkCorePatchHooks m_PatchHooks;
         private bool m_IsInitialized;
+        private bool m_IsServer;
+        private bool m_IsClient;
 
-        private static NetworkRequestContext BuildContext(uint actorNetworkId, uint correlationId)
-        {
-            return NetworkRequestContext.Create(actorNetworkId, correlationId);
-        }
-
-        private static bool IsProtocolMismatch(uint actorNetworkId, uint correlationId)
-        {
-            return SecurityIntegration.IsProtocolContextMismatch(actorNetworkId, correlationId);
-        }
-
-        private static bool TryValidateCoreActorBinding(
-            uint senderClientId,
-            uint actorNetworkId,
-            uint characterNetworkId,
-            string requestType,
-            out bool protocolMismatch)
-        {
-            protocolMismatch = false;
-
-            if (actorNetworkId == 0 || characterNetworkId == 0 || actorNetworkId != characterNetworkId)
-            {
-                protocolMismatch = true;
-                SecurityIntegration.RecordViolation(
-                    senderClientId,
-                    actorNetworkId,
-                    SecurityViolationType.ProtocolMismatch,
-                    "Core",
-                    $"{requestType} actor mismatch actor={actorNetworkId}, character={characterNetworkId}");
-                return false;
-            }
-
-            if (!SecurityIntegration.ValidateTargetEntityOwnership(
-                    senderClientId,
-                    actorNetworkId,
-                    characterNetworkId,
-                    "Core",
-                    requestType))
-            {
-                return false;
-            }
-
-            return true;
-        }
-        
         // ════════════════════════════════════════════════════════════════════════════════════════
         // PROPERTIES
         // ════════════════════════════════════════════════════════════════════════════════════════
@@ -212,6 +171,10 @@ namespace Arawn.GameCreator2.Networking
         
         protected override void OnDestroy()
         {
+            if (m_PatchHooks != null)
+            {
+                m_PatchHooks.Initialize(false, false);
+            }
             base.OnDestroy();
             UnwireController();
         }
@@ -222,11 +185,17 @@ namespace Arawn.GameCreator2.Networking
             {
                 WireController();
             }
+
+            SyncPatchHooks();
         }
         
         private void OnDisable()
         {
             SecurityIntegration.SetModuleServerContext("Core", false);
+            if (m_PatchHooks != null)
+            {
+                m_PatchHooks.Initialize(false, false);
+            }
             UnwireController();
         }
         
@@ -236,6 +205,9 @@ namespace Arawn.GameCreator2.Networking
         
         public void Initialize(bool isServer, bool isClient)
         {
+            m_IsServer = isServer;
+            m_IsClient = isClient;
+
             if (m_CoreController == null)
             {
                 m_CoreController = GetComponent<NetworkCoreController>();
@@ -249,6 +221,7 @@ namespace Arawn.GameCreator2.Networking
             SecurityIntegration.SetModuleServerContext("Core", isServer);
             SecurityIntegration.EnsureSecurityManagerInitialized(isServer, () => GetServerTime?.Invoke() ?? Time.time);
             WireController();
+            SyncPatchHooks();
             
             m_IsInitialized = true;
             
@@ -348,6 +321,29 @@ namespace Arawn.GameCreator2.Networking
             m_CoreController.GetPropPrefabByHash = null;
             m_CoreController.GetBoneByHash = null;
         }
+
+        private void SyncPatchHooks()
+        {
+            if (!m_IsServer)
+            {
+                if (m_PatchHooks != null)
+                {
+                    m_PatchHooks.Initialize(false, false);
+                }
+                return;
+            }
+
+            if (m_PatchHooks == null)
+            {
+                m_PatchHooks = GetComponent<NetworkCorePatchHooks>();
+                if (m_PatchHooks == null)
+                {
+                    m_PatchHooks = gameObject.AddComponent<NetworkCorePatchHooks>();
+                }
+            }
+
+            m_PatchHooks.Initialize(m_IsServer, m_IsClient);
+        }
         
         // ════════════════════════════════════════════════════════════════════════════════════════
         // PROP REGISTRY HELPERS
@@ -406,6 +402,12 @@ namespace Arawn.GameCreator2.Networking
         public void ReceiveRagdollRequest(uint senderNetworkId, NetworkRagdollRequest request)
         {
             if (m_CoreController == null) return;
+            if (!m_IsServer)
+            {
+                Debug.LogWarning("[NetworkCoreManager] ReceiveRagdollRequest called on non-server.");
+                return;
+            }
+            PrimeCoreOwnershipForInboundRequest(request.ActorNetworkId, request.CharacterNetworkId);
             if (!SecurityIntegration.ValidateModuleRequest(
                     senderNetworkId,
                     BuildContext(request.ActorNetworkId, request.CorrelationId),
@@ -474,6 +476,12 @@ namespace Arawn.GameCreator2.Networking
         public void ReceivePropRequest(uint senderNetworkId, NetworkPropRequest request)
         {
             if (m_CoreController == null) return;
+            if (!m_IsServer)
+            {
+                Debug.LogWarning("[NetworkCoreManager] ReceivePropRequest called on non-server.");
+                return;
+            }
+            PrimeCoreOwnershipForInboundRequest(request.ActorNetworkId, request.CharacterNetworkId);
             if (!SecurityIntegration.ValidateModuleRequest(
                     senderNetworkId,
                     BuildContext(request.ActorNetworkId, request.CorrelationId),
@@ -544,6 +552,12 @@ namespace Arawn.GameCreator2.Networking
         public void ReceiveInvincibilityRequest(uint senderNetworkId, NetworkInvincibilityRequest request)
         {
             if (m_CoreController == null) return;
+            if (!m_IsServer)
+            {
+                Debug.LogWarning("[NetworkCoreManager] ReceiveInvincibilityRequest called on non-server.");
+                return;
+            }
+            PrimeCoreOwnershipForInboundRequest(request.ActorNetworkId, request.CharacterNetworkId);
             if (!SecurityIntegration.ValidateModuleRequest(
                     senderNetworkId,
                     BuildContext(request.ActorNetworkId, request.CorrelationId),
@@ -614,6 +628,12 @@ namespace Arawn.GameCreator2.Networking
         public void ReceivePoiseRequest(uint senderNetworkId, NetworkPoiseRequest request)
         {
             if (m_CoreController == null) return;
+            if (!m_IsServer)
+            {
+                Debug.LogWarning("[NetworkCoreManager] ReceivePoiseRequest called on non-server.");
+                return;
+            }
+            PrimeCoreOwnershipForInboundRequest(request.ActorNetworkId, request.CharacterNetworkId);
             if (!SecurityIntegration.ValidateModuleRequest(
                     senderNetworkId,
                     BuildContext(request.ActorNetworkId, request.CorrelationId),
@@ -686,6 +706,12 @@ namespace Arawn.GameCreator2.Networking
         public void ReceiveBusyRequest(uint senderNetworkId, NetworkBusyRequest request)
         {
             if (m_CoreController == null) return;
+            if (!m_IsServer)
+            {
+                Debug.LogWarning("[NetworkCoreManager] ReceiveBusyRequest called on non-server.");
+                return;
+            }
+            PrimeCoreOwnershipForInboundRequest(request.ActorNetworkId, request.CharacterNetworkId);
             if (!SecurityIntegration.ValidateModuleRequest(
                     senderNetworkId,
                     BuildContext(request.ActorNetworkId, request.CorrelationId),
@@ -754,6 +780,12 @@ namespace Arawn.GameCreator2.Networking
         public void ReceiveInteractionRequest(uint senderNetworkId, NetworkInteractionRequest request)
         {
             if (m_CoreController == null) return;
+            if (!m_IsServer)
+            {
+                Debug.LogWarning("[NetworkCoreManager] ReceiveInteractionRequest called on non-server.");
+                return;
+            }
+            PrimeCoreOwnershipForInboundRequest(request.ActorNetworkId, request.CharacterNetworkId);
             if (!SecurityIntegration.ValidateModuleRequest(
                     senderNetworkId,
                     BuildContext(request.ActorNetworkId, request.CorrelationId),

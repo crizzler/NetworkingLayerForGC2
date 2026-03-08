@@ -36,6 +36,13 @@ NetworkInventoryController (Per-Bag)
     └── RuntimeItem Tracking
 ```
 
+## Component Placement
+
+- Add exactly one `NetworkInventoryManager` to a persistent scene object (network bootstrap/root).
+- Add one `NetworkInventoryController` on each networked player/NPC GameObject that owns a GC2 `Bag`.
+- The controller should live on the same GameObject as `Bag` and `NetworkCharacter`.
+- Register controllers with the manager using `NetworkCharacter.NetworkId` when the entity is spawned/ready.
+
 ## Quick Start
 
 ### 1. Setup Manager
@@ -57,10 +64,21 @@ NetworkInventoryManager.Instance.OnBroadcastItemAdded = BroadcastToClientsMethod
 Add `NetworkInventoryController` alongside each `Bag` component:
 
 ```csharp
-// During spawn
-var bag = GetComponent<Bag>();
+// During spawn/initialize (after NetworkCharacter has a valid NetworkId)
+var networkCharacter = GetComponent<NetworkCharacter>();
 var controller = GetComponent<NetworkInventoryController>();
-controller.Initialize(bag, networkId, isServer, isOwner);
+
+controller.Initialize(isServer, isLocalClient);
+if (NetworkInventoryManager.Instance != null)
+{
+    NetworkInventoryManager.Instance.RegisterController(networkCharacter.NetworkId, controller);
+}
+
+// During despawn/cleanup
+if (NetworkInventoryManager.Instance != null)
+{
+    NetworkInventoryManager.Instance.UnregisterController(networkCharacter.NetworkId);
+}
 ```
 
 ### 3. Client Operations
@@ -202,9 +220,11 @@ NetworkInventoryManager.Instance.CustomMerchantValidator = (request, clientId) =
 
 ## Transport Integration Examples
 
-### Netcode for GameObjects
+### Netcode for GameObjects (optional example)
+This sample follows NGO 2.10 unified RPC API (`[Rpc]`, `RpcParams`, `RpcTarget`).
 
 ```csharp
+// using Unity.Netcode;
 public class InventoryNetworkBridge : NetworkBehaviour
 {
     void Start()
@@ -212,25 +232,43 @@ public class InventoryNetworkBridge : NetworkBehaviour
         var manager = NetworkInventoryManager.Instance;
         
         // Client → Server
-        manager.OnSendContentAddRequest = (req) => AddItemServerRpc(req);
-        manager.OnSendEquipmentRequest = (req) => EquipmentServerRpc(req);
+        manager.OnSendContentAddRequest = (req) => AddItemRequestRpc(req);
+        manager.OnSendEquipmentRequest = (req) => EquipmentRequestRpc(req);
         
         // Server → Client
-        manager.OnBroadcastItemAdded = (bc) => ItemAddedClientRpc(bc);
-        manager.OnSendSnapshotToClient = (id, snap) => SendSnapshotClientRpc(snap, id);
+        manager.OnBroadcastItemAdded = (bc) => BroadcastItemAddedRpc(bc);
+        manager.OnSendSnapshotToClient = SendSnapshotToClient;
     }
     
-    [ServerRpc]
-    void AddItemServerRpc(NetworkContentAddRequest request, ServerRpcParams p = default)
+    [Rpc(SendTo.Server, InvokePermission = RpcInvokePermission.Everyone)]
+    void AddItemRequestRpc(NetworkContentAddRequest request, RpcParams rpcParams = default)
     {
-        NetworkInventoryManager.Instance.ReceiveContentAddRequest(request, p.Receive.SenderClientId);
+        NetworkInventoryManager.Instance.ReceiveContentAddRequest(request, rpcParams.Receive.SenderClientId);
     }
     
-    [ClientRpc]
-    void ItemAddedClientRpc(NetworkItemAddedBroadcast broadcast)
+    [Rpc(SendTo.Server, InvokePermission = RpcInvokePermission.Everyone)]
+    void EquipmentRequestRpc(NetworkEquipmentRequest request, RpcParams rpcParams = default)
+    {
+        _ = NetworkInventoryManager.Instance.ReceiveEquipmentRequest(request, rpcParams.Receive.SenderClientId);
+    }
+
+    [Rpc(SendTo.ClientsAndHost)]
+    void BroadcastItemAddedRpc(NetworkItemAddedBroadcast broadcast)
     {
         if (!IsServer) // Avoid double-processing on host
             NetworkInventoryManager.Instance.ReceiveItemAddedBroadcast(broadcast);
+    }
+
+    [Rpc(SendTo.SpecifiedInParams)]
+    void SendSnapshotRpc(NetworkInventorySnapshot snapshot, RpcParams rpcParams = default)
+    {
+        if (!IsServer)
+            NetworkInventoryManager.Instance.ReceiveFullSnapshot(snapshot);
+    }
+
+    void SendSnapshotToClient(ulong clientId, NetworkInventorySnapshot snapshot)
+    {
+        SendSnapshotRpc(snapshot, RpcTarget.Single(clientId, RpcTargetUse.Temp));
     }
 }
 ```

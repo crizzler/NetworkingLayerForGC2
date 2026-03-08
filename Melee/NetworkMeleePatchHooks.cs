@@ -1,5 +1,6 @@
 #if GC2_MELEE
 using UnityEngine;
+using GameCreator.Runtime.Characters;
 using GameCreator.Runtime.Common;
 using GameCreator.Runtime.Melee;
 using System;
@@ -31,8 +32,34 @@ namespace Arawn.GameCreator2.Networking.Melee
 
         public static bool IsMeleePatched()
         {
-            return typeof(MeleeStance).GetField("NetworkInputChargeValidator", BindingFlags.Public | BindingFlags.Static) != null &&
-                   typeof(Skill).GetField("NetworkOnHitValidator", BindingFlags.Public | BindingFlags.Static) != null;
+            return
+                HasPublicStaticField(
+                    typeof(MeleeStance),
+                    "NetworkInputChargeValidator",
+                    typeof(Func<MeleeStance, MeleeKey, bool>)) &&
+                HasPublicStaticField(
+                    typeof(MeleeStance),
+                    "NetworkInputExecuteValidator",
+                    typeof(Func<MeleeStance, MeleeKey, bool>)) &&
+                HasPublicStaticField(
+                    typeof(MeleeStance),
+                    "NetworkPlaySkillValidator",
+                    typeof(Func<MeleeStance, MeleeWeapon, Skill, GameObject, bool>)) &&
+                HasPublicStaticField(
+                    typeof(MeleeStance),
+                    "NetworkPlayReactionValidator",
+                    typeof(Func<MeleeStance, GameObject, ReactionInput, IReaction, bool>)) &&
+                HasPublicStaticField(
+                    typeof(Skill),
+                    "NetworkOnHitValidator",
+                    typeof(Func<Skill, Args, Vector3, Vector3, bool>)) &&
+                HasPublicStaticProperty(typeof(MeleeStance), "IsNetworkingActive", typeof(bool)) &&
+                HasPublicStaticProperty(typeof(Skill), "IsNetworkingActive", typeof(bool)) &&
+                HasInstanceMethod(typeof(MeleeStance), "InputChargeDirect", typeof(MeleeKey)) &&
+                HasInstanceMethod(typeof(MeleeStance), "InputExecuteDirect", typeof(MeleeKey)) &&
+                HasInstanceMethod(typeof(MeleeStance), "PlaySkillDirect", typeof(MeleeWeapon), typeof(Skill), typeof(GameObject)) &&
+                HasInstanceMethod(typeof(MeleeStance), "PlayReactionDirect", typeof(GameObject), typeof(ReactionInput), typeof(IReaction), typeof(bool)) &&
+                HasInstanceMethod(typeof(Skill), "OnHit", typeof(Args), typeof(Vector3), typeof(Vector3));
         }
 
         private void InstallHooks()
@@ -72,6 +99,30 @@ namespace Arawn.GameCreator2.Networking.Melee
         {
             FieldInfo field = type.GetField(fieldName, BindingFlags.Public | BindingFlags.Static);
             field?.SetValue(null, value);
+        }
+
+        private static bool HasPublicStaticField(Type type, string fieldName, Type expectedFieldType)
+        {
+            FieldInfo field = type.GetField(fieldName, BindingFlags.Public | BindingFlags.Static);
+            return field != null && expectedFieldType.IsAssignableFrom(field.FieldType);
+        }
+
+        private static bool HasPublicStaticProperty(Type type, string propertyName, Type expectedPropertyType)
+        {
+            PropertyInfo property = type.GetProperty(propertyName, BindingFlags.Public | BindingFlags.Static);
+            return property != null && expectedPropertyType.IsAssignableFrom(property.PropertyType);
+        }
+
+        private static bool HasInstanceMethod(Type type, string methodName, params Type[] parameterTypes)
+        {
+            MethodInfo method = type.GetMethod(
+                methodName,
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance,
+                null,
+                parameterTypes,
+                null);
+
+            return method != null;
         }
     }
 }

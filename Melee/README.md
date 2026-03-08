@@ -11,7 +11,7 @@ This module provides network-aware melee combat for GC2, enabling server-authori
 - Game Creator 2 Core
 - Game Creator 2 Melee Module
 - GC2 Network Integration (base module)
-- Unity Netcode for GameObjects (or compatible transport)
+- A configured transport adapter (NGO/FishNet/Mirror/custom)
 
 ## Installation
 
@@ -70,24 +70,29 @@ var meleeManager = NetworkMeleeManager.Instance;
 
 // Client -> Server
 meleeManager.SendHitRequestToServer = (request) => {
-    // Send via your network transport
-    MyNetworkRPC.SendHitRequestServerRpc(request);
+    SendHitRequestToServer(request);
 };
 
 // Server -> Client
 meleeManager.SendHitResponseToClient = (clientId, response) => {
-    MyNetworkRPC.SendHitResponseClientRpc(clientId, response);
+    SendHitResponseToClient(clientId, response);
 };
 
 // Server -> All Clients
 meleeManager.BroadcastHitToAllClients = (broadcast) => {
-    MyNetworkRPC.BroadcastHitClientRpc(broadcast);
+    BroadcastHitToClients(broadcast);
 };
 
 // Helper delegates
 meleeManager.GetCharacterByNetworkIdFunc = (id) => {
-    return NetworkCharacterManager.GetById(id);
+    return NetworkTransportBridge.Active != null
+        ? NetworkTransportBridge.Active.ResolveCharacter(id)
+        : null;
 };
+
+void SendHitRequestToServer(NetworkMeleeHitRequest request) { /* serialize + send C->S */ }
+void SendHitResponseToClient(uint clientId, NetworkMeleeHitResponse response) { /* send S->C target */ }
+void BroadcastHitToClients(NetworkMeleeHitBroadcast broadcast) { /* send S->all */ }
 ```
 
 #### NetworkMeleeController
@@ -147,46 +152,47 @@ For each Melee Skill that should use network hit validation:
 
 ### Step 4: Network Transport
 
-Connect the manager to your network layer:
+Connect the manager to your transport adapter. Optional NGO example:
+This sample follows NGO 2.10 unified RPC API (`[Rpc]`, `RpcParams`, `RpcTarget`).
 
 ```csharp
+// using Unity.Netcode;
 public class MeleeNetworkBridge : NetworkBehaviour
 {
     private void Start()
     {
         var manager = NetworkMeleeManager.Instance;
         
-        manager.SendHitRequestToServer = SendHitRequestServerRpc;
+        manager.SendHitRequestToServer = SendHitRequestRpc;
         manager.SendHitResponseToClient = SendResponseToClient;
-        manager.BroadcastHitToAllClients = BroadcastHitClientRpc;
+        manager.BroadcastHitToAllClients = BroadcastHitRpc;
     }
     
-    [ServerRpc(RequireOwnership = false)]
-    private void SendHitRequestServerRpc(NetworkMeleeHitRequest request, ServerRpcParams rpcParams = default)
+    [Rpc(SendTo.Server, InvokePermission = RpcInvokePermission.Everyone)]
+    private void SendHitRequestRpc(NetworkMeleeHitRequest request, RpcParams rpcParams = default)
     {
         ulong clientId = rpcParams.Receive.SenderClientId;
         NetworkMeleeManager.Instance.ReceiveHitRequest((uint)clientId, request);
     }
     
-    [ClientRpc]
-    private void SendHitResponseClientRpc(NetworkMeleeHitResponse response, ClientRpcParams rpcParams = default)
+    [Rpc(SendTo.SpecifiedInParams)]
+    private void SendHitResponseRpc(NetworkMeleeHitResponse response, RpcParams rpcParams = default)
     {
         NetworkMeleeManager.Instance.ReceiveHitResponse(response);
     }
     
-    [ClientRpc]
-    private void BroadcastHitClientRpc(NetworkMeleeHitBroadcast broadcast)
+    [Rpc(SendTo.ClientsAndHost)]
+    private void BroadcastHitRpc(NetworkMeleeHitBroadcast broadcast)
     {
         NetworkMeleeManager.Instance.ReceiveHitBroadcast(broadcast);
     }
     
     private void SendResponseToClient(uint clientId, NetworkMeleeHitResponse response)
     {
-        ClientRpcParams rpcParams = new ClientRpcParams
-        {
-            Send = new ClientRpcSendParams { TargetClientIds = new[] { (ulong)clientId } }
-        };
-        SendHitResponseClientRpc(response, rpcParams);
+        SendHitResponseRpc(
+            response,
+            RpcTarget.Single((ulong) clientId, RpcTargetUse.Temp)
+        );
     }
 }
 ```

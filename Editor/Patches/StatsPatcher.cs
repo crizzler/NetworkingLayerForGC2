@@ -9,7 +9,7 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
     public class StatsPatcher : GC2PatcherBase
     {
         public override string ModuleName => "Stats";
-        public override string PatchVersion => "1.0.0";
+        public override string PatchVersion => "2.1.0-stats";
         public override string DisplayName => "Stats (Game Creator 2)";
         
         public override string PatchDescription =>
@@ -24,6 +24,14 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
             "Plugins/GameCreator/Packages/Stats/Runtime/Classes/Traits/Stats/RuntimeStatData.cs",
             "Plugins/GameCreator/Packages/Stats/Runtime/Classes/Traits/Attributes/RuntimeAttributeData.cs"
         };
+
+        protected override VersionCompatibilityRequirement[] GetVersionCompatibilityRequirements()
+        {
+            return new[]
+            {
+                VersionRequirement("Plugins/GameCreator/Packages/Stats/Editor/Version.txt", "2.6.*")
+            };
+        }
 
         protected override string[] GetRequiredPatchTokens(string relativePath)
         {
@@ -74,13 +82,10 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
         protected override bool PatchFile(string relativePath)
         {
             string content = ReadFile(relativePath);
-            
-            // Check if already patched
-            if (ContainsPatchMarker(content))
-            {
-                Debug.LogWarning($"[GC2 Networking] {relativePath} already contains patch marker.");
-                return true;
-            }
+
+            ExistingPatchState existingPatchState = PrepareContentForPatch(relativePath, ref content);
+            if (existingPatchState == ExistingPatchState.SkipAlreadyPatched) return true;
+            if (existingPatchState == ExistingPatchState.Failed) return false;
             
             if (relativePath.EndsWith("RuntimeStatData.cs"))
             {
@@ -113,7 +118,7 @@ using UnityEngine;
 " + PatchMarker + @"
 // This file has been patched for GC2 Networking server authority.
 // Do not modify the patched sections manually.
-// Use Tools > Game Creator 2 Networking > Patches > Stats > Unpatch to restore.
+// Use Game Creator > Networking Layer > Patches > Stats > Unpatch to restore.
 
 namespace GameCreator.Runtime.Stats
 {
@@ -408,7 +413,7 @@ using UnityEngine;
 " + PatchMarker + @"
 // This file has been patched for GC2 Networking server authority.
 // Do not modify the patched sections manually.
-// Use Tools > Game Creator 2 Networking > Patches > Stats > Unpatch to restore.
+// Use Game Creator > Networking Layer > Patches > Stats > Unpatch to restore.
 
 namespace GameCreator.Runtime.Stats
 {

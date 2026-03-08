@@ -102,10 +102,26 @@ namespace Arawn.GameCreator2.Networking
         {
             try
             {
-                var casterType = typeof(Caster);
-                var field = casterType.GetField("NetworkCastValidator", 
-                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
-                return field != null;
+                return
+                    HasPublicStaticField(
+                        typeof(Caster),
+                        "NetworkCastValidator",
+                        typeof(Func<Caster, Ability, ExtendedArgs, bool>)) &&
+                    HasPublicStaticField(
+                        typeof(Caster),
+                        "NetworkLearnValidator",
+                        typeof(Func<Caster, Ability, int, bool>)) &&
+                    HasPublicStaticField(
+                        typeof(Caster),
+                        "NetworkUnLearnValidator",
+                        typeof(Func<Caster, Ability, bool>)) &&
+                    HasPublicStaticField(
+                        typeof(Caster),
+                        "NetworkCastCompleted",
+                        typeof(Action<Caster, Ability, bool>)) &&
+                    HasPublicStaticProperty(typeof(Caster), "IsNetworkingActive", typeof(bool)) &&
+                    HasInstanceMethod(typeof(Caster), "LearnDirect", typeof(Ability), typeof(int)) &&
+                    HasInstanceMethod(typeof(Caster), "UnLearnDirect", typeof(Ability));
             }
             catch
             {
@@ -303,7 +319,13 @@ namespace Arawn.GameCreator2.Networking
             {
                 var field = typeof(Caster).GetField("NetworkCastValidator",
                     System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
-                field?.SetValue(null, validator);
+                if (field == null)
+                {
+                    Debug.LogWarning("[NetworkAbilitiesPatchHooks] Missing patched field Caster.NetworkCastValidator. GC2 update likely changed signatures.");
+                    return;
+                }
+
+                field.SetValue(null, validator);
             }
             catch (Exception e)
             {
@@ -331,7 +353,13 @@ namespace Arawn.GameCreator2.Networking
             {
                 var field = typeof(Caster).GetField("NetworkLearnValidator",
                     System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
-                field?.SetValue(null, validator);
+                if (field == null)
+                {
+                    Debug.LogWarning("[NetworkAbilitiesPatchHooks] Missing patched field Caster.NetworkLearnValidator. GC2 update likely changed signatures.");
+                    return;
+                }
+
+                field.SetValue(null, validator);
             }
             catch (Exception e)
             {
@@ -359,7 +387,13 @@ namespace Arawn.GameCreator2.Networking
             {
                 var field = typeof(Caster).GetField("NetworkUnLearnValidator",
                     System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
-                field?.SetValue(null, validator);
+                if (field == null)
+                {
+                    Debug.LogWarning("[NetworkAbilitiesPatchHooks] Missing patched field Caster.NetworkUnLearnValidator. GC2 update likely changed signatures.");
+                    return;
+                }
+
+                field.SetValue(null, validator);
             }
             catch (Exception e)
             {
@@ -387,7 +421,13 @@ namespace Arawn.GameCreator2.Networking
             {
                 var field = typeof(Caster).GetField("NetworkCastCompleted",
                     System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
-                field?.SetValue(null, callback);
+                if (field == null)
+                {
+                    Debug.LogWarning("[NetworkAbilitiesPatchHooks] Missing patched field Caster.NetworkCastCompleted. GC2 update likely changed signatures.");
+                    return;
+                }
+
+                field.SetValue(null, callback);
             }
             catch (Exception e)
             {
@@ -400,7 +440,9 @@ namespace Arawn.GameCreator2.Networking
             try
             {
                 var method = typeof(Caster).GetMethod("LearnDirect",
-                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                    System.Reflection.BindingFlags.Public |
+                    System.Reflection.BindingFlags.NonPublic |
+                    System.Reflection.BindingFlags.Instance);
                 if (method != null)
                 {
                     method.Invoke(caster, new object[] { ability, slot });
@@ -419,7 +461,9 @@ namespace Arawn.GameCreator2.Networking
             try
             {
                 var method = typeof(Caster).GetMethod("UnLearnDirect",
-                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                    System.Reflection.BindingFlags.Public |
+                    System.Reflection.BindingFlags.NonPublic |
+                    System.Reflection.BindingFlags.Instance);
                 if (method != null)
                 {
                     method.Invoke(caster, new object[] { ability });
@@ -431,6 +475,36 @@ namespace Arawn.GameCreator2.Networking
                 // Method not available
             }
             return false;
+        }
+
+        private static bool HasPublicStaticField(Type type, string fieldName, Type expectedFieldType)
+        {
+            var field = type.GetField(
+                fieldName,
+                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+            return field != null && expectedFieldType.IsAssignableFrom(field.FieldType);
+        }
+
+        private static bool HasPublicStaticProperty(Type type, string propertyName, Type expectedPropertyType)
+        {
+            var property = type.GetProperty(
+                propertyName,
+                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+            return property != null && expectedPropertyType.IsAssignableFrom(property.PropertyType);
+        }
+
+        private static bool HasInstanceMethod(Type type, string methodName, params Type[] parameterTypes)
+        {
+            var method = type.GetMethod(
+                methodName,
+                System.Reflection.BindingFlags.Public |
+                System.Reflection.BindingFlags.NonPublic |
+                System.Reflection.BindingFlags.Instance,
+                null,
+                parameterTypes,
+                null);
+
+            return method != null;
         }
     }
 }

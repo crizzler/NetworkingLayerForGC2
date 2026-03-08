@@ -3,9 +3,6 @@ using UnityEngine;
 using GameCreator.Runtime.Characters;
 using GameCreator.Runtime.Common;
 
-#if UNITY_NETCODE
-using Unity.Netcode;
-#endif
 
 namespace Arawn.GameCreator2.Networking
 {
@@ -14,11 +11,7 @@ namespace Arawn.GameCreator2.Networking
     /// Packed into 6 bytes for efficient transmission.
     /// </summary>
     [Serializable]
-#if UNITY_NETCODE
-    public struct NetworkAnimimState : IEquatable<NetworkAnimimState>, INetworkSerializable
-#else
     public struct NetworkAnimimState : IEquatable<NetworkAnimimState>
-#endif
     {
         // Speed packed as bytes (-1 to 1 range, 0.01 precision)
         public sbyte speedX;      // 1 byte
@@ -110,17 +103,6 @@ namespace Arawn.GameCreator2.Networking
                    groundedStand != other.groundedStand;
         }
         
-#if UNITY_NETCODE
-        public void NetworkSerialize<T>(BufferSerializer<T> serializer) where T : IReaderWriter
-        {
-            serializer.SerializeValue(ref speedX);
-            serializer.SerializeValue(ref speedY);
-            serializer.SerializeValue(ref speedZ);
-            serializer.SerializeValue(ref pivotSpeed);
-            serializer.SerializeValue(ref groundedStand);
-            serializer.SerializeValue(ref flags);
-        }
-#endif
     }
     
     /// <summary>
@@ -183,14 +165,12 @@ namespace Arawn.GameCreator2.Networking
         // EXPOSED MEMBERS
         // ════════════════════════════════════════════════════════════════════════════════════════
         
-#if UNITY_NETCODE
         [Header("Network Settings")]
         [Tooltip("Minimum change threshold before sending update (0-127 scale)")]
         [SerializeField] private int m_ChangeThreshold = 3;
         
         [Tooltip("Maximum updates per second")]
         [SerializeField] private float m_MaxUpdateRate = 20f;
-#endif
         
         // ════════════════════════════════════════════════════════════════════════════════════════
         // PRIVATE MEMBERS
@@ -273,7 +253,6 @@ namespace Arawn.GameCreator2.Networking
                 ? AnimatorUpdateMode.Normal
                 : AnimatorUpdateMode.UnscaledTime;
             
-#if UNITY_NETCODE
             if (m_IsNetworkInitialized && m_NetworkCharacter != null)
             {
                 UpdateNetworked();
@@ -282,9 +261,6 @@ namespace Arawn.GameCreator2.Networking
             {
                 UpdateLocal();
             }
-#else
-            UpdateLocal();
-#endif
         }
         
         private void UpdateLocal()
@@ -294,7 +270,6 @@ namespace Arawn.GameCreator2.Networking
             ApplyToAnimator();
         }
         
-#if UNITY_NETCODE
         private void UpdateNetworked()
         {
             var role = m_NetworkCharacter.CurrentRole;
@@ -386,7 +361,6 @@ namespace Arawn.GameCreator2.Networking
             
             ApplyToAnimator();
         }
-#endif
         
         // ════════════════════════════════════════════════════════════════════════════════════════
         // NETWORK CALLBACKS

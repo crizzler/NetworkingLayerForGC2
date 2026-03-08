@@ -370,12 +370,14 @@ namespace Arawn.GameCreator2.Networking.Security
     /// </summary>
     public class SequenceTracker
     {
-        private readonly Dictionary<SequenceScopeKey, ushort> m_LastSequence = new(64);
-        private readonly Dictionary<SequenceScopeKey, HashSet<ushort>> m_RecentSequences = new(64);
-        private static readonly List<ushort> s_SharedKeyBuffer = new(16);
-        private static readonly List<SequenceScopeKey> s_SharedScopeKeyBuffer = new(16);
+        private readonly Dictionary<SequenceScopeKey, uint> m_LastSequence = new(64);
+        private readonly Dictionary<SequenceScopeKey, HashSet<uint>> m_RecentSequences = new(64);
+        private readonly List<uint> m_PruneBuffer = new(16);
+        private readonly List<SequenceScopeKey> m_ScopeKeyBuffer = new(16);
+        private readonly object m_StateLock = new();
         private const int MAX_RECENT = 32;
-        private const int SEQUENCE_HALF_RANGE = 32768;
+        private const uint SEQUENCE_HALF_RANGE = 2147483648u;
+        private const uint UINT16_SEQUENCE_MASK = 0x0000FFFFu;
 
         private readonly struct SequenceScopeKey : IEquatable<SequenceScopeKey>
         {
@@ -414,63 +416,113 @@ namespace Arawn.GameCreator2.Networking.Security
         /// <returns>True if valid (not a replay), false if replay detected.</returns>
         public bool ValidateSequence(uint clientId, ushort sequence)
         {
-            return ValidateSequence(clientId, string.Empty, 0u, sequence);
+            return ValidateSequence(clientId, string.Empty, 0u, (uint)sequence, UINT16_SEQUENCE_MASK);
         }
 
         /// <summary>
         /// Validate a sequence number scoped by client + module + actor.
         /// </summary>
-        public bool ValidateSequence(uint clientId, string module, uint actorNetworkId, ushort sequence)
+        public bool ValidateSequence(uint clientId, string module, uint actorNetworkId, uint sequence)
         {
-            var scopeKey = new SequenceScopeKey(clientId, module, actorNetworkId);
-            if (!m_RecentSequences.TryGetValue(scopeKey, out var recent))
-            {
-                recent = new HashSet<ushort>(MAX_RECENT);
-                m_RecentSequences[scopeKey] = recent;
-            }
+            return ValidateSequence(clientId, module, actorNetworkId, sequence, uint.MaxValue);
+        }
 
-            // Reject duplicates immediately.
-            if (recent.Contains(sequence))
+        /// <summary>
+        /// Validate a sequence number scoped by client + module + actor with explicit ring mask.
+        /// Use <paramref name="sequenceMask"/> for wrapped key spaces (e.g. 16-bit/24-bit).
+        /// </summary>
+        public bool ValidateSequence(
+            uint clientId,
+            string module,
+            uint actorNetworkId,
+            uint sequence,
+            uint sequenceMask)
+        {
+            lock (m_StateLock)
             {
-                return false;
-            }
+                var scopeKey = new SequenceScopeKey(clientId, module, actorNetworkId);
+                if (!m_RecentSequences.TryGetValue(scopeKey, out var recent))
+                {
+                    recent = new HashSet<uint>(MAX_RECENT);
+                    m_RecentSequences[scopeKey] = recent;
+                }
 
-            // Enforce strict monotonic progression with ushort wraparound support.
-            if (m_LastSequence.TryGetValue(scopeKey, out ushort lastSequence))
-            {
-                if (!IsStrictlyNewer(sequence, lastSequence))
+                uint normalizedSequence = NormalizeSequence(sequence, sequenceMask);
+
+                // Reject duplicates immediately.
+                if (recent.Contains(normalizedSequence))
                 {
                     return false;
                 }
+
+                // Enforce strict monotonic progression with unsigned wraparound support.
+                if (m_LastSequence.TryGetValue(scopeKey, out uint lastSequence))
+                {
+                    if (!IsStrictlyNewer(normalizedSequence, lastSequence, sequenceMask))
+                    {
+                        return false;
+                    }
+                }
+
+                recent.Add(normalizedSequence);
+                PruneRecentWindow(recent, normalizedSequence, sequenceMask);
+                m_LastSequence[scopeKey] = normalizedSequence;
+                return true;
+            }
+        }
+
+        private static bool IsStrictlyNewer(uint current, uint previous, uint sequenceMask)
+        {
+            uint delta = ComputeDelta(current, previous, sequenceMask);
+            uint halfRange = GetHalfRange(sequenceMask);
+            return delta != 0u && delta < halfRange;
+        }
+
+        private static uint NormalizeSequence(uint sequence, uint sequenceMask)
+        {
+            if (sequenceMask == 0u || sequenceMask == uint.MaxValue)
+            {
+                return sequence;
             }
 
-            recent.Add(sequence);
-            PruneRecentWindow(recent, sequence);
-            m_LastSequence[scopeKey] = sequence;
-            return true;
+            return sequence & sequenceMask;
         }
 
-        private static bool IsStrictlyNewer(ushort current, ushort previous)
+        private static uint ComputeDelta(uint current, uint previous, uint sequenceMask)
         {
-            ushort delta = (ushort)(current - previous);
-            return delta != 0 && delta < SEQUENCE_HALF_RANGE;
+            if (sequenceMask == 0u || sequenceMask == uint.MaxValue)
+            {
+                return current - previous;
+            }
+
+            return (current - previous) & sequenceMask;
         }
 
-        private static void PruneRecentWindow(HashSet<ushort> recent, ushort newestSequence)
+        private static uint GetHalfRange(uint sequenceMask)
+        {
+            if (sequenceMask == 0u || sequenceMask == uint.MaxValue)
+            {
+                return SEQUENCE_HALF_RANGE;
+            }
+
+            return (sequenceMask + 1u) >> 1;
+        }
+
+        private void PruneRecentWindow(HashSet<uint> recent, uint newestSequence, uint sequenceMask)
         {
             if (recent.Count <= MAX_RECENT) return;
 
-            s_SharedKeyBuffer.Clear();
-            foreach (ushort sequence in recent)
+            m_PruneBuffer.Clear();
+            foreach (uint sequence in recent)
             {
-                ushort delta = (ushort)(newestSequence - sequence);
+                uint delta = ComputeDelta(newestSequence, sequence, sequenceMask);
                 if (delta >= MAX_RECENT)
                 {
-                    s_SharedKeyBuffer.Add(sequence);
+                    m_PruneBuffer.Add(sequence);
                 }
             }
 
-            foreach (ushort sequence in s_SharedKeyBuffer)
+            foreach (uint sequence in m_PruneBuffer)
             {
                 recent.Remove(sequence);
             }
@@ -481,27 +533,30 @@ namespace Arawn.GameCreator2.Networking.Security
         /// </summary>
         public void ClearClient(uint clientId)
         {
-            s_SharedScopeKeyBuffer.Clear();
-            foreach (var key in m_LastSequence.Keys)
+            lock (m_StateLock)
             {
-                if (key.ClientId == clientId)
+                m_ScopeKeyBuffer.Clear();
+                foreach (var key in m_LastSequence.Keys)
                 {
-                    s_SharedScopeKeyBuffer.Add(key);
+                    if (key.ClientId == clientId)
+                    {
+                        m_ScopeKeyBuffer.Add(key);
+                    }
                 }
-            }
 
-            foreach (var key in m_RecentSequences.Keys)
-            {
-                if (key.ClientId == clientId && !s_SharedScopeKeyBuffer.Contains(key))
+                foreach (var key in m_RecentSequences.Keys)
                 {
-                    s_SharedScopeKeyBuffer.Add(key);
+                    if (key.ClientId == clientId && !m_ScopeKeyBuffer.Contains(key))
+                    {
+                        m_ScopeKeyBuffer.Add(key);
+                    }
                 }
-            }
 
-            foreach (var key in s_SharedScopeKeyBuffer)
-            {
-                m_LastSequence.Remove(key);
-                m_RecentSequences.Remove(key);
+                foreach (var key in m_ScopeKeyBuffer)
+                {
+                    m_LastSequence.Remove(key);
+                    m_RecentSequences.Remove(key);
+                }
             }
         }
         
@@ -510,8 +565,13 @@ namespace Arawn.GameCreator2.Networking.Security
         /// </summary>
         public void Clear()
         {
-            m_LastSequence.Clear();
-            m_RecentSequences.Clear();
+            lock (m_StateLock)
+            {
+                m_LastSequence.Clear();
+                m_RecentSequences.Clear();
+                m_PruneBuffer.Clear();
+                m_ScopeKeyBuffer.Clear();
+            }
         }
     }
 }

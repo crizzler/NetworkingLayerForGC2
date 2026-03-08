@@ -57,6 +57,7 @@ namespace Arawn.GameCreator2.Networking
         
         // Network look target for remotes
         private NetworkLookTarget m_NetworkLookTarget;
+        private bool m_HasLoggedMissingRigWarning;
         
         // EVENTS: --------------------------------------------------------------------------------
         
@@ -108,23 +109,19 @@ namespace Arawn.GameCreator2.Networking
         
         private void FindIKRigs()
         {
-            if (m_Character?.Animim?.Animator == null) return;
-            
-            // Get IK rig layers from character
-            // GC2 stores rigs in the IUnitAnimim.Rigs property
-            var animim = m_Character.Animim;
-            if (animim == null) return;
-            
-            // Access rigs through reflection to get the RigLayers
-            var rigsField = animim.GetType().GetField("m_Rigs", 
-                System.Reflection.BindingFlags.NonPublic | 
-                System.Reflection.BindingFlags.Instance);
-            
-            if (rigsField?.GetValue(animim) is RigLayers rigLayers)
+            if (m_Character == null) return;
+            if (m_Character.Animim?.Animator == null) return;
+
+            // Use GC2 public IK accessors instead of reflecting private internals.
+            m_RigLookTo = m_Character.IK?.GetRig<RigLookTo>();
+            m_RigAim = m_Character.IK?.GetRig<RigAimTowards>();
+
+            if (!m_HasLoggedMissingRigWarning && m_RigLookTo == null && m_RigAim == null)
             {
-                // Use GetRig<T>() to find specific rig types
-                m_RigLookTo = rigLayers.GetRig<RigLookTo>();
-                m_RigAim = rigLayers.GetRig<RigAimTowards>();
+                m_HasLoggedMissingRigWarning = true;
+                Debug.LogWarning(
+                    "[UnitIKNetworkController] No RigLookTo/RigAimTowards rigs found on Character.IK. " +
+                    "IK sync will stay idle until those rigs are configured.");
             }
         }
         

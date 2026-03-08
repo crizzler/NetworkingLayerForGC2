@@ -17,7 +17,7 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
     public class CorePatcher : GC2PatcherBase
     {
         public override string ModuleName => "Core";
-        public override string PatchVersion => "1.0.0";
+        public override string PatchVersion => "2.1.0-core";
         public override string DisplayName => "Core (Game Creator 2)";
         
         public override string PatchDescription =>
@@ -39,6 +39,14 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
             "Plugins/GameCreator/Packages/Core/Runtime/Characters/Features/Dash/Dash.cs",
             "Plugins/GameCreator/Packages/Core/Runtime/Characters/Components/Character.cs"
         };
+
+        protected override VersionCompatibilityRequirement[] GetVersionCompatibilityRequirements()
+        {
+            return new[]
+            {
+                VersionRequirement("Plugins/GameCreator/Packages/Core/Editor/Version.txt", "2.18.*")
+            };
+        }
 
         protected override string[] GetRequiredPatchTokens(string relativePath)
         {
@@ -121,13 +129,10 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
         protected override bool PatchFile(string relativePath)
         {
             string content = ReadFile(relativePath);
-            
-            // Check if already patched
-            if (ContainsPatchMarker(content))
-            {
-                Debug.LogWarning($"[GC2 Networking] {relativePath} already contains patch marker.");
-                return true;
-            }
+
+            ExistingPatchState existingPatchState = PrepareContentForPatch(relativePath, ref content);
+            if (existingPatchState == ExistingPatchState.SkipAlreadyPatched) return true;
+            if (existingPatchState == ExistingPatchState.Failed) return false;
             
             if (relativePath.EndsWith("Invincibility.cs"))
             {
@@ -169,7 +174,7 @@ namespace GameCreator.Runtime.Characters
 " + PatchMarker + @"
 // This file has been patched for GC2 Networking server authority.
 // Do not modify the patched sections manually.
-// Use Tools > Game Creator 2 Networking > Patches > Core > Unpatch to restore.
+// Use Game Creator > Networking Layer > Patches > Core > Unpatch to restore.
 
 namespace GameCreator.Runtime.Characters
 {
@@ -277,7 +282,7 @@ using UnityEngine;
 " + PatchMarker + @"
 // This file has been patched for GC2 Networking server authority.
 // Do not modify the patched sections manually.
-// Use Tools > Game Creator 2 Networking > Patches > Core > Unpatch to restore.
+// Use Game Creator > Networking Layer > Patches > Core > Unpatch to restore.
 
 namespace GameCreator.Runtime.Characters
 {
@@ -475,7 +480,7 @@ using UnityEngine;
 " + PatchMarker + @"
 // This file has been patched for GC2 Networking server authority.
 // Do not modify the patched sections manually.
-// Use Tools > Game Creator 2 Networking > Patches > Core > Unpatch to restore.
+// Use Game Creator > Networking Layer > Patches > Core > Unpatch to restore.
 
 namespace GameCreator.Runtime.Characters
 {
@@ -627,7 +632,7 @@ using UnityEngine;
 " + PatchMarker + @"
 // This file has been patched for GC2 Networking server authority.
 // Do not modify the patched sections manually.
-// Use Tools > Game Creator 2 Networking > Patches > Core > Unpatch to restore.
+// Use Game Creator > Networking Layer > Patches > Core > Unpatch to restore.
 
 namespace GameCreator.Runtime.Characters
 {
@@ -800,7 +805,7 @@ using UnityEngine.Playables;
 " + PatchMarker + @"
 // This file has been patched for GC2 Networking server authority.
 // Do not modify the patched sections manually.
-// Use Tools > Game Creator 2 Networking > Patches > Core > Unpatch to restore.
+// Use Game Creator > Networking Layer > Patches > Core > Unpatch to restore.
 
 namespace GameCreator.Runtime.Characters
 {";

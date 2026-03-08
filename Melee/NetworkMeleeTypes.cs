@@ -203,6 +203,9 @@ namespace Arawn.GameCreator2.Networking.Melee
         
         /// <summary>Hash of the weapon to use.</summary>
         public int WeaponHash;
+
+        /// <summary>Client-observed combo node id used for monotonic combo validation.</summary>
+        public short ComboNodeId;
         
         /// <summary>Input key used.</summary>
         public byte InputKey;

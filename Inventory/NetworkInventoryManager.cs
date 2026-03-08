@@ -166,6 +166,8 @@ namespace Arawn.GameCreator2.Networking.Inventory
 
         public int ControllerCount => m_Controllers.Count;
 
+        public float RequestTimeoutSeconds => m_RequestTimeout;
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // UNITY LIFECYCLE
         // ════════════════════════════════════════════════════════════════════════════════════════
@@ -340,7 +342,9 @@ namespace Arawn.GameCreator2.Networking.Inventory
 
         private static uint GetSenderClientId(ulong clientId)
         {
-            return clientId <= uint.MaxValue ? (uint)clientId : 0u;
+            return NetworkTransportBridge.TryConvertSenderClientId(clientId, out uint senderClientId)
+                ? senderClientId
+                : NetworkTransportBridge.InvalidClientId;
         }
 
         private static NetworkRequestContext BuildContext(uint actorNetworkId, uint correlationId)
@@ -362,7 +366,9 @@ namespace Arawn.GameCreator2.Networking.Inventory
             SecurityIntegration.RegisterEntityActor(entityNetworkId, entityNetworkId);
 
             var bridge = NetworkTransportBridge.Active;
-            if (bridge != null && bridge.TryGetCharacterOwner(entityNetworkId, out uint ownerClientId) && ownerClientId != 0)
+            if (bridge != null &&
+                bridge.TryGetCharacterOwner(entityNetworkId, out uint ownerClientId) &&
+                NetworkTransportBridge.IsValidClientId(ownerClientId))
             {
                 SecurityIntegration.RegisterEntityOwner(entityNetworkId, ownerClientId);
             }

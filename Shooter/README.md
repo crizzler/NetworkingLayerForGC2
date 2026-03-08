@@ -11,7 +11,7 @@ This module provides network-aware shooter combat for GC2, enabling server-autho
 - Game Creator 2 Core
 - Game Creator 2 Shooter Module
 - GC2 Network Integration (base module)
-- Unity Netcode for GameObjects (or compatible transport)
+- A configured transport adapter (NGO/FishNet/Mirror/custom)
 
 ## Installation
 
@@ -86,30 +86,37 @@ var shooterManager = NetworkShooterManager.Instance;
 
 // Client -> Server
 shooterManager.SendShotRequestToServer = (request) => {
-    MyNetworkRPC.SendShotRequestServerRpc(request);
+    SendShotRequestToServer(request);
 };
 
 shooterManager.SendHitRequestToServer = (request) => {
-    MyNetworkRPC.SendHitRequestServerRpc(request);
+    SendHitRequestToServer(request);
 };
 
 // Server -> Client
 shooterManager.SendShotResponseToClient = (clientId, response) => {
-    MyNetworkRPC.SendShotResponseClientRpc(clientId, response);
+    SendShotResponseToClient(clientId, response);
 };
 
 shooterManager.SendHitResponseToClient = (clientId, response) => {
-    MyNetworkRPC.SendHitResponseClientRpc(clientId, response);
+    SendHitResponseToClient(clientId, response);
 };
 
 // Server -> All Clients
 shooterManager.BroadcastShotToAllClients = (broadcast) => {
-    MyNetworkRPC.BroadcastShotClientRpc(broadcast);
+    BroadcastShotToClients(broadcast);
 };
 
 shooterManager.BroadcastHitToAllClients = (broadcast) => {
-    MyNetworkRPC.BroadcastHitClientRpc(broadcast);
+    BroadcastHitToClients(broadcast);
 };
+
+void SendShotRequestToServer(NetworkShotRequest request) { /* serialize + send C->S */ }
+void SendHitRequestToServer(NetworkShooterHitRequest request) { /* serialize + send C->S */ }
+void SendShotResponseToClient(uint clientId, NetworkShotResponse response) { /* send S->C target */ }
+void SendHitResponseToClient(uint clientId, NetworkShooterHitResponse response) { /* send S->C target */ }
+void BroadcastShotToClients(NetworkShotBroadcast broadcast) { /* send S->all */ }
+void BroadcastHitToClients(NetworkShooterHitBroadcast broadcast) { /* send S->all */ }
 ```
 
 #### NetworkShooterController
@@ -160,50 +167,78 @@ For each ShooterWeapon that should use network hit validation:
 
 ### Step 4: Network Transport
 
-Connect the manager to your network layer:
+Connect the manager to your transport adapter. Optional NGO example:
+This sample follows NGO 2.10 unified RPC API (`[Rpc]`, `RpcParams`, `RpcTarget`).
 
 ```csharp
+// using Unity.Netcode;
 public class ShooterNetworkBridge : NetworkBehaviour
 {
     private void Start()
     {
         var manager = NetworkShooterManager.Instance;
         
-        manager.SendShotRequestToServer = SendShotRequestServerRpc;
-        manager.SendHitRequestToServer = SendHitRequestServerRpc;
+        manager.SendShotRequestToServer = SendShotRequestRpc;
+        manager.SendHitRequestToServer = SendHitRequestRpc;
         manager.SendShotResponseToClient = SendShotResponse;
         manager.SendHitResponseToClient = SendHitResponse;
-        manager.BroadcastShotToAllClients = BroadcastShotClientRpc;
-        manager.BroadcastHitToAllClients = BroadcastHitClientRpc;
+        manager.BroadcastShotToAllClients = BroadcastShotRpc;
+        manager.BroadcastHitToAllClients = BroadcastHitRpc;
     }
     
-    [ServerRpc(RequireOwnership = false)]
-    private void SendShotRequestServerRpc(NetworkShotRequest request, ServerRpcParams rpcParams = default)
+    [Rpc(SendTo.Server, InvokePermission = RpcInvokePermission.Everyone)]
+    private void SendShotRequestRpc(NetworkShotRequest request, RpcParams rpcParams = default)
     {
         ulong clientId = rpcParams.Receive.SenderClientId;
         NetworkShooterManager.Instance.ReceiveShotRequest((uint)clientId, request);
     }
     
-    [ServerRpc(RequireOwnership = false)]
-    private void SendHitRequestServerRpc(NetworkShooterHitRequest request, ServerRpcParams rpcParams = default)
+    [Rpc(SendTo.Server, InvokePermission = RpcInvokePermission.Everyone)]
+    private void SendHitRequestRpc(NetworkShooterHitRequest request, RpcParams rpcParams = default)
     {
         ulong clientId = rpcParams.Receive.SenderClientId;
         NetworkShooterManager.Instance.ReceiveHitRequest((uint)clientId, request);
     }
     
-    [ClientRpc]
-    private void BroadcastShotClientRpc(NetworkShotBroadcast broadcast)
+    [Rpc(SendTo.ClientsAndHost)]
+    private void BroadcastShotRpc(NetworkShotBroadcast broadcast)
     {
         NetworkShooterManager.Instance.ReceiveShotBroadcast(broadcast);
     }
     
-    [ClientRpc]
-    private void BroadcastHitClientRpc(NetworkShooterHitBroadcast broadcast)
+    [Rpc(SendTo.ClientsAndHost)]
+    private void BroadcastHitRpc(NetworkShooterHitBroadcast broadcast)
     {
         NetworkShooterManager.Instance.ReceiveHitBroadcast(broadcast);
     }
     
-    // ... response methods with ClientRpcParams for targeting specific clients
+    [Rpc(SendTo.SpecifiedInParams)]
+    private void SendShotResponseRpc(NetworkShotResponse response, RpcParams rpcParams = default)
+    {
+        NetworkShooterManager.Instance.ReceiveShotResponse(response);
+    }
+
+    [Rpc(SendTo.SpecifiedInParams)]
+    private void SendHitResponseRpc(NetworkShooterHitResponse response, RpcParams rpcParams = default)
+    {
+        NetworkShooterManager.Instance.ReceiveHitResponse(response);
+    }
+
+    private void SendShotResponse(uint clientId, NetworkShotResponse response)
+    {
+        SendShotResponseRpc(
+            response,
+            RpcTarget.Single((ulong) clientId, RpcTargetUse.Temp)
+        );
+    }
+
+    private void SendHitResponse(uint clientId, NetworkShooterHitResponse response)
+    {
+        SendHitResponseRpc(
+            response,
+            RpcTarget.Single((ulong) clientId, RpcTargetUse.Temp)
+        );
+    }
 }
 ```
 
@@ -411,7 +446,7 @@ Like the Melee module, this is **completely transport-agnostic**:
 
 | Transport | Implementation |
 |-----------|----------------|
-| **Netcode for GameObjects** | `[ServerRpc]`, `[ClientRpc]` |
+| **Netcode for GameObjects** | `[Rpc(SendTo.*)]` + `RpcTarget.Single(...)` |
 | **FishNet** | `[ServerRpc]`, `[ObserversRpc]` |
 | **Mirror** | `[Command]`, `[ClientRpc]` |
 | **Photon Fusion** | `[Rpc]` attributes |

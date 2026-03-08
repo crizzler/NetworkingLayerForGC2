@@ -99,12 +99,13 @@ namespace Arawn.GameCreator2.Networking.Inventory
         
         // Request tracking
         private ushort m_NextRequestId = 1;
-        private static readonly List<uint> s_SharedKeyBuffer = new(16);
-        private readonly Dictionary<uint, PendingContentAdd> m_PendingAdds = new(16);
-        private readonly Dictionary<uint, PendingContentRemove> m_PendingRemoves = new(16);
-        private readonly Dictionary<uint, PendingContentMove> m_PendingMoves = new(16);
-        private readonly Dictionary<uint, PendingEquipment> m_PendingEquipment = new(8);
-        private readonly Dictionary<uint, PendingWealth> m_PendingWealth = new(8);
+        private ushort m_LastIssuedRequestId = 1;
+        private static readonly List<ulong> s_SharedKeyBuffer = new(16);
+        private readonly Dictionary<ulong, PendingContentAdd> m_PendingAdds = new(16);
+        private readonly Dictionary<ulong, PendingContentRemove> m_PendingRemoves = new(16);
+        private readonly Dictionary<ulong, PendingContentMove> m_PendingMoves = new(16);
+        private readonly Dictionary<ulong, PendingEquipment> m_PendingEquipment = new(8);
+        private readonly Dictionary<ulong, PendingWealth> m_PendingWealth = new(8);
         
         // State tracking for delta sync
         private readonly Dictionary<long, Vector2Int> m_LastSyncedPositions = new(32);
@@ -119,37 +120,42 @@ namespace Arawn.GameCreator2.Networking.Inventory
         // ════════════════════════════════════════════════════════════════════════════════════════
         // STRUCTS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
-        private struct PendingContentAdd
+
+        private struct PendingContentAdd : ITimedPendingRequest
         {
             public NetworkContentAddRequest Request;
             public float SentTime;
+            public float PendingSentTime => SentTime;
         }
         
-        private struct PendingContentRemove
+        private struct PendingContentRemove : ITimedPendingRequest
         {
             public NetworkContentRemoveRequest Request;
             public RuntimeItem RemovedItem; // For rollback
             public float SentTime;
+            public float PendingSentTime => SentTime;
         }
         
-        private struct PendingContentMove
+        private struct PendingContentMove : ITimedPendingRequest
         {
             public NetworkContentMoveRequest Request;
             public float SentTime;
+            public float PendingSentTime => SentTime;
         }
         
-        private struct PendingEquipment
+        private struct PendingEquipment : ITimedPendingRequest
         {
             public NetworkEquipmentRequest Request;
             public float SentTime;
+            public float PendingSentTime => SentTime;
         }
         
-        private struct PendingWealth
+        private struct PendingWealth : ITimedPendingRequest
         {
             public NetworkWealthRequest Request;
             public int OriginalValue;
             public float SentTime;
+            public float PendingSentTime => SentTime;
         }
         
         // ════════════════════════════════════════════════════════════════════════════════════════
@@ -167,6 +173,10 @@ namespace Arawn.GameCreator2.Networking.Inventory
         
         /// <summary>Whether this is the local player's inventory.</summary>
         public bool IsLocalClient => m_IsLocalClient;
+
+        public bool OptimisticUpdates => m_OptimisticUpdates;
+
+        public bool RollbackOnReject => m_RollbackOnReject;
         
         // ════════════════════════════════════════════════════════════════════════════════════════
         // UNITY LIFECYCLE
@@ -308,9 +318,28 @@ namespace Arawn.GameCreator2.Networking.Inventory
             }
         }
 
-        private static uint GetPendingKey(uint correlationId, ushort requestId)
+        private ushort GetNextRequestId()
         {
-            return correlationId != 0 ? correlationId : requestId;
+            if (m_NextRequestId == 0)
+            {
+                m_NextRequestId = 1;
+            }
+
+            ushort requestId = m_NextRequestId;
+            m_NextRequestId++;
+            if (m_NextRequestId == 0)
+            {
+                m_NextRequestId = 1;
+            }
+
+            m_LastIssuedRequestId = requestId;
+            return requestId;
+        }
+
+        private static ulong GetPendingKey(uint actorNetworkId, uint correlationId, ushort requestId)
+        {
+            uint pendingCorrelation = correlationId != 0 ? correlationId : requestId;
+            return ((ulong)actorNetworkId << 32) | pendingCorrelation;
         }
     }
 }

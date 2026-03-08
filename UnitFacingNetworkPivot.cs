@@ -3,9 +3,6 @@ using UnityEngine;
 using GameCreator.Runtime.Characters;
 using GameCreator.Runtime.Common;
 
-#if UNITY_NETCODE
-using Unity.Netcode;
-#endif
 
 namespace Arawn.GameCreator2.Networking
 {
@@ -48,14 +45,12 @@ namespace Arawn.GameCreator2.Networking
         [SerializeField] private DirectionFrom m_DirectionFrom = DirectionFrom.MotionDirection;
         [SerializeField] private Axonometry m_Axonometry = new Axonometry();
         
-#if UNITY_NETCODE
         [Header("Network Settings")]
         [Tooltip("How quickly clients interpolate to the server's facing direction")]
         [SerializeField] private float m_InterpolationSpeed = 15f;
         
         [Tooltip("Minimum angle change (degrees) before sending an update")]
         [SerializeField] private float m_MinAngleChange = 1f;
-#endif
         
         // ════════════════════════════════════════════════════════════════════════════════════════
         // PRIVATE MEMBERS
@@ -138,7 +133,6 @@ namespace Arawn.GameCreator2.Networking
         {
             if (Character.IsDead) return;
             
-#if UNITY_NETCODE
             if (m_IsNetworkInitialized && m_NetworkCharacter != null)
             {
                 UpdateNetworked();
@@ -147,9 +141,6 @@ namespace Arawn.GameCreator2.Networking
             {
                 UpdateLocal();
             }
-#else
-            UpdateLocal();
-#endif
         }
         
         private void UpdateLocal()
@@ -162,7 +153,6 @@ namespace Arawn.GameCreator2.Networking
             base.OnUpdate();
         }
         
-#if UNITY_NETCODE
         private void UpdateNetworked()
         {
             var role = m_NetworkCharacter.CurrentRole;
@@ -203,7 +193,7 @@ namespace Arawn.GameCreator2.Networking
             if (angleDelta >= m_MinAngleChange)
             {
                 m_LastSentYaw = m_ServerYaw;
-                // NetworkCharacter will handle broadcasting via NetworkVariable
+                // NetworkCharacter transport integration handles the broadcast path.
             }
             
             // Apply rotation
@@ -241,7 +231,6 @@ namespace Arawn.GameCreator2.Networking
             // Apply rotation
             ApplyRotation(m_ClientYaw);
         }
-#endif
         
         // ════════════════════════════════════════════════════════════════════════════════════════
         // NETWORK CALLBACKS

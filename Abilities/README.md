@@ -29,7 +29,7 @@ This module offers two security levels:
 
 To enable Option C, use the menu:
 ```
-Tools > Game Creator 2 Networking > Patches > Abilities > Patch (Server Authority)
+Game Creator > Networking Layer > Patches > Abilities > Patch (Server Authority)
 ```
 
 ## Architecture
@@ -76,7 +76,32 @@ Editor/GameCreator2/Patches/
 
 ## Quick Start
 
-### 1. Setup
+### Where To Add Components
+
+- Add exactly one `NetworkAbilitiesController` to a shared bootstrap/manager GameObject in scene.
+- Do not add `NetworkAbilitiesController` per player character.
+- The Setup Wizard `Scene Objects` step can create/reuse the shared controller when `Ensure NetworkAbilitiesController` is enabled.
+- `NetworkAbilitiesManager` is a static API/service (`NetworkAbilitiesManager.cs`), not a `MonoBehaviour` component. Do not add it to a GameObject.
+
+### NetworkAbilitiesManager Role
+
+`NetworkAbilitiesManager` is the transport-facing facade for Abilities. It owns:
+
+- Message type IDs (`MessageTypes`) used by your transport router.
+- Asset registries (`Ability`, `Projectile`, `Impact`) for hash-to-asset resolution.
+- Pawn ↔ network-id tracking (`RegisterPawn`, `UnregisterPawn`).
+- Incoming packet routing (`RouteIncomingMessage(...)`) into `NetworkAbilitiesController`.
+- Convenience gameplay API (`RequestCast`, `RequestLearn`, cooldown queries, server spawn helpers).
+
+Typical lifecycle:
+
+1. Call `NetworkAbilitiesManager.Initialize(...)` once when your network session starts.
+2. Register ability/projectile/impact assets used by this session.
+3. Register pawns on spawn and unregister on despawn.
+4. Forward received Abilities packets to `RouteIncomingMessage(...)`.
+5. Call `NetworkAbilitiesManager.Clear()` on session shutdown.
+
+### 1. Initialize Manager & Registries
 
 ```csharp
 // In your network manager initialization
@@ -100,6 +125,24 @@ void OnPawnSpawned(Pawn pawn, uint networkId)
 {
     NetworkAbilitiesManager.RegisterPawn(pawn, networkId);
 }
+
+// When a pawn despawns
+void OnPawnDespawned(Pawn pawn)
+{
+    NetworkAbilitiesManager.UnregisterPawn(pawn);
+}
+
+// Route inbound transport packets (messageId -> payload already deserialized)
+void OnAbilitiesPacket(ushort messageId, object payload, uint senderClientNetworkId)
+{
+    NetworkAbilitiesManager.RouteIncomingMessage(messageId, payload, senderClientNetworkId);
+}
+
+// On session shutdown
+void OnNetworkStop()
+{
+    NetworkAbilitiesManager.Clear();
+}
 ```
 
 ### 2. Controller Setup
@@ -114,14 +157,20 @@ if (IsServer)
 else
     controller.InitializeAsClient();
 
+// If controller was created after Initialize(...), wire manager lookups explicitly.
+NetworkAbilitiesManager.WireUpController(controller);
+
 // Wire up network delegates
 controller.SendCastRequestToServer = (request) => 
-    YourNetworkLayer.Send(MessageTypes.AbilityCastRequest, request);
+    SendToServer(NetworkAbilitiesManager.MessageTypes.AbilityCastRequest, request);
 
 controller.BroadcastCastToClients = (broadcast) => 
-    YourNetworkLayer.SendToAll(MessageTypes.AbilityCastBroadcast, broadcast);
+    BroadcastToClients(NetworkAbilitiesManager.MessageTypes.AbilityCastBroadcast, broadcast);
 
 // ... wire up other delegates
+
+void SendToServer<TPayload>(ushort messageType, TPayload payload) { /* transport send C->S */ }
+void BroadcastToClients<TPayload>(ushort messageType, TPayload payload) { /* transport send S->all */ }
 ```
 
 ### 3. Using the System
@@ -264,7 +313,7 @@ The `NetworkAbilitiesController` exposes these settings:
 ### Applying the Patch
 
 1. Open Unity
-2. Go to `Tools > Game Creator 2 Networking > Patches > Abilities > Patch (Server Authority)`
+2. Go to `Game Creator > Networking Layer > Patches > Abilities > Patch (Server Authority)`
 3. Read the confirmation dialog and click "Apply Patch"
 4. Wait for Unity to recompile
 
@@ -278,13 +327,13 @@ The patch modifies `Caster.cs` to add:
 ### Checking Patch Status
 
 ```
-Tools > Game Creator 2 Networking > Patches > Abilities > Check Status
+Game Creator > Networking Layer > Patches > Abilities > Check Status
 ```
 
 ### Removing the Patch
 
 ```
-Tools > Game Creator 2 Networking > Patches > Abilities > Unpatch
+Game Creator > Networking Layer > Patches > Abilities > Unpatch
 ```
 
 This restores the original files from the backup created during patching.

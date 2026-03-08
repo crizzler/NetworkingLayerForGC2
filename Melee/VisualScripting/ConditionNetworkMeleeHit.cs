@@ -30,7 +30,7 @@ namespace Arawn.GameCreator2.Networking.Melee
     
     [Parameter("Apply Optimistic Effects", "If true, local client sees hit effects immediately before server confirmation")]
 
-    [Keywords("Network", "Melee", "Combat", "Hit", "Server", "Authoritative", "Netcode")]
+    [Keywords("Network", "Melee", "Combat", "Hit", "Server", "Authoritative")]
     
     [Image(typeof(IconMeleeSword), ColorTheme.Type.Blue)]
     [Serializable]

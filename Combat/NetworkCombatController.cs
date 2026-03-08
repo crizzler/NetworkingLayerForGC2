@@ -5,10 +5,8 @@ using GameCreator.Runtime.Characters;
 using GameCreator.Runtime.Common;
 using Arawn.NetworkingCore;
 using Arawn.NetworkingCore.LagCompensation;
+using Arawn.GameCreator2.Networking.Security;
 
-#if UNITY_NETCODE
-using Unity.Netcode;
-#endif
 
 namespace Arawn.GameCreator2.Networking
 {
@@ -68,6 +66,16 @@ namespace Arawn.GameCreator2.Networking
         
         [Tooltip("Maximum hit requests to process per frame.")]
         [SerializeField] private int m_MaxHitsPerFrame = 10;
+
+        [Tooltip("Maximum queued hit requests awaiting server processing.")]
+        [SerializeField] private int m_MaxHitQueueLength = 512;
+
+        [Tooltip("Drop queued hit requests older than this many seconds.")]
+        [SerializeField] private float m_MaxQueueAgeSeconds = 1.5f;
+
+        [Tooltip("Fallback base damage when no external authoritative damage resolver is assigned.")]
+        [Min(0f)]
+        [SerializeField] private float m_DefaultBaseDamage = 10f;
         
         [Header("Debug")]
         [SerializeField] private bool m_DebugDrawHits = false;
@@ -139,6 +147,12 @@ namespace Arawn.GameCreator2.Networking
         /// Assign this to get the local player's network ID.
         /// </summary>
         public Func<uint> GetLocalPlayerNetworkId;
+
+        /// <summary>
+        /// Optional authoritative damage resolver hook.
+        /// Return base damage for a validated hit using request + attacker/target context.
+        /// </summary>
+        public Func<NetworkHitRequest, Character, Character, float> ResolveAuthoritativeBaseDamage;
         
         // ════════════════════════════════════════════════════════════════════════════════════════
         // PRIVATE FIELDS
@@ -176,6 +190,93 @@ namespace Arawn.GameCreator2.Networking
             public uint clientNetworkId;
             public NetworkHitRequest request;
             public float receivedTime;
+        }
+
+        private static NetworkRequestContext BuildContext(uint actorNetworkId, uint correlationId)
+        {
+            return NetworkRequestContext.Create(actorNetworkId, correlationId);
+        }
+
+        private ushort GetNextRequestId()
+        {
+            if (m_NextRequestId == 0)
+            {
+                m_NextRequestId = 1;
+            }
+
+            ushort requestId = m_NextRequestId;
+            m_NextRequestId++;
+            if (m_NextRequestId == 0)
+            {
+                m_NextRequestId = 1;
+            }
+
+            return requestId;
+        }
+
+        private static HitResult GetSecurityRejection(uint actorNetworkId, uint correlationId)
+        {
+            return SecurityIntegration.IsProtocolContextMismatch(actorNetworkId, correlationId)
+                ? HitResult.ProtocolMismatch
+                : HitResult.SecurityViolation;
+        }
+
+        private bool ValidateCombatRequest(uint senderClientId, in NetworkHitRequest request)
+        {
+            return SecurityIntegration.ValidateModuleRequest(
+                senderClientId,
+                BuildContext(request.actorNetworkId, request.correlationId),
+                "Combat",
+                nameof(NetworkHitRequest));
+        }
+
+        private bool IsQueueAtCapacity(uint senderClientId, in NetworkHitRequest request)
+        {
+            int safeLimit = Mathf.Max(1, m_MaxHitQueueLength);
+            if (m_ServerHitQueue.Count < safeLimit) return false;
+
+            SecurityIntegration.RecordViolation(
+                senderClientId,
+                request.actorNetworkId,
+                SecurityViolationType.RateLimitExceeded,
+                "Combat",
+                $"{nameof(NetworkHitRequest)} queue capacity reached ({m_ServerHitQueue.Count}/{safeLimit})");
+
+            return true;
+        }
+
+        private static int DropStaleRequests(Queue<QueuedHitRequest> queue, float maxAgeSeconds)
+        {
+            if (queue.Count == 0) return 0;
+
+            float now = Time.time;
+            int dropped = 0;
+            while (queue.Count > 0)
+            {
+                QueuedHitRequest queued = queue.Peek();
+                if (now - queued.receivedTime <= maxAgeSeconds) break;
+
+                queue.Dequeue();
+                dropped++;
+            }
+
+            return dropped;
+        }
+
+        private float ResolveBaseDamage(uint attackerNetworkId, in NetworkHitRequest request, Character target)
+        {
+            Character attacker = GetCharacterByNetworkId?.Invoke(attackerNetworkId);
+
+            if (ResolveAuthoritativeBaseDamage != null)
+            {
+                float resolvedDamage = ResolveAuthoritativeBaseDamage.Invoke(request, attacker, target);
+                if (!float.IsNaN(resolvedDamage) && !float.IsInfinity(resolvedDamage) && resolvedDamage >= 0f)
+                {
+                    return resolvedDamage;
+                }
+            }
+
+            return Mathf.Max(0f, m_DefaultBaseDamage);
         }
         
         // ════════════════════════════════════════════════════════════════════════════════════════
@@ -216,6 +317,11 @@ namespace Arawn.GameCreator2.Networking
                 ProcessServerHitQueue();
             }
         }
+
+        private void OnDisable()
+        {
+            SecurityIntegration.SetModuleServerContext("Combat", false);
+        }
         
         // ════════════════════════════════════════════════════════════════════════════════════════
         // INITIALIZATION
@@ -228,6 +334,8 @@ namespace Arawn.GameCreator2.Networking
         {
             m_IsServer = isServer;
             m_IsClient = isClient;
+            SecurityIntegration.SetModuleServerContext("Combat", isServer);
+            SecurityIntegration.EnsureSecurityManagerInitialized(isServer, () => GetServerTime?.Invoke() ?? Time.time);
             
             m_PendingRequests.Clear();
             m_ServerHitQueue.Clear();
@@ -304,23 +412,25 @@ namespace Arawn.GameCreator2.Networking
         private NetworkHitRequest CreateHitRequest(Character target, Vector3 hitPoint, 
             Vector3 hitDirection, int weaponHash, HitType hitType, float clientTime)
         {
+            ushort requestId = GetNextRequestId();
+
+            uint actorNetworkId = ResolveLocalActorNetworkId();
+
             // Get target's network ID
             uint targetNetworkId = 0;
             var networkChar = target.GetComponent<NetworkCharacter>();
             if (networkChar != null)
             {
-#if UNITY_NETCODE
-                var networkObject = target.GetComponent<NetworkObject>();
-                if (networkObject != null)
-                {
-                    targetNetworkId = (uint)networkObject.NetworkObjectId;
-                }
-#endif
+                targetNetworkId = networkChar.NetworkId;
             }
             
             var request = new NetworkHitRequest
             {
-                requestId = m_NextRequestId++,
+                requestId = requestId,
+                actorNetworkId = actorNetworkId,
+                correlationId = actorNetworkId != 0
+                    ? NetworkCorrelation.Compose(actorNetworkId, requestId)
+                    : 0u,
                 targetNetworkId = targetNetworkId,
                 clientTime = clientTime >= 0 ? clientTime : (GetServerTime?.Invoke() ?? Time.time),
                 hitPoint = hitPoint,
@@ -330,6 +440,28 @@ namespace Arawn.GameCreator2.Networking
             request.SetDirection(hitDirection);
             
             return request;
+        }
+
+        private uint ResolveLocalActorNetworkId()
+        {
+            uint actorNetworkId = GetLocalPlayerNetworkId?.Invoke() ?? 0;
+            if (actorNetworkId != 0) return actorNetworkId;
+
+            NetworkCharacter[] networkCharacters = FindObjectsByType<NetworkCharacter>(
+                FindObjectsInactive.Exclude,
+                FindObjectsSortMode.None);
+
+            for (int i = 0; i < networkCharacters.Length; i++)
+            {
+                NetworkCharacter networkCharacter = networkCharacters[i];
+                if (networkCharacter == null) continue;
+                if (!networkCharacter.IsLocalPlayer) continue;
+                if (networkCharacter.NetworkId == 0) continue;
+
+                return networkCharacter.NetworkId;
+            }
+
+            return 0;
         }
         
         private void SendHitRequest(NetworkHitRequest request)
@@ -448,7 +580,41 @@ namespace Arawn.GameCreator2.Networking
                 Debug.LogWarning("[NetworkCombat] OnReceiveHitRequest called on non-server");
                 return;
             }
-            
+
+            if (!ValidateCombatRequest(clientNetworkId, in request))
+            {
+                var rejection = new NetworkHitResponse
+                {
+                    requestId = request.requestId,
+                    actorNetworkId = request.actorNetworkId,
+                    correlationId = request.correlationId,
+                    result = GetSecurityRejection(request.actorNetworkId, request.correlationId),
+                    finalDamage = 0f,
+                    hitZone = HitZone.Body,
+                    effects = HitEffectFlags.None
+                };
+
+                SendHitResponseToClient?.Invoke(clientNetworkId, rejection);
+                return;
+            }
+
+            if (IsQueueAtCapacity(clientNetworkId, in request))
+            {
+                var rejection = new NetworkHitResponse
+                {
+                    requestId = request.requestId,
+                    actorNetworkId = request.actorNetworkId,
+                    correlationId = request.correlationId,
+                    result = HitResult.RateLimitExceeded,
+                    finalDamage = 0f,
+                    hitZone = HitZone.Body,
+                    effects = HitEffectFlags.None
+                };
+
+                SendHitResponseToClient?.Invoke(clientNetworkId, rejection);
+                return;
+            }
+
             m_Stats.hitRequestsReceived++;
             OnHitRequestReceived?.Invoke(clientNetworkId, request);
             
@@ -463,6 +629,12 @@ namespace Arawn.GameCreator2.Networking
         
         private void ProcessServerHitQueue()
         {
+            int staleDropped = DropStaleRequests(m_ServerHitQueue, m_MaxQueueAgeSeconds);
+            if (staleDropped > 0 && m_LogRejectedHits)
+            {
+                Debug.LogWarning($"[NetworkCombat] Dropped {staleDropped} stale hit requests");
+            }
+
             int processedCount = 0;
             
             while (m_ServerHitQueue.Count > 0 && processedCount < m_MaxHitsPerFrame)
@@ -484,6 +656,8 @@ namespace Arawn.GameCreator2.Networking
             var response = new NetworkHitResponse
             {
                 requestId = request.requestId,
+                actorNetworkId = request.actorNetworkId,
+                correlationId = request.correlationId,
                 result = result,
                 finalDamage = result == HitResult.Valid ? validatedDamage.finalDamage : 0f,
                 hitZone = validatedDamage.hitZone,
@@ -524,6 +698,12 @@ namespace Arawn.GameCreator2.Networking
             out ValidatedDamage validatedDamage)
         {
             validatedDamage = default;
+
+            var attacker = GetCharacterByNetworkId?.Invoke(request.actorNetworkId);
+            if (attacker == null)
+            {
+                return HitResult.InvalidTarget;
+            }
             
             // Get target character
             var target = GetCharacterByNetworkId?.Invoke(request.targetNetworkId);
@@ -585,7 +765,7 @@ namespace Arawn.GameCreator2.Networking
             }
             
             // Hit is valid - calculate damage
-            validatedDamage = CalculateDamage(clientNetworkId, request, target, lagResult);
+            validatedDamage = CalculateDamage(request.actorNetworkId, request, target, lagResult);
             
             return HitResult.Valid;
         }
@@ -611,13 +791,13 @@ namespace Arawn.GameCreator2.Networking
             }
             
             // Calculate damage
-            uint attackerId = GetLocalPlayerNetworkId?.Invoke() ?? 0;
+            float baseDamage = ResolveBaseDamage(request.actorNetworkId, in request, target);
             validatedDamage = new ValidatedDamage
             {
-                attackerNetworkId = attackerId,
+                attackerNetworkId = request.actorNetworkId,
                 targetNetworkId = request.targetNetworkId,
-                baseDamage = 10f, // Default - should come from weapon
-                finalDamage = 10f,
+                baseDamage = baseDamage,
+                finalDamage = baseDamage,
                 damageMultiplier = 1f,
                 hitPoint = request.hitPoint,
                 hitDirection = request.GetDirection(),
@@ -664,8 +844,7 @@ namespace Arawn.GameCreator2.Networking
         private ValidatedDamage CalculateDamage(uint attackerNetworkId, NetworkHitRequest request,
             Character target, HitValidationResult lagResult)
         {
-            // Get weapon damage (simplified - you'd look this up from your weapon system)
-            float baseDamage = 10f;
+            float baseDamage = ResolveBaseDamage(attackerNetworkId, in request, target);
             
             // Apply zone multiplier
             float zoneMultiplier = lagResult.damageMultiplier;

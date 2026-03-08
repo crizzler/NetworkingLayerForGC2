@@ -59,7 +59,7 @@ public class MyNetworkManager : MonoBehaviour
         // Set up kick handler
         security.KickClient = (clientId, reason) =>
         {
-            // Your network layer's kick implementation
+            // Your transport adapter's disconnect/kick implementation
             MyNetworkTransport.KickClient(clientId, reason);
         };
     }
@@ -89,10 +89,11 @@ public NetworkStatModifyResponse ProcessStatModifyRequest(
     uint clientNetworkId)
 {
     // Validate using SecurityIntegration
+    uint correlationId = NetworkCorrelation.Compose(request.ActorNetworkId, request.RequestId);
     if (!SecurityIntegration.ValidateStatsRequest(
         clientNetworkId, 
-        request.TargetNetworkId,
-        request.RequestId, 
+        request.ActorNetworkId,
+        correlationId,
         "StatModify",
         request.StatHash, 
         request.Value))
@@ -115,7 +116,7 @@ For maximum security, you can patch GC2 source files to add deep network validat
 
 ### Patch Menu
 
-Access via: `Tools > Game Creator 2 Networking > Patches`
+Access via: `Game Creator > Networking Layer > Patches`
 
 | Module | What Gets Patched |
 |--------|-------------------|
@@ -131,20 +132,20 @@ Access via: `Tools > Game Creator 2 Networking > Patches`
 
 ### How to Apply Patches
 
-1. Go to `Tools > Game Creator 2 Networking > Patches > [Module] > Patch`
+1. Go to `Game Creator > Networking Layer > Patches > [Module] > Patch`
 2. Review the dialog explaining changes
 3. Click "Apply Patch"
 4. Backups are created automatically
 
 ### How to Remove Patches
 
-1. Go to `Tools > Game Creator 2 Networking > Patches > [Module] > Unpatch`
+1. Go to `Game Creator > Networking Layer > Patches > [Module] > Unpatch`
 2. Original files are restored from backup
 
 ### Check Patch Status
 
-- Single module: `Tools > Game Creator 2 Networking > Patches > [Module] > Check Status`
-- All modules: `Tools > Game Creator 2 Networking > Patches > Status Overview...`
+- Single module: `Game Creator > Networking Layer > Patches > [Module] > Check Status`
+- All modules: `Game Creator > Networking Layer > Patches > Status Overview...`
 
 ## Security Violation Types
 
@@ -266,7 +267,7 @@ security.OnClientBlocked += (clientId, duration) =>
 | `Patches/GC2PatcherBase.cs` | Abstract patcher base |
 | `Patches/GC2PatchManager.cs` | Menu items & status window |
 | `Patches/[Module]Patcher.cs` | Module-specific patchers |
-| `Patches/Backups/[Module]/` | Backup files |
+| `Library/GameCreator2NetworkingLayer/Patches/Backups/[Module]/` | Auto-generated backup files |
 
 ## Version Compatibility
 

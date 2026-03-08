@@ -49,7 +49,33 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
         protected string LegacyPatchMarker => $"{PATCH_MARKER_PREFIX}{ModuleName}_v1]";
         protected string BackupFolder => Path.Combine(BACKUP_BASE_FOLDER, ModuleName);
         protected string LegacyBackupFolder => Path.Combine(LEGACY_BACKUP_BASE_FOLDER, ModuleName);
-        protected virtual bool AllowLegacyBackupRestore => false;
+        protected virtual bool AllowLegacyBackupRestore => true;
+
+        protected enum ExistingPatchState
+        {
+            Continue,
+            SkipAlreadyPatched,
+            Failed
+        }
+
+        protected readonly struct VersionCompatibilityRequirement
+        {
+            public readonly string VersionFileRelativePath;
+            public readonly string[] SupportedVersionPatterns;
+
+            public VersionCompatibilityRequirement(string versionFileRelativePath, params string[] supportedVersionPatterns)
+            {
+                VersionFileRelativePath = versionFileRelativePath;
+                SupportedVersionPatterns = supportedVersionPatterns ?? Array.Empty<string>();
+            }
+        }
+
+        protected static VersionCompatibilityRequirement VersionRequirement(
+            string versionFileRelativePath,
+            params string[] supportedVersionPatterns)
+        {
+            return new VersionCompatibilityRequirement(versionFileRelativePath, supportedVersionPatterns);
+        }
 
         protected static bool TryReplaceWithFlexibleWhitespace(ref string content, string originalSnippet, string replacementSnippet)
         {
@@ -61,26 +87,51 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                 return true;
             }
 
-            string escaped = Regex.Escape(NormalizeLineEndings(originalSnippet));
-            escaped = escaped.Replace(@"\ ", @"\s+");
-            escaped = escaped.Replace(@"\r\n", @"\r?\n");
-            escaped = escaped.Replace(@"\n", @"\r?\n");
+            string pattern = BuildFlexibleSnippetRegex(NormalizeLineEndings(originalSnippet));
 
-            Match match = Regex.Match(content, escaped, RegexOptions.Multiline);
-            if (!match.Success)
+            try
             {
+                Match match = Regex.Match(
+                    content,
+                    pattern,
+                    RegexOptions.CultureInvariant | RegexOptions.Singleline,
+                    TimeSpan.FromMilliseconds(250));
+
+                if (!match.Success)
+                {
+                    return false;
+                }
+
+                content = content.Remove(match.Index, match.Length).Insert(match.Index, replacementSnippet);
+                return true;
+            }
+            catch (RegexMatchTimeoutException)
+            {
+                Debug.LogWarning(
+                    "[GC2 Networking] Flexible whitespace matcher timed out. " +
+                    "Skipping this replacement to avoid editor stall.");
                 return false;
             }
-
-            content = content.Remove(match.Index, match.Length).Insert(match.Index, replacementSnippet);
-            return true;
+            catch (ArgumentException ex)
+            {
+                Debug.LogError($"[GC2 Networking] Invalid flexible-match regex generated: {ex.Message}");
+                return false;
+            }
         }
 
         protected bool ContainsPatchMarker(string content)
         {
             if (string.IsNullOrEmpty(content)) return false;
-            return content.Contains(PatchMarker, StringComparison.Ordinal) ||
-                   content.Contains(LegacyPatchMarker, StringComparison.Ordinal);
+            if (content.Contains(PatchMarker, StringComparison.Ordinal) ||
+                content.Contains(LegacyPatchMarker, StringComparison.Ordinal))
+            {
+                return true;
+            }
+
+            // Accept any versioned marker for this module so older patched projects
+            // are still recognized when patch version strings evolve.
+            string moduleMarkerPrefix = $"{PATCH_MARKER_PREFIX}{ModuleName}_";
+            return content.Contains(moduleMarkerPrefix, StringComparison.Ordinal);
         }
 
         protected bool TryReplaceRequired(
@@ -96,6 +147,40 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
 
             Debug.LogError(errorMessage);
             return false;
+        }
+
+        protected ExistingPatchState PrepareContentForPatch(string relativePath, ref string content)
+        {
+            if (!ContainsPatchMarker(content))
+            {
+                return ExistingPatchState.Continue;
+            }
+
+            if (VerifyPatchedFile(relativePath, content, out _))
+            {
+                Debug.LogWarning($"[GC2 Networking] {relativePath} is already patched and valid.");
+                return ExistingPatchState.SkipAlreadyPatched;
+            }
+
+            Debug.LogWarning(
+                $"[GC2 Networking] {relativePath} contains stale/legacy patch markers. " +
+                "Attempting in-place migration cleanup before patching.");
+
+            if (!TryStripLegacyPatchArtifacts(ref content, out string failureReason))
+            {
+                Debug.LogError(
+                    $"[GC2 Networking] Could not migrate stale patch content in {relativePath}: {failureReason}");
+                return ExistingPatchState.Failed;
+            }
+
+            if (ContainsPatchMarker(content))
+            {
+                Debug.LogError(
+                    $"[GC2 Networking] Migration cleanup for {relativePath} left patch markers behind.");
+                return ExistingPatchState.Failed;
+            }
+
+            return ExistingPatchState.Continue;
         }
         
         // ════════════════════════════════════════════════════════════════════════════════════════
@@ -115,6 +200,51 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                     return false;
                 }
             }
+            return true;
+        }
+
+        public bool TryValidateVersionCompatibility(out string compatibilityMessage)
+        {
+            compatibilityMessage = null;
+            VersionCompatibilityRequirement[] requirements = GetVersionCompatibilityRequirements();
+            if (requirements == null || requirements.Length == 0)
+            {
+                return true;
+            }
+
+            for (int i = 0; i < requirements.Length; i++)
+            {
+                VersionCompatibilityRequirement requirement = requirements[i];
+                if (string.IsNullOrWhiteSpace(requirement.VersionFileRelativePath))
+                {
+                    continue;
+                }
+
+                string fullPath = Path.Combine(Application.dataPath, requirement.VersionFileRelativePath);
+                if (!File.Exists(fullPath))
+                {
+                    compatibilityMessage =
+                        $"Expected version file missing: {requirement.VersionFileRelativePath}";
+                    return false;
+                }
+
+                string version = File.ReadAllText(fullPath).Trim();
+                if (version.Length == 0)
+                {
+                    compatibilityMessage =
+                        $"Could not read version from {requirement.VersionFileRelativePath}";
+                    return false;
+                }
+
+                if (!IsVersionSupported(version, requirement.SupportedVersionPatterns))
+                {
+                    compatibilityMessage =
+                        $"Detected version {version} at {requirement.VersionFileRelativePath}, " +
+                        $"but supported versions are: {string.Join(", ", requirement.SupportedVersionPatterns)}";
+                    return false;
+                }
+            }
+
             return true;
         }
         
@@ -171,14 +301,24 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
         /// </summary>
         public bool ApplyPatch()
         {
+            bool assetEditingStarted = false;
+            bool reloadAssembliesLocked = false;
             try
             {
+                EditorApplication.LockReloadAssemblies();
+                reloadAssembliesLocked = true;
+
+                AssetDatabase.StartAssetEditing();
+                assetEditingStarted = true;
+
                 // Create backups first
                 CreateBackups();
                 
                 // Apply patches to each file
-                foreach (var relativePath in FilesToPatch)
+                for (int i = 0; i < FilesToPatch.Length; i++)
                 {
+                    string relativePath = FilesToPatch[i];
+
                     if (!PatchFile(relativePath))
                     {
                         // Rollback on failure
@@ -209,6 +349,20 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                 
                 return false;
             }
+            finally
+            {
+                if (assetEditingStarted)
+                {
+                    AssetDatabase.StopAssetEditing();
+                }
+
+                if (reloadAssembliesLocked)
+                {
+                    EditorApplication.UnlockReloadAssemblies();
+                }
+
+                AssetDatabase.Refresh();
+            }
         }
         
         /// <summary>
@@ -216,14 +370,35 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
         /// </summary>
         public bool RemovePatch()
         {
+            bool assetEditingStarted = false;
+            bool reloadAssembliesLocked = false;
             try
             {
+                EditorApplication.LockReloadAssemblies();
+                reloadAssembliesLocked = true;
+
+                AssetDatabase.StartAssetEditing();
+                assetEditingStarted = true;
                 return RestoreFromBackups();
             }
             catch (Exception e)
             {
                 Debug.LogError($"[GC2 Networking] Failed to unpatch {ModuleName}: {e}");
                 return false;
+            }
+            finally
+            {
+                if (assetEditingStarted)
+                {
+                    AssetDatabase.StopAssetEditing();
+                }
+
+                if (reloadAssembliesLocked)
+                {
+                    EditorApplication.UnlockReloadAssemblies();
+                }
+
+                AssetDatabase.Refresh();
             }
         }
         
@@ -258,6 +433,11 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
         protected virtual bool ShouldRequirePatchMarker(string relativePath)
         {
             return !relativePath.Contains("/Editor/");
+        }
+
+        protected virtual VersionCompatibilityRequirement[] GetVersionCompatibilityRequirements()
+        {
+            return Array.Empty<VersionCompatibilityRequirement>();
         }
 
         /// <summary>
@@ -393,12 +573,180 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
         {
             if (string.IsNullOrEmpty(content) || string.IsNullOrEmpty(pattern)) return 0;
 
-            MatchCollection matches = Regex.Matches(
-                content,
-                pattern,
-                RegexOptions.Multiline | RegexOptions.Singleline);
+            try
+            {
+                Regex regex = new Regex(
+                    pattern,
+                    RegexOptions.Multiline | RegexOptions.Singleline,
+                    TimeSpan.FromSeconds(1));
 
-            return matches.Count;
+                return regex.Matches(content).Count;
+            }
+            catch (RegexMatchTimeoutException)
+            {
+                Debug.LogWarning(
+                    $"[GC2 Networking] Regex verification timed out for pattern: {pattern}. " +
+                    "Treating as non-match to fail safely.");
+                return 0;
+            }
+            catch (ArgumentException ex)
+            {
+                Debug.LogError($"[GC2 Networking] Invalid regex pattern '{pattern}': {ex.Message}");
+                return 0;
+            }
+        }
+
+        private static string BuildFlexibleSnippetRegex(string snippet)
+        {
+            if (string.IsNullOrEmpty(snippet))
+            {
+                return string.Empty;
+            }
+
+            var pattern = new System.Text.StringBuilder(snippet.Length * 2);
+            bool previousWasWhitespace = false;
+
+            for (int i = 0; i < snippet.Length; i++)
+            {
+                char character = snippet[i];
+                if (char.IsWhiteSpace(character))
+                {
+                    if (previousWasWhitespace) continue;
+                    pattern.Append(@"\s+");
+                    previousWasWhitespace = true;
+                    continue;
+                }
+
+                pattern.Append(Regex.Escape(character.ToString()));
+                previousWasWhitespace = false;
+            }
+
+            return pattern.ToString();
+        }
+
+        private static bool TryStripLegacyPatchArtifacts(ref string content, out string failureReason)
+        {
+            content = NormalizeLineEndings(content);
+
+            try
+            {
+                // Remove module/version marker header lines.
+                content = Regex.Replace(
+                    content,
+                    @"(?m)^[ \t]*//\s*\[GC2_NETWORK_PATCH_[^\]]*\]\s*\n?",
+                    string.Empty,
+                    RegexOptions.CultureInvariant,
+                    TimeSpan.FromMilliseconds(250));
+
+                // Remove standard patch header comments.
+                content = Regex.Replace(
+                    content,
+                    @"(?m)^[ \t]*// This file has been patched for GC2 Networking server authority\.\s*\n?",
+                    string.Empty,
+                    RegexOptions.CultureInvariant,
+                    TimeSpan.FromMilliseconds(250));
+                content = Regex.Replace(
+                    content,
+                    @"(?m)^[ \t]*// Do not modify the patched sections manually\.\s*\n?",
+                    string.Empty,
+                    RegexOptions.CultureInvariant,
+                    TimeSpan.FromMilliseconds(250));
+                content = Regex.Replace(
+                    content,
+                    @"(?m)^[ \t]*// Use (?:Tools > Game Creator 2 Networking|Game Creator > Networking Layer) > Patches > .*? > Unpatch to restore\.\s*\n?",
+                    string.Empty,
+                    RegexOptions.CultureInvariant,
+                    TimeSpan.FromMilliseconds(250));
+            }
+            catch (Exception ex)
+            {
+                failureReason = $"Regex cleanup failed: {ex.Message}";
+                return false;
+            }
+
+            const string sectionStart = "// [GC2_NETWORK_PATCH]";
+            const string sectionEnd = "// [GC2_NETWORK_PATCH_END]";
+            int guard = 0;
+            while (true)
+            {
+                int startIndex = content.IndexOf(sectionStart, StringComparison.Ordinal);
+                if (startIndex < 0) break;
+                if (++guard > 512)
+                {
+                    failureReason = "Exceeded cleanup iteration guard while stripping patch sections.";
+                    return false;
+                }
+
+                int endIndex = content.IndexOf(sectionEnd, startIndex, StringComparison.Ordinal);
+                if (endIndex < 0)
+                {
+                    failureReason = "Found start patch marker without matching end marker.";
+                    return false;
+                }
+
+                int removeEnd = endIndex + sectionEnd.Length;
+                while (removeEnd < content.Length &&
+                       (content[removeEnd] == ' ' || content[removeEnd] == '\t'))
+                {
+                    removeEnd++;
+                }
+
+                if (removeEnd < content.Length && content[removeEnd] == '\n')
+                {
+                    removeEnd++;
+                }
+
+                content = content.Remove(startIndex, removeEnd - startIndex);
+            }
+
+            // If any loose section end markers remain, strip the line to avoid false-positive marker detection.
+            content = Regex.Replace(
+                content,
+                @"(?m)^[ \t]*//\s*\[GC2_NETWORK_PATCH_END\]\s*\n?",
+                string.Empty,
+                RegexOptions.CultureInvariant,
+                TimeSpan.FromMilliseconds(250));
+
+            // Keep formatting sane after block removals.
+            content = Regex.Replace(
+                content,
+                @"\n{3,}",
+                "\n\n",
+                RegexOptions.CultureInvariant,
+                TimeSpan.FromMilliseconds(250));
+
+            failureReason = null;
+            return true;
+        }
+
+        private static bool IsVersionSupported(string version, string[] supportedPatterns)
+        {
+            if (supportedPatterns == null || supportedPatterns.Length == 0)
+            {
+                return true;
+            }
+
+            for (int i = 0; i < supportedPatterns.Length; i++)
+            {
+                string pattern = supportedPatterns[i];
+                if (string.IsNullOrWhiteSpace(pattern)) continue;
+
+                string normalizedPattern = pattern.Trim();
+                if (normalizedPattern.EndsWith("*", StringComparison.Ordinal))
+                {
+                    string prefix = normalizedPattern.Substring(0, normalizedPattern.Length - 1);
+                    if (version.StartsWith(prefix, StringComparison.Ordinal))
+                    {
+                        return true;
+                    }
+                }
+                else if (string.Equals(version, normalizedPattern, StringComparison.Ordinal))
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
         
         // ════════════════════════════════════════════════════════════════════════════════════════
@@ -615,7 +963,7 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
             
             insertIndex += insertAfterPattern.Length;
             
-            string markerComment = $"\n\n{PatchMarker}\n// This file has been patched for GC2 Networking server authority.\n// Do not modify the patched sections manually.\n// Use Tools > Game Creator 2 Networking > Patches > {ModuleName} > Unpatch to restore.\n";
+            string markerComment = $"\n\n{PatchMarker}\n// This file has been patched for GC2 Networking server authority.\n// Do not modify the patched sections manually.\n// Use Game Creator > Networking Layer > Patches > {ModuleName} > Unpatch to restore.\n";
             
             return content.Insert(insertIndex, markerComment);
         }

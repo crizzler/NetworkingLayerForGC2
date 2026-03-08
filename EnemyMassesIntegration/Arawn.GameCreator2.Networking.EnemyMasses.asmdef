@@ -5,8 +5,7 @@
         "Arawn.GameCreator2.Networking",
         "Arawn.EnemyMasses.Runtime",
         "Arawn.NetworkingCore.Runtime",
-        "GameCreator.Runtime.Core",
-        "Unity.Netcode.Runtime"
+        "GameCreator.Runtime.Core"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],
@@ -22,11 +21,6 @@
             "name": "com.arawn.enemymasses",
             "expression": "",
             "define": "ENEMYMASSES"
-        },
-        {
-            "name": "com.unity.netcode.gameobjects",
-            "expression": "",
-            "define": "UNITY_NETCODE"
         }
     ],
     "noEngineReferences": false

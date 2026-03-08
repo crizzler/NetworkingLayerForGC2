@@ -21,6 +21,12 @@ namespace Arawn.GameCreator2.Networking
     {
         /// <summary>Unique identifier for this hit request (for response matching).</summary>
         public ushort requestId;
+
+        /// <summary>Authoritative actor network id for strict ownership validation.</summary>
+        public uint actorNetworkId;
+
+        /// <summary>Protocol v2 correlation id for sequencing/replay protection.</summary>
+        public uint correlationId;
         
         /// <summary>Network ID of the target character.</summary>
         public uint targetNetworkId;
@@ -59,7 +65,7 @@ namespace Arawn.GameCreator2.Networking
             return new Vector3(Mathf.Sin(angle), 0f, Mathf.Cos(angle));
         }
         
-        public const int SIZE_BYTES = 20; // 2 + 4 + 4 + 12 + 2 + 4 + 1 ≈ 29, packed to ~20
+        public const int SIZE_BYTES = 28;
     }
     
     /// <summary>
@@ -93,6 +99,12 @@ namespace Arawn.GameCreator2.Networking
     {
         /// <summary>Matches the requestId from NetworkHitRequest.</summary>
         public ushort requestId;
+
+        /// <summary>Actor network id from request for response correlation.</summary>
+        public uint actorNetworkId;
+
+        /// <summary>Correlation id from request for response correlation.</summary>
+        public uint correlationId;
         
         /// <summary>Whether the hit was validated by the server.</summary>
         public HitResult result;
@@ -106,7 +118,7 @@ namespace Arawn.GameCreator2.Networking
         /// <summary>Flags for additional hit effects.</summary>
         public HitEffectFlags effects;
         
-        public const int SIZE_BYTES = 12;
+        public const int SIZE_BYTES = 20;
     }
     
     /// <summary>
@@ -136,7 +148,16 @@ namespace Arawn.GameCreator2.Networking
         InvalidWeapon = 6,
         
         /// <summary>Request too old (exceeded max rewind time).</summary>
-        TooOld = 7
+        TooOld = 7,
+
+        /// <summary>Protocol context did not match actor/correlation requirements.</summary>
+        ProtocolMismatch = 8,
+
+        /// <summary>Ownership/rate/sequence validation rejected this request.</summary>
+        SecurityViolation = 9,
+
+        /// <summary>Request queue was full and request was dropped.</summary>
+        RateLimitExceeded = 10
     }
     
     /// <summary>

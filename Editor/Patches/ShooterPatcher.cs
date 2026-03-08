@@ -1,3 +1,5 @@
+using System;
+using System.Text.RegularExpressions;
 using UnityEngine;
 
 namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
@@ -9,7 +11,7 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
     public class ShooterPatcher : GC2PatcherBase
     {
         public override string ModuleName => "Shooter";
-        public override string PatchVersion => "1.0.0";
+        public override string PatchVersion => "2.2.0-shooter";
         public override string DisplayName => "Shooter (Game Creator 2)";
         
         public override string PatchDescription =>
@@ -27,6 +29,14 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
             "Plugins/GameCreator/Packages/Shooter/Editor/Editors/ReloadEditor.cs",
             "Plugins/GameCreator/Packages/Shooter/Editor/Editors/ShooterWeaponEditor.cs"
         };
+
+        protected override VersionCompatibilityRequirement[] GetVersionCompatibilityRequirements()
+        {
+            return new[]
+            {
+                VersionRequirement("Plugins/GameCreator/Packages/Shooter/Editor/Version.txt", "2.2.*")
+            };
+        }
 
         protected override string[] GetRequiredPatchTokens(string relativePath)
         {
@@ -73,8 +83,7 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                 return new System.Collections.Generic.Dictionary<string, int>
                 {
                     { "NetworkShootValidator.Invoke", 1 },
-                    { "NetworkShotFired?.Invoke(this, origin, direction, chargeRation)", 1 },
-                    { "(this.Character.Time.Time - this.m_LastTriggerPull) / maxChargeTime", 1 }
+                    { "NetworkShotFired?.Invoke(", 1 }
                 };
             }
 
@@ -87,9 +96,9 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
             {
                 return new System.Collections.Generic.Dictionary<string, int>
                 {
-                    { @"(?s)\bvoid\s+PullTrigger\s*\([^)]*\)\s*\{.*?NetworkPullTriggerValidator\.Invoke", 1 },
-                    { @"(?s)\bvoid\s+ReleaseTrigger\s*\([^)]*\)\s*\{.*?NetworkReleaseTriggerValidator\.Invoke", 1 },
-                    { @"(?s)\bvoid\s+Reload\s*\([^)]*\)\s*\{.*?NetworkReloadValidator\.Invoke", 1 }
+                    { @"NetworkPullTriggerValidator\.Invoke", 1 },
+                    { @"NetworkReleaseTriggerValidator\.Invoke", 1 },
+                    { @"NetworkReloadValidator\.Invoke", 1 }
                 };
             }
 
@@ -97,9 +106,8 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
             {
                 return new System.Collections.Generic.Dictionary<string, int>
                 {
-                    { @"(?s)\bvoid\s+Shoot\s*\([^)]*\)\s*\{.*?NetworkShootValidator\.Invoke", 1 },
-                    { @"(?s)\bvoid\s+Shoot\s*\([^)]*\)\s*\{.*?NetworkShotFired\?\.Invoke\(\s*this\s*,\s*origin\s*,\s*direction\s*,\s*chargeRation\s*\)", 1 },
-                    { @"maxChargeTime\s*>\s*0f\s*\?\s*Mathf\.Clamp01\(\(this\.Character\.Time\.Time\s*-\s*this\.m_LastTriggerPull\)\s*/\s*maxChargeTime\)", 1 }
+                    { @"NetworkShootValidator\.Invoke\(this\)", 1 },
+                    { @"NetworkShotFired\?\.Invoke\(", 1 }
                 };
             }
 
@@ -109,13 +117,10 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
         protected override bool PatchFile(string relativePath)
         {
             string content = ReadFile(relativePath);
-            
-            // Check if already patched (supports legacy marker versions)
-            if (ContainsPatchMarker(content))
-            {
-                Debug.LogWarning($"[GC2 Networking] {relativePath} already contains patch marker.");
-                return true;
-            }
+
+            ExistingPatchState existingPatchState = PrepareContentForPatch(relativePath, ref content);
+            if (existingPatchState == ExistingPatchState.SkipAlreadyPatched) return true;
+            if (existingPatchState == ExistingPatchState.Failed) return false;
             
             if (relativePath.EndsWith("ShooterStance.cs"))
             {
@@ -158,7 +163,7 @@ using UnityEngine;
 " + PatchMarker + @"
 // This file has been patched for GC2 Networking server authority.
 // Do not modify the patched sections manually.
-// Use Tools > Game Creator 2 Networking > Patches > Shooter > Unpatch to restore.
+// Use Game Creator > Networking Layer > Patches > Shooter > Unpatch to restore.
 
 namespace GameCreator.Runtime.Shooter
 {
@@ -184,9 +189,11 @@ namespace GameCreator.Runtime.Shooter
         // [GC2_NETWORK_PATCH_END]
 ";
 
-            if (!TryReplaceWithFlexibleWhitespace(ref content, originalUsings, patchedUsings))
+            if (!content.Contains("NetworkPullTriggerValidator") &&
+                !TryReplaceWithFlexibleWhitespace(ref content, originalUsings, patchedUsings) &&
+                !TryInsertShooterStanceNetworkingHeader(ref content))
             {
-                Debug.LogError("[GC2 Networking] Could not find expected using statements in ShooterStance.cs.");
+                Debug.LogError("[GC2 Networking] Could not add network hook header in ShooterStance.cs.");
                 return false;
             }
             
@@ -214,7 +221,8 @@ namespace GameCreator.Runtime.Shooter
             int shooterWeaponId = shooterWeapon.GetInstanceID();
             if (!this.m_Equipment.TryGetValue(shooterWeaponId, out WeaponData weaponData)) return;";
 
-            if (!TryReplaceWithFlexibleWhitespace(ref content, originalPullTrigger, patchedPullTrigger))
+            if (!TryReplaceWithFlexibleWhitespace(ref content, originalPullTrigger, patchedPullTrigger) &&
+                !TryInjectStanceValidation(ref content, "PullTrigger", "NetworkPullTriggerValidator"))
             {
                 Debug.LogError("[GC2 Networking] Could not find expected PullTrigger method in ShooterStance.cs.");
                 return false;
@@ -261,7 +269,8 @@ namespace GameCreator.Runtime.Shooter
         }
         // [GC2_NETWORK_PATCH_END]";
 
-            if (!TryReplaceWithFlexibleWhitespace(ref content, originalReleaseTrigger, patchedReleaseTrigger))
+            if (!TryReplaceWithFlexibleWhitespace(ref content, originalReleaseTrigger, patchedReleaseTrigger) &&
+                !TryInjectStanceValidation(ref content, "ReleaseTrigger", "NetworkReleaseTriggerValidator"))
             {
                 Debug.LogError("[GC2 Networking] Could not find expected ReleaseTrigger method in ShooterStance.cs.");
                 return false;
@@ -300,7 +309,8 @@ namespace GameCreator.Runtime.Shooter
         }
         // [GC2_NETWORK_PATCH_END]";
 
-            if (!TryReplaceWithFlexibleWhitespace(ref content, originalReload, patchedReload))
+            if (!TryReplaceWithFlexibleWhitespace(ref content, originalReload, patchedReload) &&
+                !TryInjectStanceValidation(ref content, "Reload", "NetworkReloadValidator"))
             {
                 Debug.LogError("[GC2 Networking] Could not find expected Reload method in ShooterStance.cs.");
                 return false;
@@ -352,6 +362,12 @@ namespace GameCreator.Runtime.Shooter
             {
                 Debug.Log("[GC2 Networking] Applied flexible replacement for CancelTrigger block.");
             }
+
+            if (!EnsureStanceDirectMethods(ref content))
+            {
+                Debug.LogError("[GC2 Networking] Could not ensure direct ShooterStance methods were inserted.");
+                return false;
+            }
             
             WriteFile(relativePath, content);
             Debug.Log($"[GC2 Networking] Patched {relativePath}");
@@ -383,7 +399,7 @@ using UnityEngine;
 " + PatchMarker + @"
 // This file has been patched for GC2 Networking server authority.
 // Do not modify the patched sections manually.
-// Use Tools > Game Creator 2 Networking > Patches > Shooter > Unpatch to restore.
+// Use Game Creator > Networking Layer > Patches > Shooter > Unpatch to restore.
 
 namespace GameCreator.Runtime.Shooter
 {
@@ -406,29 +422,22 @@ namespace GameCreator.Runtime.Shooter
         // [GC2_NETWORK_PATCH_END]
 ";
 
-            if (!TryReplaceWithFlexibleWhitespace(ref content, originalUsings, patchedUsings))
+            if (!content.Contains("NetworkShootValidator"))
             {
-                Debug.LogError("[GC2 Networking] Could not find expected using statements in WeaponData.cs.");
-                return false;
+                if (!TryReplaceWithFlexibleWhitespace(ref content, originalUsings, patchedUsings) &&
+                    !TryInsertWeaponDataNetworkingHeader(ref content))
+                {
+                    Debug.LogError("[GC2 Networking] Could not add network hook header in WeaponData.cs.");
+                    return false;
+                }
             }
 
             // Fix charge ratio math precedence bug:
             // (now - lastPull) / maxChargeTime
-            const string brokenChargeRatio =
-                " ? Mathf.Clamp01(this.Character.Time.Time - this.m_LastTriggerPull / maxChargeTime)";
-            const string fixedChargeRatio =
-                " ? Mathf.Clamp01((this.Character.Time.Time - this.m_LastTriggerPull) / maxChargeTime)";
-
-            if (!content.Contains(fixedChargeRatio))
+            if (!TryFixLegacyChargeRatioExpression(ref content))
             {
-                if (!TryReplaceRequired(
-                        ref content,
-                        brokenChargeRatio,
-                        fixedChargeRatio,
-                        "[GC2 Networking] Could not find expected charge ratio expression in WeaponData.cs."))
-                {
-                    return false;
-                }
+                Debug.LogError("[GC2 Networking] Could not normalize legacy charge ratio expression in WeaponData.cs.");
+                return false;
             }
             
             // Patch the private Shoot method - insert validation at the beginning
@@ -449,49 +458,18 @@ namespace GameCreator.Runtime.Shooter
             if (this.Weapon.Jam.Run(this.WeaponArgs, this.IsJammed))
             {";
 
-            if (!TryReplaceWithFlexibleWhitespace(ref content, originalShoot, patchedShoot))
+            if (!content.Contains("NetworkShootValidator.Invoke(this)") &&
+                !TryReplaceWithFlexibleWhitespace(ref content, originalShoot, patchedShoot) &&
+                !TryInjectShootValidationFallback(ref content))
             {
                 Debug.LogError("[GC2 Networking] Could not find expected Shoot method in WeaponData.cs.");
                 return false;
             }
-            
-            // Find where shot is confirmed successful and add network notification
-            // Look for the line after success shot happens
-            string shotSuccess = @"            bool success = this.Weapon.Projectile.Run(
-                this.WeaponArgs, 
-                this.Weapon,
-                chargeRation,
-                this.m_LastTriggerPull
-            );
 
-            if (!success)
-            {";
-            
-            string patchedShotSuccess = @"            bool success = this.Weapon.Projectile.Run(
-                this.WeaponArgs, 
-                this.Weapon,
-                chargeRation,
-                this.m_LastTriggerPull
-            );
-            
-            // [GC2_NETWORK_PATCH] Notify network of successful shot
-            if (success)
+            if (!HasShotFiredInvocation(content) &&
+                !TryInjectShotSuccessNotification(ref content))
             {
-                Vector3 origin = this.Prop != null ? this.Prop.transform.position : this.Character.transform.position;
-                Vector3 direction = this.Prop != null ? this.Prop.transform.forward : this.Character.transform.forward;
-                NetworkShotFired?.Invoke(this, origin, direction, chargeRation);
-            }
-            // [GC2_NETWORK_PATCH_END]
-
-            if (!success)
-            {";
-
-            if (!TryReplaceRequired(
-                    ref content,
-                    shotSuccess,
-                    patchedShotSuccess,
-                    "[GC2 Networking] Could not find expected shot success block in WeaponData.cs."))
-            {
+                Debug.LogError("[GC2 Networking] Could not find shot success anchor in WeaponData.cs.");
                 return false;
             }
             
@@ -509,14 +487,14 @@ namespace GameCreator.Runtime.Shooter
             }
             
             float maxChargeTime = this.Weapon.Fire.MaxChargeTime(this.WeaponArgs);
-            float chargeRation = 1f;
-            
-            bool success = this.Weapon.Projectile.Run(
-                this.WeaponArgs, 
-                this.Weapon,
-                chargeRation,
-                this.m_LastTriggerPull
-            );
+	            float chargeRatio = 1f;
+	            
+	            bool success = this.Weapon.Projectile.Run(
+	                this.WeaponArgs, 
+	                this.Weapon,
+	                chargeRatio,
+	                this.m_LastTriggerPull
+	            );
 
             if (!success) return;
 
@@ -527,24 +505,10 @@ namespace GameCreator.Runtime.Shooter
         // [GC2_NETWORK_PATCH_END]
 ";
 
-                string onShootSignature = @"        internal void OnShoot(float duration)";
-                bool insertedBeforeOnShoot = TryReplaceWithFlexibleWhitespace(
-                    ref content,
-                    onShootSignature,
-                    directShootMethod + "\n" + onShootSignature);
-
-                if (!insertedBeforeOnShoot)
+                if (!TryInsertDirectShootMethod(ref content, directShootMethod))
                 {
-                    // Fallback anchor for alternate GC2 source variants.
-                    string publicMethods = "// PUBLIC METHODS: ";
-                    if (!TryReplaceRequired(
-                            ref content,
-                            publicMethods,
-                            directShootMethod + "\n        " + publicMethods,
-                            "[GC2 Networking] Could not insert ShootDirect method in WeaponData.cs."))
-                    {
-                        return false;
-                    }
+                    Debug.LogError("[GC2 Networking] Could not insert ShootDirect method in WeaponData.cs.");
+                    return false;
                 }
             }
             
@@ -552,39 +516,535 @@ namespace GameCreator.Runtime.Shooter
             Debug.Log($"[GC2 Networking] Patched {relativePath}");
             return true;
         }
-        
-        private bool PatchEditorFile(string relativePath, string content)
+
+        private bool TryInsertWeaponDataNetworkingHeader(ref string content)
         {
-            // Fix obsolete API: EditorUtility.InstanceIDToObject -> EditorUtility.EntityIdToObject
-            // This is a GC2 bug that we fix as part of our patch
-            
-            string obsoleteCall = "EditorUtility.InstanceIDToObject(instanceID)";
-            string fixedCall = "EditorUtility.EntityIdToObject(instanceID)";
-            
-            if (content.Contains(fixedCall))
-            {
-                // Already fixed
-                Debug.Log($"[GC2 Networking] {relativePath} already has the API fix.");
-                return true;
-            }
-            
-            if (!content.Contains(obsoleteCall))
-            {
-                Debug.LogWarning($"[GC2 Networking] Could not find obsolete InstanceIDToObject call in {relativePath}.");
-                return true; // Not a failure, just nothing to fix
-            }
-            
-            if (!TryReplaceRequired(
-                    ref content,
-                    obsoleteCall,
-                    fixedCall,
-                    $"[GC2 Networking] Could not replace obsolete API usage in {relativePath}."))
+            Match namespaceMatch = Regex.Match(
+                content,
+                @"(?m)^\s*namespace\s+GameCreator\.Runtime\.Shooter\s*$");
+            if (!namespaceMatch.Success)
             {
                 return false;
             }
+
+            if (!content.Contains(PatchMarker, StringComparison.Ordinal))
+            {
+                string header =
+                    PatchMarker + "\n" +
+                    "// This file has been patched for GC2 Networking server authority.\n" +
+                    "// Do not modify the patched sections manually.\n" +
+                    "// Use Game Creator > Networking Layer > Patches > Shooter > Unpatch to restore.\n\n";
+                content = content.Insert(namespaceMatch.Index, header);
+            }
+
+            Match classMatch = Regex.Match(
+                content,
+                @"(?m)^\s*public\s+class\s+WeaponData\b[^{]*\{\s*$");
+            if (!classMatch.Success)
+            {
+                return false;
+            }
+
+            const string staticHooks = @"
+        // [GC2_NETWORK_PATCH] Static hooks for server-authoritative networking
+        
+        /// <summary>Validates if a shot should proceed locally.</summary>
+        public static Func<WeaponData, bool> NetworkShootValidator;
+        
+        /// <summary>Called when a shot is fired (for network sync).</summary>
+        public static Action<WeaponData, Vector3, Vector3, float> NetworkShotFired;
+        
+        /// <summary>Called when a projectile hits something (for damage validation).</summary>
+        public static Action<WeaponData, GameObject, Vector3, Vector3> NetworkProjectileHit;
+        
+        /// <summary>Returns true if networking hooks are active.</summary>
+        public static bool IsNetworkingActive => NetworkShootValidator != null;
+        
+        // [GC2_NETWORK_PATCH_END]
+";
+
+            int insertionIndex = classMatch.Index + classMatch.Length;
+            content = content.Insert(insertionIndex, staticHooks);
+            return true;
+        }
+
+        private bool TryInsertShooterStanceNetworkingHeader(ref string content)
+        {
+            Match namespaceMatch = Regex.Match(
+                content,
+                @"(?m)^\s*namespace\s+GameCreator\.Runtime\.Shooter\s*$");
+            if (!namespaceMatch.Success)
+            {
+                return false;
+            }
+
+            if (!content.Contains(PatchMarker, StringComparison.Ordinal))
+            {
+                string header =
+                    PatchMarker + "\n" +
+                    "// This file has been patched for GC2 Networking server authority.\n" +
+                    "// Do not modify the patched sections manually.\n" +
+                    "// Use Game Creator > Networking Layer > Patches > Shooter > Unpatch to restore.\n\n";
+                content = content.Insert(namespaceMatch.Index, header);
+            }
+
+            Match classMatch = Regex.Match(
+                content,
+                @"(?m)^\s*public\s+class\s+ShooterStance\b[^{]*\{\s*$");
+            if (!classMatch.Success)
+            {
+                return false;
+            }
+
+            const string staticHooks = @"
+        // [GC2_NETWORK_PATCH] Static hooks for server-authoritative networking
+        
+        /// <summary>Validates if pulling trigger should proceed locally.</summary>
+        public static Func<ShooterStance, ShooterWeapon, bool> NetworkPullTriggerValidator;
+        
+        /// <summary>Validates if releasing trigger should proceed locally.</summary>
+        public static Func<ShooterStance, ShooterWeapon, bool> NetworkReleaseTriggerValidator;
+        
+        /// <summary>Validates if reload should proceed locally.</summary>
+        public static Func<ShooterStance, ShooterWeapon, bool> NetworkReloadValidator;
+        
+        /// <summary>Called when a shot is fired (for network sync).</summary>
+        public static Action<ShooterStance, ShooterWeapon, Vector3, Vector3> NetworkShotFired;
+        
+        /// <summary>Returns true if networking hooks are active.</summary>
+        public static bool IsNetworkingActive => NetworkPullTriggerValidator != null;
+        
+        // [GC2_NETWORK_PATCH_END]
+";
+
+            int insertionIndex = classMatch.Index + classMatch.Length;
+            content = content.Insert(insertionIndex, staticHooks);
+            return true;
+        }
+
+        private static bool TryInjectStanceValidation(ref string content, string methodName, string validatorFieldName)
+        {
+            if (!TryFindMethodBodySpan(content, methodName, out int bodyStart, out int bodyLength))
+            {
+                return false;
+            }
+
+            string body = content.Substring(bodyStart, bodyLength);
+            if (body.Contains($"{validatorFieldName}.Invoke", StringComparison.Ordinal))
+            {
+                return true;
+            }
+
+            Match weaponVariableMatch = Regex.Match(
+                body,
+                @"ShooterWeapon\s+(?<name>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*this\.GetWeapon\s*\(",
+                RegexOptions.CultureInvariant);
+            string weaponVariable = weaponVariableMatch.Success
+                ? weaponVariableMatch.Groups["name"].Value
+                : "shooterWeapon";
+
+            int insertionOffset = 0;
+            Match nullCheckMatch = Regex.Match(
+                body,
+                $@"if\s*\(\s*{Regex.Escape(weaponVariable)}\s*==\s*null\s*\)\s*return\s*;",
+                RegexOptions.CultureInvariant);
+            if (nullCheckMatch.Success)
+            {
+                insertionOffset = nullCheckMatch.Index + nullCheckMatch.Length;
+            }
+            else if (weaponVariableMatch.Success)
+            {
+                insertionOffset = weaponVariableMatch.Index + weaponVariableMatch.Length;
+            }
+
+            string validationBlock = $@"
             
+            // [GC2_NETWORK_PATCH] Server authority check
+            if ({validatorFieldName} != null && !{validatorFieldName}.Invoke(this, {weaponVariable}))
+            {{
+                return; // Network will handle this
+            }}
+            // [GC2_NETWORK_PATCH_END]
+";
+
+            content = content.Insert(bodyStart + insertionOffset, validationBlock);
+            return true;
+        }
+
+        private static bool EnsureStanceDirectMethods(ref string content)
+        {
+            const string releaseDirectMethod = @"
+        // [GC2_NETWORK_PATCH] Server-side direct release trigger (bypasses validation)
+        public void ReleaseTriggerDirect(ShooterWeapon optionalWeapon)
+        {
+            ShooterWeapon shooterWeapon = this.GetWeapon(optionalWeapon);
+            if (shooterWeapon == null) return;
+            int shooterWeaponId = shooterWeapon.GetInstanceID();
+            if (!this.m_Equipment.TryGetValue(shooterWeaponId, out WeaponData weaponData)) return;
+            weaponData.OnReleaseTrigger();
+        }
+        // [GC2_NETWORK_PATCH_END]
+";
+
+            const string pullDirectMethod = @"
+        // [GC2_NETWORK_PATCH] Server-side direct pull trigger (bypasses validation)
+        public void PullTriggerDirect(ShooterWeapon optionalWeapon)
+        {
+            ShooterWeapon shooterWeapon = this.GetWeapon(optionalWeapon);
+            if (shooterWeapon == null) return;
+            int shooterWeaponId = shooterWeapon.GetInstanceID();
+            if (!this.m_Equipment.TryGetValue(shooterWeaponId, out WeaponData weaponData)) return;
+
+            if (this.Reloading.WeaponReloading == shooterWeapon)
+            {
+                if (!this.Reloading.CanPartialReload) return;
+                this.StopReload(shooterWeapon, CancelReason.PartialReload);
+                return;
+            }
+
+            weaponData.OnPullTrigger();
+        }
+        // [GC2_NETWORK_PATCH_END]
+";
+
+            const string reloadDirectMethod = @"
+        // [GC2_NETWORK_PATCH] Server-side direct reload (bypasses validation)
+        public async Task ReloadDirect(ShooterWeapon optionalWeapon)
+        {
+            ShooterWeapon shooterWeapon = this.GetWeapon(optionalWeapon);
+            if (shooterWeapon == null) return;
+            await this.Reloading.Reload(shooterWeapon);
+        }
+        // [GC2_NETWORK_PATCH_END]
+";
+
+            if (!EnsureStanceMethod(ref content, "ReleaseTriggerDirect(", releaseDirectMethod))
+            {
+                return false;
+            }
+
+            if (!EnsureStanceMethod(ref content, "PullTriggerDirect(", pullDirectMethod))
+            {
+                return false;
+            }
+
+            if (!EnsureStanceMethod(ref content, "ReloadDirect(", reloadDirectMethod))
+            {
+                return false;
+            }
+
+            return true;
+        }
+
+        private static bool EnsureStanceMethod(ref string content, string signatureToken, string methodSnippet)
+        {
+            if (content.Contains(signatureToken, StringComparison.Ordinal))
+            {
+                return true;
+            }
+
+            Match stopReloadMatch = Regex.Match(
+                content,
+                @"(?m)^\s*(?:public|private|internal|protected)\s+void\s+StopReload\s*\(",
+                RegexOptions.CultureInvariant);
+            if (stopReloadMatch.Success)
+            {
+                content = content.Insert(stopReloadMatch.Index, methodSnippet + "\n");
+                return true;
+            }
+
+            Match privateMethodsMatch = Regex.Match(
+                content,
+                @"(?m)^\s*//\s*PRIVATE METHODS:\s*",
+                RegexOptions.CultureInvariant);
+            if (privateMethodsMatch.Success)
+            {
+                content = content.Insert(privateMethodsMatch.Index, methodSnippet + "\n");
+                return true;
+            }
+
+            int classClosingIndex = content.LastIndexOf("\n    }", StringComparison.Ordinal);
+            if (classClosingIndex < 0)
+            {
+                return false;
+            }
+
+            content = content.Insert(classClosingIndex, "\n" + methodSnippet + "\n");
+            return true;
+        }
+
+        private static bool TryFixLegacyChargeRatioExpression(ref string content)
+        {
+            const string normalizedExpression =
+                "Mathf.Clamp01((this.Character.Time.Time - this.m_LastTriggerPull) / maxChargeTime)";
+
+            if (content.Contains(normalizedExpression, StringComparison.Ordinal))
+            {
+                return true;
+            }
+
+            string updated = Regex.Replace(
+                content,
+                @"Mathf\.Clamp01\(\s*this\.Character\.Time\.Time\s*-\s*this\.m_LastTriggerPull\s*/\s*maxChargeTime\s*\)",
+                normalizedExpression,
+                RegexOptions.CultureInvariant);
+
+            if (updated != content)
+            {
+                content = updated;
+                return true;
+            }
+
+            // Normalize equivalent parenthesized variants to a deterministic form.
+            updated = Regex.Replace(
+                content,
+                @"Mathf\.Clamp01\(\s*\(\s*this\.Character\.Time\.Time\s*-\s*this\.m_LastTriggerPull\s*\)\s*/\s*maxChargeTime\s*\)",
+                normalizedExpression,
+                RegexOptions.CultureInvariant);
+
+            if (updated != content)
+            {
+                content = updated;
+            }
+
+            updated = Regex.Replace(
+                content,
+                @"\bchargeRation\b",
+                "chargeRatio",
+                RegexOptions.CultureInvariant);
+
+            if (updated != content)
+            {
+                content = updated;
+            }
+
+            return true;
+        }
+
+        private static bool HasShotFiredInvocation(string content)
+        {
+            if (string.IsNullOrEmpty(content))
+            {
+                return false;
+            }
+
+            return Regex.IsMatch(
+                content,
+                @"NetworkShotFired\?\.Invoke\(\s*this\s*,\s*origin\s*,\s*direction\s*,\s*(?:chargeRati(?:o|on)|[^)\r\n]+)\)",
+                RegexOptions.CultureInvariant);
+        }
+
+        private static string ResolveChargeRatioIdentifier(string methodBody)
+        {
+            if (string.IsNullOrEmpty(methodBody))
+            {
+                return "chargeRatio";
+            }
+
+            if (Regex.IsMatch(methodBody, @"\bchargeRatio\b", RegexOptions.CultureInvariant))
+            {
+                return "chargeRatio";
+            }
+
+            if (Regex.IsMatch(methodBody, @"\bchargeRation\b", RegexOptions.CultureInvariant))
+            {
+                return "chargeRation";
+            }
+
+            return "chargeRatio";
+        }
+
+        private static bool TryInjectShootValidationFallback(ref string content)
+        {
+            if (!TryFindMethodBodySpan(content, "Shoot", out int bodyStart, out int bodyLength))
+            {
+                return false;
+            }
+
+            string body = content.Substring(bodyStart, bodyLength);
+            if (body.Contains("NetworkShootValidator.Invoke(this)", StringComparison.Ordinal))
+            {
+                return true;
+            }
+
+            Match anchor = Regex.Match(body, @"if\s*\(\s*this\.Weapon\.Jam\.Run\(", RegexOptions.CultureInvariant);
+            if (!anchor.Success)
+            {
+                return false;
+            }
+
+            const string validationBlock = @"
+            // [GC2_NETWORK_PATCH] Server authority check
+            if (NetworkShootValidator != null && !NetworkShootValidator.Invoke(this))
+            {
+                return; // Network will handle this
+            }
+            // [GC2_NETWORK_PATCH_END]
+            
+";
+
+            content = content.Insert(bodyStart + anchor.Index, validationBlock);
+            return true;
+        }
+
+        private static bool TryInjectShotSuccessNotification(ref string content)
+        {
+            if (!TryFindMethodBodySpan(content, "Shoot", out int bodyStart, out int bodyLength))
+            {
+                return false;
+            }
+
+            string body = content.Substring(bodyStart, bodyLength);
+            if (HasShotFiredInvocation(body))
+            {
+                return true;
+            }
+
+            string chargeRatioIdentifier = ResolveChargeRatioIdentifier(body);
+            string notifyBlock = $@"
+            // [GC2_NETWORK_PATCH] Notify network of successful shot
+            if (success)
+            {{
+                Vector3 origin = this.Prop != null ? this.Prop.transform.position : this.Character.transform.position;
+                Vector3 direction = this.Prop != null ? this.Prop.transform.forward : this.Character.transform.forward;
+                NetworkShotFired?.Invoke(this, origin, direction, {chargeRatioIdentifier});
+            }}
+            // [GC2_NETWORK_PATCH_END]
+
+";
+
+            Match successAssignment = Regex.Match(
+                body,
+                @"bool\s+success\s*=\s*this\.Weapon\.Projectile\.Run\s*\(",
+                RegexOptions.CultureInvariant);
+            if (successAssignment.Success)
+            {
+                int absoluteIndex = bodyStart + successAssignment.Index;
+                int parenDepth = 0;
+                for (int i = absoluteIndex; i < content.Length; i++)
+                {
+                    char character = content[i];
+                    if (character == '(') parenDepth++;
+                    else if (character == ')') parenDepth = Math.Max(0, parenDepth - 1);
+                    else if (character == ';' && parenDepth == 0)
+                    {
+                        content = content.Insert(i + 1, notifyBlock);
+                        return true;
+                    }
+                }
+            }
+
+            Match failureBranchAnchor = Regex.Match(body, @"if\s*\(\s*!\s*success\s*\)", RegexOptions.CultureInvariant);
+            if (!failureBranchAnchor.Success)
+            {
+                return false;
+            }
+
+            content = content.Insert(bodyStart + failureBranchAnchor.Index, notifyBlock);
+            return true;
+        }
+
+        private static bool TryInsertDirectShootMethod(ref string content, string directShootMethod)
+        {
+            Match onShootMatch = Regex.Match(
+                content,
+                @"(?m)^\s*(?:public|internal|private|protected)\s+void\s+OnShoot\s*\(",
+                RegexOptions.CultureInvariant);
+            if (onShootMatch.Success)
+            {
+                content = content.Insert(onShootMatch.Index, directShootMethod + "\n");
+                return true;
+            }
+
+            Match publicMethodsMatch = Regex.Match(
+                content,
+                @"(?m)^\s*//\s*PUBLIC METHODS:\s*",
+                RegexOptions.CultureInvariant);
+            if (publicMethodsMatch.Success)
+            {
+                content = content.Insert(publicMethodsMatch.Index, directShootMethod + "\n");
+                return true;
+            }
+
+            int classClosingIndex = content.LastIndexOf("\n    }", StringComparison.Ordinal);
+            if (classClosingIndex < 0)
+            {
+                return false;
+            }
+
+            content = content.Insert(classClosingIndex, "\n" + directShootMethod + "\n");
+            return true;
+        }
+
+        private static bool TryFindMethodBodySpan(
+            string content,
+            string methodName,
+            out int bodyStart,
+            out int bodyLength)
+        {
+            bodyStart = 0;
+            bodyLength = 0;
+
+            Match methodMatch = Regex.Match(
+                content,
+                $@"(?m)^\s*(?:public|private|internal|protected)\s+(?:async\s+)?(?:void|Task(?:<[^>]+>)?)\s+{Regex.Escape(methodName)}\s*\([^)]*\)\s*\{{",
+                RegexOptions.CultureInvariant);
+            if (!methodMatch.Success)
+            {
+                return false;
+            }
+
+            int braceIndex = content.IndexOf('{', methodMatch.Index + methodMatch.Length - 1);
+            if (braceIndex < 0)
+            {
+                return false;
+            }
+
+            int depth = 0;
+            for (int i = braceIndex; i < content.Length; i++)
+            {
+                if (content[i] == '{')
+                {
+                    depth++;
+                }
+                else if (content[i] == '}')
+                {
+                    depth--;
+                    if (depth == 0)
+                    {
+                        bodyStart = braceIndex + 1;
+                        bodyLength = i - braceIndex - 1;
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+        
+        private bool PatchEditorFile(string relativePath, string content)
+        {
+            // Fix obsolete API: EditorUtility.InstanceIDToObject(...) -> EditorUtility.EntityIdToObject(...)
+            // Handle both legacy (instanceID) and modern (entityId) parameter names.
+            const string obsoleteCallPrefix = "EditorUtility.InstanceIDToObject(";
+            const string fixedCallPrefix = "EditorUtility.EntityIdToObject(";
+
+            if (content.Contains(fixedCallPrefix))
+            {
+                Debug.Log($"[GC2 Networking] {relativePath} already uses EntityIdToObject.");
+                return true;
+            }
+
+            if (!content.Contains(obsoleteCallPrefix))
+            {
+                Debug.Log($"[GC2 Networking] {relativePath} has no OnOpenAsset API migration needed.");
+                return true;
+            }
+
+            content = content.Replace(obsoleteCallPrefix, fixedCallPrefix);
+
             WriteFile(relativePath, content);
-            Debug.Log($"[GC2 Networking] Fixed obsolete API in {relativePath}");
+            Debug.Log($"[GC2 Networking] Migrated OnOpenAsset API usage in {relativePath}");
             return true;
         }
     }
