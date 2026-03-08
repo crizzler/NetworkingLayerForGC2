@@ -13,6 +13,8 @@ Server-authoritative networking for Game Creator 2 Core character features.
 | **Busy Limbs** | ✅ `NetworkBusyRequest/Response` | ✅ `NetworkBusyBroadcast` | - |
 | **Interaction** | ✅ `NetworkInteractionRequest/Response` | ✅ `NetworkInteractionBroadcast` | - |
 
+> Note: This package also syncs GC2 **States** and **Gestures** animations, but that path is handled by `NetworkCharacter` + `UnitAnimimNetworkController` (not by Core message IDs `200-229`).
+
 ## Architecture
 
 ```
@@ -60,9 +62,10 @@ Reserved range: **200-229**
 ### Where To Add Components
 
 - Add `NetworkCoreManager` to a single bootstrap object in your scene (or use the Setup Wizard scene step).
-- `NetworkCoreController` should live on the same GameObject as `NetworkCoreManager`.
-- `NetworkCoreManager` auto-ensures `NetworkCoreController` on itself at runtime if it is missing.
-- For character-side core hooks, `NetworkCharacter` can also add/use a local `NetworkCoreController` when `Use Core Networking` is enabled.
+- Do **not** manually add `NetworkCoreController` in Setup Wizard or on player prefabs.
+- `NetworkCoreManager` auto-ensures and initializes `NetworkCoreController` on the manager GameObject at runtime if it is missing.
+- Keep `Use Core Networking` enabled on `NetworkCharacter` when you want core feature interception, but avoid manually placing extra `NetworkCoreController` components on characters (prevents duplicate-controller ambiguity).
+- For animation state/gesture sync, enable `Use Animation Sync` on `NetworkCharacter` so it adds/uses `UnitAnimimNetworkController`.
 
 ### Setup
 
@@ -183,6 +186,23 @@ void OnNetworkMessage(byte messageType, uint senderId, byte[] data)
 }
 ```
 
+## States & Gestures Sync (Also Supported)
+
+In addition to the Core features above, the networking layer also syncs GC2 animation commands for:
+
+- `Character.States`
+- `Character.Gestures`
+
+This uses `UnitAnimimNetworkController` on `NetworkCharacter` (owner drives commands, remotes apply).  
+Common API surface:
+
+- `SetState(...)`
+- `StopState(...)`
+- `PlayGesture(...)`
+- `StopGesture(...)` / `StopGestures(...)`
+
+This is intentionally separate from `NetworkCoreManager` message routing and Core type IDs.
+
 ## Validation Rules
 
 ### Ragdoll
@@ -226,6 +246,8 @@ int hash = NetworkCoreManager.GetPropHash("Sword_01");
 
 This Core module complements:
 - **NetworkCharacter** - Death/Revive, Driver assignment
+- **UnitAnimimNetworkController** - States/Gestures animation command sync
+- **UnitAnimimNetworkKinematic** - Optional server-authoritative locomotion animation parameters
 - **UnitMotionNetworkController** - Movement, Dash, Jump
 - **NetworkCombatController** - Hit validation, Lag compensation
 - **NetworkMeleeController** - Block, Skills, Reactions
