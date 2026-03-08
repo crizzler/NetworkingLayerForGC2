@@ -2,6 +2,8 @@
 
 Transport-agnostic, server-authoritative multiplayer layer for Game Creator 2.
 
+Online documentation: <https://arawn-software-publishing.gitbook.io/networking-layer-for-gc2>
+
 > **Release Status: Alpha**  
 > This package is currently in **Alpha**. APIs, behavior, and documentation may change between releases.
 
