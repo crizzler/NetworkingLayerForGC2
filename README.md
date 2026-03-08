@@ -70,6 +70,24 @@ Start here for transport wiring:
 - `Assets/Plugins/GameCreator2NetworkingLayer/Documentation/PUBLIC_API.md`
 - `Assets/Plugins/GameCreator2NetworkingLayer/Documentation/PATCHING_STRATEGY.md`
 
+## Contributing
+
+Recommended default flow: **fork -> branch -> pull request**.
+
+1. Fork the repository.
+2. Create a branch from `main` (example: `fix/melee-hit-validation`).
+3. Keep changes scoped and atomic (one concern per PR when possible).
+4. Verify Unity compiles cleanly for affected modules (no new errors).
+5. Open a PR with:
+   - What changed
+   - Why it changed
+   - How to test it
+
+Notes:
+
+- If you have direct write access, branch + PR in the main repo is still preferred over direct pushes to `main`.
+- For release packaging/sync, only `Assets/Plugins/GameCreator2NetworkingLayer/` should be included.
+
 ## License
 
 This networking layer is MIT licensed.
