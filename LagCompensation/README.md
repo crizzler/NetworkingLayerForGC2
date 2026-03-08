@@ -1,10 +1,10 @@
-# NetworkingCore
+# Lag Compensation
 
 A network-agnostic lag compensation library for Unity multiplayer games.
 
 ## Overview
 
-NetworkingCore provides server-authoritative hit validation through position history tracking and temporal rewinding. It works with any networking solution (Netcode for GameObjects, Photon, FishNet, Mirror, etc.).
+Lag Compensation provides server-authoritative hit validation through position history tracking and temporal rewinding. It works with any networking solution (Netcode for GameObjects, Photon, FishNet, Mirror, etc.).
 
 ## Features
 
@@ -15,9 +15,6 @@ NetworkingCore provides server-authoritative hit validation through position his
 - **Hit Zones**: Support for damage multipliers per body region
 - **High Performance**: Pooled allocations, batch operations for crowds
 
-## Installation
-
-Copy the `NetworkingCore` folder to your project's `Assets/Plugins/` directory.
 
 ## Quick Start
 
@@ -197,26 +194,6 @@ Use `EnemyMassesLagCompensation` component:
 - Efficiently tracks large crowds with pooled adapters
 - Batch recording and validation
 
-## Architecture
-
-```
-NetworkingCore/                  ← Zero external dependencies
-├── Runtime/
-│   ├── LagCompensation/
-│   │   ├── ILagCompensated.cs            ← Base interface
-│   │   ├── LagCompensationHistory.cs
-│   │   ├── LagCompensationManager.cs
-│   │   ├── LagCompensationBootstrap.cs   ← Drop-in MonoBehaviour (init + record)
-│   │   └── HitValidationUtility.cs
-│   └── Types/
-│       └── NetworkTimestamp.cs
-
-EnemyMasses/                     ← References NetworkingCore
-├── Integration/GameCreator2/Networking/
-│   └── CharacterLagCompensation.cs  ← GC2 adapter
-└── Networking/
-    └── EnemyMassesLagCompensation.cs ← Crowd adapter
-```
 
 ## Configuration
 
