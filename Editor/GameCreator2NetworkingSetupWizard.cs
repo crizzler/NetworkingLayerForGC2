@@ -133,7 +133,8 @@ namespace Arawn.GameCreator2.Networking.Editor
 
         private static readonly GUIContent GUI_CREATE_CORE_MANAGER = new GUIContent(
             "Ensure NetworkCoreManager",
-            "Creates/reuses the core manager that routes core gameplay networking messages."
+            "Creates/reuses the core manager that routes core gameplay networking messages. " +
+            "NetworkCoreController is auto-managed by runtime initialization and is not added manually by this wizard."
         );
 
 #if GC2_INVENTORY
@@ -578,6 +579,7 @@ namespace Arawn.GameCreator2.Networking.Editor
                 EditorGUILayout.HelpBox(
                     "The created/reused player template receives selected per-character controllers " +
                     "(Inventory/Stats/Shooter/Melee/Quests/Traversal). " +
+                    "NetworkCoreController is intentionally not added manually here because it is auto-managed by NetworkCoreManager/NetworkCharacter runtime setup. " +
                     "Dialogue and Abilities remain scene-driven and should be wired explicitly where needed.",
                     MessageType.Info
                 );
