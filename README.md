@@ -65,15 +65,15 @@ Use `Game Creator > Networking Layer > Patches` for optional source patching.
 
 See:
 
-- `Assets/Plugins/GameCreator2NetworkingLayer/Documentation/PATCHING_STRATEGY.md`
+- [Patching Strategy](https://arawn-software-publishing.gitbook.io/networking-layer-for-gc2/misc/optional-patching-strategy)
 
 ## Quickstart
 
 Start here for transport wiring:
 
-- `Assets/Plugins/GameCreator2NetworkingLayer/Documentation/TRANSPORT_QUICKSTART.md`
-- `Assets/Plugins/GameCreator2NetworkingLayer/Documentation/PUBLIC_API.md`
-- `Assets/Plugins/GameCreator2NetworkingLayer/Documentation/PATCHING_STRATEGY.md`
+- [Quickstart](https://arawn-software-publishing.gitbook.io/networking-layer-for-gc2/getting-started/quickstart)
+- [Public API](https://arawn-software-publishing.gitbook.io/networking-layer-for-gc2/getting-started/publish-your-docs)
+- [Patching Strategy](https://arawn-software-publishing.gitbook.io/networking-layer-for-gc2/misc/optional-patching-strategy)
 
 ## Contributing
 
@@ -99,4 +99,4 @@ This networking layer is MIT licensed.
 
 See:
 
-- `Assets/Plugins/GameCreator2NetworkingLayer/LICENSE.md`
+- [License](https://arawn-software-publishing.gitbook.io/networking-layer-for-gc2/getting-started/license-mit)
