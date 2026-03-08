@@ -79,4 +79,4 @@ This networking layer is MIT licensed.
 
 See:
 
-- `Assets/Plugins/GameCreator2NetworkingLayer/LICENSE.md`
+- [`Assets/Plugins/GameCreator2NetworkingLayer/LICENSE.md`](https://github.com/crizzler/NetworkingLayerForGC2#MIT-1-ov-file)
