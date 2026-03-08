@@ -63,4 +63,4 @@ No. Patching is optional by design.
 
 - `Assets/Plugins/GameCreator2NetworkingLayer/Documentation/TRANSPORT_QUICKSTART.md`
 - `Assets/Plugins/GameCreator2NetworkingLayer/Documentation/PUBLIC_API.md`
-- `Assets/Plugins/GameCreator2NetworkingLayer/REFLECTION_DEPENDENCIES.md`
+- `Documentation/REFLECTION_DEPENDENCIES.md`
