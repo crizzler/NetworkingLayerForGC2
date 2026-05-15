@@ -50,7 +50,7 @@ The core layer remains transport-agnostic. PurrNet is included as the currently 
 
 ## Setup Wizard
 
-Use `Game Creator > Networking Layer > PurrNet Scene Setup Wizard` for PurrNet projects. The generic scene setup wizard is hidden automatically when a transport-specific wizard is installed.
+Use `Game Creator > Networking Layer > PurrNet Scene Setup Wizard` for PurrNet projects. The generic scene setup wizard is hidden automatically when a transport-specific wizard is installed. Follow this guide when no PurrNet Transport is present: [https://arawn-software-publishing.gitbook.io/networking-layer-for-gc2/getting-started/quickstart](https://arawn-software-publishing.gitbook.io/networking-layer-for-gc2/getting-started/quickstart)
 
 The PurrNet wizard is split into six pages:
 
