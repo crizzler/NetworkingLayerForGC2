@@ -92,7 +92,10 @@ namespace Arawn.GameCreator2.Networking.Dialogue
             if (controller == null || networkId == 0) return;
 
             m_Controllers[networkId] = controller;
-            RegisterOwnedEntityMapping(networkId);
+            if (controller.RequiresTargetOwnership)
+            {
+                RegisterOwnedEntityMapping(networkId);
+            }
 
             if (m_LogNetworkMessages)
             {
@@ -157,7 +160,15 @@ namespace Arawn.GameCreator2.Networking.Dialogue
                     return;
                 }
 
-                if (!ValidateTargetOwnership(senderClientId, request.ActorNetworkId, request.TargetNetworkId, nameof(NetworkDialogueRequest)))
+                NetworkDialogueController controller = GetController(request.TargetNetworkId);
+                if (controller == null)
+                {
+                    SendRejectedResponse(senderClientId, request, DialogueRejectionReason.TargetNotFound);
+                    return;
+                }
+
+                if (controller.RequiresTargetOwnership &&
+                    !ValidateTargetOwnership(senderClientId, request.ActorNetworkId, request.TargetNetworkId, nameof(NetworkDialogueRequest)))
                 {
                     SendRejectedResponse(senderClientId, request, DialogueRejectionReason.SecurityViolation);
                     return;
@@ -181,16 +192,10 @@ namespace Arawn.GameCreator2.Networking.Dialogue
 
                 pendingIncremented = true;
 
-                NetworkDialogueController controller = GetController(request.TargetNetworkId);
-                if (controller == null)
-                {
-                    SendRejectedResponse(senderClientId, request, DialogueRejectionReason.TargetNotFound);
-                    return;
-                }
-
                 NetworkDialogueResponse response = await controller.ProcessDialogueRequestAsync(request, senderClientId);
                 response.ActorNetworkId = request.ActorNetworkId;
                 response.CorrelationId = request.CorrelationId;
+                response.TargetNetworkId = request.TargetNetworkId;
                 OnSendDialogueResponse?.Invoke(senderClientId, response);
             }
             catch (Exception exception)
@@ -209,8 +214,8 @@ namespace Arawn.GameCreator2.Networking.Dialogue
 
         public void ReceiveDialogueResponse(NetworkDialogueResponse response, uint targetNetworkId)
         {
-            uint actorId = response.ActorNetworkId != 0 ? response.ActorNetworkId : targetNetworkId;
-            NetworkDialogueController controller = GetController(actorId);
+            uint resolvedTargetId = response.TargetNetworkId != 0 ? response.TargetNetworkId : targetNetworkId;
+            NetworkDialogueController controller = GetController(resolvedTargetId);
             controller?.ReceiveDialogueResponse(response);
         }
 
@@ -303,6 +308,7 @@ namespace Arawn.GameCreator2.Networking.Dialogue
                 RequestId = request.RequestId,
                 ActorNetworkId = request.ActorNetworkId,
                 CorrelationId = request.CorrelationId,
+                TargetNetworkId = request.TargetNetworkId,
                 Action = request.Action,
                 Authorized = false,
                 Applied = false,
@@ -334,7 +340,10 @@ namespace Arawn.GameCreator2.Networking.Dialogue
         {
             foreach (KeyValuePair<uint, NetworkDialogueController> pair in m_Controllers)
             {
-                RegisterOwnedEntityMapping(pair.Key);
+                if (pair.Value != null && pair.Value.RequiresTargetOwnership)
+                {
+                    RegisterOwnedEntityMapping(pair.Key);
+                }
             }
         }
 

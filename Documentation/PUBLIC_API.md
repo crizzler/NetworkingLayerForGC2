@@ -18,6 +18,11 @@ This does not cover:
 - Transport-specific SDK code (NGO/FishNet/Mirror/etc.)
 - Per-module gameplay behavior details (see each module README)
 
+PurrNet users normally do not need to implement this bridge contract from scratch. Use `Game Creator > Networking Layer > PurrNet Scene Setup Wizard` to create the included PurrNet bridge stack, managers, selected module bridges, player spawning helpers, and prefab preparation.
+
+For the PurrNet-specific runtime/editor API surface, see
+`Assets/Arawn/NetworkingLayerForGC2/Documentation/purrnet-public-api.md`.
+
 ## 1) Bridge Contract
 
 Your transport adapter must derive from:
@@ -171,8 +176,11 @@ For each `NetworkCharacter` instance:
 
 Runtime setup and patch workflows are exposed under:
 
-- `Game Creator > Networking Layer > Scene Setup Wizard`
+- `Game Creator > Networking Layer > PurrNet Scene Setup Wizard` when the PurrNet transport integration is installed
+- `Game Creator > Networking Layer > Scene Setup Wizard` only when no transport-specific setup wizard is installed
 - `Game Creator > Networking Layer > Patches`
+
+Transport-specific setup presence is represented by the editor define `ARAWN_GC2_TRANSPORT_INTEGRATION`. It is managed automatically by `GC2NetworkingDefineSymbols` and hides the generic wizard menu to avoid duplicate setup paths.
 
 ## 9) Optional Patchers
 
@@ -190,7 +198,7 @@ Use:
 
 Detailed rollout guidance:
 
-- `Assets/Plugins/GameCreator2NetworkingLayer/Documentation/PATCHING_STRATEGY.md`
+- `Assets/Arawn/NetworkingLayerForGC2/Documentation/PATCHING_STRATEGY.md`
 
 ## 10) Recommended Integration Checklist
 
@@ -204,7 +212,8 @@ Detailed rollout guidance:
 
 ## Related Docs
 
-- `Assets/Plugins/GameCreator2NetworkingLayer/Documentation/TRANSPORT_QUICKSTART.md`
-- `Assets/Plugins/GameCreator2NetworkingLayer/Documentation/PATCHING_STRATEGY.md`
-- `Assets/Plugins/GameCreator2NetworkingLayer/README.md`
+- `Assets/Arawn/NetworkingLayerForGC2/Documentation/TRANSPORT_QUICKSTART.md`
+- `Assets/Arawn/NetworkingLayerForGC2/Documentation/purrnet-public-api.md`
+- `Assets/Arawn/NetworkingLayerForGC2/Documentation/PATCHING_STRATEGY.md`
+- `Assets/Arawn/NetworkingLayerForGC2/README.md`
 - Module-specific docs under each module folder (`Core`, `Inventory`, `Stats`, `Shooter`, `Melee`, `Quests`, `Dialogue`, `Traversal`, `Abilities`)

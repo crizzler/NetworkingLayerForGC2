@@ -233,7 +233,7 @@ namespace Arawn.GameCreator2.Networking.Security
                 Time = currentTime
             });
             
-            return violations.Count >= m_Threshold;
+            return violations.Count == m_Threshold;
         }
         
         /// <summary>

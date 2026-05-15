@@ -105,51 +105,47 @@ namespace Arawn.GameCreator2.Networking.Combat
                 ShooterNetworkId = request.ShooterNetworkId
             };
             
-            var clientTimestamp = NetworkTimestamp.FromServerTime(request.ClientTimestamp);
-            var serverTimestamp = m_LagManager.LastTimestamp;
-            double rewindAmount = serverTimestamp.serverTime - clientTimestamp.serverTime;
-            
             // ═══════════════════════════════════════════════════════════════
-            // STEP 1: Validate timestamp
+            // STEP 1: Normalize timestamp to the lag-compensation history clock
             // ═══════════════════════════════════════════════════════════════
-            
-            if (rewindAmount < -Config.FutureTimestampTolerance)
-            {
-                result.IsValid = false;
-                result.RejectionReason = ShotRejectionReason.InvalidPosition;
-                result.RejectionDetails = $"Timestamp {rewindAmount * 1000:F0}ms in future";
-                return result;
-            }
-            
-            if (rewindAmount > Config.MaxRewindTime)
-            {
-                result.IsValid = false;
-                result.RejectionReason = ShotRejectionReason.InvalidPosition;
-                result.RejectionDetails = $"Rewind {rewindAmount * 1000:F0}ms exceeds max";
-                return result;
-            }
-            
+
+            NetworkTimestamp clientTimestamp = ResolveValidationTimestamp(
+                request.ClientTimestamp,
+                out _,
+                out _
+            );
+
             // ═══════════════════════════════════════════════════════════════
             // STEP 2: Validate muzzle position
             // ═══════════════════════════════════════════════════════════════
             
-            Vector3 expectedMuzzlePos = shooterCharacter.transform.position + Vector3.up * 1.5f;
+            bool hasWeaponMuzzle = TryGetExpectedWeaponMuzzlePosition(
+                shooterCharacter,
+                weapon,
+                out Vector3 expectedMuzzlePos
+            );
             
-            // Try to get historical position
-            if (m_LagManager.TryGetPositionAtTime(
-                request.ShooterNetworkId, 
-                clientTimestamp, 
-                out var historicalPos))
+            if (!hasWeaponMuzzle)
             {
-                expectedMuzzlePos = historicalPos + Vector3.up * 1.5f;
+                expectedMuzzlePos = shooterCharacter.transform.position + Vector3.up * 1.5f;
+
+                // Try to get historical position
+                if (m_LagManager.TryGetPositionAtTime(
+                    request.ShooterNetworkId,
+                    clientTimestamp,
+                    out var historicalPos))
+                {
+                    expectedMuzzlePos = historicalPos + Vector3.up * 1.5f;
+                }
             }
             
             float muzzleDeviation = Vector3.Distance(request.MuzzlePosition, expectedMuzzlePos);
-            if (muzzleDeviation > Config.MaxMuzzleDeviation)
+            float maxMuzzleDeviation = Mathf.Max(Config.MaxMuzzleDeviation, 2.5f);
+            if (muzzleDeviation > maxMuzzleDeviation)
             {
                 result.IsValid = false;
                 result.RejectionReason = ShotRejectionReason.InvalidPosition;
-                result.RejectionDetails = $"Muzzle deviation {muzzleDeviation:F2}m exceeds max";
+                result.RejectionDetails = $"Muzzle deviation {muzzleDeviation:F2}m exceeds max {maxMuzzleDeviation:F2}m";
                 return result;
             }
             
@@ -157,7 +153,7 @@ namespace Arawn.GameCreator2.Networking.Combat
             // STEP 3: Validate direction (sanity check)
             // ═══════════════════════════════════════════════════════════════
             
-            if (request.ShotDirection.sqrMagnitude < 0.9f || 
+            if (request.ShotDirection.sqrMagnitude < 0.9f ||
                 request.ShotDirection.sqrMagnitude > 1.1f)
             {
                 result.IsValid = false;
@@ -189,6 +185,56 @@ namespace Arawn.GameCreator2.Networking.Combat
             
             return result;
         }
+
+        private static bool TryGetExpectedWeaponMuzzlePosition(
+            Character shooterCharacter,
+            ShooterWeapon weapon,
+            out Vector3 position)
+        {
+            position = default;
+            if (shooterCharacter == null || weapon == null) return false;
+
+            try
+            {
+                ShooterStance stance = shooterCharacter.Combat.RequestStance<ShooterStance>();
+                WeaponData weaponData = stance?.Get(weapon);
+                if (weaponData != null && weaponData.WeaponArgs.Target != null)
+                {
+                    position = weapon.Muzzle.GetPosition(weaponData.WeaponArgs);
+                    return position.sqrMagnitude > 0.0001f;
+                }
+
+                GameObject prop = shooterCharacter.Combat.GetProp(weapon);
+                if (prop == null) return false;
+
+                position = prop.transform.TransformPoint(weapon.Muzzle.LocalPosition);
+                return position.sqrMagnitude > 0.0001f;
+            }
+            catch (Exception)
+            {
+                position = default;
+                return false;
+            }
+        }
+
+        private NetworkTimestamp ResolveValidationTimestamp(
+            float requestTimestamp,
+            out NetworkTimestamp serverTimestamp,
+            out double rewindAmount)
+        {
+            NetworkTimestamp clientTimestamp = NetworkTimestamp.FromServerTime(requestTimestamp);
+            serverTimestamp = m_LagManager.LastTimestamp;
+            rewindAmount = serverTimestamp.serverTime - clientTimestamp.serverTime;
+
+            if (rewindAmount < -Config.FutureTimestampTolerance ||
+                rewindAmount > Config.MaxRewindTime)
+            {
+                clientTimestamp = serverTimestamp;
+                rewindAmount = 0d;
+            }
+
+            return clientTimestamp;
+        }
         
         // ════════════════════════════════════════════════════════════════════
         // HIT VALIDATION
@@ -218,8 +264,11 @@ namespace Arawn.GameCreator2.Networking.Combat
             };
             
             // Convert timestamp
-            result.ClientTimestamp = NetworkTimestamp.FromServerTime(request.ClientTimestamp);
-            result.ServerTimestamp = m_LagManager.LastTimestamp;
+            result.ClientTimestamp = ResolveValidationTimestamp(
+                request.ClientTimestamp,
+                out NetworkTimestamp serverTimestamp,
+                out _);
+            result.ServerTimestamp = serverTimestamp;
 
             // ═══════════════════════════════════════════════════════════════
             // STEP 0: Validate that this hit is bound to a validated shot
@@ -352,15 +401,24 @@ namespace Arawn.GameCreator2.Networking.Combat
             // STEP 3: Get historical target state
             // ═══════════════════════════════════════════════════════════════
             
+            bool usingCurrentTargetSnapshot = false;
             if (!m_LagManager.TryGetStateAtTime(
                 request.TargetNetworkId,
                 result.ClientTimestamp,
                 out var targetSnapshot))
             {
-                result.IsValid = false;
-                result.RejectionReason = CombatValidationRejectionReason.TargetNotRegistered;
-                result.RejectionDetails = $"No history for target {request.TargetNetworkId}";
-                return result;
+                usingCurrentTargetSnapshot = TryGetCurrentTargetSnapshot(
+                    request.TargetNetworkId,
+                    result.ServerTimestamp,
+                    out targetSnapshot);
+
+                if (!usingCurrentTargetSnapshot)
+                {
+                    result.IsValid = false;
+                    result.RejectionReason = CombatValidationRejectionReason.TargetNotRegistered;
+                    result.RejectionDetails = $"No history for target {request.TargetNetworkId}";
+                    return result;
+                }
             }
             
             result.HistoricalTargetPosition = targetSnapshot.position;
@@ -385,13 +443,23 @@ namespace Arawn.GameCreator2.Networking.Combat
             
             // Validate that the shot could have hit the target
             float maxRange = GetWeaponRange(weapon);
-            var hitValidation = m_LagManager.ValidateRaycastHit(
-                request.TargetNetworkId,
-                muzzlePosition,
-                shotDirection,
-                maxRange,
-                result.ClientTimestamp
-            );
+            var hitValidation = usingCurrentTargetSnapshot
+                ? ValidateRaycastAgainstSnapshot(
+                    request.TargetNetworkId,
+                    muzzlePosition,
+                    shotDirection,
+                    maxRange,
+                    request.HitPoint,
+                    result.ClientTimestamp,
+                    result.ServerTimestamp,
+                    targetSnapshot)
+                : m_LagManager.ValidateRaycastHit(
+                    request.TargetNetworkId,
+                    muzzlePosition,
+                    shotDirection,
+                    maxRange,
+                    result.ClientTimestamp
+                );
             
             if (!hitValidation.isValid)
             {
@@ -471,6 +539,105 @@ namespace Arawn.GameCreator2.Networking.Combat
         {
             shotData.HitsProcessed++;
             m_ValidatedShots[sourceShotRequestId] = shotData;
+        }
+
+        private static bool TryGetCurrentTargetSnapshot(
+            uint targetNetworkId,
+            NetworkTimestamp timestamp,
+            out LagCompensationHistory.StateSnapshot snapshot)
+        {
+            snapshot = default;
+            NetworkCharacter networkCharacter = NetworkShooterManager.Instance?.GetCharacterByNetworkId(targetNetworkId);
+            if (networkCharacter == null) return false;
+
+            ILagCompensated lagCompensated = null;
+            foreach (MonoBehaviour component in networkCharacter.GetComponents<MonoBehaviour>())
+            {
+                if (component is not ILagCompensated candidate) continue;
+                lagCompensated = candidate;
+                break;
+            }
+
+            if (lagCompensated != null)
+            {
+                snapshot = new LagCompensationHistory.StateSnapshot
+                {
+                    timestamp = timestamp,
+                    position = lagCompensated.Position,
+                    rotation = lagCompensated.Rotation,
+                    bounds = lagCompensated.Bounds,
+                    isActive = lagCompensated.IsActive
+                };
+                return true;
+            }
+
+            Character character = networkCharacter.GetComponent<Character>();
+            float radius = character != null ? character.Motion.Radius : 0.5f;
+            float height = character != null ? character.Motion.Height : 2f;
+            Bounds bounds = new Bounds(
+                networkCharacter.transform.position + Vector3.up * (height * 0.5f),
+                new Vector3(radius * 2f, height, radius * 2f)
+            );
+
+            snapshot = new LagCompensationHistory.StateSnapshot
+            {
+                timestamp = timestamp,
+                position = networkCharacter.transform.position,
+                rotation = networkCharacter.transform.rotation,
+                bounds = bounds,
+                isActive = networkCharacter.gameObject.activeInHierarchy &&
+                           (character == null || !character.IsDead)
+            };
+
+            return true;
+        }
+
+        private HitValidationResult ValidateRaycastAgainstSnapshot(
+            uint targetNetworkId,
+            Vector3 rayOrigin,
+            Vector3 rayDirection,
+            float maxDistance,
+            Vector3 claimedHitPoint,
+            NetworkTimestamp clientTimestamp,
+            NetworkTimestamp serverTimestamp,
+            LagCompensationHistory.StateSnapshot snapshot)
+        {
+            var result = new HitValidationResult
+            {
+                targetNetworkId = targetNetworkId,
+                clientTimestamp = clientTimestamp,
+                serverTimestamp = serverTimestamp,
+                historicalPosition = snapshot.position,
+                historicalBounds = snapshot.bounds
+            };
+
+            if (!snapshot.isActive)
+            {
+                result.isValid = false;
+                result.reason = HitRejectReason.EntityInactive;
+                return result;
+            }
+
+            Bounds expandedBounds = snapshot.bounds;
+            float tolerance = Mathf.Max(0.2f, Config.MaxHitPointDeviation);
+            expandedBounds.Expand(tolerance * 2f);
+
+            Ray ray = new Ray(rayOrigin, rayDirection);
+            if (!expandedBounds.IntersectRay(ray, out float hitDistance) || hitDistance > maxDistance)
+            {
+                result.isValid = false;
+                result.reason = hitDistance > maxDistance ? HitRejectReason.OutOfRange : HitRejectReason.RayMissed;
+                result.distanceFromBounds = Vector3.Distance(rayOrigin, expandedBounds.ClosestPoint(rayOrigin));
+                return result;
+            }
+
+            result.isValid = true;
+            result.reason = HitRejectReason.None;
+            result.hitPoint = expandedBounds.Contains(claimedHitPoint)
+                ? claimedHitPoint
+                : ray.GetPoint(hitDistance);
+            result.distanceFromBounds = 0f;
+            return result;
         }
         
         /// <summary>
@@ -685,7 +852,7 @@ namespace Arawn.GameCreator2.Networking.Combat
         
         [Header("Position Validation")]
         [Tooltip("Maximum allowed muzzle position deviation (meters).")]
-        public float MaxMuzzleDeviation = 1.5f;
+        public float MaxMuzzleDeviation = 2.5f;
         
         [Tooltip("Maximum allowed hit point deviation (meters).")]
         public float MaxHitPointDeviation = 0.5f;

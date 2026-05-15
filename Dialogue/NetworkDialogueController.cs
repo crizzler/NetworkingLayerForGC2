@@ -26,7 +26,11 @@ namespace Arawn.GameCreator2.Networking.Dialogue
         [SerializeField] private NetworkCharacter m_NetworkCharacter;
 
         [Header("Network Settings")]
+        [SerializeField] private NetworkDialogueAuthorityMode m_AuthorityMode = NetworkDialogueAuthorityMode.PlayerOwned;
         [SerializeField] private bool m_OptimisticUpdates;
+        [SerializeField] private bool m_UseAutomaticNetworkId = true;
+        [SerializeField] private uint m_ManualNetworkId;
+        [SerializeField] private string m_NetworkIdSalt = string.Empty;
 
         [Header("Sync Settings")]
         [SerializeField] private float m_FullSyncInterval = 5f;
@@ -52,15 +56,23 @@ namespace Arawn.GameCreator2.Networking.Dialogue
         private uint m_RegisteredNetworkId;
 
         private bool m_SuppressInterception;
+        private bool m_AuthoritativePlaybackActive;
+        private uint m_AuthoritativePlaybackToken;
         private bool m_IsPlaying;
         private int m_CurrentNodeId = Content.NODE_INVALID;
+        private Args m_LastArgs;
         private float m_LastFullSync;
         private float m_LastExplicitStopTime = -999f;
+        private uint m_RuntimeStandaloneNetworkId;
 
         private readonly Dictionary<ulong, PendingDialogueRequest> m_PendingRequests = new(16);
         private readonly Dictionary<uint, float> m_RecentlyAppliedCorrelations = new(16);
+        private readonly HashSet<uint> m_PendingAuthoritativeStartTokens = new();
 
-        public uint NetworkId => m_NetworkCharacter != null ? m_NetworkCharacter.NetworkId : 0;
+        public uint NetworkId => ResolveNetworkId();
+        public NetworkCharacter NetworkCharacter => m_NetworkCharacter;
+        public NetworkDialogueAuthorityMode AuthorityMode => m_AuthorityMode;
+        public bool RequiresTargetOwnership => m_AuthorityMode == NetworkDialogueAuthorityMode.PlayerOwned;
 
         public bool IsServer => m_IsServer;
         public bool IsLocalClient => m_IsLocalClient;
@@ -77,11 +89,13 @@ namespace Arawn.GameCreator2.Networking.Dialogue
         private void OnValidate()
         {
             ResolveReferences(true);
+            m_RuntimeStandaloneNetworkId = ResolveStandaloneNetworkId();
         }
 
         private void Awake()
         {
             ResolveReferences(true);
+            m_RuntimeStandaloneNetworkId = ResolveStandaloneNetworkId();
             if (m_Dialogue == null)
             {
                 Debug.LogWarning("[NetworkDialogueController] Missing Dialogue reference. Assign a Dialogue component in the inspector.");
@@ -147,9 +161,19 @@ namespace Arawn.GameCreator2.Networking.Dialogue
             RequestDialogueAction(DialogueActionType.Play, Content.NODE_INVALID, args);
         }
 
+        public void RequestPlay(Args args, uint actorNetworkId)
+        {
+            RequestDialogueAction(DialogueActionType.Play, Content.NODE_INVALID, args, actorNetworkId);
+        }
+
         public void RequestStop()
         {
             RequestDialogueAction(DialogueActionType.Stop);
+        }
+
+        public void RequestStop(uint actorNetworkId)
+        {
+            RequestDialogueAction(DialogueActionType.Stop, Content.NODE_INVALID, null, actorNetworkId);
         }
 
         public void RequestContinue()
@@ -157,9 +181,40 @@ namespace Arawn.GameCreator2.Networking.Dialogue
             RequestDialogueAction(DialogueActionType.Continue);
         }
 
+        public void RequestContinue(uint actorNetworkId)
+        {
+            RequestDialogueAction(DialogueActionType.Continue, Content.NODE_INVALID, null, actorNetworkId);
+        }
+
         public void RequestChoose(int choiceNodeId)
         {
             RequestDialogueAction(DialogueActionType.Choose, choiceNodeId);
+        }
+
+        public void RequestChoose(int choiceNodeId, uint actorNetworkId)
+        {
+            RequestDialogueAction(DialogueActionType.Choose, choiceNodeId, null, actorNetworkId);
+        }
+
+        public void RequestChooseIndex(int oneBasedIndex)
+        {
+            RequestChooseIndex(oneBasedIndex, 0);
+        }
+
+        public void RequestChooseIndex(int oneBasedIndex, uint actorNetworkId)
+        {
+            if (!TryResolveChoiceNodeByIndex(oneBasedIndex, out int choiceNodeId))
+            {
+                if (m_LogRejections)
+                {
+                    Debug.LogWarning($"[NetworkDialogueController] Cannot resolve dialogue choice index {oneBasedIndex}");
+                }
+
+                OnDialogueRejected?.Invoke(DialogueRejectionReason.InvalidAction, "Cannot resolve dialogue choice index");
+                return;
+            }
+
+            RequestChoose(choiceNodeId, actorNetworkId);
         }
 
         internal void RequestPlayFromPatch(Args args)
@@ -182,7 +237,11 @@ namespace Arawn.GameCreator2.Networking.Dialogue
             RequestDialogueAction(DialogueActionType.Choose, choiceNodeId);
         }
 
-        private void RequestDialogueAction(DialogueActionType action, int choiceNodeId = Content.NODE_INVALID, Args args = null)
+        private void RequestDialogueAction(
+            DialogueActionType action,
+            int choiceNodeId = Content.NODE_INVALID,
+            Args args = null,
+            uint requesterActorNetworkId = 0)
         {
             if (m_IsRemoteClient)
             {
@@ -194,15 +253,30 @@ namespace Arawn.GameCreator2.Networking.Dialogue
                 return;
             }
 
-            uint networkId = NetworkId;
-            if (networkId == 0)
+            uint targetNetworkId = NetworkId;
+            if (targetNetworkId == 0)
             {
                 if (m_LogRejections)
                 {
-                    Debug.LogWarning("[NetworkDialogueController] Missing NetworkId; cannot send dialogue request");
+                    Debug.LogWarning("[NetworkDialogueController] Missing target NetworkId; cannot send dialogue request");
                 }
 
-                OnDialogueRejected?.Invoke(DialogueRejectionReason.TargetNotFound, "Missing NetworkId");
+                OnDialogueRejected?.Invoke(DialogueRejectionReason.TargetNotFound, "Missing target NetworkId");
+                return;
+            }
+
+            uint actorNetworkId = requesterActorNetworkId != 0
+                ? requesterActorNetworkId
+                : ResolveRequesterNetworkId(args);
+
+            if (actorNetworkId == 0)
+            {
+                if (m_LogRejections)
+                {
+                    Debug.LogWarning("[NetworkDialogueController] Missing requester actor NetworkId; cannot send dialogue request");
+                }
+
+                OnDialogueRejected?.Invoke(DialogueRejectionReason.TargetNotFound, "Missing requester actor NetworkId");
                 return;
             }
 
@@ -223,15 +297,17 @@ namespace Arawn.GameCreator2.Networking.Dialogue
             var request = new NetworkDialogueRequest
             {
                 RequestId = GetNextRequestId(),
-                ActorNetworkId = networkId,
-                CorrelationId = NetworkCorrelation.Compose(networkId, m_LastIssuedRequestId),
-                TargetNetworkId = networkId,
+                ActorNetworkId = actorNetworkId,
+                CorrelationId = NetworkCorrelation.Compose(actorNetworkId, m_LastIssuedRequestId),
+                TargetNetworkId = targetNetworkId,
                 Action = action,
                 DialogueHash = dialogueIdentity.Hash,
                 DialogueIdString = dialogueIdentity.String,
                 ChoiceNodeId = choiceNodeId,
-                SelfNetworkId = ExtractNetworkId(args != null ? args.Self : null),
-                ArgsTargetNetworkId = ExtractNetworkId(args != null ? args.Target : null)
+                SelfNetworkId = ResolveSelfNetworkId(args, actorNetworkId),
+                ArgsTargetNetworkId = requesterActorNetworkId != 0
+                    ? targetNetworkId
+                    : ResolveArgsTargetNetworkId(args, targetNetworkId)
             };
 
             NetworkDialogueManager manager = NetworkDialogueManager.Instance;
@@ -352,8 +428,15 @@ namespace Arawn.GameCreator2.Networking.Dialogue
 
             if (!m_IsServer)
             {
-                m_RecentlyAppliedCorrelations[response.CorrelationId] = Time.time;
-                if (!m_OptimisticUpdates)
+                bool alreadyApplied = response.CorrelationId != 0 &&
+                    m_RecentlyAppliedCorrelations.ContainsKey(response.CorrelationId);
+
+                if (response.CorrelationId != 0)
+                {
+                    m_RecentlyAppliedCorrelations[response.CorrelationId] = Time.time;
+                }
+
+                if (!m_OptimisticUpdates && !alreadyApplied)
                 {
                     _ = ApplyResponseStateAsync(response);
                 }
@@ -363,10 +446,16 @@ namespace Arawn.GameCreator2.Networking.Dialogue
         public void ReceiveDialogueChangeBroadcast(NetworkDialogueBroadcast broadcast)
         {
             if (broadcast.NetworkId != NetworkId) return;
+            if (m_IsServer) return;
 
             if (broadcast.CorrelationId != 0 && m_RecentlyAppliedCorrelations.Remove(broadcast.CorrelationId))
             {
                 return;
+            }
+
+            if (HasPendingRequestForCorrelation(broadcast.ActorNetworkId, broadcast.CorrelationId))
+            {
+                m_RecentlyAppliedCorrelations[broadcast.CorrelationId] = Time.time;
             }
 
             _ = ApplyBroadcastAsync(broadcast);
@@ -494,9 +583,40 @@ namespace Arawn.GameCreator2.Networking.Dialogue
             if (m_Dialogue == null) return false;
 
             Args args = BuildArgs(actorNetworkId, selfNetworkId, argsTargetNetworkId);
-            _ = m_Dialogue.Play(args);
+            m_LastArgs = args;
+            m_IsPlaying = true;
+
+            uint playbackToken = ++m_AuthoritativePlaybackToken;
+            m_AuthoritativePlaybackActive = true;
+            m_PendingAuthoritativeStartTokens.Add(playbackToken);
+
+            _ = PlayDialogueAuthoritativelyAsync(args, playbackToken);
             await Task.Yield();
             return true;
+        }
+
+        private async Task PlayDialogueAuthoritativelyAsync(Args args, uint playbackToken)
+        {
+            try
+            {
+                await m_Dialogue.Play(args);
+            }
+            catch (Exception exception)
+            {
+                if (m_LogRejections)
+                {
+                    Debug.LogWarning($"[NetworkDialogueController] Dialogue play failed: {exception.Message}", this);
+                }
+            }
+            finally
+            {
+                if (m_AuthoritativePlaybackToken == playbackToken)
+                {
+                    m_AuthoritativePlaybackActive = false;
+                }
+
+                m_PendingAuthoritativeStartTokens.Remove(playbackToken);
+            }
         }
 
         private Args BuildArgs(uint actorNetworkId, uint selfNetworkId, uint argsTargetNetworkId)
@@ -527,7 +647,17 @@ namespace Arawn.GameCreator2.Networking.Dialogue
         private static GameObject ResolveGameObject(uint networkId)
         {
             Character character = ResolveCharacter(networkId);
-            return character != null ? character.gameObject : null;
+            if (character != null) return character.gameObject;
+
+            NetworkDialogueController[] controllers = FindObjectsByType<NetworkDialogueController>(FindObjectsSortMode.None);
+            for (int i = 0; i < controllers.Length; i++)
+            {
+                NetworkDialogueController controller = controllers[i];
+                if (controller == null || controller.NetworkId != networkId) continue;
+                return controller.gameObject;
+            }
+
+            return null;
         }
 
         private bool TryChooseNode(int choiceNodeId)
@@ -552,6 +682,24 @@ namespace Arawn.GameCreator2.Networking.Dialogue
             return true;
         }
 
+        private bool TryResolveChoiceNodeByIndex(int oneBasedIndex, out int choiceNodeId)
+        {
+            choiceNodeId = Content.NODE_INVALID;
+            if (oneBasedIndex < 1) return false;
+            if (m_Dialogue == null || m_CurrentNodeId == Content.NODE_INVALID) return false;
+
+            Node currentNode = m_Dialogue.Story.Content.Get(m_CurrentNodeId);
+            if (currentNode?.NodeType is not NodeTypeChoice choiceType) return false;
+
+            Args args = m_LastArgs ?? BuildArgs(NetworkId, 0, 0);
+            List<int> choices = choiceType.GetChoices(m_Dialogue.Story, m_CurrentNodeId, args, false);
+            int choiceIndex = oneBasedIndex - 1;
+            if (choiceIndex < 0 || choiceIndex >= choices.Count) return false;
+
+            choiceNodeId = choices[choiceIndex];
+            return choiceNodeId != Content.NODE_INVALID;
+        }
+
         private NetworkDialogueResponse BuildSuccessResponse(in NetworkDialogueRequest request)
         {
             string dialogueId = GetDialogueIdString();
@@ -562,6 +710,7 @@ namespace Arawn.GameCreator2.Networking.Dialogue
                 RequestId = request.RequestId,
                 ActorNetworkId = request.ActorNetworkId,
                 CorrelationId = request.CorrelationId,
+                TargetNetworkId = request.TargetNetworkId,
                 Action = request.Action,
                 Authorized = true,
                 Applied = true,
@@ -606,6 +755,7 @@ namespace Arawn.GameCreator2.Networking.Dialogue
                 RequestId = request.RequestId,
                 ActorNetworkId = request.ActorNetworkId,
                 CorrelationId = request.CorrelationId,
+                TargetNetworkId = request.TargetNetworkId,
                 Action = request.Action,
                 Authorized = false,
                 Applied = false,
@@ -713,13 +863,121 @@ namespace Arawn.GameCreator2.Networking.Dialogue
             if (gameObject == null) return 0;
 
             NetworkCharacter networkCharacter = gameObject.GetComponent<NetworkCharacter>();
+            if (networkCharacter == null)
+            {
+                networkCharacter = gameObject.GetComponentInParent<NetworkCharacter>();
+            }
+
+            if (networkCharacter != null && networkCharacter.NetworkId != 0)
+            {
+                return networkCharacter.NetworkId;
+            }
+
+            NetworkDialogueController dialogueController = gameObject.GetComponent<NetworkDialogueController>();
+            if (dialogueController == null)
+            {
+                dialogueController = gameObject.GetComponentInParent<NetworkDialogueController>();
+            }
+
+            return dialogueController != null ? dialogueController.NetworkId : 0;
+        }
+
+        private uint ResolveRequesterNetworkId(Args args)
+        {
+            uint actorNetworkId = ExtractNetworkCharacterId(args != null ? args.Self : null);
+            if (actorNetworkId != 0) return actorNetworkId;
+
+            actorNetworkId = ExtractNetworkCharacterId(args != null ? args.Target : null);
+            if (actorNetworkId != 0) return actorNetworkId;
+
+            actorNetworkId = ExtractNetworkCharacterId(ShortcutPlayer.Instance != null
+                ? ShortcutPlayer.Instance.gameObject
+                : null);
+            if (actorNetworkId != 0) return actorNetworkId;
+
+            return NetworkId;
+        }
+
+        private static uint ResolveSelfNetworkId(Args args, uint actorNetworkId)
+        {
+            uint selfNetworkId = ExtractNetworkCharacterId(args != null ? args.Self : null);
+            return selfNetworkId != 0 ? selfNetworkId : actorNetworkId;
+        }
+
+        private static uint ResolveArgsTargetNetworkId(Args args, uint targetNetworkId)
+        {
+            uint argsTargetNetworkId = ExtractNetworkId(args != null ? args.Target : null);
+            return argsTargetNetworkId != 0 ? argsTargetNetworkId : targetNetworkId;
+        }
+
+        private static uint ExtractNetworkCharacterId(GameObject gameObject)
+        {
+            if (gameObject == null) return 0;
+
+            NetworkCharacter networkCharacter = gameObject.GetComponent<NetworkCharacter>();
+            if (networkCharacter == null)
+            {
+                networkCharacter = gameObject.GetComponentInParent<NetworkCharacter>();
+            }
+
             return networkCharacter != null ? networkCharacter.NetworkId : 0;
+        }
+
+        private uint ResolveNetworkId()
+        {
+            if (m_NetworkCharacter != null && m_NetworkCharacter.NetworkId != 0)
+            {
+                return m_NetworkCharacter.NetworkId;
+            }
+
+            if (m_RuntimeStandaloneNetworkId == 0)
+            {
+                m_RuntimeStandaloneNetworkId = ResolveStandaloneNetworkId();
+            }
+
+            return m_RuntimeStandaloneNetworkId;
+        }
+
+        private uint ResolveStandaloneNetworkId()
+        {
+            if (!m_UseAutomaticNetworkId)
+            {
+                return m_ManualNetworkId == 0 ? 1u : m_ManualNetworkId;
+            }
+
+            string scenePath = gameObject.scene.path;
+            string hierarchyPath = BuildHierarchyPath(transform);
+            string key = $"{scenePath}|{hierarchyPath}|Dialogue|{m_NetworkIdSalt}";
+            uint stableHash = unchecked((uint)StableHashUtility.GetStableHash(key));
+
+            return stableHash == 0 ? (uint)(Mathf.Abs(transform.GetInstanceID()) + 1) : stableHash;
+        }
+
+        private static string BuildHierarchyPath(Transform current)
+        {
+            if (current == null) return string.Empty;
+
+            string path = current.name;
+            Transform parent = current.parent;
+            while (parent != null)
+            {
+                path = $"{parent.name}/{path}";
+                parent = parent.parent;
+            }
+
+            return path;
         }
 
         private static ulong GetPendingKey(uint actorNetworkId, uint correlationId, ushort requestId)
         {
             uint pendingCorrelation = correlationId != 0 ? correlationId : requestId;
             return ((ulong)actorNetworkId << 32) | pendingCorrelation;
+        }
+
+        private bool HasPendingRequestForCorrelation(uint actorNetworkId, uint correlationId)
+        {
+            if (correlationId == 0) return false;
+            return m_PendingRequests.ContainsKey(GetPendingKey(actorNetworkId, correlationId, 0));
         }
 
         private ushort GetNextRequestId()
@@ -848,6 +1106,7 @@ namespace Arawn.GameCreator2.Networking.Dialogue
         {
             m_IsPlaying = true;
 
+            if (ConsumeAuthoritativeStartEvent()) return;
             if (m_SuppressInterception) return;
             if (m_IsServer) return;
             if (!m_IsLocalClient || m_IsRemoteClient) return;
@@ -861,40 +1120,78 @@ namespace Arawn.GameCreator2.Networking.Dialogue
 
             if (m_SuppressInterception) return;
 
-            if (m_IsServer)
+            if (m_AuthoritativePlaybackActive)
             {
-                if (Time.time - m_LastExplicitStopTime <= 0.25f)
+                m_AuthoritativePlaybackActive = false;
+                if (m_IsServer)
                 {
-                    return;
-                }
-
-                NetworkDialogueManager manager = NetworkDialogueManager.Instance;
-                if (manager != null)
-                {
-                    string dialogueId = GetDialogueIdString();
-                    IdString dialogueIdentity = new IdString(dialogueId);
-
-                    manager.BroadcastDialogueChange(new NetworkDialogueBroadcast
-                    {
-                        NetworkId = NetworkId,
-                        ActorNetworkId = NetworkId,
-                        CorrelationId = 0,
-                        Action = DialogueActionType.Stop,
-                        DialogueHash = dialogueIdentity.Hash,
-                        DialogueIdString = dialogueIdentity.String,
-                        CurrentNodeId = m_CurrentNodeId,
-                        ChoiceNodeId = Content.NODE_INVALID,
-                        IsPlaying = false,
-                        IsVisited = m_Dialogue.Story.Visits.IsVisited,
-                        ServerTime = Time.time
-                    });
+                    BroadcastServerDialogueFinishIfNeeded();
                 }
 
                 return;
             }
 
+            if (m_IsServer)
+            {
+                BroadcastServerDialogueFinishIfNeeded();
+                return;
+            }
+
             if (!m_IsLocalClient || m_IsRemoteClient) return;
             RequestDialogueAction(DialogueActionType.Stop);
+        }
+
+        private bool ConsumeAuthoritativeStartEvent()
+        {
+            if (m_PendingAuthoritativeStartTokens.Count == 0)
+            {
+                return false;
+            }
+
+            uint token = 0;
+            foreach (uint pendingToken in m_PendingAuthoritativeStartTokens)
+            {
+                token = pendingToken;
+                break;
+            }
+
+            m_PendingAuthoritativeStartTokens.Remove(token);
+
+            if (m_LogAllChanges)
+            {
+                Debug.Log($"[NetworkDialogueController] Ignored authoritative Dialogue start event on {name}", this);
+            }
+
+            return true;
+        }
+
+        private void BroadcastServerDialogueFinishIfNeeded()
+        {
+            if (Time.time - m_LastExplicitStopTime <= 0.25f)
+            {
+                return;
+            }
+
+            NetworkDialogueManager manager = NetworkDialogueManager.Instance;
+            if (manager == null || m_Dialogue == null) return;
+
+            string dialogueId = GetDialogueIdString();
+            IdString dialogueIdentity = new IdString(dialogueId);
+
+            manager.BroadcastDialogueChange(new NetworkDialogueBroadcast
+            {
+                NetworkId = NetworkId,
+                ActorNetworkId = NetworkId,
+                CorrelationId = 0,
+                Action = DialogueActionType.Stop,
+                DialogueHash = dialogueIdentity.Hash,
+                DialogueIdString = dialogueIdentity.String,
+                CurrentNodeId = m_CurrentNodeId,
+                ChoiceNodeId = Content.NODE_INVALID,
+                IsPlaying = false,
+                IsVisited = m_Dialogue.Story.Visits.IsVisited,
+                ServerTime = Time.time
+            });
         }
 
         private void OnLocalStartNext(int nodeId)

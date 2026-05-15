@@ -25,6 +25,13 @@ namespace Arawn.GameCreator2.Networking.Dialogue
         Exception = 9
     }
 
+    public enum NetworkDialogueAuthorityMode : byte
+    {
+        PlayerOwned = 0,
+        ServerOwnedNpc = 1,
+        GlobalScene = 2
+    }
+
     [Serializable]
     public struct NetworkDialogueRequest
     {
@@ -50,6 +57,7 @@ namespace Arawn.GameCreator2.Networking.Dialogue
         public ushort RequestId;
         public uint ActorNetworkId;
         public uint CorrelationId;
+        public uint TargetNetworkId;
 
         public DialogueActionType Action;
         public bool Authorized;

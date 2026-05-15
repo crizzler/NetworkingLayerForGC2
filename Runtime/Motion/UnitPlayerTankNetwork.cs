@@ -132,6 +132,7 @@ namespace Arawn.GameCreator2.Networking
             }
             
             // Feed to network driver for prediction
+            RefreshNetworkDriver();
             if (m_NetworkDriver != null)
             {
                 // For tank controls, we send the raw input and let the driver/server handle
@@ -200,6 +201,13 @@ namespace Arawn.GameCreator2.Networking
         public void SetNetworkDriver(UnitDriverNetworkClient driver)
         {
             m_NetworkDriver = driver;
+        }
+
+        private void RefreshNetworkDriver()
+        {
+            if (this.Character == null) return;
+            if (ReferenceEquals(m_NetworkDriver, this.Character.Driver)) return;
+            m_NetworkDriver = this.Character.Driver as UnitDriverNetworkClient;
         }
 
         // STRING: --------------------------------------------------------------------------------

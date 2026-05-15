@@ -38,12 +38,17 @@ namespace Arawn.GameCreator2.Networking.Melee
             // Server processes hits directly
             if (m_IsServer)
             {
+                LogMeleeSync(
+                    $"InterceptHit server-local target={target.name} skill={(skill != null ? skill.name : "null")} " +
+                    $"phase={m_MeleeStance?.CurrentPhase.ToString() ?? "NoStance"}");
                 return true;
             }
             
             // Remote clients don't process hits - they receive broadcasts
             if (m_IsRemoteClient)
             {
+                LogMeleeSync(
+                    $"InterceptHit ignored on remote target={target.name} skill={(skill != null ? skill.name : "null")}");
                 return false;
             }
             
@@ -67,6 +72,12 @@ namespace Arawn.GameCreator2.Networking.Melee
                 ComboNodeId = m_LastAttackState.ComboNodeId,
                 AttackPhase = m_LastAttackState.Phase
             };
+
+            LogReactionDiagnostics(
+                $"hit request built req={request.RequestId} target={targetNetworkId} " +
+                $"skill={(skill != null ? skill.name : "null")} skillHash={request.SkillHash} " +
+                $"strikeLocal={FormatVector(direction)} vertical={direction.normalized.y:F3} " +
+                $"phase={m_MeleeStance?.CurrentPhase.ToString() ?? "NoStance"} hitPoint={FormatVector(hitPoint)}");
 
             ulong pendingKey = GetPendingKey(request.ActorNetworkId, request.CorrelationId);
             if (pendingKey == 0)
@@ -94,6 +105,10 @@ namespace Arawn.GameCreator2.Networking.Melee
             };
             
             // Raise event for network layer to send
+            LogMeleeSync(
+                $"sending hit request req={request.RequestId} corr={request.CorrelationId} " +
+                $"target={request.TargetNetworkId} skillHash={request.SkillHash} weaponHash={request.WeaponHash} " +
+                $"phase={request.AttackPhase}");
             OnHitDetected?.Invoke(request);
             
             if (m_LogHits)
@@ -104,21 +119,72 @@ namespace Arawn.GameCreator2.Networking.Melee
             // Return optimistic setting
             return m_OptimisticEffects;
         }
-        
+
+        /// <summary>
+        /// Resolves the same target-local strike direction that GC2's AttackSkill uses when it
+        /// builds ShieldInput and ReactionInput. This preserves vertical strikes such as
+        /// UpperSlash so network reactions can select FromBottom hit animations.
+        /// </summary>
+        public Vector3 ResolveStrikeDirectionForTarget(GameObject target, Skill skill)
+        {
+            if (target == null) return Vector3.zero;
+
+            Transform attacker = m_Character != null ? m_Character.transform : transform;
+            Vector3 worldDirection = ResolveSkillWorldStrikeDirection(attacker, target.transform, skill);
+            if (worldDirection.sqrMagnitude < 0.0001f) return Vector3.zero;
+
+            Vector3 localDirection = target.transform.InverseTransformDirection(worldDirection).normalized;
+            if (ShouldLogReactionDiagnostics &&
+                (IsVerticalReactionDirection(localDirection) ||
+                 skill == null ||
+                 skill.Strike.Direction is MeleeDirection.Upwards or MeleeDirection.Downwards))
+            {
+                LogReactionDiagnostics(
+                    $"resolved strike direction target={target.name} skill={(skill != null ? skill.name : "null")} " +
+                    $"skillDir={(skill != null ? skill.Strike.Direction.ToString() : "fallbackToTarget")} " +
+                    $"world={FormatVector(worldDirection.normalized)} local={FormatVector(localDirection)} " +
+                    $"attackerPos={FormatVector(attacker.position)} targetPos={FormatVector(target.transform.position)}");
+            }
+
+            return localDirection;
+        }
+
+        private static Vector3 ResolveSkillWorldStrikeDirection(
+            Transform attacker,
+            Transform target,
+            Skill skill)
+        {
+            if (attacker == null) return Vector3.forward;
+
+            if (skill != null)
+            {
+                return skill.Strike.Direction switch
+                {
+                    MeleeDirection.None => Vector3.zero,
+                    MeleeDirection.Left => attacker.TransformDirection(Vector3.left),
+                    MeleeDirection.Right => attacker.TransformDirection(Vector3.right),
+                    MeleeDirection.Forward => attacker.TransformDirection(Vector3.forward),
+                    MeleeDirection.Backwards => attacker.TransformDirection(Vector3.back),
+                    MeleeDirection.Upwards => attacker.TransformDirection(Vector3.up),
+                    MeleeDirection.Downwards => attacker.TransformDirection(Vector3.down),
+                    _ => attacker.TransformDirection(Vector3.forward)
+                };
+            }
+
+            if (target == null) return attacker.TransformDirection(Vector3.forward);
+
+            Vector3 toTarget = target.position - attacker.position;
+            return toTarget.sqrMagnitude > float.Epsilon
+                ? toTarget.normalized
+                : attacker.TransformDirection(Vector3.forward);
+        }
+
         /// <summary>
         /// Intercept a StrikeOutput from GC2's striker system.
         /// </summary>
         public bool InterceptStrikeOutput(StrikeOutput output, Skill skill)
         {
-            Vector3 direction = m_Character != null ? m_Character.transform.forward : Vector3.forward;
-            if (output.GameObject != null && m_Character != null)
-            {
-                Vector3 toTarget = output.GameObject.transform.position - m_Character.transform.position;
-                if (toTarget.sqrMagnitude > float.Epsilon)
-                {
-                    direction = toTarget.normalized;
-                }
-            }
+            Vector3 direction = ResolveStrikeDirectionForTarget(output.GameObject, skill);
 
             return InterceptHit(output.GameObject, output.Point, direction, skill);
         }
@@ -149,6 +215,8 @@ namespace Arawn.GameCreator2.Networking.Melee
             var targetNetworkChar = NetworkMeleeManager.Instance?.GetCharacterByNetworkId(request.TargetNetworkId);
             if (targetNetworkChar == null)
             {
+                LogMeleeSyncWarning(
+                    $"hit rejected target not found req={request.RequestId} target={request.TargetNetworkId}");
                 return new NetworkMeleeHitResponse
                 {
                     RequestId = request.RequestId,
@@ -162,6 +230,8 @@ namespace Arawn.GameCreator2.Networking.Melee
             var targetCharacter = targetNetworkChar.GetComponent<Character>();
             if (targetCharacter == null)
             {
+                LogMeleeSyncWarning(
+                    $"hit rejected target has no GC2 Character req={request.RequestId} target={request.TargetNetworkId}");
                 return new NetworkMeleeHitResponse
                 {
                     RequestId = request.RequestId,
@@ -175,6 +245,8 @@ namespace Arawn.GameCreator2.Networking.Melee
             // Check if target is invincible
             if (targetCharacter.Combat.Invincibility.IsInvincible)
             {
+                LogMeleeSyncWarning(
+                    $"hit rejected target invincible req={request.RequestId} target={request.TargetNetworkId}");
                 return new NetworkMeleeHitResponse
                 {
                     RequestId = request.RequestId,
@@ -188,6 +260,8 @@ namespace Arawn.GameCreator2.Networking.Melee
             // Check if target dodged
             if (targetCharacter.Dash != null && targetCharacter.Dash.IsDodge)
             {
+                LogMeleeSyncWarning(
+                    $"hit rejected target dodged req={request.RequestId} target={request.TargetNetworkId}");
                 return new NetworkMeleeHitResponse
                 {
                     RequestId = request.RequestId,
@@ -218,10 +292,11 @@ namespace Arawn.GameCreator2.Networking.Melee
             
             if (!validationResult.IsValid)
             {
-                if (m_LogHits)
-                {
-                    Debug.Log($"[NetworkMeleeController] Hit rejected: {validationResult}");
-                }
+                LogReactionWarning(
+                    $"hit rejected by validator req={request.RequestId} target={request.TargetNetworkId} " +
+                    $"strikeLocal={FormatVector(request.StrikeDirection)} reason={validationResult.RejectionReason} " +
+                    $"details={validationResult.RejectionDetails}");
+                LogMeleeSyncWarning($"hit rejected by validator req={request.RequestId}: {validationResult}");
                 
                 return new NetworkMeleeHitResponse
                 {
@@ -236,10 +311,11 @@ namespace Arawn.GameCreator2.Networking.Melee
             }
             
             // Hit validated with lag compensation!
-            if (m_LogHits)
-            {
-                Debug.Log($"[NetworkMeleeController] Hit validated: {validationResult}");
-            }
+            LogReactionDiagnostics(
+                $"hit validated req={request.RequestId} target={request.TargetNetworkId} " +
+                $"strikeLocal={FormatVector(request.StrikeDirection)} damage={validationResult.FinalDamage:F3} " +
+                $"hitPoint={FormatVector(validationResult.ValidatedHitPoint)}");
+            LogMeleeSync($"hit validated req={request.RequestId}: {validationResult}");
             
             return new NetworkMeleeHitResponse
             {
@@ -281,12 +357,13 @@ namespace Arawn.GameCreator2.Networking.Melee
         {
             if (!TryTakePending(m_PendingHits, response.ActorNetworkId, response.CorrelationId, out var pending))
             {
-                if (m_LogHits)
-                {
-                    Debug.LogWarning($"[NetworkMeleeController] Response for unknown request: {response.RequestId}, corr={response.CorrelationId}");
-                }
+                LogMeleeSyncWarning($"hit response for unknown request req={response.RequestId} corr={response.CorrelationId}");
                 return;
             }
+
+            LogMeleeSync(
+                $"received hit response req={response.RequestId} corr={response.CorrelationId} " +
+                $"validated={response.Validated} reason={response.RejectionReason} damage={response.Damage:F2}");
             
             if (response.Validated)
             {
@@ -314,6 +391,14 @@ namespace Arawn.GameCreator2.Networking.Melee
         public void ReceiveHitBroadcast(NetworkMeleeHitBroadcast broadcast)
         {
             OnHitConfirmed?.Invoke(broadcast);
+            LogMeleeSync(
+                $"received hit broadcast attacker={broadcast.AttackerNetworkId} target={broadcast.TargetNetworkId} " +
+                $"skillHash={broadcast.SkillHash} block={broadcast.BlockResult} poiseBroken={broadcast.PoiseBroken}");
+
+            if (broadcast.TargetNetworkId == NetworkId)
+            {
+                SuppressLocalOwnerReconciliation(OwnerHitPreReactionReconciliationSuppression);
+            }
             
             // Play effects if this is a remote client or non-optimistic local
             bool shouldPlayEffects = m_IsRemoteClient || 

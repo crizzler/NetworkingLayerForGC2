@@ -226,6 +226,8 @@ namespace Arawn.GameCreator2.Networking
         /// </summary>
         public void RequestMoveToPosition(Vector3 target)
         {
+            m_DirectionInput = Vector3.zero;
+            m_IsDirectionMode = false;
             m_CurrentSequence++;
             var command = NetworkNavMeshCommand.CreateMoveToPosition(target, m_CurrentSequence);
             
@@ -254,8 +256,9 @@ namespace Arawn.GameCreator2.Networking
         {
             m_DirectionInput = direction.normalized;
             m_IsDirectionMode = true;
-            
-            var command = NetworkNavMeshCommand.CreateMoveToDirection(direction, m_CurrentSequence++);
+
+            m_CurrentSequence++;
+            var command = NetworkNavMeshCommand.CreateMoveToDirection(direction, m_CurrentSequence);
             OnSendCommand?.Invoke(command);
         }
         
@@ -264,10 +267,10 @@ namespace Arawn.GameCreator2.Networking
         /// </summary>
         public void RequestStop(bool immediate = false)
         {
-            m_DirectionInput = Vector3.zero;
-            m_IsDirectionMode = false;
-            
-            var command = NetworkNavMeshCommand.CreateStop(m_CurrentSequence++, immediate);
+            ClearMovementState();
+
+            m_CurrentSequence++;
+            var command = NetworkNavMeshCommand.CreateStop(m_CurrentSequence, immediate);
             OnSendCommand?.Invoke(command);
         }
         
@@ -276,7 +279,8 @@ namespace Arawn.GameCreator2.Networking
         /// </summary>
         public void RequestWarp(Vector3 position)
         {
-            var command = NetworkNavMeshCommand.CreateWarp(position, m_CurrentSequence++);
+            m_CurrentSequence++;
+            var command = NetworkNavMeshCommand.CreateWarp(position, m_CurrentSequence);
             OnSendCommand?.Invoke(command);
         }
 
@@ -412,6 +416,30 @@ namespace Arawn.GameCreator2.Networking
             
             m_IsExtrapolating = false;
             m_ExtrapolationTime = 0f;
+        }
+
+        private void ClearMovementState()
+        {
+            m_DirectionInput = Vector3.zero;
+            m_IsDirectionMode = false;
+            m_IsPredicting = false;
+            m_PredictedPathCorners = null;
+            m_PredictedCornerIndex = 0;
+            m_ServerPathCorners = null;
+            m_CurrentCornerIndex = 0;
+            m_PathStatus = NetworkNavMeshPathState.STATUS_NONE;
+            m_Velocity = Vector3.zero;
+            m_MoveDirection = Vector3.zero;
+            m_IsExtrapolating = false;
+            m_ExtrapolationTime = 0f;
+            m_SnapshotBuffer?.Clear();
+
+            if (m_EnableLocalNavMesh && m_Agent != null && m_Agent.enabled && m_Agent.isOnNavMesh)
+            {
+                m_Agent.isStopped = true;
+                m_Agent.velocity = Vector3.zero;
+                m_Agent.ResetPath();
+            }
         }
         
         /// <summary>

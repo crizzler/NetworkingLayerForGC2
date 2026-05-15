@@ -21,6 +21,12 @@ Server-authoritative inventory networking for Game Creator 2 Inventory module. D
 - Socket compatibility checks
 - Rate limiting per client
 
+## PurrNet Scene Setup Wizard
+
+For PurrNet projects, enable **Inventory** on the PurrNet wizard Modules page. The wizard creates/reuses `NetworkInventoryManager` and `PurrNetInventoryTransportBridge`.
+
+When a Player Prefab is assigned on the Scene page and prefab preparation is enabled, selecting Inventory adds `NetworkInventoryController` to that prefab. Keep one controller per networked Bag owner; scene/NPC inventories can still be configured manually when they are not part of the player prefab.
+
 ## Architecture
 
 ```

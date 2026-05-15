@@ -61,6 +61,9 @@ namespace Arawn.GameCreator2.Networking
         
         [Tooltip("How often to update destination while holding (per second)")]
         [SerializeField] private float m_HoldUpdateRate = 5f;
+
+        [Tooltip("Send a stop command when hold-to-move input is released")]
+        [SerializeField] private bool m_StopOnRelease = true;
         
         [Header("Anti-Cheat")]
         [Tooltip("Maximum distance from character to click (0 = unlimited)")]
@@ -80,6 +83,7 @@ namespace Arawn.GameCreator2.Networking
         [NonSerialized] private Vector3 m_LastClickPosition;
         [NonSerialized] private bool m_IsHolding;
         [NonSerialized] private bool m_PressThisFrame;
+        [NonSerialized] private bool m_MovePerformedThisFrame;
         
         // Click validation
         [NonSerialized] private ushort m_ClickSequence;
@@ -137,7 +141,7 @@ namespace Arawn.GameCreator2.Networking
 
         public UnitPlayerPointClickNetwork()
         {
-            this.m_InputMove = InputButtonMousePress.Create();
+            this.m_InputMove = InputButtonMouseWhilePressing.Create();
             this.m_Indicator = new PropertyGetInstantiate
             {
                 usePooling = true,
@@ -193,7 +197,13 @@ namespace Arawn.GameCreator2.Networking
             
             this.m_InputStop?.ForgetPerform(this.OnPerformStop);
             
+            if (m_IsHolding && m_StopOnRelease)
+            {
+                RequestStopMovement();
+            }
+
             m_IsHolding = false;
+            m_MovePerformedThisFrame = false;
         }
 
         // UPDATE METHODS: ------------------------------------------------------------------------
@@ -205,7 +215,28 @@ namespace Arawn.GameCreator2.Networking
             this.m_InputMove.OnUpdate();
             this.m_InputStop?.OnUpdate();
             
-            if (!m_IsInputEnabled) return;
+            if (!m_IsInputEnabled)
+            {
+                if (m_IsHolding && m_StopOnRelease)
+                {
+                    RequestStopMovement();
+                }
+
+                m_MovePerformedThisFrame = false;
+                return;
+            }
+
+            if (m_HoldToMove && m_IsHolding && !m_MovePerformedThisFrame)
+            {
+                if (m_StopOnRelease)
+                {
+                    RequestStopMovement();
+                }
+                else
+                {
+                    m_IsHolding = false;
+                }
+            }
             
             // Handle hold-to-move
             if (m_HoldToMove && m_IsHolding)
@@ -228,6 +259,8 @@ namespace Arawn.GameCreator2.Networking
             
             // Clean old click history
             CleanClickHistory();
+
+            m_MovePerformedThisFrame = false;
         }
         
         // INPUT HANDLERS: ------------------------------------------------------------------------
@@ -247,14 +280,26 @@ namespace Arawn.GameCreator2.Networking
             if (!this.Character.IsPlayer) return;
             if (!this.m_IsControllable) return;
             if (!m_IsInputEnabled) return;
-            
+            if (!m_HoldToMove) return;
+
+            m_MovePerformedThisFrame = true;
+            if (!m_IsHolding)
+            {
+                m_LastHoldUpdateTime = Time.time;
+            }
+
             m_IsHolding = true;
-            m_LastHoldUpdateTime = Time.time;
         }
         
         private void OnCancelClick()
         {
+            bool wasHolding = m_IsHolding;
             m_IsHolding = false;
+
+            if (m_StopOnRelease && wasHolding)
+            {
+                RequestStopMovement();
+            }
         }
         
         private void OnPerformStop()
@@ -262,16 +307,7 @@ namespace Arawn.GameCreator2.Networking
             if (!this.Character.IsPlayer) return;
             if (!m_IsInputEnabled) return;
             
-            if (m_NetworkDriver != null)
-            {
-                m_NetworkDriver.RequestStop(true);
-            }
-            else
-            {
-                this.Character.Motion?.MoveToDirection(Vector3.zero, Space.World, 0);
-            }
-            
-            OnStopCaptured?.Invoke();
+            RequestStopMovement();
         }
         
         // CLICK PROCESSING: ----------------------------------------------------------------------
@@ -328,6 +364,7 @@ namespace Arawn.GameCreator2.Networking
             RecordClick(destination);
             
             // Send to network driver
+            RefreshNetworkDriver();
             if (m_NetworkDriver != null)
             {
                 m_NetworkDriver.RequestMoveToPosition(destination);
@@ -445,6 +482,7 @@ namespace Arawn.GameCreator2.Networking
             
             RecordClick(destination);
             
+            RefreshNetworkDriver();
             if (m_NetworkDriver != null)
             {
                 m_NetworkDriver.RequestMoveToPosition(destination);
@@ -462,16 +500,26 @@ namespace Arawn.GameCreator2.Networking
         /// </summary>
         public void Stop()
         {
+            RequestStopMovement();
+        }
+
+        private void RequestStopMovement()
+        {
+            RefreshNetworkDriver();
+
             if (m_NetworkDriver != null)
             {
                 m_NetworkDriver.RequestStop(true);
             }
             else
             {
-                this.Character.Motion?.MoveToDirection(Vector3.zero, Space.World, 0);
+                this.Character.Motion?.StopToDirection(0);
             }
             
             m_IsHolding = false;
+            m_MovePerformedThisFrame = false;
+            m_LastClickPosition = Vector3.zero;
+            this.InputDirection = Vector3.zero;
             OnStopCaptured?.Invoke();
         }
         
@@ -481,6 +529,13 @@ namespace Arawn.GameCreator2.Networking
         public void SetNetworkDriver(UnitDriverNavmeshNetworkClient driver)
         {
             m_NetworkDriver = driver;
+        }
+
+        private void RefreshNetworkDriver()
+        {
+            if (this.Character == null) return;
+            if (ReferenceEquals(m_NetworkDriver, this.Character.Driver)) return;
+            m_NetworkDriver = this.Character.Driver as UnitDriverNavmeshNetworkClient;
         }
 
         // STRING: --------------------------------------------------------------------------------

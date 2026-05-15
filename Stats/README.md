@@ -11,6 +11,12 @@ This module provides:
 - **Bandwidth Efficiency** - Delta sync, bitmask compression, minimal data structures
 - **Transport Agnostic** - Works with NGO, FishNet, Mirror, custom stacks, etc.
 
+## PurrNet Scene Setup Wizard
+
+For PurrNet projects, enable **Stats** on the PurrNet wizard Modules page. The wizard creates/reuses `NetworkStatsManager` and `PurrNetStatsTransportBridge`.
+
+When a Player Prefab is assigned on the Scene page and prefab preparation is enabled, selecting Stats adds `NetworkStatsController` to that prefab. If Melee is also selected, the Core page can add the optional Melee -> Stats damage bridge so validated melee hits apply authoritative stat damage.
+
 ## Architecture
 
 ```

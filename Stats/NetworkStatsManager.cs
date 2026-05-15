@@ -1065,6 +1065,20 @@ namespace Arawn.GameCreator2.Networking.Stats
         }
 
         /// <summary>
+        /// [Client] Process stat modifier change broadcast from server.
+        /// </summary>
+        public void ReceiveStatModifierBroadcast(NetworkStatModifierBroadcast broadcast)
+        {
+            if (m_LogNetworkMessages)
+            {
+                Debug.Log($"[NetworkStatsManager] Received stat modifier broadcast: NetworkId={broadcast.NetworkId}");
+            }
+
+            var controller = GetController(broadcast.NetworkId);
+            controller?.ReceiveStatModifierBroadcast(broadcast);
+        }
+
+        /// <summary>
         /// [Client] Process full snapshot from server.
         /// </summary>
         public void ReceiveFullSnapshot(NetworkStatsSnapshot snapshot)

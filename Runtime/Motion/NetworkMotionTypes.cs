@@ -131,7 +131,7 @@ namespace Arawn.GameCreator2.Networking
     /// <summary>
     /// Compressed motion command for network transmission.
     /// Used for MoveToDirection, MoveToPosition, Dash, Teleport, etc.
-    /// Total size: 20 bytes (fixed size for all command types)
+    /// Fixed size for all command types. Transport packers serialize fields explicitly.
     /// </summary>
     [Serializable]
     public struct NetworkMotionCommand : IEquatable<NetworkMotionCommand>
@@ -145,9 +145,11 @@ namespace Arawn.GameCreator2.Networking
         public int dataY;   // Position Y or Direction Y (fixed point * 100)
         public int dataZ;   // Position Z or Direction Z (fixed point * 100)
         
-        // Additional parameters (4 bytes)
+        // Additional parameters
         public ushort param1;  // Speed, Force, Duration, etc.
         public ushort param2;  // StopDistance, Fade, etc.
+        public ushort param3;  // Gravity or future command-specific scalar
+        public uint targetNetworkId; // Follow target NetworkCharacter id, when applicable
         
         /// <summary>
         /// Create a MoveToDirection command.
@@ -205,6 +207,44 @@ namespace Arawn.GameCreator2.Networking
                 param2 = 0
             };
         }
+
+        /// <summary>
+        /// Create a FollowTarget command.
+        /// </summary>
+        public static NetworkMotionCommand CreateFollowTarget(
+            uint targetNetworkId,
+            Vector3 fallbackPosition,
+            float minRadius,
+            float maxRadius,
+            int priority,
+            ushort sequence)
+        {
+            return new NetworkMotionCommand
+            {
+                commandType = NetworkMotionCommandType.FollowTarget,
+                priority = (byte)Mathf.Clamp(priority, 0, 255),
+                sequenceNumber = sequence,
+                dataX = Mathf.RoundToInt(fallbackPosition.x * 100f),
+                dataY = Mathf.RoundToInt(fallbackPosition.y * 100f),
+                dataZ = Mathf.RoundToInt(fallbackPosition.z * 100f),
+                param1 = (ushort)Mathf.Clamp(minRadius * 100f, 0f, 65535f),
+                param2 = (ushort)Mathf.Clamp(maxRadius * 100f, 0f, 65535f),
+                targetNetworkId = targetNetworkId
+            };
+        }
+
+        /// <summary>
+        /// Create a StopFollow command.
+        /// </summary>
+        public static NetworkMotionCommand CreateStopFollow(int priority, ushort sequence)
+        {
+            return new NetworkMotionCommand
+            {
+                commandType = NetworkMotionCommandType.StopFollow,
+                priority = (byte)Mathf.Clamp(priority, 0, 255),
+                sequenceNumber = sequence
+            };
+        }
         
         /// <summary>
         /// Create a Dash command (transient movement).
@@ -214,7 +254,8 @@ namespace Arawn.GameCreator2.Networking
             float speed,
             float duration,
             float fade,
-            ushort sequence)
+            ushort sequence,
+            float gravity = 1f)
         {
             return new NetworkMotionCommand
             {
@@ -226,7 +267,8 @@ namespace Arawn.GameCreator2.Networking
                 param1 = (ushort)Mathf.Clamp(speed * 10f, 0f, 65535f),
                 // Pack duration and fade into param2 (8 bits each, 0-2.55s)
                 param2 = (ushort)(((byte)Mathf.Clamp(duration * 100f, 0f, 255f) << 8) | 
-                                  (byte)Mathf.Clamp(fade * 100f, 0f, 255f))
+                                  (byte)Mathf.Clamp(fade * 100f, 0f, 255f)),
+                param3 = (ushort)Mathf.Clamp(gravity * 100f, 0f, 65535f)
             };
         }
         
@@ -272,8 +314,11 @@ namespace Arawn.GameCreator2.Networking
         public float GetSpeed() => param1 / 10f;
         public float GetDuration() => ((param2 >> 8) & 0xFF) / 100f;
         public float GetFade() => (param2 & 0xFF) / 100f;
+        public float GetGravity() => param3 / 100f;
         public float GetRotationY() => param1 / 65535f * 360f;
         public float GetJumpForce() => param1 / 100f;
+        public float GetFollowMinRadius() => param1 / 100f;
+        public float GetFollowMaxRadius() => param2 / 100f;
         public bool IsWorldSpace() => param1 == 1;
         
         public bool Equals(NetworkMotionCommand other)
@@ -282,12 +327,26 @@ namespace Arawn.GameCreator2.Networking
                    sequenceNumber == other.sequenceNumber &&
                    dataX == other.dataX &&
                    dataY == other.dataY &&
-                   dataZ == other.dataZ;
+                   dataZ == other.dataZ &&
+                   param1 == other.param1 &&
+                   param2 == other.param2 &&
+                   param3 == other.param3 &&
+                   targetNetworkId == other.targetNetworkId;
         }
         
         public override int GetHashCode()
         {
-            return HashCode.Combine(commandType, sequenceNumber, dataX, dataY, dataZ);
+            HashCode hash = new HashCode();
+            hash.Add(commandType);
+            hash.Add(sequenceNumber);
+            hash.Add(dataX);
+            hash.Add(dataY);
+            hash.Add(dataZ);
+            hash.Add(param1);
+            hash.Add(param2);
+            hash.Add(param3);
+            hash.Add(targetNetworkId);
+            return hash.ToHashCode();
         }
     }
     

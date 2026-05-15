@@ -149,7 +149,14 @@ namespace Arawn.GameCreator2.Networking
         
         [Tooltip("Enable animation sync for States and Gestures (attack anims, emotes, etc.)")]
         [SerializeField] private bool m_UseAnimationSync = true;
-        
+
+        [Tooltip("Animation clips to pre-register at startup so remote peers can resolve " +
+                 "broadcast hashes (e.g., dash gesture clips referenced by a Network Dash " +
+                 "instruction). Drop any clips that are referenced only by instruction assets " +
+                 "(and therefore never auto-discovered from the character's own animators) " +
+                 "into this list. Forwarded to UnitAnimimNetworkController.Initialize.")]
+        [SerializeField] private AnimationClip[] m_PreRegisteredAnimationClips;
+
         [Tooltip("Enable Core feature networking (Ragdoll, Props, Invincibility, Poise, Busy, Interaction)")]
         [SerializeField] private bool m_UseCoreNetworking = true;
         
@@ -172,7 +179,7 @@ namespace Arawn.GameCreator2.Networking
         
         [Tooltip("If enabled, host-owner character uses client prediction role. Disable for strict server-authority fairness.")]
         [SerializeField] private bool m_HostOwnerUsesClientPrediction = false;
-        
+
         [Tooltip("Optional transform used as relevance observer. Defaults to local player or main camera.")]
         [SerializeField] private Transform m_RelevanceObserver;
         
@@ -206,7 +213,7 @@ namespace Arawn.GameCreator2.Networking
         private NetworkSessionProfile m_ResolvedSessionProfile;
         private NetworkTransportBridge m_RegisteredBridge;
         private readonly Dictionary<uint, float> m_LastStateBroadcastPerClient = new Dictionary<uint, float>(32);
-        
+
         // Network state (manual sync if not using transport)
         private bool m_LastIsDead;
         private bool m_LastIsPlayer;

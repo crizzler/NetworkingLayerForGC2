@@ -106,6 +106,8 @@ namespace Arawn.GameCreator2.Networking.Inventory
 
         public Action<NetworkItemAddedBroadcast> OnBroadcastItemAdded;
         public Action<NetworkItemRemovedBroadcast> OnBroadcastItemRemoved;
+        public Action<NetworkItemDroppedBroadcast> OnBroadcastItemDropped;
+        public Action<NetworkDroppedItemRemovedBroadcast> OnBroadcastDroppedItemRemoved;
         public Action<NetworkItemMovedBroadcast> OnBroadcastItemMoved;
         public Action<NetworkItemUsedBroadcast> OnBroadcastItemUsed;
         public Action<NetworkItemEquippedBroadcast> OnBroadcastItemEquipped;
@@ -219,6 +221,25 @@ namespace Arawn.GameCreator2.Networking.Inventory
             return m_Controllers.TryGetValue(networkId, out var controller) ? controller : null;
         }
 
+        private NetworkInventoryController GetControllerOrFallback(uint networkId, string operation)
+        {
+            NetworkInventoryController controller = GetController(networkId);
+            if (controller != null) return controller;
+
+            foreach (var entry in m_Controllers)
+            {
+                if (entry.Value == null) continue;
+
+                Debug.LogWarning(
+                    $"[NetworkInventoryPickupDebug][Manager] {operation} using fallback controller because bag={networkId} is not registered locally. fallbackBag={entry.Key}");
+                return entry.Value;
+            }
+
+            Debug.LogWarning(
+                $"[NetworkInventoryPickupDebug][Manager] {operation} ignored because bag={networkId} is not registered locally and no fallback controller exists");
+            return null;
+        }
+
         public void RegisterMerchantController(uint networkId, NetworkMerchantController controller)
         {
             if (controller == null) return;
@@ -320,8 +341,8 @@ namespace Arawn.GameCreator2.Networking.Inventory
 
         public void SendPickupRequest(NetworkPickupRequest request)
         {
-            if (m_LogNetworkMessages)
-                Debug.Log($"[NetworkInventoryManager] Sending pickup request: RequestId={request.RequestId}");
+            Debug.Log(
+                $"[NetworkInventoryPickupDebug][Manager] send pickup request req={request.RequestId} actor={request.ActorNetworkId} pickerBag={request.PickerBagNetworkId} sourceBag={request.SourceBagNetworkId} runtime={request.RuntimeIdHash} destination={request.DestinationPosition}");
             OnSendPickupRequest?.Invoke(request);
         }
 
@@ -382,8 +403,14 @@ namespace Arawn.GameCreator2.Networking.Inventory
             }
         }
 
-        private static bool ValidateTargetOwnership(uint senderClientId, uint actorNetworkId, uint targetBagNetworkId, string requestType)
+        private bool ValidateTargetOwnership(uint senderClientId, uint actorNetworkId, uint targetBagNetworkId, string requestType)
         {
+            NetworkInventoryController targetController = GetController(targetBagNetworkId);
+            if (targetController != null && targetController.IsWorldInventory)
+            {
+                return true;
+            }
+
             return SecurityIntegration.ValidateTargetEntityOwnership(
                 senderClientId,
                 actorNetworkId,
@@ -1009,6 +1036,190 @@ namespace Arawn.GameCreator2.Networking.Inventory
             }
         }
 
+        public void ReceiveTransferRequest(NetworkTransferRequest request, ulong clientId)
+        {
+            if (!m_IsServer) return;
+            uint senderClientId = GetSenderClientId(clientId);
+            NetworkInventoryController sourceController = GetController(request.SourceBagNetworkId);
+            NetworkInventoryController destinationController = GetController(request.DestinationBagNetworkId);
+            Debug.Log(
+                $"[NetworkInventoryPickupDebug][Manager] receive transfer request req={request.RequestId} senderConnection={clientId} senderClient={senderClientId} actor={request.ActorNetworkId} sourceBag={request.SourceBagNetworkId} sourceFound={sourceController != null} sourceWorld={(sourceController != null && sourceController.IsWorldInventory)} destinationBag={request.DestinationBagNetworkId} destinationFound={destinationController != null} destinationWorld={(destinationController != null && destinationController.IsWorldInventory)} runtime={request.RuntimeIdHash} destination={request.DestinationPosition}");
+
+            if (!SecurityIntegration.ValidateModuleRequest(
+                    senderClientId,
+                    BuildContext(request.ActorNetworkId, request.CorrelationId),
+                    "Inventory",
+                    nameof(NetworkTransferRequest)))
+            {
+                SendTransferResponse(senderClientId, new NetworkTransferResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Authorized = false,
+                    RejectionReason = GetSecurityRejection(request.ActorNetworkId, request.CorrelationId)
+                });
+                return;
+            }
+
+            bool sourceAuthorized = ValidateTargetOwnership(
+                senderClientId,
+                request.ActorNetworkId,
+                request.SourceBagNetworkId,
+                nameof(NetworkTransferRequest));
+
+            bool destinationAuthorized = ValidateTargetOwnership(
+                senderClientId,
+                request.ActorNetworkId,
+                request.DestinationBagNetworkId,
+                nameof(NetworkTransferRequest));
+
+            if (!sourceAuthorized || !destinationAuthorized)
+            {
+                Debug.LogWarning(
+                    $"[NetworkInventoryPickupDebug][Manager] transfer rejected by ownership req={request.RequestId} senderClient={senderClientId} actor={request.ActorNetworkId} sourceBag={request.SourceBagNetworkId} sourceAuthorized={sourceAuthorized} destinationBag={request.DestinationBagNetworkId} destinationAuthorized={destinationAuthorized}");
+
+                SendTransferResponse(senderClientId, new NetworkTransferResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Authorized = false,
+                    RejectionReason = InventoryRejectionReason.SecurityViolation
+                });
+                return;
+            }
+
+            if (!CheckRateLimit(clientId))
+            {
+                SendTransferResponse(senderClientId, new NetworkTransferResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Authorized = false,
+                    RejectionReason = InventoryRejectionReason.RateLimitExceeded
+                });
+                return;
+            }
+
+            try
+            {
+                NetworkInventoryController source = GetController(request.SourceBagNetworkId);
+                NetworkInventoryController destination = GetController(request.DestinationBagNetworkId);
+                if (source == null || destination == null)
+                {
+                    Debug.LogWarning(
+                        $"[NetworkInventoryPickupDebug][Manager] transfer rejected bag not found req={request.RequestId} sourceBag={request.SourceBagNetworkId} sourceFound={source != null} destinationBag={request.DestinationBagNetworkId} destinationFound={destination != null}");
+
+                    SendTransferResponse(senderClientId, new NetworkTransferResponse
+                    {
+                        RequestId = request.RequestId,
+                        ActorNetworkId = request.ActorNetworkId,
+                        CorrelationId = request.CorrelationId,
+                        Authorized = false,
+                        RejectionReason = InventoryRejectionReason.BagNotFound
+                    });
+                    return;
+                }
+
+                NetworkTransferResponse response = source.ProcessTransferRequest(request, destination, senderClientId);
+                response.ActorNetworkId = request.ActorNetworkId;
+                response.CorrelationId = request.CorrelationId;
+                SendTransferResponse(senderClientId, response);
+            }
+            finally
+            {
+                DecrementPendingRequests(clientId);
+            }
+        }
+
+        public void ReceivePickupRequest(NetworkPickupRequest request, ulong clientId)
+        {
+            if (!m_IsServer) return;
+            uint senderClientId = GetSenderClientId(clientId);
+            Debug.Log(
+                $"[NetworkInventoryPickupDebug][Manager] receive pickup request req={request.RequestId} senderConnection={clientId} senderClient={senderClientId} actor={request.ActorNetworkId} pickerBag={request.PickerBagNetworkId} sourceBag={request.SourceBagNetworkId} runtime={request.RuntimeIdHash}");
+            if (!SecurityIntegration.ValidateModuleRequest(
+                    senderClientId,
+                    BuildContext(request.ActorNetworkId, request.CorrelationId),
+                    "Inventory",
+                    nameof(NetworkPickupRequest)))
+            {
+                Debug.LogWarning(
+                    $"[NetworkInventoryPickupDebug][Manager] pickup rejected by security req={request.RequestId} senderClient={senderClientId} actor={request.ActorNetworkId} reason={GetSecurityRejection(request.ActorNetworkId, request.CorrelationId)}");
+                SendPickupResponse(senderClientId, new NetworkPickupResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Authorized = false,
+                    RejectionReason = GetSecurityRejection(request.ActorNetworkId, request.CorrelationId)
+                });
+                return;
+            }
+
+            if (!ValidateTargetOwnership(senderClientId, request.ActorNetworkId, request.PickerBagNetworkId, nameof(NetworkPickupRequest)))
+            {
+                Debug.LogWarning(
+                    $"[NetworkInventoryPickupDebug][Manager] pickup rejected by ownership req={request.RequestId} senderClient={senderClientId} actor={request.ActorNetworkId} pickerBag={request.PickerBagNetworkId}");
+                SendPickupResponse(senderClientId, new NetworkPickupResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Authorized = false,
+                    RejectionReason = InventoryRejectionReason.SecurityViolation
+                });
+                return;
+            }
+
+            if (!CheckRateLimit(clientId))
+            {
+                Debug.LogWarning(
+                    $"[NetworkInventoryPickupDebug][Manager] pickup rejected by rate limit req={request.RequestId} senderConnection={clientId}");
+                SendPickupResponse(senderClientId, new NetworkPickupResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Authorized = false,
+                    RejectionReason = InventoryRejectionReason.RateLimitExceeded
+                });
+                return;
+            }
+
+            try
+            {
+                NetworkInventoryController picker = GetController(request.PickerBagNetworkId);
+                if (picker == null)
+                {
+                    Debug.LogWarning(
+                        $"[NetworkInventoryPickupDebug][Manager] pickup rejected picker bag not found req={request.RequestId} pickerBag={request.PickerBagNetworkId}");
+                    SendPickupResponse(senderClientId, new NetworkPickupResponse
+                    {
+                        RequestId = request.RequestId,
+                        ActorNetworkId = request.ActorNetworkId,
+                        CorrelationId = request.CorrelationId,
+                        Authorized = false,
+                        RejectionReason = InventoryRejectionReason.BagNotFound
+                    });
+                    return;
+                }
+
+                NetworkPickupResponse response = picker.ProcessPickupRequest(request, senderClientId);
+                response.ActorNetworkId = request.ActorNetworkId;
+                response.CorrelationId = request.CorrelationId;
+                Debug.Log(
+                    $"[NetworkInventoryPickupDebug][Manager] pickup processed req={request.RequestId} authorized={response.Authorized} reason={response.RejectionReason} senderClient={senderClientId} placed={response.PlacedPosition}");
+                SendPickupResponse(senderClientId, response);
+            }
+            finally
+            {
+                DecrementPendingRequests(clientId);
+            }
+        }
+
         #endregion
 
         // ════════════════════════════════════════════════════════════════════════════════════════
@@ -1073,6 +1284,20 @@ namespace Arawn.GameCreator2.Networking.Inventory
             OnSendWealthResponse?.Invoke(targetNetworkId, response);
         }
 
+        private void SendTransferResponse(uint targetNetworkId, NetworkTransferResponse response)
+        {
+            if (m_LogNetworkMessages)
+                Debug.Log($"[NetworkInventoryManager] Sending transfer response: RequestId={response.RequestId}, Authorized={response.Authorized}");
+            OnSendTransferResponse?.Invoke(targetNetworkId, response);
+        }
+
+        private void SendPickupResponse(uint targetNetworkId, NetworkPickupResponse response)
+        {
+            Debug.Log(
+                $"[NetworkInventoryPickupDebug][Manager] send pickup response req={response.RequestId} target={targetNetworkId} authorized={response.Authorized} reason={response.RejectionReason} placed={response.PlacedPosition}");
+            OnSendPickupResponse?.Invoke(targetNetworkId, response);
+        }
+
         #endregion
 
         // ════════════════════════════════════════════════════════════════════════════════════════
@@ -1095,6 +1320,22 @@ namespace Arawn.GameCreator2.Networking.Inventory
             if (m_LogNetworkMessages)
                 Debug.Log($"[NetworkInventoryManager] Broadcasting item removed: BagId={broadcast.BagNetworkId}");
             OnBroadcastItemRemoved?.Invoke(broadcast);
+        }
+
+        public void BroadcastItemDropped(NetworkItemDroppedBroadcast broadcast)
+        {
+            if (!m_IsServer) return;
+            if (m_LogNetworkMessages)
+                Debug.Log($"[NetworkInventoryManager] Broadcasting item dropped: BagId={broadcast.SourceBagNetworkId}");
+            OnBroadcastItemDropped?.Invoke(broadcast);
+        }
+
+        public void BroadcastDroppedItemRemoved(NetworkDroppedItemRemovedBroadcast broadcast)
+        {
+            if (!m_IsServer) return;
+            Debug.Log(
+                $"[NetworkInventoryPickupDebug][Manager] broadcast dropped item removed sourceBag={broadcast.SourceBagNetworkId} runtime={broadcast.RuntimeIdHash} position={broadcast.Position}");
+            OnBroadcastDroppedItemRemoved?.Invoke(broadcast);
         }
 
         public void BroadcastItemMoved(NetworkItemMovedBroadcast broadcast)
@@ -1197,6 +1438,18 @@ namespace Arawn.GameCreator2.Networking.Inventory
             controller?.ReceiveItemRemovedBroadcast(broadcast);
         }
 
+        public void ReceiveItemDroppedBroadcast(NetworkItemDroppedBroadcast broadcast)
+        {
+            var controller = GetControllerOrFallback(broadcast.SourceBagNetworkId, "receive dropped item broadcast");
+            controller?.ReceiveItemDroppedBroadcast(broadcast);
+        }
+
+        public void ReceiveDroppedItemRemovedBroadcast(NetworkDroppedItemRemovedBroadcast broadcast)
+        {
+            var controller = GetControllerOrFallback(broadcast.SourceBagNetworkId, "receive dropped item removed broadcast");
+            controller?.ReceiveDroppedItemRemovedBroadcast(broadcast);
+        }
+
         public void ReceiveItemMovedBroadcast(NetworkItemMovedBroadcast broadcast)
         {
             var controller = GetController(broadcast.BagNetworkId);
@@ -1236,7 +1489,14 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public void ReceiveFullSnapshot(NetworkInventorySnapshot snapshot)
         {
             var controller = GetController(snapshot.BagNetworkId);
-            controller?.ReceiveFullSnapshot(snapshot);
+            if (controller == null)
+            {
+                Debug.LogWarning(
+                    $"[NetworkInventoryPickupDebug][Manager] full snapshot ignored because no controller is registered for bag={snapshot.BagNetworkId} registeredControllers={m_Controllers.Count}");
+                return;
+            }
+
+            controller.ReceiveFullSnapshot(snapshot);
         }
 
         public void ReceiveDelta(NetworkInventoryDelta delta)
@@ -1307,6 +1567,25 @@ namespace Arawn.GameCreator2.Networking.Inventory
             uint actorId = response.ActorNetworkId != 0 ? response.ActorNetworkId : targetNetworkId;
             var controller = GetController(actorId);
             controller?.ReceiveWealthResponse(response);
+        }
+
+        public void ReceiveTransferResponse(NetworkTransferResponse response, uint targetNetworkId)
+        {
+            if (!response.Authorized && m_LogNetworkMessages)
+            {
+                Debug.LogWarning($"[NetworkInventoryManager] Transfer rejected: {response.RejectionReason}");
+            }
+        }
+
+        public void ReceivePickupResponse(NetworkPickupResponse response, uint targetNetworkId)
+        {
+            Debug.Log(
+                $"[NetworkInventoryPickupDebug][Manager] receive pickup response target={targetNetworkId} req={response.RequestId} authorized={response.Authorized} reason={response.RejectionReason} placed={response.PlacedPosition}");
+
+            if (!response.Authorized)
+            {
+                Debug.LogWarning($"[NetworkInventoryManager] Pickup rejected: {response.RejectionReason}");
+            }
         }
 
         #endregion

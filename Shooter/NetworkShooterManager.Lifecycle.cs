@@ -6,8 +6,37 @@ namespace Arawn.GameCreator2.Networking.Shooter
 {
     public partial class NetworkShooterManager
     {
+        private void LogDiagnostics(string message)
+        {
+            if (!m_LogDiagnostics && !NetworkShooterDebug.ForceDiagnostics) return;
+            Debug.Log($"[NetworkShooterManager] {message}", this);
+        }
+
+        private void LogDiagnosticsWarning(string message)
+        {
+            if (!m_LogDiagnostics && !NetworkShooterDebug.ForceDiagnostics) return;
+            Debug.LogWarning($"[NetworkShooterManager] {message}", this);
+        }
+
+        private void Start()
+        {
+            LogDiagnostics(
+                $"started server={m_IsServer} client={m_IsClient} controllers={m_Controllers.Count} " +
+                $"delegates shotReq={(SendShotRequestToServer != null)} hitReq={(SendHitRequestToServer != null)} " +
+                $"reloadReq={(SendReloadRequestToServer != null)} shotBroadcast={(BroadcastShotToAllClients != null)} " +
+                $"hitBroadcast={(BroadcastHitToAllClients != null)} reloadBroadcast={(BroadcastReloadToAllClients != null)}");
+
+            if (!m_IsServer && !m_IsClient)
+            {
+                LogDiagnosticsWarning(
+                    "manager has not been initialized by a transport bridge yet. " +
+                    "If this remains true after the network session starts, Shooter sync has no active transport wiring.");
+            }
+        }
+
         private void OnDisable()
         {
+            LogDiagnostics($"disabled; registeredControllers={m_Controllers.Count}");
             SecurityIntegration.SetModuleServerContext("Shooter", false);
             m_ValidatedShotReferences.Clear();
 
@@ -32,12 +61,18 @@ namespace Arawn.GameCreator2.Networking.Shooter
             SecurityIntegration.EnsureSecurityManagerInitialized(isServer, () => GetNetworkTimeFunc?.Invoke() ?? Time.time);
             SyncPatchHooks();
 
-            Debug.Log($"[NetworkShooterManager] Initialized - Server: {isServer}, Client: {isClient}");
+            LogDiagnostics(
+                $"initialized server={isServer} client={isClient} controllers={m_Controllers.Count} " +
+                $"delegates shotReq={(SendShotRequestToServer != null)} hitReq={(SendHitRequestToServer != null)} " +
+                $"reloadReq={(SendReloadRequestToServer != null)} shotResp={(SendShotResponseToClient != null)} " +
+                $"hitResp={(SendHitResponseToClient != null)} reloadResp={(SendReloadResponseToClient != null)} " +
+                $"shotBroadcast={(BroadcastShotToAllClients != null)} hitBroadcast={(BroadcastHitToAllClients != null)} " +
+                $"reloadBroadcast={(BroadcastReloadToAllClients != null)} lookup={(GetCharacterByNetworkIdFunc != null)}");
         }
 
         private void SyncPatchHooks()
         {
-            if (!m_IsServer)
+            if (!m_IsServer && !m_IsClient)
             {
                 if (m_PatchHooks != null) m_PatchHooks.Initialize(false);
                 return;
@@ -66,10 +101,30 @@ namespace Arawn.GameCreator2.Networking.Shooter
         {
             if (controller == null) return;
 
+            if (m_Controllers.TryGetValue(networkId, out var previous) && previous != null && previous != controller)
+            {
+                previous.OnShotRequestSent -= OnControllerShotRequestSent;
+                previous.OnHitDetected -= OnControllerHitDetected;
+                previous.OnReloadRequestSent -= OnControllerReloadRequestSent;
+            }
+
             m_Controllers[networkId] = controller;
+
+            controller.OnShotRequestSent -= OnControllerShotRequestSent;
+            controller.OnHitDetected -= OnControllerHitDetected;
+            controller.OnReloadRequestSent -= OnControllerReloadRequestSent;
 
             controller.OnShotRequestSent += OnControllerShotRequestSent;
             controller.OnHitDetected += OnControllerHitDetected;
+            controller.OnReloadRequestSent += OnControllerReloadRequestSent;
+
+            var networkCharacter = controller.GetComponent<NetworkCharacter>();
+            LogDiagnostics(
+                $"registered controller netId={networkId} name={controller.name} " +
+                $"role={(networkCharacter != null ? networkCharacter.Role.ToString() : "no NetworkCharacter")} " +
+                $"server={controller.IsServer} localClient={controller.IsLocalClient} " +
+                $"transportDelegates shot={(SendShotRequestToServer != null)} hit={(SendHitRequestToServer != null)} " +
+                $"reload={(SendReloadRequestToServer != null)}");
         }
 
         /// <summary>
@@ -79,9 +134,16 @@ namespace Arawn.GameCreator2.Networking.Shooter
         {
             if (m_Controllers.TryGetValue(networkId, out var controller))
             {
-                controller.OnShotRequestSent -= OnControllerShotRequestSent;
-                controller.OnHitDetected -= OnControllerHitDetected;
+                string controllerName = controller != null ? controller.name : "<destroyed>";
+                if (controller != null)
+                {
+                    controller.OnShotRequestSent -= OnControllerShotRequestSent;
+                    controller.OnHitDetected -= OnControllerHitDetected;
+                    controller.OnReloadRequestSent -= OnControllerReloadRequestSent;
+                }
+
                 m_Controllers.Remove(networkId);
+                LogDiagnostics($"unregistered controller netId={networkId} name={controllerName}");
             }
         }
 
@@ -109,12 +171,24 @@ namespace Arawn.GameCreator2.Networking.Shooter
 
         private void OnControllerShotRequestSent(NetworkShotRequest request)
         {
-            if (!m_IsClient) return;
+            if (!m_IsClient)
+            {
+                LogDiagnosticsWarning(
+                    $"dropped shot request because manager is not client actor={request.ActorNetworkId} req={request.RequestId}");
+                return;
+            }
 
-            if (m_LogShotRequests)
+            if (m_LogShotRequests || m_LogDiagnostics || NetworkShooterDebug.ForceDiagnostics)
             {
                 Debug.Log($"[NetworkShooterManager] Shot request: Shooter={request.ShooterNetworkId}, " +
                          $"Pos={request.MuzzlePosition}, Dir={request.ShotDirection}");
+            }
+
+            if (SendShotRequestToServer == null)
+            {
+                LogDiagnosticsWarning(
+                    $"shot request has no transport delegate actor={request.ActorNetworkId} req={request.RequestId}. " +
+                    "Expected a Shooter transport bridge to assign SendShotRequestToServer.");
             }
 
             SendShotRequestToServer?.Invoke(request);
@@ -125,15 +199,49 @@ namespace Arawn.GameCreator2.Networking.Shooter
 
         private void OnControllerHitDetected(NetworkShooterHitRequest request)
         {
-            if (!m_IsClient) return;
+            if (!m_IsClient)
+            {
+                LogDiagnosticsWarning(
+                    $"dropped hit request because manager is not client actor={request.ActorNetworkId} req={request.RequestId}");
+                return;
+            }
 
-            if (m_LogHitRequests)
+            if (m_LogHitRequests || m_LogDiagnostics || NetworkShooterDebug.ForceDiagnostics)
             {
                 Debug.Log($"[NetworkShooterManager] Hit request: Target={request.TargetNetworkId}, " +
                          $"Point={request.HitPoint}");
             }
 
+            if (SendHitRequestToServer == null)
+            {
+                LogDiagnosticsWarning(
+                    $"hit request has no transport delegate actor={request.ActorNetworkId} req={request.RequestId}. " +
+                    "Expected a Shooter transport bridge to assign SendHitRequestToServer.");
+            }
+
             SendHitRequestToServer?.Invoke(request);
+        }
+
+        private void OnControllerReloadRequestSent(NetworkReloadRequest request)
+        {
+            if (!m_IsClient)
+            {
+                LogDiagnosticsWarning(
+                    $"dropped reload request because manager is not client actor={request.ActorNetworkId} req={request.RequestId}");
+                return;
+            }
+
+            LogDiagnostics(
+                $"reload request actor={request.ActorNetworkId} req={request.RequestId} weaponHash={request.WeaponHash}");
+
+            if (SendReloadRequestToServer == null)
+            {
+                LogDiagnosticsWarning(
+                    $"reload request has no transport delegate actor={request.ActorNetworkId} req={request.RequestId}. " +
+                    "Expected a Shooter transport bridge to assign SendReloadRequestToServer.");
+            }
+
+            SendReloadRequestToServer?.Invoke(request);
         }
     }
 }

@@ -760,6 +760,40 @@ namespace Arawn.GameCreator2.Networking.Inventory
             }
         }
 
+        private bool ContainsRuntimeItemRecursive(long runtimeIdHash)
+        {
+            foreach (Cell cell in m_Bag.Content.CellList)
+            {
+                if (cell == null || cell.Available) continue;
+
+                RuntimeItem rootItem = cell.RootRuntimeItem;
+                if (ContainsRuntimeItemRecursive(rootItem, runtimeIdHash)) return true;
+
+                foreach (IdString stackedId in cell.List)
+                {
+                    RuntimeItem stackedItem = m_Bag.Content.GetRuntimeItem(stackedId);
+                    if (ContainsRuntimeItemRecursive(stackedItem, runtimeIdHash)) return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool ContainsRuntimeItemRecursive(RuntimeItem runtimeItem, long runtimeIdHash)
+        {
+            if (runtimeItem == null) return false;
+            if (runtimeItem.RuntimeID.Hash == runtimeIdHash) return true;
+
+            foreach (KeyValuePair<IdString, RuntimeSocket> socketEntry in runtimeItem.Sockets)
+            {
+                RuntimeSocket socket = socketEntry.Value;
+                if (socket == null || !socket.HasAttachment) continue;
+                if (ContainsRuntimeItemRecursive(socket.Attachment, runtimeIdHash)) return true;
+            }
+
+            return false;
+        }
+
         private static void TryApplyRuntimeId(RuntimeItem runtimeItem, string runtimeIdString, long runtimeIdHash)
         {
             if (runtimeItem == null || s_RuntimeItemIdField == null) return;

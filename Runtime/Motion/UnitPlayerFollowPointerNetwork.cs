@@ -150,6 +150,7 @@ namespace Arawn.GameCreator2.Networking
             this.m_InputMove.ForgetPerform(this.OnPerformPointer);
             this.m_InputMove.ForgetCancel(this.OnCancelPointer);
             
+            SendStopToNetwork();
             this.m_Direction = Vector3.zero;
         }
 
@@ -165,6 +166,7 @@ namespace Arawn.GameCreator2.Networking
             {
                 m_Direction = Vector3.zero;
                 this.InputDirection = Vector3.zero;
+                SendStopToNetwork();
                 return;
             }
             
@@ -189,7 +191,8 @@ namespace Arawn.GameCreator2.Networking
             }
             
             // Feed to network driver for prediction
-            if (m_NetworkDriver != null && m_Direction != Vector3.zero)
+            RefreshNetworkDriver();
+            if (m_NetworkDriver != null)
             {
                 // Convert direction to input format
                 Vector2 input = new Vector2(m_Direction.x, m_Direction.z);
@@ -201,6 +204,8 @@ namespace Arawn.GameCreator2.Networking
             
             // Reset per-frame state
             this.m_PointerPress = false;
+            this.m_Pointer = Vector3.zero;
+            this.m_Direction = Vector3.zero;
         }
         
         private bool ShouldSendDirection()
@@ -266,10 +271,7 @@ namespace Arawn.GameCreator2.Networking
             // Send stop when pointer released
             if (m_StopOnRelease && m_WasPressed)
             {
-                m_Direction = Vector3.zero;
-                m_InputSequence++;
-                OnSendStop?.Invoke(m_InputSequence);
-                m_LastSentDirection = Vector3.zero;
+                SendStopToNetwork();
             }
         }
 
@@ -326,6 +328,32 @@ namespace Arawn.GameCreator2.Networking
         public void SetNetworkDriver(UnitDriverNetworkClient driver)
         {
             m_NetworkDriver = driver;
+        }
+
+        private void RefreshNetworkDriver()
+        {
+            if (this.Character == null) return;
+            if (ReferenceEquals(m_NetworkDriver, this.Character.Driver)) return;
+            m_NetworkDriver = this.Character.Driver as UnitDriverNetworkClient;
+        }
+
+        private void SendStopToNetwork()
+        {
+            bool wasMoving = m_Direction != Vector3.zero || m_LastSentDirection != Vector3.zero;
+
+            m_Direction = Vector3.zero;
+            this.InputDirection = Vector3.zero;
+
+            if (wasMoving && m_StopOnRelease)
+            {
+                m_InputSequence++;
+                m_LastSendTime = Time.time;
+                OnSendStop?.Invoke(m_InputSequence);
+                m_LastSentDirection = Vector3.zero;
+            }
+
+            RefreshNetworkDriver();
+            m_NetworkDriver?.ProcessLocalInput(Vector2.zero, null, false);
         }
 
         // STRING: --------------------------------------------------------------------------------

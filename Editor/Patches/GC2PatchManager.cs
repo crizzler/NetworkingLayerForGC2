@@ -24,6 +24,7 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
             { "Dialogue", new DialoguePatcher() },
             { "Traversal", new TraversalPatcher() },
             { "Melee", new MeleePatcher() },
+            { "ShooterSight", new ShooterSightPatcher() },
             { "Shooter", new ShooterPatcher() }
         };
         
@@ -166,6 +167,15 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
         
         [MenuItem("Game Creator/Networking Layer/Patches/Shooter/Check Status", false, 142)]
         public static void CheckShooterStatus() => ShowStatus("Shooter");
+
+        [MenuItem("Game Creator/Networking Layer/Patches/Shooter Sight/Patch (Remote Camera Safety)", false, 143)]
+        public static void PatchShooterSight() => ApplyPatch("ShooterSight");
+
+        [MenuItem("Game Creator/Networking Layer/Patches/Shooter Sight/Unpatch", false, 144)]
+        public static void UnpatchShooterSight() => RemovePatch("ShooterSight");
+
+        [MenuItem("Game Creator/Networking Layer/Patches/Shooter Sight/Check Status", false, 145)]
+        public static void CheckShooterSightStatus() => ShowStatus("ShooterSight");
         
         // ════════════════════════════════════════════════════════════════════════════════════════
         // COMMON OPERATIONS
@@ -216,16 +226,28 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                 return;
             }
             
+            bool isRequiredSightPatch = moduleName == "ShooterSight";
+            string menuModuleName = isRequiredSightPatch ? "Shooter Sight" : moduleName;
+            string patchKindText = isRequiredSightPatch
+                ? "This patch is REQUIRED for safe networked GC2 Shooter sight transitions in the PurrNet demo/setup."
+                : "This patch is OPTIONAL. Without it, the networking solution uses\n" +
+                  "interception-based validation which is less secure but doesn't\n" +
+                  "modify third-party code.";
+            string changeText = isRequiredSightPatch
+                ? "Changes:\n" +
+                  "• Adds one Sight.Enter/Exit instruction side-effect gate\n" +
+                  "• Keeps GC2 owning sight lifecycle, blends, IK, crosshair and aim\n" +
+                  "• A backup will be created before patching"
+                : "Changes:\n" +
+                  "• Adds network validation hooks to core methods\n" +
+                  "• Clients cannot bypass validation by calling methods directly\n" +
+                  "• A backup will be created before patching";
+
             bool confirm = EditorUtility.DisplayDialog(
                 $"Patch {patcher.DisplayName} for Server Authority",
                 $"{patcher.PatchDescription}\n\n" +
-                "Changes:\n" +
-                "• Adds network validation hooks to core methods\n" +
-                "• Clients cannot bypass validation by calling methods directly\n" +
-                "• A backup will be created before patching\n\n" +
-                "This patch is OPTIONAL. Without it, the networking solution uses\n" +
-                "interception-based validation which is less secure but doesn't\n" +
-                "modify third-party code.\n\n" +
+                changeText + "\n\n" +
+                patchKindText + "\n\n" +
                 "Do you want to continue?",
                 "Apply Patch",
                 "Cancel");
@@ -240,7 +262,7 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                     "Patch Applied Successfully",
                     $"The {patcher.DisplayName} system has been patched.\n\n" +
                     "Backups have been saved. You can unpatch at any time using:\n" +
-                    $"Game Creator > Networking Layer > Patches > {moduleName} > Unpatch",
+                    $"Game Creator > Networking Layer > Patches > {menuModuleName} > Unpatch",
                     "OK");
             }
             else
@@ -293,10 +315,14 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
             
             if (success)
             {
+                string successTail = moduleName == "ShooterSight"
+                    ? "Remote shooter sight transitions can again execute local Sight OnEnter/OnExit instructions until the hook is re-applied."
+                    : "The networking solution will now use interception-based validation.";
+
                 EditorUtility.DisplayDialog(
                     "Unpatch Successful",
                     $"The {patcher.DisplayName} system has been restored to its original state.\n\n" +
-                    "The networking solution will now use interception-based validation.",
+                    successTail,
                     "OK");
             }
             else

@@ -19,13 +19,13 @@ namespace Arawn.GameCreator2.Networking
         // Layer index (0-255)
         public byte Layer;
         
-        // Animation timing packed into half-floats
-        public ushort DelayIn;      // Half-float (0-65504 range)
-        public ushort Speed;        // Half-float (0-65504 range)
+        // Animation timing packed as fixed-point values with 0.001 precision.
+        public ushort DelayIn;
+        public ushort Speed;
         public ushort Weight;       // Normalized (0-65535 maps to 0-1)
-        public ushort TransitionIn; // Half-float
-        public ushort TransitionOut;// Half-float
-        public ushort Duration;     // Half-float (0 = infinite)
+        public ushort TransitionIn;
+        public ushort TransitionOut;
+        public ushort Duration;     // 0 = infinite
         
         // Animation identifier - can be:
         // - Hash of AnimationClip name (for simple clips)
@@ -35,7 +35,8 @@ namespace Arawn.GameCreator2.Networking
         
         // CONSTANTS: -----------------------------------------------------------------------------
         
-        private const float HALF_FLOAT_MAX = 65504f;
+        private const float PACK_SCALE = 1000f;
+        private const float PACK_MAX = 65535f / PACK_SCALE;
         
         // PROPERTIES: ----------------------------------------------------------------------------
         
@@ -73,40 +74,40 @@ namespace Arawn.GameCreator2.Networking
                 BlendMode = blendMode,
                 RootMotion = config.RootMotion,
                 StateType = stateType,
-                DelayIn = PackHalfFloat(config.DelayIn),
-                Speed = PackHalfFloat(config.Speed),
+                DelayIn = PackFixedFloat(config.DelayIn),
+                Speed = PackFixedFloat(config.Speed),
                 Weight = (ushort)(Mathf.Clamp01(config.Weight) * 65535f),
-                TransitionIn = PackHalfFloat(config.TransitionIn),
-                TransitionOut = PackHalfFloat(config.TransitionOut),
-                Duration = PackHalfFloat(config.Duration)
+                TransitionIn = PackFixedFloat(config.TransitionIn),
+                TransitionOut = PackFixedFloat(config.TransitionOut),
+                Duration = PackFixedFloat(config.Duration)
             };
         }
         
         public ConfigState ToConfigState()
         {
             return new ConfigState(
-                delayIn: UnpackHalfFloat(DelayIn),
-                speed: UnpackHalfFloat(Speed),
+                delayIn: UnpackFixedFloat(DelayIn),
+                speed: UnpackFixedFloat(Speed),
                 weight: Weight / 65535f,
-                transitionIn: UnpackHalfFloat(TransitionIn),
-                transitionOut: UnpackHalfFloat(TransitionOut)
+                transitionIn: UnpackFixedFloat(TransitionIn),
+                transitionOut: UnpackFixedFloat(TransitionOut)
             )
             {
-                Duration = UnpackHalfFloat(Duration),
+                Duration = UnpackFixedFloat(Duration),
                 RootMotion = RootMotion
             };
         }
         
         // COMPRESSION HELPERS: -------------------------------------------------------------------
         
-        private static ushort PackHalfFloat(float value)
+        private static ushort PackFixedFloat(float value)
         {
-            return (ushort)(Mathf.Clamp(value, 0, HALF_FLOAT_MAX) / HALF_FLOAT_MAX * 65535f);
+            return (ushort)Mathf.RoundToInt(Mathf.Clamp(value, 0f, PACK_MAX) * PACK_SCALE);
         }
         
-        private static float UnpackHalfFloat(ushort packed)
+        private static float UnpackFixedFloat(ushort packed)
         {
-            return packed / 65535f * HALF_FLOAT_MAX;
+            return packed / PACK_SCALE;
         }
         
         // EQUALITY: ------------------------------------------------------------------------------
@@ -144,7 +145,8 @@ namespace Arawn.GameCreator2.Networking
         
         // CONSTANTS: -----------------------------------------------------------------------------
         
-        private const float HALF_FLOAT_MAX = 65504f;
+        private const float PACK_SCALE = 1000f;
+        private const float PACK_MAX = 65535f / PACK_SCALE;
         
         // PROPERTIES: ----------------------------------------------------------------------------
         
@@ -180,36 +182,36 @@ namespace Arawn.GameCreator2.Networking
                 BlendMode = blendMode,
                 RootMotion = config.RootMotion,
                 StopPreviousGestures = stopPrevious,
-                DelayIn = PackHalfFloat(config.DelayIn),
-                Duration = PackHalfFloat(config.Duration),
-                Speed = PackHalfFloat(config.Speed),
-                TransitionIn = PackHalfFloat(config.TransitionIn),
-                TransitionOut = PackHalfFloat(config.TransitionOut)
+                DelayIn = PackFixedFloat(config.DelayIn),
+                Duration = PackFixedFloat(config.Duration),
+                Speed = PackFixedFloat(config.Speed),
+                TransitionIn = PackFixedFloat(config.TransitionIn),
+                TransitionOut = PackFixedFloat(config.TransitionOut)
             };
         }
         
         public ConfigGesture ToConfigGesture()
         {
             return new ConfigGesture(
-                delayIn: UnpackHalfFloat(DelayIn),
-                duration: UnpackHalfFloat(Duration),
-                speed: UnpackHalfFloat(Speed),
+                delayIn: UnpackFixedFloat(DelayIn),
+                duration: UnpackFixedFloat(Duration),
+                speed: UnpackFixedFloat(Speed),
                 rootMotion: RootMotion,
-                transitionIn: UnpackHalfFloat(TransitionIn),
-                transitionOut: UnpackHalfFloat(TransitionOut)
+                transitionIn: UnpackFixedFloat(TransitionIn),
+                transitionOut: UnpackFixedFloat(TransitionOut)
             );
         }
         
         // COMPRESSION HELPERS: -------------------------------------------------------------------
         
-        private static ushort PackHalfFloat(float value)
+        private static ushort PackFixedFloat(float value)
         {
-            return (ushort)(Mathf.Clamp(value, 0, HALF_FLOAT_MAX) / HALF_FLOAT_MAX * 65535f);
+            return (ushort)Mathf.RoundToInt(Mathf.Clamp(value, 0f, PACK_MAX) * PACK_SCALE);
         }
         
-        private static float UnpackHalfFloat(ushort packed)
+        private static float UnpackFixedFloat(ushort packed)
         {
-            return packed / 65535f * HALF_FLOAT_MAX;
+            return packed / PACK_SCALE;
         }
         
         // EQUALITY: ------------------------------------------------------------------------------
@@ -234,20 +236,26 @@ namespace Arawn.GameCreator2.Networking
         public ushort Delay;
         public ushort TransitionOut;
         
-        private const float HALF_FLOAT_MAX = 65504f;
+        private const float PACK_SCALE = 1000f;
+        private const float PACK_MAX = 65535f / PACK_SCALE;
         
         public static NetworkStopStateCommand Create(int layer, float delay, float transitionOut)
         {
             return new NetworkStopStateCommand
             {
                 Layer = (byte)Mathf.Clamp(layer, 0, 255),
-                Delay = (ushort)(Mathf.Clamp(delay, 0, HALF_FLOAT_MAX) / HALF_FLOAT_MAX * 65535f),
-                TransitionOut = (ushort)(Mathf.Clamp(transitionOut, 0, HALF_FLOAT_MAX) / HALF_FLOAT_MAX * 65535f)
+                Delay = PackFixedFloat(delay),
+                TransitionOut = PackFixedFloat(transitionOut)
             };
         }
         
-        public float GetDelay() => Delay / 65535f * HALF_FLOAT_MAX;
-        public float GetTransitionOut() => TransitionOut / 65535f * HALF_FLOAT_MAX;
+        public float GetDelay() => Delay / PACK_SCALE;
+        public float GetTransitionOut() => TransitionOut / PACK_SCALE;
+
+        private static ushort PackFixedFloat(float value)
+        {
+            return (ushort)Mathf.RoundToInt(Mathf.Clamp(value, 0f, PACK_MAX) * PACK_SCALE);
+        }
     }
     
     /// <summary>
@@ -262,20 +270,26 @@ namespace Arawn.GameCreator2.Networking
         public ushort Delay;
         public ushort TransitionOut;
         
-        private const float HALF_FLOAT_MAX = 65504f;
+        private const float PACK_SCALE = 1000f;
+        private const float PACK_MAX = 65535f / PACK_SCALE;
         
         public static NetworkStopGestureCommand Create(int clipHash, float delay, float transitionOut)
         {
             return new NetworkStopGestureCommand
             {
                 ClipHash = clipHash,
-                Delay = (ushort)(Mathf.Clamp(delay, 0, HALF_FLOAT_MAX) / HALF_FLOAT_MAX * 65535f),
-                TransitionOut = (ushort)(Mathf.Clamp(transitionOut, 0, HALF_FLOAT_MAX) / HALF_FLOAT_MAX * 65535f)
+                Delay = PackFixedFloat(delay),
+                TransitionOut = PackFixedFloat(transitionOut)
             };
         }
         
-        public float GetDelay() => Delay / 65535f * HALF_FLOAT_MAX;
-        public float GetTransitionOut() => TransitionOut / 65535f * HALF_FLOAT_MAX;
+        public float GetDelay() => Delay / PACK_SCALE;
+        public float GetTransitionOut() => TransitionOut / PACK_SCALE;
+
+        private static ushort PackFixedFloat(float value)
+        {
+            return (ushort)Mathf.RoundToInt(Mathf.Clamp(value, 0f, PACK_MAX) * PACK_SCALE);
+        }
     }
     
     /// <summary>
@@ -338,10 +352,23 @@ namespace Arawn.GameCreator2.Networking
         
         // PUBLIC METHODS: ------------------------------------------------------------------------
         
-        public bool TryGetEntry(int networkId, out AnimationEntry entry)
+        public bool TryGetEntry(int networkIdOrStableHash, out AnimationEntry entry)
         {
             if (m_LookupById == null) BuildLookups();
-            return m_LookupById.TryGetValue(networkId, out entry);
+
+            if (m_LookupById.TryGetValue(networkIdOrStableHash, out entry))
+            {
+                return true;
+            }
+
+            if (m_HashToId != null &&
+                m_HashToId.TryGetValue(networkIdOrStableHash, out int networkId))
+            {
+                return m_LookupById.TryGetValue(networkId, out entry);
+            }
+
+            entry = default;
+            return false;
         }
         
         public bool TryGetNetworkId(AnimationClip clip, out int networkId)

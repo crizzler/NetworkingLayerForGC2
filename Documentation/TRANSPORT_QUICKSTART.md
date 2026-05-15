@@ -1,12 +1,12 @@
 # Transport Wiring Quickstart
 
-This quickstart shows how to connect **any networking stack** (NGO, FishNet, Mirror, custom) to the Game Creator 2 Networking Layer.
+This quickstart shows how to connect **any networking stack** (PurrNet, NGO, FishNet, Mirror, custom) to the Game Creator 2 Networking Layer.
 
 For the canonical transport contract and public runtime API reference, see:
 
-- `Assets/Plugins/GameCreator2NetworkingLayer/Documentation/PUBLIC_API.md`
+- `Assets/Arawn/NetworkingLayerForGC2/Documentation/PUBLIC_API.md`
 
-The GC2 layer is transport-agnostic. You provide:
+The GC2 layer is transport-agnostic. The package includes a first-class PurrNet integration; other transports provide the same three pieces:
 
 1. A `NetworkTransportBridge` implementation.
 2. Packet serialization + routing in your transport.
@@ -14,14 +14,18 @@ The GC2 layer is transport-agnostic. You provide:
 
 ## 1) Scene Prerequisites
 
-Use `Game Creator > Networking Layer > Scene Setup Wizard` once, then verify your scene has:
+For PurrNet, use `Game Creator > Networking Layer > PurrNet Scene Setup Wizard`. The wizard creates/reuses the PurrNet `NetworkManager`, the GC2 core managers, the core PurrNet bridges, selected module managers/bridges, optional player spawning, and helper UI.
+
+For a custom or future transport, verify your scene has:
 
 - One `NetworkTransportBridge` implementation (your class, not a placeholder).
 - One `NetworkSecurityManager` (server/host scenes).
 - Relevant module managers/controllers you use (`NetworkCoreManager`, `NetworkInventoryManager`, `NetworkStatsManager`, `NetworkShooterManager`, `NetworkMeleeManager`, `NetworkQuestsManager`, `NetworkDialogueManager`, `NetworkTraversalManager`, `NetworkAbilitiesController`).  
-  The setup wizard can create/reuse these directly in **Step 3: Scene Objects** when their toggles are enabled.
-- If **Create / Ensure GC2 Network Player object** is enabled, the wizard also adds selected per-character controllers to that player template:
-  `NetworkInventoryController`, `NetworkStatsController`, `NetworkShooterController`, `NetworkMeleeController`, `NetworkQuestsController`, `NetworkTraversalController`.
+  The PurrNet wizard can create/reuse these directly on its **Core** page when module toggles are enabled.
+- If a Player Prefab is assigned on the PurrNet wizard **Scene** page and prefab preparation is enabled, the wizard adds required transport/core components plus selected per-character controllers:
+  `NetworkInventoryController`, `NetworkStatsController`, `NetworkShooterController`, `NetworkMeleeController`, `NetworkQuestsController`, and `NetworkTraversalController`.
+- `NetworkVariableController` is added to the Player Prefab only when **Player uses local GC2 Variables** is enabled.
+- Network State, Dash, and Gesture clips referenced only by Visual Scripting assets should be added to **Pre Registered Clips** from the PurrNet wizard Scene page.
 - `NetworkDialogueController` is usually placed on dialogue actors (not automatically on the player template) and can reference `Dialogue` + `NetworkCharacter` on different GameObjects.
 
 Optional modules compile only when their symbols are enabled:
@@ -36,7 +40,7 @@ Optional modules compile only when their symbols are enabled:
 - `GC2_ABILITIES`
 
 These are auto-synchronized by `GC2NetworkingDefineSymbols` based on installed modules.  
-Manual refresh: `Game Creator > Networking Layer > Refresh Define Symbols`.
+Transport-specific setup wizards are detected through `ARAWN_GC2_TRANSPORT_INTEGRATION`; this keeps the generic wizard hidden when a concrete transport wizard such as PurrNet is present.
 
 ## 2) Create Your Bridge
 
@@ -289,15 +293,15 @@ Before shipping:
 
 ## 8) Where To Go Next
 
-- Core module details: `Assets/Plugins/GameCreator2NetworkingLayer/Core/README.md`
-- Inventory module details: `Assets/Plugins/GameCreator2NetworkingLayer/Inventory/README.md`
-- Stats module details: `Assets/Plugins/GameCreator2NetworkingLayer/Stats/README.md`
-- Shooter module details: `Assets/Plugins/GameCreator2NetworkingLayer/Shooter/README.md`
-- Melee module details: `Assets/Plugins/GameCreator2NetworkingLayer/Melee/README.md`
-- Quests module details: `Assets/Plugins/GameCreator2NetworkingLayer/Quests/README.md`
-- Dialogue module details: `Assets/Plugins/GameCreator2NetworkingLayer/Dialogue/README.md`
-- Traversal module details: `Assets/Plugins/GameCreator2NetworkingLayer/Traversal/README.md`
-- Abilities module details: `Assets/Plugins/GameCreator2NetworkingLayer/Abilities/README.md`
+- Core module details: `Assets/Arawn/NetworkingLayerForGC2/Core/README.md`
+- Inventory module details: `Assets/Arawn/NetworkingLayerForGC2/Inventory/README.md`
+- Stats module details: `Assets/Arawn/NetworkingLayerForGC2/Stats/README.md`
+- Shooter module details: `Assets/Arawn/NetworkingLayerForGC2/Shooter/README.md`
+- Melee module details: `Assets/Arawn/NetworkingLayerForGC2/Melee/README.md`
+- Quests module details: `Assets/Arawn/NetworkingLayerForGC2/Quests/README.md`
+- Dialogue module details: `Assets/Arawn/NetworkingLayerForGC2/Dialogue/README.md`
+- Traversal module details: `Assets/Arawn/NetworkingLayerForGC2/Traversal/README.md`
+- Abilities module details: `Assets/Arawn/NetworkingLayerForGC2/Abilities/README.md`
 
 ## 9) Patching Policy (Recommended)
 
@@ -312,7 +316,7 @@ Patch menu:
 
 Detailed strategy:
 
-- `Assets/Plugins/GameCreator2NetworkingLayer/Documentation/PATCHING_STRATEGY.md`
+- `Assets/Arawn/NetworkingLayerForGC2/Documentation/PATCHING_STRATEGY.md`
 
 ## 10) License
 
@@ -320,4 +324,4 @@ Game Creator 2 Networking Layer is MIT licensed.
 
 See:
 
-- `Assets/Plugins/GameCreator2NetworkingLayer/LICENSE.md`
+- `Assets/Arawn/NetworkingLayerForGC2/LICENSE.md`

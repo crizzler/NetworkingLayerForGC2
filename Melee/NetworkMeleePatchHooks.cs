@@ -15,6 +15,7 @@ namespace Arawn.GameCreator2.Networking.Melee
     {
         private bool m_IsServer;
         private bool m_Installed;
+        private float m_NextPatchDiagnosticTime;
 
         public bool IsPatchActive => m_Installed && IsMeleePatched();
 
@@ -23,6 +24,7 @@ namespace Arawn.GameCreator2.Networking.Melee
             m_IsServer = isServer;
             if (m_IsServer) InstallHooks();
             else UninstallHooks();
+            LogPatchDiagnostic($"initialize server={isServer} installed={m_Installed} patched={IsMeleePatched()}");
         }
 
         protected override void OnSingletonCleanup()
@@ -65,7 +67,14 @@ namespace Arawn.GameCreator2.Networking.Melee
         private void InstallHooks()
         {
             if (m_Installed) return;
-            if (!IsMeleePatched()) return;
+            if (!IsMeleePatched())
+            {
+                LogPatchDiagnostic("install skipped: GC2 melee package is not patched with network delegates");
+                return;
+            }
+
+            SetStaticProperty(typeof(MeleeStance), "IsNetworkingActive", true);
+            SetStaticProperty(typeof(Skill), "IsNetworkingActive", true);
 
             SetStaticField(typeof(MeleeStance), "NetworkInputChargeValidator", new Func<MeleeStance, MeleeKey, bool>(ValidateInputCharge));
             SetStaticField(typeof(MeleeStance), "NetworkInputExecuteValidator", new Func<MeleeStance, MeleeKey, bool>(ValidateInputExecute));
@@ -74,6 +83,7 @@ namespace Arawn.GameCreator2.Networking.Melee
             SetStaticField(typeof(Skill), "NetworkOnHitValidator", new Func<Skill, Args, Vector3, Vector3, bool>(ValidateOnHit));
 
             m_Installed = true;
+            LogPatchDiagnostic("installed GC2 melee patch hooks");
         }
 
         private void UninstallHooks()
@@ -85,20 +95,71 @@ namespace Arawn.GameCreator2.Networking.Melee
             SetStaticField(typeof(MeleeStance), "NetworkPlaySkillValidator", null);
             SetStaticField(typeof(MeleeStance), "NetworkPlayReactionValidator", null);
             SetStaticField(typeof(Skill), "NetworkOnHitValidator", null);
+            SetStaticProperty(typeof(MeleeStance), "IsNetworkingActive", false);
+            SetStaticProperty(typeof(Skill), "IsNetworkingActive", false);
 
             m_Installed = false;
+            LogPatchDiagnostic("uninstalled GC2 melee patch hooks");
         }
 
-        private bool ValidateInputCharge(MeleeStance _, MeleeKey __) => m_IsServer;
-        private bool ValidateInputExecute(MeleeStance _, MeleeKey __) => m_IsServer;
-        private bool ValidatePlaySkill(MeleeStance _, MeleeWeapon __, Skill ___, GameObject ____) => m_IsServer;
+        private bool ValidateInputCharge(MeleeStance stance, MeleeKey _) => CanRunLocalOrServerMelee(stance);
+        private bool ValidateInputExecute(MeleeStance stance, MeleeKey key)
+        {
+            bool allowed = CanRunLocalOrServerMelee(stance);
+            if (!allowed)
+            {
+                LogPatchDiagnostic(
+                    $"blocked patched InputExecute key={key} character={(stance?.Character != null ? stance.Character.name : "null")} " +
+                    $"server={m_IsServer}");
+            }
+
+            return allowed;
+        }
+
+        private bool ValidatePlaySkill(MeleeStance stance, MeleeWeapon _, Skill __, GameObject ___) => CanRunLocalOrServerMelee(stance);
         private bool ValidatePlayReaction(MeleeStance _, GameObject __, ReactionInput ___, IReaction ____) => m_IsServer;
         private bool ValidateOnHit(Skill _, Args __, Vector3 ___, Vector3 ____) => m_IsServer;
+
+        private bool CanRunLocalOrServerMelee(MeleeStance stance)
+        {
+            if (m_IsServer) return true;
+
+            var character = stance?.Character;
+            var controller = character != null
+                ? character.GetComponent<NetworkMeleeController>()
+                : null;
+
+            return controller != null && controller.IsLocalClient;
+        }
+
+        private void LogPatchDiagnostic(string message)
+        {
+            if (!NetworkMeleeDebug.ForceInputLockDiagnostics &&
+                !NetworkMeleeDebug.ForceSkillDiagnostics)
+            {
+                return;
+            }
+
+            if (Time.unscaledTime < m_NextPatchDiagnosticTime && !message.StartsWith("blocked", StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            m_NextPatchDiagnosticTime = Time.unscaledTime + 0.5f;
+            Debug.Log($"[NetworkMeleeSkillDebug][PatchHooks] {message}", this);
+        }
 
         private static void SetStaticField(Type type, string fieldName, object value)
         {
             FieldInfo field = type.GetField(fieldName, BindingFlags.Public | BindingFlags.Static);
             field?.SetValue(null, value);
+        }
+
+        private static void SetStaticProperty(Type type, string propertyName, object value)
+        {
+            PropertyInfo property = type.GetProperty(propertyName, BindingFlags.Public | BindingFlags.Static);
+            MethodInfo setter = property?.GetSetMethod(true);
+            setter?.Invoke(null, new[] { value });
         }
 
         private static bool HasPublicStaticField(Type type, string fieldName, Type expectedFieldType)

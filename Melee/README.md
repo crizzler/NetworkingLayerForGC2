@@ -11,13 +11,21 @@ This module provides network-aware melee combat for GC2, enabling server-authori
 - Game Creator 2 Core
 - Game Creator 2 Melee Module
 - GC2 Network Integration (base module)
-- A configured transport adapter (NGO/FishNet/Mirror/custom)
+- PurrNet integration or a configured custom transport adapter (NGO/FishNet/Mirror/custom)
 
 ## Installation
 
 1. Import the GC2 Network Integration base module
 2. Import this GC2 Melee Network module
 3. The module will auto-detect GC2 Melee via the `GC2_MELEE` define symbol
+
+## PurrNet Scene Setup Wizard
+
+For PurrNet projects, enable **Melee** on the PurrNet wizard Modules page. The wizard creates/reuses `NetworkMeleeManager` and `PurrNetMeleeTransportBridge`.
+
+When a Player Prefab is assigned on the Scene page and prefab preparation is enabled, selecting Melee adds `NetworkMeleeController` to that prefab. If Stats is also selected, the Core page can add the optional Melee -> Stats damage bridge.
+
+The PurrNet path synchronizes skill input, skill validation/broadcasts, hit validation, hit responses, hit reactions, and reaction root motion. Hit reactions that launch characters upward, such as air-launch clips driven by root motion, should run through the networked reaction path so the authoritative motion driver accepts the vertical displacement instead of correcting it away.
 
 ## Architecture
 

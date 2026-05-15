@@ -40,6 +40,9 @@ namespace Arawn.GameCreator2.Networking.Inventory
         
         [Tooltip("Rollback optimistic updates if server rejects.")]
         [SerializeField] private bool m_RollbackOnReject = true;
+
+        [Tooltip("Optional stable network id for scene/world bags. Leave 0 to derive one from the scene hierarchy.")]
+        [SerializeField] private uint m_StaticNetworkIdOverride = 0;
         
         [Header("Sync Settings")]
         [Tooltip("Send full state sync at this interval (seconds). 0 = never.")]
@@ -91,6 +94,8 @@ namespace Arawn.GameCreator2.Networking.Inventory
         
         private Bag m_Bag;
         private NetworkCharacter m_NetworkCharacter;
+        private uint m_CachedStaticNetworkId;
+        private bool m_IsApplyingNetworkState;
         
         // Network role
         private bool m_IsServer;
@@ -101,11 +106,13 @@ namespace Arawn.GameCreator2.Networking.Inventory
         private ushort m_NextRequestId = 1;
         private ushort m_LastIssuedRequestId = 1;
         private static readonly List<ulong> s_SharedKeyBuffer = new(16);
+        private static readonly List<long> s_SharedRuntimeIdBuffer = new(16);
         private readonly Dictionary<ulong, PendingContentAdd> m_PendingAdds = new(16);
         private readonly Dictionary<ulong, PendingContentRemove> m_PendingRemoves = new(16);
         private readonly Dictionary<ulong, PendingContentMove> m_PendingMoves = new(16);
         private readonly Dictionary<ulong, PendingEquipment> m_PendingEquipment = new(8);
         private readonly Dictionary<ulong, PendingWealth> m_PendingWealth = new(8);
+        private readonly Dictionary<long, long> m_PendingPickupLocalRuntimeByServerRuntime = new(8);
         
         // State tracking for delta sync
         private readonly Dictionary<long, Vector2Int> m_LastSyncedPositions = new(32);
@@ -116,6 +123,14 @@ namespace Arawn.GameCreator2.Networking.Inventory
         
         // RuntimeItem ID mapping (for server-assigned IDs)
         private readonly Dictionary<long, RuntimeItem> m_RuntimeItemMap = new(64);
+
+        private static readonly List<NetworkInventoryController> s_Controllers = new(64);
+        private static readonly List<PendingLocalRemoval> s_PendingLocalRemovals = new(32);
+        private static readonly HashSet<long> s_LocalDropRuntimeIds = new();
+        private static readonly Dictionary<long, DroppedItemInstance> s_DroppedItemInstances = new();
+        private static readonly Dictionary<long, ServerDroppedWorldItem> s_ServerDroppedWorldItems = new();
+        private static bool s_StaticHooksInstalled;
+        private static NetworkInventoryController s_LocalPlayerController;
         
         // ════════════════════════════════════════════════════════════════════════════════════════
         // STRUCTS
@@ -157,6 +172,53 @@ namespace Arawn.GameCreator2.Networking.Inventory
             public float SentTime;
             public float PendingSentTime => SentTime;
         }
+
+        private struct PendingLocalRemoval
+        {
+            public NetworkInventoryController SourceController;
+            public NetworkRuntimeItem Item;
+            public long RuntimeIdHash;
+            public float Time;
+        }
+
+        private struct DroppedItemInstance
+        {
+            public GameObject Instance;
+            public uint SourceBagNetworkId;
+            public NetworkRuntimeItem Item;
+            public Vector3 Position;
+        }
+
+        private struct ServerDroppedWorldItem
+        {
+            public uint SourceBagNetworkId;
+            public NetworkRuntimeItem Item;
+            public Vector3 Position;
+            public float Time;
+        }
+
+        private static void LogPickupDebug(string message, UnityEngine.Object context = null)
+        {
+            if (context != null) Debug.Log($"[NetworkInventoryPickupDebug] {message}", context);
+            else Debug.Log($"[NetworkInventoryPickupDebug] {message}");
+        }
+
+        private static void LogPickupWarning(string message, UnityEngine.Object context = null)
+        {
+            if (context != null) Debug.LogWarning($"[NetworkInventoryPickupDebug] {message}", context);
+            else Debug.LogWarning($"[NetworkInventoryPickupDebug] {message}");
+        }
+
+        private static string DescribeRuntimeItem(RuntimeItem item)
+        {
+            if (item == null) return "null";
+            return $"{item.ItemID.String} runtime={item.RuntimeID.String} hash={item.RuntimeID.Hash}";
+        }
+
+        private static string DescribeNetworkItem(NetworkRuntimeItem item)
+        {
+            return $"{item.ItemIdString} runtime={item.RuntimeIdString} hash={item.RuntimeIdHash} itemHash={item.ItemHash}";
+        }
         
         // ════════════════════════════════════════════════════════════════════════════════════════
         // PROPERTIES
@@ -166,7 +228,15 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public Bag Bag => m_Bag;
         
         /// <summary>Network ID of this bag's owner.</summary>
-        public uint NetworkId => m_NetworkCharacter != null ? m_NetworkCharacter.NetworkId : 0;
+        public uint NetworkId => m_NetworkCharacter != null
+            ? m_NetworkCharacter.NetworkId
+            : GetStaticNetworkId();
+
+        /// <summary>Whether this inventory is backed by a spawned NetworkCharacter.</summary>
+        public bool UsesNetworkCharacterId => m_NetworkCharacter != null;
+
+        /// <summary>Whether this inventory is a scene/world bag such as a chest.</summary>
+        public bool IsWorldInventory => m_NetworkCharacter == null;
         
         /// <summary>Whether this is running on the server.</summary>
         public bool IsServer => m_IsServer;
@@ -236,8 +306,20 @@ namespace Arawn.GameCreator2.Networking.Inventory
             m_IsServer = isServer;
             m_IsLocalClient = isLocalClient;
             m_IsRemoteClient = !isServer && !isLocalClient;
+
+            if (m_IsLocalClient && UsesNetworkCharacterId && NetworkId != 0)
+            {
+                s_LocalPlayerController = this;
+            }
             
             InitializeStateTracking();
+
+            if (IsWorldInventory)
+            {
+                LogPickupDebug(
+                    $"{name}: world inventory initialized networkId={NetworkId} path={BuildStableScenePath(transform)} server={m_IsServer} local={m_IsLocalClient} remote={m_IsRemoteClient} trackedItems={m_RuntimeItemMap.Count}",
+                    this);
+            }
             
             if (m_LogAllChanges)
             {
@@ -259,7 +341,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
                     var runtimeItem = m_Bag.Content.GetRuntimeItem(runtimeIdEntry);
                     if (runtimeItem != null)
                     {
-                        m_RuntimeItemMap[runtimeItem.RuntimeID.Hash] = runtimeItem;
+                        TrackRuntimeItemRecursive(runtimeItem);
                     }
                 }
             }
@@ -275,6 +357,13 @@ namespace Arawn.GameCreator2.Networking.Inventory
         
         private void SubscribeToBagEvents()
         {
+            if (!s_Controllers.Contains(this))
+            {
+                s_Controllers.Add(this);
+            }
+
+            InstallStaticInventoryHooks();
+
             if (m_Bag.Content != null)
             {
                 m_Bag.Content.EventAdd += OnLocalItemAdded;
@@ -296,6 +385,14 @@ namespace Arawn.GameCreator2.Networking.Inventory
         
         private void UnsubscribeFromBagEvents()
         {
+            s_Controllers.Remove(this);
+            if (s_LocalPlayerController == this)
+            {
+                s_LocalPlayerController = null;
+            }
+
+            UninstallStaticInventoryHooksIfUnused();
+
             if (m_Bag != null)
             {
                 if (m_Bag.Content != null)
@@ -340,6 +437,99 @@ namespace Arawn.GameCreator2.Networking.Inventory
         {
             uint pendingCorrelation = correlationId != 0 ? correlationId : requestId;
             return ((ulong)actorNetworkId << 32) | pendingCorrelation;
+        }
+
+        private uint GetStaticNetworkId()
+        {
+            if (m_StaticNetworkIdOverride != 0) return m_StaticNetworkIdOverride;
+            if (m_CachedStaticNetworkId != 0) return m_CachedStaticNetworkId;
+
+            string path = BuildStableScenePath(transform);
+            uint hash = 2166136261u;
+            for (int i = 0; i < path.Length; i++)
+            {
+                hash ^= path[i];
+                hash *= 16777619u;
+            }
+
+            m_CachedStaticNetworkId = 0x80000000u | (hash & 0x7FFFFFFFu);
+            if (m_CachedStaticNetworkId == 0) m_CachedStaticNetworkId = 0x80000001u;
+            return m_CachedStaticNetworkId;
+        }
+
+        private static string BuildStableScenePath(Transform target)
+        {
+            if (target == null) return string.Empty;
+
+            string scenePath = target.gameObject.scene.path;
+            if (string.IsNullOrEmpty(scenePath)) scenePath = target.gameObject.scene.name;
+
+            string path = BuildStableScenePathSegment(target);
+            Transform current = target;
+            while (current.parent != null)
+            {
+                current = current.parent;
+                path = $"{BuildStableScenePathSegment(current)}/{path}";
+            }
+
+            return $"{scenePath}:{path}";
+        }
+
+        private static string BuildStableScenePathSegment(Transform target)
+        {
+            int sameNameIndex = 0;
+            Transform parent = target.parent;
+            if (parent != null)
+            {
+                for (int i = 0; i < parent.childCount; i++)
+                {
+                    Transform sibling = parent.GetChild(i);
+                    if (sibling == target) break;
+                    if (sibling != null && sibling.name == target.name)
+                    {
+                        sameNameIndex++;
+                    }
+                }
+            }
+            else if (target.gameObject.scene.IsValid())
+            {
+                GameObject[] roots = target.gameObject.scene.GetRootGameObjects();
+                for (int i = 0; i < roots.Length; i++)
+                {
+                    GameObject root = roots[i];
+                    if (root == null) continue;
+                    if (root.transform == target) break;
+                    if (root.name == target.name)
+                    {
+                        sameNameIndex++;
+                    }
+                }
+            }
+
+            return $"{target.name}[{sameNameIndex}]";
+        }
+
+        private static void InstallStaticInventoryHooks()
+        {
+            if (s_StaticHooksInstalled) return;
+
+            RuntimeSockets.EventAttachRuntimeItem -= HandleGlobalSocketAttached;
+            RuntimeSockets.EventAttachRuntimeItem += HandleGlobalSocketAttached;
+            RuntimeSockets.EventDetachRuntimeItem -= HandleGlobalSocketDetached;
+            RuntimeSockets.EventDetachRuntimeItem += HandleGlobalSocketDetached;
+            Item.EventInstantiate -= HandleGlobalItemInstantiated;
+            Item.EventInstantiate += HandleGlobalItemInstantiated;
+            s_StaticHooksInstalled = true;
+        }
+
+        private static void UninstallStaticInventoryHooksIfUnused()
+        {
+            if (!s_StaticHooksInstalled || s_Controllers.Count > 0) return;
+
+            RuntimeSockets.EventAttachRuntimeItem -= HandleGlobalSocketAttached;
+            RuntimeSockets.EventDetachRuntimeItem -= HandleGlobalSocketDetached;
+            Item.EventInstantiate -= HandleGlobalItemInstantiated;
+            s_StaticHooksInstalled = false;
         }
     }
 }

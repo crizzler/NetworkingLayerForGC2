@@ -184,8 +184,9 @@ namespace Arawn.GameCreator2.Networking
             if (m_RuntimeIsServer)
             {
                 ProcessServerSimulation(deltaTime);
+                PublishHostLocalClientState();
             }
-            
+
             if (m_RemoteDriver != null && NetworkTransportBridge.HasActive)
             {
                 m_RemoteDriver.SetServerTime(NetworkTransportBridge.Active.ServerTime);
@@ -222,6 +223,16 @@ namespace Arawn.GameCreator2.Networking
         
         private void Cleanup()
         {
+            if (m_AnimimController != null)
+            {
+                NetworkAnimationManager.Instance?.UnregisterController(m_AnimimController);
+            }
+
+            if (m_MotionController != null)
+            {
+                NetworkMotionManager.Instance?.UnregisterController(m_MotionController);
+            }
+
             UnregisterFromBridge();
             UnwireMovementEvents();
             UnsubscribeFromCharacterEvents();
@@ -231,6 +242,11 @@ namespace Arawn.GameCreator2.Networking
             m_RuntimeIsOwner = false;
             m_RuntimeIsHost = false;
             m_LastStateBroadcastPerClient.Clear();
+        }
+
+        public void ResetNetworkRole()
+        {
+            Cleanup();
         }
         
         // ════════════════════════════════════════════════════════════════════════════════════════
@@ -253,9 +269,11 @@ namespace Arawn.GameCreator2.Networking
                 m_Character.IsDead = state.isDead;
             }
             
-            if (m_Character.IsPlayer != state.isPlayer)
+            // GC2's IsPlayer gates local input, so remote replicas must never inherit it.
+            bool isLocalPlayer = m_CurrentRole != NetworkRole.RemoteClient && state.isPlayer;
+            if (m_Character.IsPlayer != isLocalPlayer)
             {
-                m_Character.IsPlayer = state.isPlayer;
+                m_Character.IsPlayer = isLocalPlayer;
             }
         }
         

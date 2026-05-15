@@ -15,6 +15,13 @@ Server-authoritative networking for Game Creator 2 Core character features.
 
 > Note: This package also syncs GC2 **States** and **Gestures** animations, but that path is handled by `NetworkCharacter` + `UnitAnimimNetworkController` (not by Core message IDs `200-229`).
 
+## PurrNet Scene Setup Wizard
+
+For PurrNet projects, open `Game Creator > Networking Layer > PurrNet Scene Setup Wizard`.
+Core, Variables, Animation, and Motion are always included. The wizard creates/reuses `NetworkSecurityManager`, `NetworkCoreManager`, `NetworkAnimationManager`, `NetworkMotionManager`, `NetworkVariableManager`, `PurrNetTransportBridge`, `PurrNetVariableTransportBridge`, and `PurrNetAnimationMotionTransportBridge`.
+
+If a Player Prefab is assigned on the Scene page and prefab preparation is enabled, the wizard adds `NetworkIdentity`, `NetworkCharacter`, `PurrNetNetworkCharacterAuto`, network-ready GC2 character units, optional local-variable sync, and optional pre-registered Network State/Dash/Gesture clips.
+
 ## Architecture
 
 ```
@@ -61,8 +68,8 @@ Reserved range: **200-229**
 
 ### Where To Add Components
 
-- Add `NetworkCoreManager` to a single bootstrap object in your scene (or use the Setup Wizard scene step).
-- Do **not** manually add `NetworkCoreController` in Setup Wizard or on player prefabs.
+- Add `NetworkCoreManager` to a single bootstrap object in your scene, or let the PurrNet wizard create it from the Core page.
+- Do **not** manually add `NetworkCoreController` in the PurrNet wizard output or on player prefabs.
 - `NetworkCoreManager` auto-ensures and initializes `NetworkCoreController` on the manager GameObject at runtime if it is missing.
 - Keep `Use Core Networking` enabled on `NetworkCharacter` when you want core feature interception, but avoid manually placing extra `NetworkCoreController` components on characters (prevents duplicate-controller ambiguity).
 - For animation state/gesture sync, enable `Use Animation Sync` on `NetworkCharacter` so it adds/uses `UnitAnimimNetworkController`.

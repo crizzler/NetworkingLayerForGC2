@@ -63,14 +63,19 @@ namespace Arawn.GameCreator2.Networking.Melee
                 return true;
             }
             
-            // Get hit position and direction (approximate from target position)
+            // Get hit position and direction.
             // Note: The actual hit point comes from the Striker, but we don't have access here
-            // We use the target's position as a fallback
+            // so we use the target's position as a fallback. The direction must match GC2's
+            // target-local ReactionInput direction, otherwise vertical skills such as
+            // UpperSlash cannot select FromBottom reactions like Sword@HitToAir.
             Vector3 hitPoint = args.Target.transform.position;
-            Vector3 direction = (args.Target.transform.position - args.Self.transform.position).normalized;
             
             // Get the current skill being used (via reflection or cached reference)
             Skill currentSkill = GetCurrentSkill(args.Self.Get<Character>());
+            Vector3 direction = attackerController.ResolveStrikeDirectionForTarget(
+                args.Target,
+                currentSkill
+            );
             
             // Intercept the hit
             bool shouldProcessLocally = attackerController.InterceptHit(

@@ -28,6 +28,9 @@ namespace Arawn.GameCreator2.Networking
         [Header("Anti-Cheat")]
         [SerializeField] private NetworkCharacterConfig m_Config = new NetworkCharacterConfig();
 
+        [Header("Debug")]
+        [SerializeField] private bool m_LogMotionDiagnostics = false;
+
         // MEMBERS: -------------------------------------------------------------------------------
 
         [NonSerialized] protected CharacterController m_Controller;
@@ -36,16 +39,22 @@ namespace Arawn.GameCreator2.Networking
         [NonSerialized] protected AnimVector3 m_FloorNormal;
         
         [NonSerialized] private Queue<NetworkInputState> m_InputBuffer;
+        [NonSerialized] private HashSet<ushort> m_QueuedInputSequences;
         [NonSerialized] private ushort m_LastProcessedInput;
         [NonSerialized] private int m_SpeedViolations;
         [NonSerialized] private Vector3 m_LastValidatedPosition;
         [NonSerialized] private float m_ExpectedMaxSpeed;
+        [NonSerialized] private int m_SuppressedDuplicateInputs;
+        [NonSerialized] private float m_LastMotionDiagnosticRealtime;
         
         /// <summary>
         /// Maximum number of buffered inputs. Protects against memory growth from
         /// packet floods or malicious clients. At 60 inputs/sec this is ~4 seconds.
         /// </summary>
         private const int MAX_BUFFERED_INPUTS = 256;
+        private const float OWNER_AUTHORITY_POSITION_EPSILON = 0.005f;
+        private const float OWNER_AUTHORITY_EXTRA_DISTANCE = 0.5f;
+        private const float OWNER_AUTHORITY_ROOT_MOTION_THRESHOLD = 0.05f;
         
         [NonSerialized] protected int m_GroundFrame = -100;
         [NonSerialized] protected float m_GroundTime = -100f;
@@ -76,7 +85,10 @@ namespace Arawn.GameCreator2.Networking
             {
                 if (this.m_Controller == null) return false;
                 if (this.m_ForceGrounded) return true;
-                return this.m_Controller.isGrounded && !this.m_IsOnSteepSlope;
+                if (this.m_Controller.isGrounded) return !this.m_IsOnSteepSlope;
+
+                return TryProbeGround(out RaycastHit hit) &&
+                       Vector3.Angle(hit.normal, Vector3.up) <= m_MaxSlope;
             }
         }
 
@@ -92,6 +104,11 @@ namespace Arawn.GameCreator2.Networking
         {
             get => this.m_Axonometry;
             set => this.m_Axonometry = value;
+        }
+
+        public void SetExternalMoveDirection(Vector3 velocity)
+        {
+            this.m_MoveDirection = velocity;
         }
         
         public ushort LastProcessedInput => m_LastProcessedInput;
@@ -112,6 +129,8 @@ namespace Arawn.GameCreator2.Networking
             this.m_MoveDirection = Vector3.zero;
             this.m_VerticalSpeed = 0f;
             this.m_InputBuffer = new Queue<NetworkInputState>(32);
+            this.m_QueuedInputSequences = new HashSet<ushort>();
+            this.m_LastProcessedInput = ushort.MaxValue;
         }
 
         public override void OnStartup(Character character)
@@ -120,9 +139,11 @@ namespace Arawn.GameCreator2.Networking
 
             this.m_FloorNormal = new AnimVector3(Vector3.up, 0.15f);
             this.m_InputBuffer = new Queue<NetworkInputState>(32);
-            this.m_LastProcessedInput = 0;
+            this.m_QueuedInputSequences = new HashSet<ushort>();
+            this.m_LastProcessedInput = ushort.MaxValue;
             this.m_SpeedViolations = 0;
-
+            this.m_SuppressedDuplicateInputs = 0;
+            this.m_LastMotionDiagnosticRealtime = -100f;
             this.m_Controller = this.Character.GetComponent<CharacterController>();
             if (this.m_Controller == null)
             {
@@ -143,6 +164,7 @@ namespace Arawn.GameCreator2.Networking
 
             this.m_LastValidatedPosition = this.Transform.position;
             this.m_ExpectedMaxSpeed = this.Character.Motion.LinearSpeed;
+
         }
 
         public override void OnEnable()
@@ -158,10 +180,7 @@ namespace Arawn.GameCreator2.Networking
         public override void OnDispose(Character character)
         {
             base.OnDispose(character);
-            if (this.m_Controller != null)
-            {
-                UnityEngine.Object.Destroy(this.m_Controller);
-            }
+            this.m_Controller = null;
         }
 
         // INPUT PROCESSING: ----------------------------------------------------------------------
@@ -175,12 +194,29 @@ namespace Arawn.GameCreator2.Networking
             // Reject out-of-order inputs (simple protection)
             if (IsSequenceNewer(input.sequenceNumber, m_LastProcessedInput))
             {
+                if (m_QueuedInputSequences.Contains(input.sequenceNumber))
+                {
+                    m_SuppressedDuplicateInputs++;
+                    LogServerMotionDiagnostic(
+                        $"suppressed duplicate queued input seq={input.sequenceNumber} " +
+                        $"lastProcessed={m_LastProcessedInput} queued={m_InputBuffer.Count} " +
+                        $"suppressedSinceLast={m_SuppressedDuplicateInputs}");
+                    return;
+                }
+
                 // Cap buffer size to prevent memory growth from floods
                 if (m_InputBuffer.Count >= MAX_BUFFERED_INPUTS)
                 {
-                    m_InputBuffer.Dequeue(); // Drop oldest input
+                    NetworkInputState dropped = m_InputBuffer.Dequeue(); // Drop oldest input
+                    m_QueuedInputSequences.Remove(dropped.sequenceNumber);
+                    LogServerMotionDiagnostic(
+                        $"input buffer full; dropped oldest seq={dropped.sequenceNumber} " +
+                        $"incoming={input.sequenceNumber}",
+                        force: true);
                 }
+
                 m_InputBuffer.Enqueue(input);
+                m_QueuedInputSequences.Add(input.sequenceNumber);
             }
         }
 
@@ -190,9 +226,18 @@ namespace Arawn.GameCreator2.Networking
         /// </summary>
         public NetworkPositionState ProcessInputs(Transform cameraTransform = null)
         {
+            int queuedAtStart = m_InputBuffer.Count;
+            if (queuedAtStart > 4)
+            {
+                LogServerMotionDiagnostic(
+                    $"processing input backlog queued={queuedAtStart} " +
+                    $"lastProcessed={m_LastProcessedInput} position={FormatVector(this.Transform.position)}");
+            }
+
             while (m_InputBuffer.Count > 0)
             {
                 var input = m_InputBuffer.Dequeue();
+                m_QueuedInputSequences.Remove(input.sequenceNumber);
                 ProcessSingleInput(input, cameraTransform);
                 m_LastProcessedInput = input.sequenceNumber;
             }
@@ -202,10 +247,30 @@ namespace Arawn.GameCreator2.Networking
             return state;
         }
 
+        private void LogServerMotionDiagnostic(string message, bool force = false)
+        {
+            if (!m_LogMotionDiagnostics) return;
+
+            float now = Time.realtimeSinceStartup;
+            if (!force && now - m_LastMotionDiagnosticRealtime < 0.5f) return;
+
+            Debug.Log(
+                $"[NetworkMotionDebug][ServerDriver] {this.Character?.name ?? "Character"}: {message}",
+                this.Character);
+            m_LastMotionDiagnosticRealtime = now;
+            m_SuppressedDuplicateInputs = 0;
+        }
+
+        private static string FormatVector(Vector3 value)
+        {
+            return $"({value.x:F3},{value.y:F3},{value.z:F3})";
+        }
+
         private void ProcessSingleInput(NetworkInputState input, Transform cameraTransform)
         {
             Vector2 rawInput = input.GetInputDirection();
             float deltaTime = input.GetDeltaTime();
+            this.Transform.rotation = Quaternion.Euler(0f, input.GetRotationY(), 0f);
             
             // Convert input to world direction
             Vector3 inputDirection = new Vector3(rawInput.x, 0f, rawInput.y);
@@ -216,7 +281,7 @@ namespace Arawn.GameCreator2.Networking
                 inputDirection = cameraRotation * inputDirection;
             }
             
-            inputDirection.Normalize();
+            if (inputDirection.sqrMagnitude > 1f) inputDirection.Normalize();
 
             // Calculate expected movement
             float speed = this.Character.Motion.LinearSpeed;
@@ -243,12 +308,20 @@ namespace Arawn.GameCreator2.Networking
             }
 
             // Combine movement
-            Vector3 totalMovement = horizontalMovement + Vector3.up * m_VerticalSpeed * deltaTime;
+            Vector3 translation = ApplyRootMotionBlend(horizontalMovement);
+            translation = this.m_Axonometry?.ProcessTranslation(this, translation) ?? translation;
+
+            Vector3 totalMovement = translation + Vector3.up * m_VerticalSpeed * deltaTime;
             
             // Move character controller
             if (m_Controller != null && m_Controller.enabled)
             {
                 m_Controller.Move(totalMovement);
+            }
+
+            if (TryApplyOwnerAuthorityPosition(input, deltaTime, out Vector3 ownerAuthorityDelta))
+            {
+                translation = ownerAuthorityDelta;
             }
 
             // Update grounded state
@@ -260,7 +333,7 @@ namespace Arawn.GameCreator2.Networking
             }
 
             // Store move direction for animation
-            m_MoveDirection = horizontalMovement / deltaTime;
+            m_MoveDirection = translation / deltaTime;
             
             // Update floor normal
             if (m_FloorNormal != null)
@@ -269,17 +342,118 @@ namespace Arawn.GameCreator2.Networking
             }
         }
 
+        private Vector3 ApplyRootMotionBlend(Vector3 kineticMovement)
+        {
+            Vector3 rootMotion = this.Character.Animim.RootMotionDeltaPosition;
+            return Vector3.Lerp(kineticMovement, rootMotion, this.Character.RootMotionPosition);
+        }
+
+        private bool TryApplyOwnerAuthorityPosition(
+            NetworkInputState input,
+            float deltaTime,
+            out Vector3 appliedDelta)
+        {
+            appliedDelta = Vector3.zero;
+            if (!input.HasOwnerAuthorityPosition) return false;
+            if (!ShouldAcceptOwnerAuthorityPosition()) return false;
+
+            Vector3 targetPosition = input.GetOwnerAuthorityPosition();
+            Vector3 currentPosition = this.Transform.position;
+            Vector3 delta = targetPosition - currentPosition;
+            float distance = delta.magnitude;
+
+            if (distance <= OWNER_AUTHORITY_POSITION_EPSILON) return false;
+
+            float speed = this.Character.Motion.LinearSpeed;
+            float maxKineticDistance = speed * m_Config.maxSpeedMultiplier * deltaTime + OWNER_AUTHORITY_EXTRA_DISTANCE;
+            float maxAuthorityDistance = Mathf.Max(m_Config.maxReconciliationDistance, maxKineticDistance);
+
+            if (distance > maxAuthorityDistance)
+            {
+                m_SpeedViolations++;
+                OnSpeedViolation?.Invoke(m_SpeedViolations);
+                LogServerMotionDiagnostic(
+                    $"rejected owner authority position seq={input.sequenceNumber} distance={distance:F3} " +
+                    $"max={maxAuthorityDistance:F3} current={FormatVector(currentPosition)} owner={FormatVector(targetPosition)}",
+                    true);
+                return false;
+            }
+
+            if (m_Controller != null && m_Controller.enabled)
+            {
+                m_Controller.enabled = false;
+                this.Transform.position = targetPosition;
+                m_Controller.enabled = true;
+            }
+            else
+            {
+                this.Transform.position = targetPosition;
+            }
+
+            appliedDelta = delta;
+            LogServerMotionDiagnostic(
+                $"accepted owner authority position seq={input.sequenceNumber} distance={distance:F3} " +
+                $"rootMotion={this.Character.RootMotionPosition:F3} busy={this.Character.Busy.IsBusy} " +
+                $"owner={FormatVector(targetPosition)}",
+                distance > 0.05f);
+            return true;
+        }
+
+        private bool ShouldAcceptOwnerAuthorityPosition()
+        {
+            if (this.Character == null) return false;
+            if (this.Character.RootMotionPosition > OWNER_AUTHORITY_ROOT_MOTION_THRESHOLD) return true;
+            return this.Character.Busy != null && this.Character.Busy.IsBusy;
+        }
+
         private void UpdateGravity(float deltaTime)
         {
+            float gravityInfluence = this.GravityInfluence;
+
+            if (IsGrounded)
+            {
+                if (m_VerticalSpeed <= 0f)
+                {
+                    m_VerticalSpeed = gravityInfluence <= 0.001f ? 0f : -2f;
+                }
+
+                m_GroundTime = this.Character.Time.Time;
+                m_GroundFrame = this.Character.Time.Frame;
+                return;
+            }
+
             if (!IsGrounded)
             {
                 float gravity = m_VerticalSpeed >= 0 
                     ? this.Character.Motion.GravityUpwards 
                     : this.Character.Motion.GravityDownwards;
-                
+
+                gravity *= gravityInfluence;
                 m_VerticalSpeed += gravity * deltaTime;
                 m_VerticalSpeed = Mathf.Max(m_VerticalSpeed, this.Character.Motion.TerminalVelocity);
             }
+        }
+
+        private bool TryProbeGround(out RaycastHit hit)
+        {
+            hit = default;
+            if (m_Controller == null || !m_Controller.enabled) return false;
+
+            float skin = Mathf.Max(0.01f, m_Controller.skinWidth);
+            float radius = Mathf.Max(0.01f, m_Controller.radius - skin);
+            float halfHeight = Mathf.Max(radius, m_Controller.height * 0.5f);
+            float probeDistance = Mathf.Max(0.05f, halfHeight - radius + skin + 0.08f);
+            Vector3 center = Transform.TransformPoint(m_Controller.center);
+
+            return Physics.SphereCast(
+                center,
+                radius,
+                Vector3.down,
+                out hit,
+                probeDistance,
+                Physics.DefaultRaycastLayers,
+                QueryTriggerInteraction.Ignore
+            );
         }
 
         private bool CanJump()
@@ -384,8 +558,25 @@ namespace Arawn.GameCreator2.Networking
         {
             if (m_Controller != null && m_Controller.enabled)
             {
+                Vector3 before = this.Transform.position;
                 m_Controller.Move(amount);
+                RecordExternalMoveVelocity(before);
             }
+        }
+
+        private void RecordExternalMoveVelocity(Vector3 before)
+        {
+            float deltaTime = this.Character != null
+                ? this.Character.Time.DeltaTime
+                : Time.deltaTime;
+
+            if (deltaTime <= 0f) deltaTime = Time.deltaTime;
+            if (deltaTime <= 0f) return;
+
+            Vector3 actualDelta = this.Transform.position - before;
+            if (actualDelta.sqrMagnitude <= 0.0000001f) return;
+
+            this.m_MoveDirection = actualDelta / deltaTime;
         }
 
         public override void AddRotation(Quaternion amount)

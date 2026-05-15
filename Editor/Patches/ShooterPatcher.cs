@@ -11,7 +11,7 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
     public class ShooterPatcher : GC2PatcherBase
     {
         public override string ModuleName => "Shooter";
-        public override string PatchVersion => "2.2.0-shooter";
+        public override string PatchVersion => "2.2.2-shooter";
         public override string DisplayName => "Shooter (Game Creator 2)";
         
         public override string PatchDescription =>
@@ -20,12 +20,15 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
             "ShooterStance.PullTrigger/ReleaseTrigger will have network validation.\n" +
             "ShooterStance.Reload will have network hooks.\n" +
             "WeaponData.Shoot will be intercepted for hit validation.\n" +
+            "ShooterWeapon.OnHit will report hit claims for server validation.\n" +
             "Also fixes obsolete API warnings in editor files.";
         
         protected override string[] FilesToPatch => new[]
         {
             "Plugins/GameCreator/Packages/Shooter/Runtime/Classes/Stances/ShooterStance.cs",
             "Plugins/GameCreator/Packages/Shooter/Runtime/Classes/Data/WeaponData.cs",
+            "Plugins/GameCreator/Packages/Shooter/Runtime/ScriptableObjects/ShooterWeapon.cs",
+            "Plugins/GameCreator/Packages/Shooter/Runtime/Classes/Aim/Aim.cs",
             "Plugins/GameCreator/Packages/Shooter/Editor/Editors/ReloadEditor.cs",
             "Plugins/GameCreator/Packages/Shooter/Editor/Editors/ShooterWeaponEditor.cs"
         };
@@ -63,6 +66,24 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                 };
             }
 
+            if (relativePath.EndsWith("ShooterWeapon.cs"))
+            {
+                return new[]
+                {
+                    "NetworkHitDetected",
+                    "NetworkHitDetected?.Invoke"
+                };
+            }
+
+            if (relativePath.EndsWith("Aim.cs"))
+            {
+                return new[]
+                {
+                    "NetworkAimPointResolver",
+                    "NetworkAimPointResolver?.Invoke"
+                };
+            }
+
             return base.GetRequiredPatchTokens(relativePath);
         }
 
@@ -84,6 +105,22 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                 {
                     { "NetworkShootValidator.Invoke", 1 },
                     { "NetworkShotFired?.Invoke(", 1 }
+                };
+            }
+
+            if (relativePath.EndsWith("ShooterWeapon.cs"))
+            {
+                return new System.Collections.Generic.Dictionary<string, int>
+                {
+                    { "NetworkHitDetected?.Invoke", 1 }
+                };
+            }
+
+            if (relativePath.EndsWith("Aim.cs"))
+            {
+                return new System.Collections.Generic.Dictionary<string, int>
+                {
+                    { "NetworkAimPointResolver?.Invoke", 1 }
                 };
             }
 
@@ -111,6 +148,22 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                 };
             }
 
+            if (relativePath.EndsWith("ShooterWeapon.cs"))
+            {
+                return new System.Collections.Generic.Dictionary<string, int>
+                {
+                    { @"NetworkHitDetected\?\.Invoke\(", 1 }
+                };
+            }
+
+            if (relativePath.EndsWith("Aim.cs"))
+            {
+                return new System.Collections.Generic.Dictionary<string, int>
+                {
+                    { @"NetworkAimPointResolver\?\.Invoke\(", 1 }
+                };
+            }
+
             return base.GetRequiredPatchRegexTokenCounts(relativePath);
         }
         
@@ -129,6 +182,14 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
             else if (relativePath.EndsWith("WeaponData.cs"))
             {
                 return PatchWeaponData(relativePath, content);
+            }
+            else if (relativePath.EndsWith("ShooterWeapon.cs"))
+            {
+                return PatchShooterWeapon(relativePath, content);
+            }
+            else if (relativePath.EndsWith("Aim.cs"))
+            {
+                return PatchAim(relativePath, content);
             }
             else if (relativePath.EndsWith("ReloadEditor.cs") || relativePath.EndsWith("ShooterWeaponEditor.cs"))
             {
@@ -512,6 +573,111 @@ namespace GameCreator.Runtime.Shooter
                 }
             }
             
+            WriteFile(relativePath, content);
+            Debug.Log($"[GC2 Networking] Patched {relativePath}");
+            return true;
+        }
+
+        private bool PatchShooterWeapon(string relativePath, string content)
+        {
+            if (!content.Contains("NetworkHitDetected"))
+            {
+                const string lastShotData = "        public static ShotData LastShotData { get; private set; }";
+                const string patchedLastShotData =
+                    "        public static ShotData LastShotData { get; private set; }\n" +
+                    "        public static Action<ShotData, Args> NetworkHitDetected;";
+
+                if (!TryReplaceWithFlexibleWhitespace(ref content, lastShotData, patchedLastShotData))
+                {
+                    Debug.LogError("[GC2 Networking] Could not add NetworkHitDetected hook in ShooterWeapon.cs.");
+                    return false;
+                }
+            }
+
+            if (!content.Contains("NetworkHitDetected = null"))
+            {
+                const string resetAnchor =
+                    "        private static void RuntimeInitializeOnLoad()\n" +
+                    "        {\n" +
+                    "            LastShotData = default;";
+                const string patchedResetAnchor =
+                    "        private static void RuntimeInitializeOnLoad()\n" +
+                    "        {\n" +
+                    "            LastShotData = default;\n" +
+                    "            NetworkHitDetected = null;";
+
+                if (!TryReplaceWithFlexibleWhitespace(ref content, resetAnchor, patchedResetAnchor))
+                {
+                    Debug.LogError("[GC2 Networking] Could not add NetworkHitDetected reset in ShooterWeapon.cs.");
+                    return false;
+                }
+            }
+
+            if (!content.Contains("NetworkHitDetected?.Invoke"))
+            {
+                const string onHitAnchor =
+                    "        internal void OnHit(ShotData data, Args args)\n" +
+                    "        {\n" +
+                    "            LastShotData = data;";
+                const string patchedOnHitAnchor =
+                    "        internal void OnHit(ShotData data, Args args)\n" +
+                    "        {\n" +
+                    "            LastShotData = data;\n" +
+                    "            NetworkHitDetected?.Invoke(data, args);";
+
+                if (!TryReplaceWithFlexibleWhitespace(ref content, onHitAnchor, patchedOnHitAnchor))
+                {
+                    Debug.LogError("[GC2 Networking] Could not inject NetworkHitDetected invocation in ShooterWeapon.cs.");
+                    return false;
+                }
+            }
+
+            WriteFile(relativePath, content);
+            Debug.Log($"[GC2 Networking] Patched {relativePath}");
+            return true;
+        }
+
+        private bool PatchAim(string relativePath, string content)
+        {
+            if (!content.Contains("NetworkAimPointResolver"))
+            {
+                const string classAnchor =
+                    "    public class Aim\n" +
+                    "    {";
+                const string patchedClassAnchor =
+                    "    public class Aim\n" +
+                    "    {\n" +
+                    "        public static Func<Args, Aim, Vector3?> NetworkAimPointResolver;";
+
+                if (!TryReplaceWithFlexibleWhitespace(ref content, classAnchor, patchedClassAnchor))
+                {
+                    Debug.LogError("[GC2 Networking] Could not add NetworkAimPointResolver hook in Aim.cs.");
+                    return false;
+                }
+            }
+
+            if (!content.Contains("NetworkAimPointResolver?.Invoke"))
+            {
+                const string getPointAnchor =
+                    "        public Vector3 GetPoint(Args args)\n" +
+                    "        {\n" +
+                    "            return this.m_Aim.GetPoint(args);\n" +
+                    "        }";
+                const string patchedGetPointAnchor =
+                    "        public Vector3 GetPoint(Args args)\n" +
+                    "        {\n" +
+                    "            Vector3? networkAimPoint = NetworkAimPointResolver?.Invoke(args, this);\n" +
+                    "            if (networkAimPoint.HasValue) return networkAimPoint.Value;\n\n" +
+                    "            return this.m_Aim.GetPoint(args);\n" +
+                    "        }";
+
+                if (!TryReplaceWithFlexibleWhitespace(ref content, getPointAnchor, patchedGetPointAnchor))
+                {
+                    Debug.LogError("[GC2 Networking] Could not inject NetworkAimPointResolver invocation in Aim.cs.");
+                    return false;
+                }
+            }
+
             WriteFile(relativePath, content);
             Debug.Log($"[GC2 Networking] Patched {relativePath}");
             return true;
@@ -902,13 +1068,10 @@ namespace GameCreator.Runtime.Shooter
 
             string chargeRatioIdentifier = ResolveChargeRatioIdentifier(body);
             string notifyBlock = $@"
-            // [GC2_NETWORK_PATCH] Notify network of successful shot
-            if (success)
-            {{
-                Vector3 origin = this.Prop != null ? this.Prop.transform.position : this.Character.transform.position;
-                Vector3 direction = this.Prop != null ? this.Prop.transform.forward : this.Character.transform.forward;
-                NetworkShotFired?.Invoke(this, origin, direction, {chargeRatioIdentifier});
-            }}
+            // [GC2_NETWORK_PATCH] Notify network before the projectile pipeline reports hits
+            Vector3 origin = this.Weapon.Muzzle.GetPosition(this.WeaponArgs);
+            Vector3 direction = this.Weapon.Muzzle.GetRotation(this.WeaponArgs) * Vector3.forward;
+            NetworkShotFired?.Invoke(this, origin, direction, {chargeRatioIdentifier});
             // [GC2_NETWORK_PATCH_END]
 
 ";
@@ -919,19 +1082,8 @@ namespace GameCreator.Runtime.Shooter
                 RegexOptions.CultureInvariant);
             if (successAssignment.Success)
             {
-                int absoluteIndex = bodyStart + successAssignment.Index;
-                int parenDepth = 0;
-                for (int i = absoluteIndex; i < content.Length; i++)
-                {
-                    char character = content[i];
-                    if (character == '(') parenDepth++;
-                    else if (character == ')') parenDepth = Math.Max(0, parenDepth - 1);
-                    else if (character == ';' && parenDepth == 0)
-                    {
-                        content = content.Insert(i + 1, notifyBlock);
-                        return true;
-                    }
-                }
+                content = content.Insert(bodyStart + successAssignment.Index, notifyBlock);
+                return true;
             }
 
             Match failureBranchAnchor = Regex.Match(body, @"if\s*\(\s*!\s*success\s*\)", RegexOptions.CultureInvariant);

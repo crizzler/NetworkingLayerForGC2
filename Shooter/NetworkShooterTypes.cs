@@ -3,6 +3,13 @@ using UnityEngine;
 
 namespace Arawn.GameCreator2.Networking.Shooter
 {
+    public static class NetworkShooterDebug
+    {
+        // Existing demo scenes can serialize diagnostics off. Keep this forced on
+        // while chasing Shooter sync handoff failures across controller/manager/bridge.
+        public static bool ForceDiagnostics = true;
+    }
+
     /// <summary>
     /// Network-optimized data types for GC2 Shooter synchronization.
     /// </summary>
@@ -97,6 +104,9 @@ namespace Arawn.GameCreator2.Networking.Shooter
         
         /// <summary>Whether this hit a character (vs environment).</summary>
         public bool IsCharacterHit;
+
+        /// <summary>Network shooter impact prop id for deterministic environment motion.</summary>
+        public uint ImpactPropNetworkId;
     }
     
     // ════════════════════════════════════════════════════════════════════════════════════════════
@@ -257,6 +267,30 @@ namespace Arawn.GameCreator2.Networking.Shooter
         
         /// <summary>Material hash for impact sound.</summary>
         public int MaterialHash;
+
+        /// <summary>Whether this hit drives deterministic environment prop motion.</summary>
+        public bool HasImpactMotion;
+
+        /// <summary>Deterministic kinematic motion for an impacted environment prop.</summary>
+        public NetworkShooterImpactMotion ImpactMotion;
+    }
+
+    /// <summary>
+    /// Compact deterministic motion payload for shooter-driven environment props.
+    /// </summary>
+    [Serializable]
+    public struct NetworkShooterImpactMotion
+    {
+        public uint PropNetworkId;
+        public Vector3 StartPosition;
+        public Quaternion StartRotation;
+        public Vector3 TargetPosition;
+        public Quaternion TargetRotation;
+        public Vector3 HitPoint;
+        public Vector3 ImpactDirection;
+        public float StartTime;
+        public float Duration;
+        public float ImpactStrength;
     }
     
     // ════════════════════════════════════════════════════════════════════════════════════════════
@@ -264,7 +298,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
     // ════════════════════════════════════════════════════════════════════════════════════════════
     
     /// <summary>
-    /// Compact weapon state for synchronization. (~12 bytes)
+    /// Compact weapon state for synchronization. (~20 bytes)
     /// </summary>
     [Serializable]
     public struct NetworkWeaponState
@@ -280,6 +314,12 @@ namespace Arawn.GameCreator2.Networking.Shooter
         
         /// <summary>Weapon state flags.</summary>
         public byte StateFlags;
+
+        /// <summary>Target shooter lean amount in degrees.</summary>
+        public float LeanAmount;
+
+        /// <summary>Shooter lean spring decay/speed.</summary>
+        public float LeanDecay;
         
         public const byte FLAG_IS_RELOADING = 0x01;
         public const byte FLAG_IS_JAMMED = 0x02;
@@ -298,7 +338,9 @@ namespace Arawn.GameCreator2.Networking.Shooter
             WeaponHash = 0,
             SightHash = 0,
             AmmoInMagazine = 0,
-            StateFlags = 0
+            StateFlags = 0,
+            LeanAmount = 0f,
+            LeanDecay = 0f
         };
     }
     

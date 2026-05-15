@@ -73,6 +73,8 @@ namespace Arawn.GameCreator2.Networking.Melee
         [Header("Debug")]
         [SerializeField] private bool m_LogHitRequests = false;
         [SerializeField] private bool m_LogHitBroadcasts = false;
+        [SerializeField] private bool m_LogMeleeFlow = false;
+        [SerializeField] private bool m_LogSkillFlowDiagnostics = false;
         
         // ════════════════════════════════════════════════════════════════════════════════════════
         // NETWORK DELEGATES (Connect to your transport)
@@ -156,6 +158,12 @@ namespace Arawn.GameCreator2.Networking.Melee
 
         /// <summary>Optional server-side damage calculation hook.</summary>
         public Func<NetworkMeleeHitRequest, float> ComputeDamageFunc;
+
+        /// <summary>
+        /// Optional server-side damage application hook. Return true when damage was applied.
+        /// Returning false lets the built-in melee reaction fallback run.
+        /// </summary>
+        public Func<NetworkMeleeHitRequest, float, bool> TryApplyDamageFunc;
 
         /// <summary>Optional server-side damage application hook.</summary>
         public Action<NetworkMeleeHitRequest, float> ApplyDamageFunc;
@@ -501,6 +509,36 @@ namespace Arawn.GameCreator2.Networking.Melee
         public bool IsServer => m_IsServer;
         public bool IsClient => m_IsClient;
         public MeleeNetworkStats Stats => m_Stats;
+
+        private bool ShouldLogMeleeFlow => m_LogMeleeFlow || m_LogHitRequests || m_LogHitBroadcasts;
+        private bool ShouldLogSkillFlow =>
+            m_LogSkillFlowDiagnostics ||
+            ShouldLogMeleeFlow ||
+            NetworkMeleeDebug.ForcePacketDiagnostics;
+
+        private void LogMeleeFlow(string message)
+        {
+            if (!ShouldLogMeleeFlow) return;
+            Debug.Log($"[NetworkMeleeManager] {message}", this);
+        }
+
+        private void LogMeleeFlowWarning(string message)
+        {
+            if (!ShouldLogMeleeFlow) return;
+            Debug.LogWarning($"[NetworkMeleeManager] {message}", this);
+        }
+
+        private void LogSkillFlow(string message)
+        {
+            if (!ShouldLogSkillFlow) return;
+            Debug.Log($"[NetworkMeleeSkillDebug][Manager] {message}", this);
+        }
+
+        private void LogSkillFlowWarning(string message)
+        {
+            if (!ShouldLogSkillFlow) return;
+            Debug.LogWarning($"[NetworkMeleeSkillDebug][Manager] {message}", this);
+        }
         
         // ════════════════════════════════════════════════════════════════════════════════════════
         // UNITY LIFECYCLE
@@ -582,6 +620,11 @@ namespace Arawn.GameCreator2.Networking.Melee
             controller.OnBlockRequested += OnControllerBlockRequested;
             controller.OnSkillRequested += OnControllerSkillRequested;
             controller.OnChargeRequested += OnControllerChargeRequested;
+
+            LogSkillFlow(
+                $"registered controller netId={networkId} name={controller.name} " +
+                $"server={controller.IsServer} local={controller.IsLocalClient} " +
+                $"registeredCount={m_Controllers.Count}");
         }
         
         /// <summary>
@@ -596,6 +639,9 @@ namespace Arawn.GameCreator2.Networking.Melee
                 controller.OnSkillRequested -= OnControllerSkillRequested;
                 controller.OnChargeRequested -= OnControllerChargeRequested;
                 m_Controllers.Remove(networkId);
+                LogSkillFlow(
+                    $"unregistered controller netId={networkId} name={(controller != null ? controller.name : "null")} " +
+                    $"registeredCount={m_Controllers.Count}");
             }
         }
         
@@ -641,16 +687,41 @@ namespace Arawn.GameCreator2.Networking.Melee
         
         private void OnControllerBlockRequested(NetworkBlockRequest request)
         {
-            if (!m_IsClient) return;
+            if (!m_IsClient)
+            {
+                LogMeleeFlowWarning(
+                    $"dropped local block request because manager is not client. actor={request.ActorNetworkId} " +
+                    $"action={request.Action} shieldHash={request.ShieldHash}");
+                return;
+            }
             
+            LogMeleeFlow(
+                $"sending block request to server actor={request.ActorNetworkId} req={request.RequestId} " +
+                $"corr={request.CorrelationId} action={request.Action} shieldHash={request.ShieldHash}");
             SendBlockRequestToServer?.Invoke(request);
             OnBlockRequestSent?.Invoke(request);
         }
         
         private void OnControllerSkillRequested(NetworkSkillRequest request)
         {
-            if (!m_IsClient) return;
+            if (!m_IsClient)
+            {
+                LogSkillFlowWarning(
+                    $"dropped local skill request because manager is not client actor={request.ActorNetworkId} " +
+                    $"req={request.RequestId} corr={request.CorrelationId} skillHash={request.SkillHash} weaponHash={request.WeaponHash}");
+                LogMeleeFlowWarning(
+                    $"dropped local skill request because manager is not client. actor={request.ActorNetworkId} " +
+                    $"skillHash={request.SkillHash} weaponHash={request.WeaponHash}");
+                return;
+            }
             
+            LogSkillFlow(
+                $"sending skill request to server actor={request.ActorNetworkId} req={request.RequestId} corr={request.CorrelationId} " +
+                $"skillHash={request.SkillHash} weaponHash={request.WeaponHash} combo={request.ComboNodeId} target={request.TargetNetworkId} " +
+                $"sendDelegate={(SendSkillRequestToServer != null)}");
+            LogMeleeFlow(
+                $"sending skill request to server actor={request.ActorNetworkId} req={request.RequestId} corr={request.CorrelationId} " +
+                $"skillHash={request.SkillHash} weaponHash={request.WeaponHash} combo={request.ComboNodeId}");
             SendSkillRequestToServer?.Invoke(request);
             OnSkillRequestSent?.Invoke(request);
         }
@@ -1043,6 +1114,20 @@ namespace Arawn.GameCreator2.Networking.Melee
             var targetCharacter = targetNetworkChar.GetComponent<Character>();
             if (targetCharacter == null) return;
             
+            if (TryApplyDamageFunc != null)
+            {
+                try
+                {
+                    if (TryApplyDamageFunc.Invoke(request, damage)) return;
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogError(
+                        $"[NetworkMeleeManager] TryApplyDamageFunc threw an exception. " +
+                        $"Falling back to built-in reaction damage path.\n{ex.Message}");
+                }
+            }
+
             if (ApplyDamageFunc != null)
             {
                 try
@@ -1060,13 +1145,12 @@ namespace Arawn.GameCreator2.Networking.Melee
 
             uint attackerNetworkId = request.ActorNetworkId != 0 ? request.ActorNetworkId : request.AttackerNetworkId;
             var attackerNetworkChar = GetCharacterByNetworkId(attackerNetworkId);
-            Vector3 incomingDirection = request.StrikeDirection.sqrMagnitude > 0.0001f
+            Vector3 localDirection = request.StrikeDirection.sqrMagnitude > 0.0001f
                 ? request.StrikeDirection.normalized
                 : attackerNetworkChar != null
-                    ? (targetCharacter.transform.position - attackerNetworkChar.transform.position).normalized
-                    : targetCharacter.transform.forward;
-
-            Vector3 localDirection = targetCharacter.transform.InverseTransformDirection(incomingDirection).normalized;
+                    ? targetCharacter.transform.InverseTransformDirection(
+                        (targetCharacter.transform.position - attackerNetworkChar.transform.position).normalized)
+                    : Vector3.forward;
             if (localDirection.sqrMagnitude < 0.0001f)
             {
                 localDirection = Vector3.forward;
@@ -1092,9 +1176,23 @@ namespace Arawn.GameCreator2.Networking.Melee
         /// </summary>
         public void ReceiveBlockRequest(uint clientNetworkId, NetworkBlockRequest request)
         {
-            if (!m_IsServer) return;
+            if (!m_IsServer)
+            {
+                LogMeleeFlowWarning(
+                    $"dropped block request on non-server manager client={clientNetworkId} actor={request.ActorNetworkId} " +
+                    $"action={request.Action}");
+                return;
+            }
+
+            LogMeleeFlow(
+                $"received block request client={clientNetworkId} actor={request.ActorNetworkId} req={request.RequestId} " +
+                $"corr={request.CorrelationId} action={request.Action} shieldHash={request.ShieldHash}");
+
             if (!ValidateMeleeRequest(clientNetworkId, request.ActorNetworkId, request.CorrelationId, nameof(NetworkBlockRequest)))
             {
+                LogMeleeFlowWarning(
+                    $"rejected block request in security validation client={clientNetworkId} actor={request.ActorNetworkId} " +
+                    $"req={request.RequestId} corr={request.CorrelationId} action={request.Action}");
                 SendBlockResponseToClient?.Invoke(clientNetworkId, new NetworkBlockResponse
                 {
                     RequestId = request.RequestId,
@@ -1115,6 +1213,8 @@ namespace Arawn.GameCreator2.Networking.Melee
                     request.ActorNetworkId,
                     nameof(NetworkBlockRequest)))
             {
+                LogMeleeFlowWarning(
+                    $"rejected block request because queue is full client={clientNetworkId} actor={request.ActorNetworkId}");
                 SendBlockResponseToClient?.Invoke(clientNetworkId, new NetworkBlockResponse
                 {
                     RequestId = request.RequestId,
@@ -1132,6 +1232,7 @@ namespace Arawn.GameCreator2.Networking.Melee
                 Request = request,
                 ReceivedTime = Time.time
             });
+            LogMeleeFlow($"queued block request actor={request.ActorNetworkId} queueCount={m_ServerBlockQueue.Count}");
         }
         
         private void ProcessServerBlockQueue()
@@ -1156,6 +1257,8 @@ namespace Arawn.GameCreator2.Networking.Melee
             // Find character's controller
             if (!m_Controllers.TryGetValue(request.ActorNetworkId, out var controller))
             {
+                LogMeleeFlowWarning(
+                    $"rejected block request: no controller for actor={request.ActorNetworkId} req={request.RequestId}");
                 SendBlockResponseToClient?.Invoke(queued.ClientNetworkId, new NetworkBlockResponse
                 {
                     RequestId = request.RequestId,
@@ -1171,6 +1274,9 @@ namespace Arawn.GameCreator2.Networking.Melee
             var response = controller.ProcessBlockRequest(request, queued.ClientNetworkId);
             response.ActorNetworkId = request.ActorNetworkId;
             response.CorrelationId = request.CorrelationId;
+            LogMeleeFlow(
+                $"processed block request actor={request.ActorNetworkId} req={request.RequestId} " +
+                $"action={request.Action} validated={response.Validated} reason={response.RejectionReason}");
             
             // Send response to client
             SendBlockResponseToClient?.Invoke(queued.ClientNetworkId, response);
@@ -1188,6 +1294,9 @@ namespace Arawn.GameCreator2.Networking.Melee
                     ShieldHash = request.ShieldHash
                 };
                 
+                LogMeleeFlow(
+                    $"broadcasting block actor={broadcast.CharacterNetworkId} action={broadcast.Action} " +
+                    $"shieldHash={broadcast.ShieldHash} serverTime={broadcast.ServerTimestamp:F3}");
                 BroadcastBlockToAllClients?.Invoke(broadcast);
                 OnBlockValidated?.Invoke(broadcast);
             }
@@ -1202,9 +1311,30 @@ namespace Arawn.GameCreator2.Networking.Melee
         /// </summary>
         public void ReceiveSkillRequest(uint clientNetworkId, NetworkSkillRequest request)
         {
-            if (!m_IsServer) return;
+            if (!m_IsServer)
+            {
+                LogSkillFlowWarning(
+                    $"dropped skill request on non-server manager client={clientNetworkId} actor={request.ActorNetworkId} " +
+                    $"req={request.RequestId} corr={request.CorrelationId}");
+                LogMeleeFlowWarning(
+                    $"dropped skill request on non-server manager client={clientNetworkId} actor={request.ActorNetworkId}");
+                return;
+            }
+            LogSkillFlow(
+                $"received skill request client={clientNetworkId} actor={request.ActorNetworkId} req={request.RequestId} " +
+                $"corr={request.CorrelationId} skillHash={request.SkillHash} weaponHash={request.WeaponHash} combo={request.ComboNodeId} " +
+                $"queueCount={m_ServerSkillQueue.Count}");
+            LogMeleeFlow(
+                $"received skill request client={clientNetworkId} actor={request.ActorNetworkId} req={request.RequestId} " +
+                $"corr={request.CorrelationId} skillHash={request.SkillHash} weaponHash={request.WeaponHash} combo={request.ComboNodeId}");
             if (!ValidateMeleeRequest(clientNetworkId, request.ActorNetworkId, request.CorrelationId, nameof(NetworkSkillRequest)))
             {
+                LogSkillFlowWarning(
+                    $"rejected skill request in security validation client={clientNetworkId} actor={request.ActorNetworkId} " +
+                    $"req={request.RequestId} corr={request.CorrelationId}");
+                LogMeleeFlowWarning(
+                    $"rejected skill request in security validation client={clientNetworkId} actor={request.ActorNetworkId} " +
+                    $"req={request.RequestId} corr={request.CorrelationId}");
                 SendSkillResponseToClient?.Invoke(clientNetworkId, new NetworkSkillResponse
                 {
                     RequestId = request.RequestId,
@@ -1225,6 +1355,11 @@ namespace Arawn.GameCreator2.Networking.Melee
                     request.ActorNetworkId,
                     nameof(NetworkSkillRequest)))
             {
+                LogSkillFlowWarning(
+                    $"rejected skill request because queue is full client={clientNetworkId} actor={request.ActorNetworkId} " +
+                    $"queueCount={m_ServerSkillQueue.Count} max={m_MaxSkillQueueLength}");
+                LogMeleeFlowWarning(
+                    $"rejected skill request because queue is full client={clientNetworkId} actor={request.ActorNetworkId}");
                 SendSkillResponseToClient?.Invoke(clientNetworkId, new NetworkSkillResponse
                 {
                     RequestId = request.RequestId,
@@ -1242,6 +1377,8 @@ namespace Arawn.GameCreator2.Networking.Melee
                 Request = request,
                 ReceivedTime = Time.time
             });
+            LogSkillFlow($"queued skill request actor={request.ActorNetworkId} queueCount={m_ServerSkillQueue.Count}");
+            LogMeleeFlow($"queued skill request actor={request.ActorNetworkId} queueCount={m_ServerSkillQueue.Count}");
         }
         
         private void ProcessServerSkillQueue()
@@ -1266,6 +1403,11 @@ namespace Arawn.GameCreator2.Networking.Melee
             // Find character's controller
             if (!m_Controllers.TryGetValue(request.ActorNetworkId, out var controller))
             {
+                LogSkillFlowWarning(
+                    $"rejected skill request: no controller for actor={request.ActorNetworkId} req={request.RequestId} " +
+                    $"registeredControllers={m_Controllers.Count}");
+                LogMeleeFlowWarning(
+                    $"rejected skill request: no controller for actor={request.ActorNetworkId} req={request.RequestId}");
                 SendSkillResponseToClient?.Invoke(queued.ClientNetworkId, new NetworkSkillResponse
                 {
                     RequestId = request.RequestId,
@@ -1281,6 +1423,12 @@ namespace Arawn.GameCreator2.Networking.Melee
             var response = controller.ProcessSkillRequest(request, queued.ClientNetworkId);
             response.ActorNetworkId = request.ActorNetworkId;
             response.CorrelationId = request.CorrelationId;
+            LogMeleeFlow(
+                $"processed skill request actor={request.ActorNetworkId} req={request.RequestId} " +
+                $"validated={response.Validated} reason={response.RejectionReason}");
+            LogSkillFlow(
+                $"processed skill request actor={request.ActorNetworkId} req={request.RequestId} " +
+                $"validated={response.Validated} reason={response.RejectionReason} sendResponse={(SendSkillResponseToClient != null)}");
             
             // Send response to client
             SendSkillResponseToClient?.Invoke(queued.ClientNetworkId, response);
@@ -1304,6 +1452,12 @@ namespace Arawn.GameCreator2.Networking.Melee
                         : (byte)0
                 };
                 
+                LogMeleeFlow(
+                    $"broadcasting skill actor={broadcast.CharacterNetworkId} skillHash={broadcast.SkillHash} " +
+                    $"weaponHash={broadcast.WeaponHash} combo={broadcast.ComboNodeId}");
+                LogSkillFlow(
+                    $"broadcasting skill actor={broadcast.CharacterNetworkId} skillHash={broadcast.SkillHash} " +
+                    $"weaponHash={broadcast.WeaponHash} combo={broadcast.ComboNodeId} broadcastDelegate={(BroadcastSkillToAllClients != null)}");
                 BroadcastSkillToAllClients?.Invoke(broadcast);
                 OnSkillValidated?.Invoke(broadcast);
             }
@@ -1470,6 +1624,10 @@ namespace Arawn.GameCreator2.Networking.Melee
         /// </summary>
         public void ReceiveBlockResponse(NetworkBlockResponse response)
         {
+            LogMeleeFlow(
+                $"received block response actor={response.ActorNetworkId} req={response.RequestId} " +
+                $"validated={response.Validated} reason={response.RejectionReason} " +
+                $"hasController={m_Controllers.ContainsKey(response.ActorNetworkId)}");
             if (response.ActorNetworkId != 0 && m_Controllers.TryGetValue(response.ActorNetworkId, out var controller))
             {
                 controller.ReceiveBlockResponse(response);
@@ -1481,6 +1639,9 @@ namespace Arawn.GameCreator2.Networking.Melee
         /// </summary>
         public void ReceiveBlockBroadcast(NetworkBlockBroadcast broadcast)
         {
+            LogMeleeFlow(
+                $"received block broadcast actor={broadcast.CharacterNetworkId} action={broadcast.Action} " +
+                $"shieldHash={broadcast.ShieldHash} hasController={m_Controllers.ContainsKey(broadcast.CharacterNetworkId)}");
             if (m_Controllers.TryGetValue(broadcast.CharacterNetworkId, out var ctrl))
             {
                 ctrl.ReceiveBlockBroadcast(broadcast);
@@ -1492,6 +1653,10 @@ namespace Arawn.GameCreator2.Networking.Melee
         /// </summary>
         public void ReceiveSkillResponse(NetworkSkillResponse response)
         {
+            LogSkillFlow(
+                $"received skill response actor={response.ActorNetworkId} req={response.RequestId} corr={response.CorrelationId} " +
+                $"validated={response.Validated} reason={response.RejectionReason} " +
+                $"hasController={m_Controllers.ContainsKey(response.ActorNetworkId)}");
             if (response.ActorNetworkId != 0 && m_Controllers.TryGetValue(response.ActorNetworkId, out var controller))
             {
                 controller.ReceiveSkillResponse(response);
@@ -1503,6 +1668,13 @@ namespace Arawn.GameCreator2.Networking.Melee
         /// </summary>
         public void ReceiveSkillBroadcast(NetworkSkillBroadcast broadcast)
         {
+            LogSkillFlow(
+                $"received skill broadcast actor={broadcast.CharacterNetworkId} skillHash={broadcast.SkillHash} " +
+                $"weaponHash={broadcast.WeaponHash} combo={broadcast.ComboNodeId} " +
+                $"hasController={m_Controllers.ContainsKey(broadcast.CharacterNetworkId)}");
+            LogMeleeFlow(
+                $"received skill broadcast actor={broadcast.CharacterNetworkId} skillHash={broadcast.SkillHash} " +
+                $"weaponHash={broadcast.WeaponHash} hasController={m_Controllers.ContainsKey(broadcast.CharacterNetworkId)}");
             if (m_Controllers.TryGetValue(broadcast.CharacterNetworkId, out var ctrl))
             {
                 ctrl.ReceiveSkillBroadcast(broadcast);
@@ -1536,6 +1708,9 @@ namespace Arawn.GameCreator2.Networking.Melee
         /// </summary>
         public void ReceiveReactionBroadcast(NetworkReactionBroadcast broadcast)
         {
+            LogMeleeFlow(
+                $"received reaction broadcast target={broadcast.CharacterNetworkId} from={broadcast.FromNetworkId} " +
+                $"hasController={m_Controllers.ContainsKey(broadcast.CharacterNetworkId)}");
             if (m_Controllers.TryGetValue(broadcast.CharacterNetworkId, out var ctrl))
             {
                 ctrl.ReceiveReactionBroadcast(broadcast);

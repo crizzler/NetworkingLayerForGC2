@@ -61,6 +61,6 @@ No. Patching is optional by design.
 
 ## Related Docs
 
-- `Assets/Plugins/GameCreator2NetworkingLayer/Documentation/TRANSPORT_QUICKSTART.md`
-- `Assets/Plugins/GameCreator2NetworkingLayer/Documentation/PUBLIC_API.md`
+- `Assets/Arawn/NetworkingLayerForGC2/Documentation/TRANSPORT_QUICKSTART.md`
+- `Assets/Arawn/NetworkingLayerForGC2/Documentation/PUBLIC_API.md`
 - `Documentation/REFLECTION_DEPENDENCIES.md`

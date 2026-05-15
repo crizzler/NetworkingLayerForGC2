@@ -50,7 +50,7 @@ namespace Arawn.GameCreator2.Networking
             
             m_CurrentRole = ResolveRole(isServer, isOwner, isHost);
             RefreshNetworkId();
-            
+
             InitializeForRole();
         }
         
@@ -74,7 +74,7 @@ namespace Arawn.GameCreator2.Networking
             RegisterWithBridge();
             
             // Server optimizations
-            if (m_RuntimeIsServer && !m_RuntimeIsOwner)
+            if (m_RuntimeIsServer && !m_RuntimeIsOwner && !m_RuntimeIsHost)
             {
                 ApplyServerOptimizations();
             }
@@ -92,8 +92,6 @@ namespace Arawn.GameCreator2.Networking
             ApplyCurrentRelevanceTier(force: true);
             
             OnRoleAssigned?.Invoke(m_CurrentRole);
-            
-            Debug.Log($"[NetworkCharacter] {gameObject.name} initialized as {m_CurrentRole} (id:{m_RuntimeNetworkId})");
         }
         
         private void AssignDriverForRole()
@@ -118,24 +116,41 @@ namespace Arawn.GameCreator2.Networking
                 }
                 
                 OnDriverAssigned?.Invoke(driver);
-                Debug.Log($"[NetworkCharacter] Assigned {driver.GetType().Name} to {gameObject.name}");
             }
         }
         
         private UnitDriverNetworkServer CreateServerDriver()
         {
+            if (m_Character?.Driver is UnitDriverNetworkServer currentDriver)
+            {
+                m_ServerDriver = currentDriver;
+                return m_ServerDriver;
+            }
+
             m_ServerDriver = new UnitDriverNetworkServer();
             return m_ServerDriver;
         }
         
         private UnitDriverNetworkClient CreateClientDriver()
         {
+            if (m_Character?.Driver is UnitDriverNetworkClient currentDriver)
+            {
+                m_ClientDriver = currentDriver;
+                return m_ClientDriver;
+            }
+
             m_ClientDriver = new UnitDriverNetworkClient();
             return m_ClientDriver;
         }
         
         private UnitDriverNetworkRemote CreateRemoteDriver()
         {
+            if (m_Character?.Driver is UnitDriverNetworkRemote currentDriver)
+            {
+                m_RemoteDriver = currentDriver;
+                return m_RemoteDriver;
+            }
+
             m_RemoteDriver = new UnitDriverNetworkRemote();
             return m_RemoteDriver;
         }
@@ -160,6 +175,9 @@ namespace Arawn.GameCreator2.Networking
         private void EnsurePlayerUnitForRole()
         {
             if (m_Character?.Kernel == null) return;
+
+            bool isLocalOwner = m_RuntimeIsOwner || m_CurrentRole == NetworkRole.LocalClient;
+            SetCharacterPlayerFlag(isLocalOwner);
             
             // Remote and dedicated server instances should not process local player input.
             if (m_CurrentRole == NetworkRole.RemoteClient || (m_CurrentRole == NetworkRole.Server && !m_RuntimeIsOwner))
@@ -192,6 +210,19 @@ namespace Arawn.GameCreator2.Networking
             if (networkPlayer != null)
             {
                 m_Character.Kernel.ChangePlayer(m_Character, networkPlayer);
+            }
+        }
+
+        private void SetCharacterPlayerFlag(bool isPlayer)
+        {
+            if (m_Character == null || m_Character.IsPlayer == isPlayer) return;
+
+            GameObject previousShortcut = ShortcutPlayer.Instance;
+            m_Character.IsPlayer = isPlayer;
+
+            if (!isPlayer && previousShortcut != null && previousShortcut != gameObject)
+            {
+                ShortcutPlayer.Change(previousShortcut);
             }
         }
         
@@ -405,6 +436,7 @@ namespace Arawn.GameCreator2.Networking
                 if (m_MotionController != null)
                 {
                     m_MotionController.IsServer = m_RuntimeIsServer;
+                    NetworkMotionManager.Instance?.RegisterController(m_MotionController);
                 }
             }
             
@@ -428,13 +460,16 @@ namespace Arawn.GameCreator2.Networking
                     m_AnimimController = gameObject.AddComponent<UnitAnimimNetworkController>();
                 }
                 m_AnimimController.Initialize(m_Character, m_RuntimeIsOwner);
-                
+                m_AnimimController.RegisterClips(m_PreRegisteredAnimationClips);
+
                 if (m_ResolvedSessionProfile != null)
                 {
                     var nearSettings = m_ResolvedSessionProfile.GetTierSettings(NetworkRelevanceTier.Near);
                     m_AnimimController.SetRateLimits(nearSettings.animationStateRate, nearSettings.animationGestureRate);
                     m_AnimimController.SetSyncEnabled(nearSettings.syncAnimation);
                 }
+
+                NetworkAnimationManager.Instance?.RegisterController(m_AnimimController);
             }
             
             // Setup Core networking controller if enabled (Ragdoll, Props, Invincibility, Poise, Busy, Interaction)
@@ -555,9 +590,30 @@ namespace Arawn.GameCreator2.Networking
         
         public void SetManualNetworkId(uint networkId)
         {
-            m_ManualNetworkId = networkId == 0 ? 1u : networkId;
+            uint resolvedId = networkId == 0 ? 1u : networkId;
+            uint previousId = m_RuntimeNetworkId;
+
+            m_ManualNetworkId = resolvedId;
             m_UseAutomaticNetworkId = false;
-            RefreshNetworkId();
+            if (previousId == resolvedId) return;
+
+            bool shouldReregister = m_RegisteredBridge != null && m_TransportCallbacksWired && previousId != 0;
+            if (shouldReregister)
+            {
+                m_RegisteredBridge.UnregisterCharacter(this);
+            }
+
+            m_RuntimeNetworkId = resolvedId;
+
+            if (m_LagCompensation != null)
+            {
+                m_LagCompensation.NetworkId = m_RuntimeNetworkId;
+            }
+
+            if (shouldReregister)
+            {
+                m_RegisteredBridge.RegisterCharacter(this);
+            }
         }
 
         internal void ApplyServerIssuedNetworkId(uint networkId)
@@ -662,7 +718,7 @@ namespace Arawn.GameCreator2.Networking
         private void OnClientInputReady(NetworkInputState[] inputs)
         {
             if (inputs == null || inputs.Length == 0) return;
-            
+
             OnInputPayloadReady?.Invoke(NetworkId, inputs);
             
             if (NetworkTransportBridge.HasActive)
@@ -691,7 +747,7 @@ namespace Arawn.GameCreator2.Networking
                 : Time.time;
             
             OnStatePayloadReady?.Invoke(NetworkId, state, serverTime);
-            
+
             if (NetworkTransportBridge.HasActive)
             {
                 NetworkTransportBridge.Active.Broadcast(
@@ -703,6 +759,15 @@ namespace Arawn.GameCreator2.Networking
             }
             
             m_LastStateBroadcastTime = Time.time;
+        }
+
+        private void PublishHostLocalClientState()
+        {
+            if (!m_RuntimeIsServer) return;
+            if (m_CurrentRole != NetworkRole.LocalClient) return;
+            if (m_ClientDriver == null) return;
+
+            OnServerStateProduced(m_ClientDriver.GetCurrentState());
         }
         
         private void OnBridgeInputReceivedServer(uint senderClientId, uint characterNetworkId, NetworkInputState[] inputs)
@@ -728,6 +793,7 @@ namespace Arawn.GameCreator2.Networking
             {
                 m_ServerDriver.QueueInput(inputs[i]);
             }
+
         }
 
         private bool ShouldBroadcastStateToClient(uint targetClientId, uint characterNetworkId, NetworkPositionState state, float serverTime)
@@ -802,7 +868,27 @@ namespace Arawn.GameCreator2.Networking
         private void OnBridgeStateReceivedClient(uint characterNetworkId, NetworkPositionState state, float serverTime)
         {
             if (characterNetworkId != NetworkId) return;
-            
+
+            if (m_NetworkFacingUnit != null)
+            {
+                m_NetworkFacingUnit.OnServerYawReceived(state.GetRotationY());
+            }
+
+            // The host owner (server + owner running with client-side prediction) publishes
+            // its own state via PublishHostLocalClientState. PurrNet then loops that broadcast
+            // back to this character's bridge listener. Reconciling against a state that
+            // originated from ourselves is not only redundant -- it causes visible regressions
+            // for impulses that bypass the input stream (e.g., Network Dash drives motion via
+            // Driver.AddPosition rather than NetworkInputState). The broadcast captures the
+            // current transform AFTER the dash impulse was added, but the prediction history
+            // at the matching input sequence was captured BEFORE the impulse, so reconciliation
+            // teleports the host back and only replays WASD inputs -- losing the dash distance.
+            // Skip self-reconciliation entirely when this owner is also the server.
+            if (m_RuntimeIsServer && m_RuntimeIsOwner)
+            {
+                return;
+            }
+
             if (m_ClientDriver != null)
             {
                 m_ClientDriver.ApplyServerState(state);

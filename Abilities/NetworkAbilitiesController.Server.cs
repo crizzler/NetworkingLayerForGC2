@@ -8,6 +8,8 @@ using DaimahouGames.Runtime.Core.Common;
 using GameCreator.Runtime.Characters;
 using GameCreator.Runtime.Common;
 using Arawn.GameCreator2.Networking.Security;
+using DaimahouAbilitySource = DaimahouGames.Runtime.Abilities.AbiltySource;
+using DaimahouAutoConfirmInput = DaimahouGames.Runtime.Abilities.VisualScripting.AutoConfirmInput;
 
 namespace Arawn.GameCreator2.Networking
 {
@@ -60,6 +62,16 @@ namespace Arawn.GameCreator2.Networking
             OnCastRequestReceived?.Invoke(clientId, request);
             m_Stats.TotalCastRequests++;
 
+            if (m_DebugLog)
+            {
+                Debug.Log(
+                    $"[NetworkAbilitiesController] Cast request received sender={clientId} " +
+                    $"actor={request.ActorNetworkId} caster={request.CasterNetworkId} " +
+                    $"abilityHash={request.AbilityIdHash} targetType={request.TargetType} " +
+                    $"targetPos={request.TargetPosition} targetNetId={request.TargetNetworkId} " +
+                    $"autoConfirm={request.AutoConfirm}");
+            }
+
             if (!ValidateAbilitiesRequest(clientId, request.ActorNetworkId, request.CorrelationId, nameof(NetworkAbilityCastRequest)))
             {
                 SendCastRejection(
@@ -106,6 +118,12 @@ namespace Arawn.GameCreator2.Networking
             
             if (casterState.Caster == null)
             {
+                if (m_DebugLog)
+                {
+                    Debug.LogWarning(
+                        $"[NetworkAbilitiesController] Cast rejected: pawn has no Caster feature " +
+                        $"caster={casterNetworkId} pawn={casterPawn.name}");
+                }
                 SendCastRejection(clientId, request.RequestId, request.ActorNetworkId, request.CorrelationId, AbilityCastRejectReason.CasterNotFound);
                 return;
             }
@@ -114,6 +132,12 @@ namespace Arawn.GameCreator2.Networking
             Ability ability = GetAbilityByHash?.Invoke(request.AbilityIdHash);
             if (ability == null)
             {
+                if (m_DebugLog)
+                {
+                    Debug.LogWarning(
+                        $"[NetworkAbilitiesController] Cast rejected: ability hash not registered " +
+                        $"hash={request.AbilityIdHash} caster={casterNetworkId} {DescribeCasterSlots(casterState.Caster)}");
+                }
                 SendCastRejection(clientId, request.RequestId, request.ActorNetworkId, request.CorrelationId, AbilityCastRejectReason.AbilityNotKnown);
                 return;
             }
@@ -132,6 +156,13 @@ namespace Arawn.GameCreator2.Networking
             
             if (!abilityKnown)
             {
+                if (m_DebugLog)
+                {
+                    Debug.LogWarning(
+                        $"[NetworkAbilitiesController] Cast rejected: ability not slotted " +
+                        $"ability={ability.name} hash={request.AbilityIdHash} caster={casterNetworkId} " +
+                        $"{DescribeCasterSlots(casterState.Caster)}");
+                }
                 SendCastRejection(clientId, request.RequestId, request.ActorNetworkId, request.CorrelationId, AbilityCastRejectReason.AbilityNotKnown);
                 m_Stats.RejectedRequirements++;
                 return;
@@ -162,6 +193,17 @@ namespace Arawn.GameCreator2.Networking
             RuntimeAbility runtimeAbility = casterState.Caster.GetRuntimeAbility(ability);
             var args = new ExtendedArgs(casterState.Pawn.gameObject);
             args.Set(runtimeAbility);
+
+            if (m_DebugLog)
+            {
+                Debug.Log(
+                    $"[NetworkAbilitiesController] Cast validating ability={ability.name} caster={casterNetworkId} " +
+                    $"activator={runtimeAbility.Activator?.GetType().Name ?? "none"} " +
+                    $"targeting={runtimeAbility.Targeting?.GetType().Name ?? "none"} " +
+                    $"requirements=[{DescribeTypes(runtimeAbility.Requirements)}] " +
+                    $"filters=[{DescribeTypes(runtimeAbility.Filters)}] " +
+                    $"effects=[{DescribeTypes(runtimeAbility.Effects)}]");
+            }
             
             if (!runtimeAbility.CanUse(args, out var failedRequirement))
             {
@@ -191,6 +233,13 @@ namespace Arawn.GameCreator2.Networking
                     
                     if (distance > range)
                     {
+                        if (m_DebugLog)
+                        {
+                            Debug.LogWarning(
+                                $"[NetworkAbilitiesController] Cast rejected: out of range " +
+                                $"ability={ability.name} distance={distance:F2} allowed={range:F2} " +
+                                $"casterPos={casterState.Pawn.Position} target={request.TargetPosition}");
+                        }
                         SendCastRejection(clientId, request.RequestId, request.ActorNetworkId, request.CorrelationId, AbilityCastRejectReason.OutOfRange);
                         m_Stats.RejectedOutOfRange++;
                         return;
@@ -301,7 +350,7 @@ namespace Arawn.GameCreator2.Networking
                 
                 var args = new ExtendedArgs(casterState.Pawn.gameObject);
                 args.Set(runtimeAbility);
-                args.Set(new AbiltySource(casterState.Pawn.gameObject));
+                args.Set(new DaimahouAbilitySource(casterState.Pawn.gameObject));
                 
                 // Set target
                 if (activeCast.TargetType > 0)
@@ -314,11 +363,49 @@ namespace Arawn.GameCreator2.Networking
                 }
                 
                 // Mark as auto-confirm for server execution
-                args.Set(new AutoConfirmInput());
+                args.Set(new DaimahouAutoConfirmInput());
+
+                bool hasTarget = args.Has<Target>();
+                Target targetForLog = hasTarget ? args.Get<Target>() : default;
+                bool inRange = hasTarget && SafeIsInRange(runtimeAbility, args);
+                if (m_DebugLog)
+                {
+                    Debug.Log(
+                        $"[NetworkAbilitiesController] Cast executing ability={activeCast.Ability.name} " +
+                        $"caster={activeCast.CasterNetworkId} castId={activeCast.CastInstanceId} " +
+                        $"hasTarget={hasTarget} target={DescribeTarget(targetForLog)} " +
+                        $"range={SafeGetRange(runtimeAbility, args):F2} inRange={inRange} " +
+                        $"activator={runtimeAbility.Activator?.GetType().Name ?? "none"} " +
+                        $"targeting={runtimeAbility.Targeting?.GetType().Name ?? "none"}");
+                }
+
+                bool inputCompleted = false;
+                bool triggered = false;
+                var statusReceipt = runtimeAbility.OnStatus.Subscribe(status =>
+                {
+                    if (m_DebugLog)
+                    {
+                        Debug.Log(
+                            $"[NetworkAbilitiesController] Cast status ability={activeCast.Ability.name} " +
+                            $"castId={activeCast.CastInstanceId} status='{status}'");
+                    }
+                });
+
+                var inputReceipt = runtimeAbility.OnInputComplete.Subscribe(inputArgs =>
+                {
+                    inputCompleted = true;
+                    if (m_DebugLog)
+                    {
+                        Debug.Log(
+                            $"[NetworkAbilitiesController] Cast input complete ability={activeCast.Ability.name} " +
+                            $"castId={activeCast.CastInstanceId} target={DescribeTarget(inputArgs)}");
+                    }
+                });
                 
                 // Subscribe to trigger events to broadcast effects
                 var triggerReceipt = runtimeAbility.OnTrigger.Subscribe(triggerArgs =>
                 {
+                    triggered = true;
                     OnAbilityTriggered(activeCast, triggerArgs);
                 });
                 
@@ -326,6 +413,8 @@ namespace Arawn.GameCreator2.Networking
                 bool success = await casterState.Caster.Cast(activeCast.Ability, args);
                 
                 triggerReceipt.Dispose();
+                inputReceipt.Dispose();
+                statusReceipt.Dispose();
                 
                 // Update cast state
                 activeCast.State = runtimeAbility.IsCanceled ? AbilityCastState.Canceled : AbilityCastState.Completed;
@@ -347,7 +436,9 @@ namespace Arawn.GameCreator2.Networking
                 if (m_DebugLog)
                 {
                     Debug.Log($"[NetworkAbilitiesController] Cast completed: {activeCast.Ability.name} " +
-                              $"(Success: {success}, Canceled: {runtimeAbility.IsCanceled})");
+                              $"(Success: {success}, Canceled: {runtimeAbility.IsCanceled}, " +
+                              $"Triggered: {triggered}, InputComplete: {inputCompleted}, " +
+                              $"Targets: {runtimeAbility.Targets.Count})");
                 }
             }
             catch (Exception ex)
@@ -373,7 +464,9 @@ namespace Arawn.GameCreator2.Networking
             
             if (m_DebugLog)
             {
-                Debug.Log($"[NetworkAbilitiesController] Ability triggered: {activeCast.Ability.name}");
+                Debug.Log(
+                    $"[NetworkAbilitiesController] Ability triggered: {activeCast.Ability.name} " +
+                    $"castId={activeCast.CastInstanceId} target={DescribeTarget(args)}");
             }
         }
         
@@ -392,6 +485,82 @@ namespace Arawn.GameCreator2.Networking
             };
             
             BroadcastCastToClients?.Invoke(stateBroadcast);
+        }
+
+        private static string DescribeCasterSlots(Caster caster)
+        {
+            if (caster == null) return "slots=missing";
+
+            const int MaxSlotsToProbe = 16;
+            int populated = 0;
+            string names = string.Empty;
+
+            for (int i = 0; i < MaxSlotsToProbe; i++)
+            {
+                Ability ability = caster.GetSlottedAbility(i);
+                if (ability == null) continue;
+
+                if (names.Length > 0) names += ",";
+                names += $"{i}:{ability.name}#{ability.ID.Hash}";
+                populated++;
+            }
+
+            return $"populatedSlots={populated} slots=[{names}]";
+        }
+
+        private static string DescribeTypes<T>(IEnumerable<T> values)
+        {
+            if (values == null) return string.Empty;
+
+            string result = string.Empty;
+            foreach (T value in values)
+            {
+                if (value == null) continue;
+
+                if (result.Length > 0) result += ",";
+                result += value.GetType().Name;
+            }
+
+            return result;
+        }
+
+        private static bool SafeIsInRange(RuntimeAbility runtimeAbility, ExtendedArgs args)
+        {
+            try
+            {
+                return runtimeAbility != null && runtimeAbility.IsInRange(args);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static float SafeGetRange(RuntimeAbility runtimeAbility, ExtendedArgs args)
+        {
+            try
+            {
+                return runtimeAbility != null ? (float)runtimeAbility.GetRange(args) : 0f;
+            }
+            catch
+            {
+                return 0f;
+            }
+        }
+
+        private static string DescribeTarget(ExtendedArgs args)
+        {
+            return args != null && args.Has<Target>() ? DescribeTarget(args.Get<Target>()) : "none";
+        }
+
+        private static string DescribeTarget(Target target)
+        {
+            if (target.GameObject != null)
+            {
+                return $"{target.GameObject.name}@{target.Position}";
+            }
+
+            return target.HasPosition ? target.Position.ToString() : "none";
         }
         
         // ════════════════════════════════════════════════════════════════════════════════════════

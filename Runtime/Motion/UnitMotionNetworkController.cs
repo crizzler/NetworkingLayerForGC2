@@ -42,6 +42,9 @@ namespace Arawn.GameCreator2.Networking
         [SerializeField] private float m_MaxDashDistance = 20f;
         [SerializeField] private int m_MaxPendingCallbacks = 128;
         [SerializeField] private float m_PendingCallbackTimeoutSeconds = 8f;
+        [SerializeField] private bool m_LogDashDiagnostics = false;
+        [SerializeField] private bool m_LogNavigationDiagnostics = false;
+        [SerializeField] private float m_NavigationDiagnosticsInterval = 0.5f;
 
         // MEMBERS: -------------------------------------------------------------------------------
 
@@ -51,6 +54,10 @@ namespace Arawn.GameCreator2.Networking
             public float CreatedAt;
         }
 
+        private const float MOVE_DIRECTION_MINIMUM_SEND_INTERVAL = 0.05f;
+        private const float MOVE_DIRECTION_HEARTBEAT_INTERVAL = 0.12f;
+        private const float MOVE_DIRECTION_CHANGE_THRESHOLD = 0.05f;
+
         [NonSerialized] private byte m_ConfigVersion;
         [NonSerialized] private NetworkMotionConfig m_LastSentConfig;
         [NonSerialized] private Queue<NetworkMotionCommand> m_PendingCommands;
@@ -59,6 +66,14 @@ namespace Arawn.GameCreator2.Networking
         [NonSerialized] private int m_DashesUsed;
         [NonSerialized] private Dictionary<ushort, PendingCallbackEntry> m_PendingCallbacks;
         [NonSerialized] private List<ushort> m_PendingCallbackRemovalBuffer;
+        [NonSerialized] private HashSet<ushort> m_PredictedCommandSequences;
+        [NonSerialized] private Coroutine m_NavigationRoutine;
+        [NonSerialized] private float m_LastNavigationDiagnosticTime;
+        [NonSerialized] private bool m_HasSentMoveDirection;
+        [NonSerialized] private Vector3 m_LastSentMoveDirectionVelocity;
+        [NonSerialized] private Space m_LastSentMoveDirectionSpace;
+        [NonSerialized] private int m_LastSentMoveDirectionPriority;
+        [NonSerialized] private float m_LastMoveDirectionSentAt;
 
         // EVENTS: --------------------------------------------------------------------------------
 
@@ -309,6 +324,7 @@ namespace Arawn.GameCreator2.Networking
             this.m_PendingCommands = new Queue<NetworkMotionCommand>(16);
             this.m_PendingCallbacks = new Dictionary<ushort, PendingCallbackEntry>(16);
             this.m_PendingCallbackRemovalBuffer = new List<ushort>(8);
+            this.m_PredictedCommandSequences = new HashSet<ushort>();
         }
 
         // INITIALIZERS: --------------------------------------------------------------------------
@@ -322,9 +338,23 @@ namespace Arawn.GameCreator2.Networking
             this.m_LastDashTime = -1000f;
             this.m_DashesUsed = 0;
             this.m_PendingCallbacks.Clear();
+            this.m_PredictedCommandSequences.Clear();
+            this.m_NavigationRoutine = null;
+            this.m_LastNavigationDiagnosticTime = -1000f;
+            this.m_HasSentMoveDirection = false;
+            this.m_LastSentMoveDirectionVelocity = Vector3.zero;
+            this.m_LastSentMoveDirectionSpace = Space.World;
+            this.m_LastSentMoveDirectionPriority = 0;
+            this.m_LastMoveDirectionSentAt = -1000f;
             
             // Send initial config
             SendConfigUpdate();
+        }
+
+        public override void OnUpdate()
+        {
+            base.OnUpdate();
+            PublishExplicitNavigationVelocityForAnimation();
         }
 
         // CONFIG SYNCHRONIZATION: ----------------------------------------------------------------
@@ -443,6 +473,74 @@ namespace Arawn.GameCreator2.Networking
         }
 
         /// <summary>
+        /// Sends a dash command after the caller has already predicted and applied the
+        /// local GC2 dash. Used by network-aware visual scripting instructions that
+        /// need immediate local responsiveness while still letting the server validate
+        /// and replicate the semantic dash to other peers.
+        /// </summary>
+        public void SubmitPredictedDash(
+            Vector3 direction,
+            float speed,
+            float gravity,
+            float duration,
+            float fade)
+        {
+            ushort sequence = NextCommandSequence(false);
+            var command = NetworkMotionCommand.CreateDash(
+                direction.normalized,
+                speed,
+                duration,
+                fade,
+                sequence,
+                gravity);
+
+            m_PredictedCommandSequences.Add(sequence);
+
+            LogDash(
+                $"submit predicted seq={sequence} server={m_IsServer} " +
+                $"dir={FormatVector(command.GetDirection())} speed={command.GetSpeed():F2} " +
+                $"gravity={command.GetGravity():F2} duration={command.GetDuration():F2} fade={command.GetFade():F2} " +
+                $"sendHook={(OnSendCommand != null)} broadcastHook={(OnBroadcastCommand != null)}");
+
+            // Character.Dash.Execute writes the GC2 motion transient (MoveDirection)
+            // but our network drivers (UnitDriverNetworkServer / UnitDriverNetworkClient)
+            // do not read MoveDirection in OnUpdate -- they only translate via raw input
+            // or explicit AddPosition. The host (server+owner) therefore never moves, and
+            // even on a regular client the local dash visual depends on server reconciliation.
+            // Drive translation explicitly here on the owner so the impulse is felt instantly
+            // on the dasher's own view, regardless of host or client.
+            if (this.Character != null && this.Character.gameObject.activeInHierarchy)
+            {
+                this.Character.StartCoroutine(
+                    DriveServerDashRoutine(direction.normalized, speed, duration));
+            }
+
+            if (m_IsServer)
+            {
+                if (OnBroadcastCommand == null)
+                {
+                    LogDash($"cannot broadcast host/server dash seq={sequence}: OnBroadcastCommand has no listeners");
+                }
+
+                OnBroadcastCommand?.Invoke(command);
+                return;
+            }
+
+            if (OnSendCommand == null)
+            {
+                LogDash($"cannot send dash seq={sequence}: OnSendCommand has no listeners");
+            }
+
+            OnSendCommand?.Invoke(command);
+        }
+
+        public bool ConsumePredictedCommand(NetworkMotionCommand command)
+        {
+            EnsureRuntimeStateInitialized();
+            return m_PredictedCommandSequences.Remove(command.sequenceNumber);
+        }
+
+        /// <summary>
         /// Request a server-validated teleport.
         /// </summary>
         public void RequestTeleport(Vector3 position, float rotationY = float.NaN, 
@@ -479,11 +577,12 @@ namespace Arawn.GameCreator2.Networking
         /// </summary>
         public override void MoveToDirection(Vector3 velocity, Space space, int priority)
         {
-            ushort sequence = NextCommandSequence(false);
-
             if (m_IsServer)
             {
+                ushort sequence = NextCommandSequence(false);
+
                 // Server applies directly
+                StopNavigationRoutine();
                 base.MoveToDirection(velocity, space, priority);
                 
                 // Broadcast to clients
@@ -493,6 +592,15 @@ namespace Arawn.GameCreator2.Networking
             }
             else
             {
+                if (!ShouldSendMoveDirectionCommand(velocity, space, priority))
+                {
+                    return;
+                }
+
+                ushort sequence = NextCommandSequence(false);
+
+                StopNavigationRoutine();
+
                 // Client sends to server
                 var command = NetworkMotionCommand.CreateMoveToDirection(
                     velocity, space == Space.World, priority, sequence);
@@ -504,31 +612,167 @@ namespace Arawn.GameCreator2.Networking
         }
 
         /// <summary>
+        /// Network-aware StopToDirection. Also cancels explicit network navigation routines.
+        /// </summary>
+        public override void StopToDirection(int priority)
+        {
+            ushort sequence = NextCommandSequence(false);
+            StopNavigationRoutine();
+            base.StopToDirection(priority);
+            MarkMoveDirectionCommandSent(Vector3.zero, Space.World, priority, Time.unscaledTime);
+
+            var command = NetworkMotionCommand.CreateStopDirection(priority, sequence);
+            if (m_IsServer)
+            {
+                MarkOwnerPredictedCommand(sequence);
+                OnBroadcastCommand?.Invoke(command);
+            }
+            else
+            {
+                m_PredictedCommandSequences.Add(sequence);
+                if (OnSendCommand == null)
+                {
+                    LogNavigation($"cannot send StopDirection seq={sequence}: OnSendCommand has no listeners");
+                }
+
+                OnSendCommand?.Invoke(command);
+            }
+        }
+
+        /// <summary>
         /// Network-aware MoveToLocation.
         /// Routes through server for validation.
         /// </summary>
-        public override void MoveToLocation(Location location, float stopDistance, 
+        public override void MoveToLocation(Location location, float stopDistance,
             Action<Character, bool> onFinish, int priority)
         {
             Vector3 targetPosition = location.GetPosition(this.Character.gameObject);
             ushort sequence = NextCommandSequence(false);
+            GetNavigationDriveDecision(out string driveReason);
+            LogNavigation(
+                $"request MoveTo seq={sequence} server={m_IsServer} {FormatNetworkContext()} " +
+                $"driver={FormatDriver()} canExplicitDrive={driveReason} " +
+                $"currentFeet={FormatVector(this.Character.Feet)} target={FormatVector(targetPosition)} " +
+                $"stop={stopDistance:F2} priority={priority} sendHook={(OnSendCommand != null)} " +
+                $"broadcastHook={(OnBroadcastCommand != null)} callback={(onFinish != null)}");
             
             if (m_IsServer)
             {
+                StopNavigationRoutine();
                 base.MoveToLocation(location, stopDistance, onFinish, priority);
+                StartMoveToPositionRoutine(targetPosition, stopDistance);
                 
                 var command = NetworkMotionCommand.CreateMoveToPosition(
                     targetPosition, stopDistance, priority, sequence);
+                MarkOwnerPredictedCommand(sequence);
                 OnBroadcastCommand?.Invoke(command);
             }
             else
             {
                 var command = NetworkMotionCommand.CreateMoveToPosition(
                     targetPosition, stopDistance, priority, sequence);
+                m_PredictedCommandSequences.Add(sequence);
+                StopNavigationRoutine();
+                base.MoveToLocation(location, stopDistance, onFinish, priority);
+                StartMoveToPositionRoutine(targetPosition, stopDistance);
+                if (OnSendCommand == null)
+                {
+                    LogNavigation($"cannot send MoveTo seq={sequence}: OnSendCommand has no listeners");
+                }
                 OnSendCommand?.Invoke(command);
-                
-                // Store callback for when server confirms
-                // Note: Full implementation would need to track pending move callbacks
+            }
+        }
+
+        /// <summary>
+        /// Network-aware StartFollowingTarget.
+        /// Routes follow intent through the server and explicitly drives network drivers locally.
+        /// </summary>
+        public override void StartFollowingTarget(Transform target, float minRadius,
+            float maxRadius, int priority)
+        {
+            if (target == null) return;
+
+            minRadius = Mathf.Max(0f, minRadius);
+            maxRadius = Mathf.Max(minRadius, maxRadius);
+
+            ushort sequence = NextCommandSequence(false);
+            uint targetNetworkId = TryGetNetworkCharacterId(target, out uint resolvedId)
+                ? resolvedId
+                : 0u;
+            Vector3 fallbackPosition = target.position;
+            GetNavigationDriveDecision(out string driveReason);
+            LogNavigation(
+                $"request Follow seq={sequence} server={m_IsServer} {FormatNetworkContext()} " +
+                $"driver={FormatDriver()} canExplicitDrive={driveReason} target='{target.name}' " +
+                $"targetId={targetNetworkId} currentFeet={FormatVector(this.Character.Feet)} " +
+                $"targetPos={FormatVector(fallbackPosition)} min={minRadius:F2} max={maxRadius:F2} " +
+                $"priority={priority} sendHook={(OnSendCommand != null)} broadcastHook={(OnBroadcastCommand != null)}");
+
+            if (m_IsServer)
+            {
+                StopNavigationRoutine();
+                base.StartFollowingTarget(target, minRadius, maxRadius, priority);
+                StartFollowTargetRoutine(target, targetNetworkId, fallbackPosition, minRadius, maxRadius);
+
+                var command = NetworkMotionCommand.CreateFollowTarget(
+                    targetNetworkId,
+                    fallbackPosition,
+                    minRadius,
+                    maxRadius,
+                    priority,
+                    sequence);
+                MarkOwnerPredictedCommand(sequence);
+                OnBroadcastCommand?.Invoke(command);
+            }
+            else
+            {
+                var command = NetworkMotionCommand.CreateFollowTarget(
+                    targetNetworkId,
+                    fallbackPosition,
+                    minRadius,
+                    maxRadius,
+                    priority,
+                    sequence);
+                m_PredictedCommandSequences.Add(sequence);
+                StopNavigationRoutine();
+                base.StartFollowingTarget(target, minRadius, maxRadius, priority);
+                StartFollowTargetRoutine(target, targetNetworkId, fallbackPosition, minRadius, maxRadius);
+                if (OnSendCommand == null)
+                {
+                    LogNavigation($"cannot send Follow seq={sequence}: OnSendCommand has no listeners");
+                }
+                OnSendCommand?.Invoke(command);
+            }
+        }
+
+        /// <summary>
+        /// Network-aware StopFollowingTarget.
+        /// </summary>
+        public override void StopFollowingTarget(int priority)
+        {
+            ushort sequence = NextCommandSequence(false);
+            LogNavigation(
+                $"request StopFollow seq={sequence} server={m_IsServer} {FormatNetworkContext()} " +
+                $"driver={FormatDriver()} priority={priority} sendHook={(OnSendCommand != null)} " +
+                $"broadcastHook={(OnBroadcastCommand != null)}");
+
+            StopNavigationRoutine();
+            base.StopFollowingTarget(priority);
+
+            var command = NetworkMotionCommand.CreateStopFollow(priority, sequence);
+            if (m_IsServer)
+            {
+                MarkOwnerPredictedCommand(sequence);
+                OnBroadcastCommand?.Invoke(command);
+            }
+            else
+            {
+                m_PredictedCommandSequences.Add(sequence);
+                if (OnSendCommand == null)
+                {
+                    LogNavigation($"cannot send StopFollow seq={sequence}: OnSendCommand has no listeners");
+                }
+                OnSendCommand?.Invoke(command);
             }
         }
 
@@ -539,8 +783,17 @@ namespace Arawn.GameCreator2.Networking
         /// </summary>
         public NetworkMotionResult ProcessClientCommand(NetworkMotionCommand command, uint senderClientId)
         {
+            if (IsNavigationCommand(command.commandType))
+            {
+                LogNavigation(
+                    $"server received {FormatNavigationCommand(command)} from sender={senderClientId} " +
+                    $"{FormatNetworkContext()} driver={FormatDriver()}");
+            }
+
             if (!m_IsServer)
             {
+                LogDash($"server rejected {command.commandType} seq={command.sequenceNumber}: controller is not server");
+                LogNavigation($"server rejected {command.commandType} seq={command.sequenceNumber}: controller is not server");
                 return NetworkMotionResult.Rejected(command.sequenceNumber, 
                     NetworkMotionResult.REJECT_NOT_ALLOWED);
             }
@@ -554,6 +807,13 @@ namespace Arawn.GameCreator2.Networking
                     SecurityViolationType.InvalidTarget,
                     "Core",
                     $"Motion command rejected: missing sender/actor context. sender={senderClientId}, actor={actorNetworkId}");
+
+                LogDash(
+                    $"server rejected {command.commandType} seq={command.sequenceNumber}: " +
+                    $"missing sender/actor sender={senderClientId} actor={actorNetworkId}");
+                LogNavigation(
+                    $"server rejected {command.commandType} seq={command.sequenceNumber}: " +
+                    $"missing sender/actor sender={senderClientId} actor={actorNetworkId}");
 
                 NetworkMotionResult rejected = NetworkMotionResult.Rejected(
                     command.sequenceNumber,
@@ -569,6 +829,13 @@ namespace Arawn.GameCreator2.Networking
                     correlationId,
                     command.commandType.ToString()))
             {
+                LogDash(
+                    $"server rejected {command.commandType} seq={command.sequenceNumber}: " +
+                    $"security validation failed sender={senderClientId} actor={actorNetworkId}");
+                LogNavigation(
+                    $"server rejected {command.commandType} seq={command.sequenceNumber}: " +
+                    $"security validation failed sender={senderClientId} actor={actorNetworkId}");
+
                 NetworkMotionResult rejected = NetworkMotionResult.Rejected(
                     command.sequenceNumber,
                     NetworkMotionResult.REJECT_NOT_ALLOWED);
@@ -577,6 +844,18 @@ namespace Arawn.GameCreator2.Networking
             }
 
             NetworkMotionResult result = ProcessValidatedClientCommand(command);
+            if (command.commandType == NetworkMotionCommandType.Dash)
+            {
+                LogDash(
+                    $"server processed dash seq={command.sequenceNumber} approved={result.approved} " +
+                    $"reason={result.rejectionReason}");
+            }
+            else if (IsNavigationCommand(command.commandType))
+            {
+                LogNavigation(
+                    $"server processed {command.commandType} seq={command.sequenceNumber} " +
+                    $"approved={result.approved} reason={result.rejectionReason}");
+            }
             OnSendResult?.Invoke(result);
             return result;
         }
@@ -589,8 +868,23 @@ namespace Arawn.GameCreator2.Networking
                     NetworkMotionResult result = ValidateDashCommand(command);
                     if (result.approved)
                     {
+                        LogDash(
+                            $"server applying validated dash seq={command.sequenceNumber} " +
+                            $"dir={FormatVector(command.GetDirection())} speed={command.GetSpeed():F2} " +
+                            $"gravity={command.GetGravity():F2} duration={command.GetDuration():F2}");
                         ApplyDashLocally(command);
+                        if (OnBroadcastCommand == null)
+                        {
+                            LogDash($"server cannot broadcast dash seq={command.sequenceNumber}: OnBroadcastCommand has no listeners");
+                        }
                         OnBroadcastCommand?.Invoke(command);
+                    }
+                    else
+                    {
+                        LogDash(
+                            $"server rejected dash seq={command.sequenceNumber} reason={result.rejectionReason} " +
+                            $"dir={FormatVector(command.GetDirection())} speed={command.GetSpeed():F2} " +
+                            $"duration={command.GetDuration():F2}");
                     }
                     return result;
 
@@ -609,6 +903,7 @@ namespace Arawn.GameCreator2.Networking
                     {
                         Vector3 velocity = command.GetVelocity();
                         Space space = command.IsWorldSpace() ? Space.World : Space.Self;
+                        StopNavigationRoutine();
                         base.MoveToDirection(velocity, space, command.priority);
                         OnBroadcastCommand?.Invoke(command);
                     }
@@ -621,9 +916,38 @@ namespace Arawn.GameCreator2.Networking
                         Vector3 position = command.GetPosition();
                         float stopDist = command.GetStopDistance();
                         Location loc = new Location(position);
+                        LogNavigation(
+                            $"server applying MoveTo seq={command.sequenceNumber} " +
+                            $"target={FormatVector(position)} stop={stopDist:F2} driver={FormatDriver()}");
+                        StopNavigationRoutine();
                         base.MoveToLocation(loc, stopDist, null, command.priority);
+                        StartMoveToPositionRoutine(position, stopDist);
                         OnBroadcastCommand?.Invoke(command);
                     }
+                    return result;
+
+                case NetworkMotionCommandType.FollowTarget:
+                    result = ValidateFollowTargetCommand(command);
+                    if (result.approved)
+                    {
+                        LogNavigation(
+                            $"server applying Follow seq={command.sequenceNumber} " +
+                            $"targetId={command.targetNetworkId} fallback={FormatVector(command.GetPosition())} " +
+                            $"min={command.GetFollowMinRadius():F2} max={command.GetFollowMaxRadius():F2} " +
+                            $"driver={FormatDriver()}");
+                        ApplyFollowCommandLocally(command, driveExplicitly: true);
+                        OnBroadcastCommand?.Invoke(command);
+                    }
+                    return result;
+
+                case NetworkMotionCommandType.StopFollow:
+                    result = NetworkMotionResult.Approved(command.sequenceNumber);
+                    LogNavigation(
+                        $"server applying StopFollow seq={command.sequenceNumber} priority={command.priority} " +
+                        $"driver={FormatDriver()}");
+                    StopNavigationRoutine();
+                    base.StopFollowingTarget(command.priority);
+                    OnBroadcastCommand?.Invoke(command);
                     return result;
 
                 case NetworkMotionCommandType.Jump:
@@ -642,6 +966,7 @@ namespace Arawn.GameCreator2.Networking
 
                 case NetworkMotionCommandType.StopDirection:
                     result = NetworkMotionResult.Approved(command.sequenceNumber);
+                    StopNavigationRoutine();
                     base.StopToDirection(command.priority);
                     OnBroadcastCommand?.Invoke(command);
                     return result;
@@ -657,9 +982,20 @@ namespace Arawn.GameCreator2.Networking
         /// </summary>
         public void ApplyBroadcastCommand(NetworkMotionCommand command)
         {
+            if (IsNavigationCommand(command.commandType))
+            {
+                LogNavigation(
+                    $"apply broadcast {FormatNavigationCommand(command)} server={m_IsServer} " +
+                    $"{FormatNetworkContext()} driver={FormatDriver()}");
+            }
+
             switch (command.commandType)
             {
                 case NetworkMotionCommandType.Dash:
+                    LogDash(
+                        $"applying dash broadcast seq={command.sequenceNumber} " +
+                        $"dir={FormatVector(command.GetDirection())} speed={command.GetSpeed():F2} " +
+                        $"gravity={command.GetGravity():F2} duration={command.GetDuration():F2}");
                     ApplyDashLocally(command);
                     break;
 
@@ -670,14 +1006,27 @@ namespace Arawn.GameCreator2.Networking
                 case NetworkMotionCommandType.MoveToDirection:
                     Vector3 velocity = command.GetVelocity();
                     Space space = command.IsWorldSpace() ? Space.World : Space.Self;
+                    StopNavigationRoutine();
                     base.MoveToDirection(velocity, space, command.priority);
                     break;
 
                 case NetworkMotionCommandType.MoveToPosition:
+                    if (m_IsServer) break;
                     Vector3 position = command.GetPosition();
                     float stopDist = command.GetStopDistance();
                     Location loc = new Location(position);
                     base.MoveToLocation(loc, stopDist, null, command.priority);
+                    break;
+
+                case NetworkMotionCommandType.FollowTarget:
+                    if (m_IsServer) break;
+                    ApplyFollowCommandLocally(command, driveExplicitly: false);
+                    break;
+
+                case NetworkMotionCommandType.StopFollow:
+                    if (m_IsServer) break;
+                    StopNavigationRoutine();
+                    base.StopFollowingTarget(command.priority);
                     break;
 
                 case NetworkMotionCommandType.Jump:
@@ -689,6 +1038,7 @@ namespace Arawn.GameCreator2.Networking
                     break;
 
                 case NetworkMotionCommandType.StopDirection:
+                    StopNavigationRoutine();
                     base.StopToDirection(command.priority);
                     break;
             }
@@ -717,6 +1067,10 @@ namespace Arawn.GameCreator2.Networking
             // Check cooldown
             if (currentTime - m_LastDashTime < m_Dash.Cooldown && m_DashesUsed >= m_Dash.InSuccession)
             {
+                LogDash(
+                    $"dash validation failed cooldown seq={command.sequenceNumber} " +
+                    $"elapsed={currentTime - m_LastDashTime:F2} cooldown={m_Dash.Cooldown:F2} " +
+                    $"used={m_DashesUsed} succession={m_Dash.InSuccession}");
                 return NetworkMotionResult.Rejected(command.sequenceNumber, 
                     NetworkMotionResult.REJECT_COOLDOWN);
             }
@@ -724,6 +1078,9 @@ namespace Arawn.GameCreator2.Networking
             // Check if in air when not allowed
             if (!m_Dash.DashInAir && !this.Character.Driver.IsGrounded)
             {
+                LogDash(
+                    $"dash validation failed grounded seq={command.sequenceNumber}: " +
+                    $"dashInAir={m_Dash.DashInAir} grounded={this.Character.Driver.IsGrounded}");
                 return NetworkMotionResult.Rejected(command.sequenceNumber, 
                     NetworkMotionResult.REJECT_NOT_ALLOWED);
             }
@@ -732,6 +1089,9 @@ namespace Arawn.GameCreator2.Networking
             float dashDistance = command.GetSpeed() * command.GetDuration();
             if (dashDistance > m_MaxDashDistance)
             {
+                LogDash(
+                    $"dash validation failed distance seq={command.sequenceNumber}: " +
+                    $"distance={dashDistance:F2} max={m_MaxDashDistance:F2}");
                 return NetworkMotionResult.Rejected(command.sequenceNumber, 
                     NetworkMotionResult.REJECT_TOO_FAR);
             }
@@ -760,6 +1120,62 @@ namespace Arawn.GameCreator2.Networking
             return NetworkMotionResult.Approved(command.sequenceNumber);
         }
 
+        private bool ShouldSendMoveDirectionCommand(Vector3 velocity, Space space, int priority)
+        {
+            float now = Time.unscaledTime;
+            const float minimumInterval = MOVE_DIRECTION_MINIMUM_SEND_INTERVAL;
+            const float heartbeatInterval = MOVE_DIRECTION_HEARTBEAT_INTERVAL;
+            const float changeThreshold = MOVE_DIRECTION_CHANGE_THRESHOLD;
+
+            if (!m_HasSentMoveDirection)
+            {
+                MarkMoveDirectionCommandSent(velocity, space, priority, now);
+                return true;
+            }
+
+            float elapsed = now - m_LastMoveDirectionSentAt;
+            bool isStopped = velocity.sqrMagnitude <= 0.0001f;
+            bool wasStopped = m_LastSentMoveDirectionVelocity.sqrMagnitude <= 0.0001f;
+            bool startOrStop = isStopped != wasStopped;
+            bool contextChanged = space != m_LastSentMoveDirectionSpace ||
+                priority != m_LastSentMoveDirectionPriority;
+            bool velocityChanged = (velocity - m_LastSentMoveDirectionVelocity).sqrMagnitude >=
+                changeThreshold * changeThreshold;
+
+            if (startOrStop || contextChanged)
+            {
+                MarkMoveDirectionCommandSent(velocity, space, priority, now);
+                return true;
+            }
+
+            if (elapsed < minimumInterval)
+            {
+                return false;
+            }
+
+            if (isStopped)
+            {
+                return false;
+            }
+
+            if (velocityChanged || elapsed >= heartbeatInterval)
+            {
+                MarkMoveDirectionCommandSent(velocity, space, priority, now);
+                return true;
+            }
+
+            return false;
+        }
+
+        private void MarkMoveDirectionCommandSent(Vector3 velocity, Space space, int priority, float timestamp)
+        {
+            m_HasSentMoveDirection = true;
+            m_LastSentMoveDirectionVelocity = velocity;
+            m_LastSentMoveDirectionSpace = space;
+            m_LastSentMoveDirectionPriority = priority;
+            m_LastMoveDirectionSentAt = timestamp;
+        }
+
         private NetworkMotionResult ValidateMoveDirectionCommand(NetworkMotionCommand command)
         {
             Vector3 velocity = command.GetVelocity();
@@ -779,6 +1195,17 @@ namespace Arawn.GameCreator2.Networking
         private NetworkMotionResult ValidateMovePositionCommand(NetworkMotionCommand command)
         {
             // MoveToPosition is generally safe as the server controls actual movement
+            return NetworkMotionResult.Approved(command.sequenceNumber);
+        }
+
+        private NetworkMotionResult ValidateFollowTargetCommand(NetworkMotionCommand command)
+        {
+            if (command.GetFollowMaxRadius() < command.GetFollowMinRadius())
+            {
+                return NetworkMotionResult.Rejected(command.sequenceNumber,
+                    NetworkMotionResult.REJECT_INVALID_POSITION);
+            }
+
             return NetworkMotionResult.Approved(command.sequenceNumber);
         }
 
@@ -804,23 +1231,715 @@ namespace Arawn.GameCreator2.Networking
 
         // LOCAL APPLICATION: ---------------------------------------------------------------------
 
+        private void ApplyFollowCommandLocally(NetworkMotionCommand command, bool driveExplicitly)
+        {
+            Transform target = ResolveFollowTarget(command.targetNetworkId);
+            Vector3 fallbackPosition = command.GetPosition();
+            float minRadius = command.GetFollowMinRadius();
+            float maxRadius = Mathf.Max(minRadius, command.GetFollowMaxRadius());
+
+            LogNavigation(
+                $"apply Follow locally seq={command.sequenceNumber} driveExplicitly={driveExplicitly} " +
+                $"resolvedTarget={(target != null ? target.name : "null")} targetId={command.targetNetworkId} " +
+                $"fallback={FormatVector(fallbackPosition)} min={minRadius:F2} max={maxRadius:F2} " +
+                $"driver={FormatDriver()}");
+
+            StopNavigationRoutine();
+
+            if (target != null)
+            {
+                base.StartFollowingTarget(target, minRadius, maxRadius, command.priority);
+            }
+            else
+            {
+                base.MoveToLocation(new Location(fallbackPosition), minRadius, null, command.priority);
+            }
+
+            if (!driveExplicitly) return;
+
+            StartFollowTargetRoutine(
+                target,
+                command.targetNetworkId,
+                fallbackPosition,
+                minRadius,
+                maxRadius);
+        }
+
+        private void StartMoveToPositionRoutine(Vector3 targetPosition, float stopDistance)
+        {
+            if (!GetNavigationDriveDecision(out string reason))
+            {
+                LogNavigation(
+                    $"MoveTo explicit drive not started: {reason} target={FormatVector(targetPosition)} " +
+                    $"stop={stopDistance:F2} {FormatNetworkContext()}");
+                return;
+            }
+
+            if (this.Character == null || !this.Character.gameObject.activeInHierarchy)
+            {
+                LogNavigation(
+                    $"MoveTo explicit drive not started: inactive or missing Character " +
+                    $"target={FormatVector(targetPosition)} stop={stopDistance:F2}");
+                return;
+            }
+
+            LogNavigation(
+                $"MoveTo explicit drive started target={FormatVector(targetPosition)} " +
+                $"stop={stopDistance:F2} driver={FormatDriver()} currentFeet={FormatVector(this.Character.Feet)}");
+
+            m_NavigationRoutine = this.Character.StartCoroutine(
+                DriveMoveToPositionRoutine(targetPosition, Mathf.Max(0.01f, stopDistance)));
+        }
+
+        private void StartFollowTargetRoutine(Transform target, uint targetNetworkId,
+            Vector3 fallbackPosition, float minRadius, float maxRadius)
+        {
+            if (!GetNavigationDriveDecision(out string reason))
+            {
+                LogNavigation(
+                    $"Follow explicit drive not started: {reason} targetId={targetNetworkId} " +
+                    $"target={(target != null ? target.name : "null")} fallback={FormatVector(fallbackPosition)} " +
+                    $"min={minRadius:F2} max={maxRadius:F2} {FormatNetworkContext()}");
+                return;
+            }
+
+            if (this.Character == null || !this.Character.gameObject.activeInHierarchy)
+            {
+                LogNavigation(
+                    $"Follow explicit drive not started: inactive or missing Character " +
+                    $"targetId={targetNetworkId} target={(target != null ? target.name : "null")}");
+                return;
+            }
+
+            LogNavigation(
+                $"Follow explicit drive started targetId={targetNetworkId} " +
+                $"target={(target != null ? target.name : "null")} fallback={FormatVector(fallbackPosition)} " +
+                $"min={minRadius:F2} max={maxRadius:F2} driver={FormatDriver()} " +
+                $"currentFeet={FormatVector(this.Character.Feet)}");
+
+            m_NavigationRoutine = this.Character.StartCoroutine(
+                DriveFollowTargetRoutine(
+                    target,
+                    targetNetworkId,
+                    fallbackPosition,
+                    Mathf.Max(0f, minRadius),
+                    Mathf.Max(minRadius, maxRadius)));
+        }
+
+        private void StopNavigationRoutine()
+        {
+            if (m_NavigationRoutine == null) return;
+
+            LogNavigation($"stopping explicit navigation routine driver={FormatDriver()} {FormatNetworkContext()}");
+
+            if (this.Character != null)
+            {
+                this.Character.StopCoroutine(m_NavigationRoutine);
+            }
+
+            m_NavigationRoutine = null;
+            SetDriverExternalMoveDirection(Vector3.zero);
+        }
+
+        private void PublishExplicitNavigationVelocityForAnimation()
+        {
+            if (m_NavigationRoutine == null) return;
+            if (this.Character?.Driver == null) return;
+
+            Vector3 direction = this.MoveDirection;
+            direction.y = 0f;
+
+            if (direction.sqrMagnitude <= 0.0001f)
+            {
+                SetDriverExternalMoveDirection(Vector3.zero);
+                return;
+            }
+
+            SetDriverExternalMoveDirection(direction.normalized * ResolveNavigationSpeed());
+        }
+
+        private void SetDriverExternalMoveDirection(Vector3 velocity)
+        {
+            switch (this.Character?.Driver)
+            {
+                case UnitDriverNetworkClient clientDriver:
+                    clientDriver.SetExternalMoveDirection(velocity);
+                    break;
+
+                case UnitDriverNetworkServer serverDriver:
+                    serverDriver.SetExternalMoveDirection(velocity);
+                    break;
+            }
+        }
+
+        private bool GetNavigationDriveDecision(out string reason)
+        {
+            if (this.Character?.Driver == null)
+            {
+                reason = "false: missing Character.Driver";
+                return false;
+            }
+
+            if (this.Character.Driver is UnitDriverNetworkRemote)
+            {
+                reason = $"false: remote interpolation driver ({FormatDriver()})";
+                return false;
+            }
+
+            if (this.Character.Driver is UnitDriverNetworkServer ||
+                this.Character.Driver is UnitDriverNetworkClient)
+            {
+                reason = $"true: supported network controller driver ({FormatDriver()})";
+                return true;
+            }
+
+            reason = $"false: unsupported driver ({FormatDriver()})";
+            return false;
+        }
+
+        private System.Collections.IEnumerator DriveMoveToPositionRoutine(
+            Vector3 targetPosition,
+            float stopDistance)
+        {
+            int steps = 0;
+            string exitReason = "not started";
+
+            while (true)
+            {
+                bool shouldContinue = TryCreateNavigationStep(
+                    targetPosition,
+                    stopDistance,
+                    out Vector3 step,
+                    out Vector3 direction,
+                    out string stepReason);
+
+                if (!shouldContinue)
+                {
+                    exitReason = stepReason;
+                    break;
+                }
+
+                if (step.sqrMagnitude > 0.0000001f)
+                {
+                    Vector3 before = this.Character.transform.position;
+                    this.Character.Driver.AddPosition(step);
+                    Vector3 after = this.Character.transform.position;
+                    Vector3 actual = after - before;
+                    steps++;
+
+                    if (actual.sqrMagnitude <= 0.0000001f)
+                    {
+                        LogNavigationThrottled(
+                            $"MoveTo AddPosition produced no transform delta requested={FormatVector(step)} " +
+                            $"target={FormatVector(targetPosition)} feet={FormatVector(this.Character.Feet)} " +
+                            $"driver={FormatDriver()} reason={stepReason}");
+                    }
+                    else
+                    {
+                        LogNavigationThrottled(
+                            $"MoveTo step requested={FormatVector(step)} actual={FormatVector(actual)} " +
+                            $"target={FormatVector(targetPosition)} feet={FormatVector(this.Character.Feet)} " +
+                            $"moveDirection={FormatVector(this.MoveDirection)} driver={FormatDriver()}");
+                    }
+                }
+                else
+                {
+                    LogNavigationThrottled(
+                        $"MoveTo waiting without step reason={stepReason} target={FormatVector(targetPosition)} " +
+                        $"feet={FormatVector(this.Character.Feet)} moveDirection={FormatVector(this.MoveDirection)} " +
+                        $"speed={ResolveNavigationSpeed():F2} driver={FormatDriver()}");
+                }
+
+                RotateTowardsNavigation(direction);
+                yield return null;
+            }
+
+            LogNavigation(
+                $"MoveTo explicit drive ended reason={exitReason} steps={steps} " +
+                $"target={FormatVector(targetPosition)} finalFeet={FormatVector(this.Character?.Feet ?? Vector3.zero)} " +
+                $"driver={FormatDriver()}");
+
+            m_NavigationRoutine = null;
+            SetDriverExternalMoveDirection(Vector3.zero);
+        }
+
+        private System.Collections.IEnumerator DriveFollowTargetRoutine(
+            Transform target,
+            uint targetNetworkId,
+            Vector3 fallbackPosition,
+            float minRadius,
+            float maxRadius)
+        {
+            bool isFollowing = true;
+            int steps = 0;
+            string exitReason = "not started";
+
+            while (this.Character?.Driver != null && !this.Character.IsDead)
+            {
+                if (target == null && targetNetworkId != 0)
+                {
+                    target = ResolveFollowTarget(targetNetworkId);
+                }
+
+                Vector3 targetPosition = target != null ? target.position : fallbackPosition;
+                float distance = HorizontalDistance(this.Character.Feet, targetPosition);
+
+                if (isFollowing && distance <= minRadius)
+                {
+                    isFollowing = false;
+                }
+                else if (!isFollowing && distance > maxRadius)
+                {
+                    isFollowing = true;
+                }
+
+                Vector3 lookDirection = targetPosition - this.Character.Feet;
+                lookDirection.y = 0f;
+                if (lookDirection.sqrMagnitude > 0.0001f)
+                {
+                    RotateTowardsNavigation(lookDirection.normalized);
+                }
+
+                if (isFollowing &&
+                    TryCreateNavigationStep(
+                        targetPosition,
+                        minRadius,
+                        out Vector3 step,
+                        out Vector3 direction,
+                        out string stepReason))
+                {
+                    if (step.sqrMagnitude > 0.0000001f)
+                    {
+                        Vector3 before = this.Character.transform.position;
+                        this.Character.Driver.AddPosition(step);
+                        Vector3 after = this.Character.transform.position;
+                        Vector3 actual = after - before;
+                        steps++;
+
+                        if (actual.sqrMagnitude <= 0.0000001f)
+                        {
+                            LogNavigationThrottled(
+                                $"Follow AddPosition produced no transform delta requested={FormatVector(step)} " +
+                                $"target={FormatVector(targetPosition)} feet={FormatVector(this.Character.Feet)} " +
+                                $"targetId={targetNetworkId} driver={FormatDriver()} reason={stepReason}");
+                        }
+                        else
+                        {
+                            LogNavigationThrottled(
+                                $"Follow step requested={FormatVector(step)} actual={FormatVector(actual)} " +
+                                $"target={FormatVector(targetPosition)} feet={FormatVector(this.Character.Feet)} " +
+                                $"distance={distance:F2} targetId={targetNetworkId} driver={FormatDriver()}");
+                        }
+                    }
+                    else
+                    {
+                        LogNavigationThrottled(
+                            $"Follow waiting without step reason={stepReason} target={FormatVector(targetPosition)} " +
+                            $"feet={FormatVector(this.Character.Feet)} distance={distance:F2} " +
+                            $"moveDirection={FormatVector(this.MoveDirection)} driver={FormatDriver()}");
+                    }
+
+                    RotateTowardsNavigation(direction);
+                }
+                else if (target == null && targetNetworkId == 0)
+                {
+                    exitReason = "static fallback target reached or unavailable";
+                    break;
+                }
+                else if (!isFollowing)
+                {
+                    LogNavigationThrottled(
+                        $"Follow holding distance={distance:F2} min={minRadius:F2} max={maxRadius:F2} " +
+                        $"target={FormatVector(targetPosition)} feet={FormatVector(this.Character.Feet)} " +
+                        $"driver={FormatDriver()}");
+                }
+
+                yield return null;
+            }
+
+            if (this.Character?.Driver == null)
+            {
+                exitReason = "missing driver";
+            }
+            else if (this.Character.IsDead)
+            {
+                exitReason = "character dead";
+            }
+
+            LogNavigation(
+                $"Follow explicit drive ended reason={exitReason} steps={steps} targetId={targetNetworkId} " +
+                $"finalFeet={FormatVector(this.Character?.Feet ?? Vector3.zero)} driver={FormatDriver()}");
+
+            m_NavigationRoutine = null;
+            SetDriverExternalMoveDirection(Vector3.zero);
+        }
+
+        private bool TryCreateNavigationStep(Vector3 targetPosition, float stopDistance,
+            out Vector3 step, out Vector3 direction, out string reason)
+        {
+            step = Vector3.zero;
+            direction = Vector3.zero;
+            reason = "none";
+
+            if (this.Character?.Driver == null)
+            {
+                reason = "missing Character.Driver";
+                return false;
+            }
+
+            if (this.Character.IsDead)
+            {
+                reason = "character is dead";
+                return false;
+            }
+
+            float dt = Time.deltaTime;
+            if (dt <= 0f)
+            {
+                reason = "waiting: Time.deltaTime <= 0";
+                return true;
+            }
+
+            Vector3 source = this.Character.Feet;
+            Vector3 toTarget = targetPosition - source;
+            toTarget.y = 0f;
+
+            float distance = toTarget.magnitude;
+            if (distance <= stopDistance)
+            {
+                reason = $"reached: distance={distance:F2} stop={stopDistance:F2}";
+                return false;
+            }
+
+            direction = ResolveNavigationDirection(toTarget);
+            if (direction.sqrMagnitude <= 0.0001f)
+            {
+                reason = $"waiting: zero direction distance={distance:F2}";
+                return true;
+            }
+
+            float speed = ResolveNavigationSpeed();
+            if (speed <= 0f)
+            {
+                reason = $"waiting: speed={speed:F2} linearSpeed={this.LinearSpeed:F2}";
+                return true;
+            }
+
+            float maxStep = Mathf.Max(0f, distance - stopDistance);
+            step = direction.normalized * Mathf.Min(speed * dt, maxStep);
+            reason = $"moving: distance={distance:F2} stop={stopDistance:F2} speed={speed:F2} dt={dt:F3}";
+            return true;
+        }
+
+        private Vector3 ResolveNavigationDirection(Vector3 toTarget)
+        {
+            Vector3 motionDirection = this.MoveDirection;
+            motionDirection.y = 0f;
+
+            return motionDirection.sqrMagnitude > 0.0001f
+                ? motionDirection.normalized
+                : toTarget.normalized;
+        }
+
+        private float ResolveNavigationSpeed()
+        {
+            return Mathf.Max(0f, this.LinearSpeed);
+        }
+
+        private void RotateTowardsNavigation(Vector3 direction)
+        {
+            if (this.Character?.Driver == null) return;
+            direction.y = 0f;
+            if (direction.sqrMagnitude <= 0.0001f) return;
+
+            Quaternion targetRotation = Quaternion.LookRotation(direction.normalized, Vector3.up);
+            float angularSpeed = this.AngularSpeed;
+            Quaternion rotation = angularSpeed >= 0f
+                ? Quaternion.RotateTowards(
+                    this.Character.transform.rotation,
+                    targetRotation,
+                    angularSpeed * Time.deltaTime)
+                : targetRotation;
+
+            this.Character.Driver.SetRotation(rotation);
+        }
+
+        private static float HorizontalDistance(Vector3 source, Vector3 target)
+        {
+            source.y = 0f;
+            target.y = 0f;
+            return Vector3.Distance(source, target);
+        }
+
+        private static bool TryGetNetworkCharacterId(Transform target, out uint networkId)
+        {
+            networkId = 0;
+            if (target == null) return false;
+
+            NetworkCharacter networkCharacter = target.GetComponentInParent<NetworkCharacter>();
+            if (networkCharacter == null || networkCharacter.NetworkId == 0) return false;
+
+            networkId = networkCharacter.NetworkId;
+            return true;
+        }
+
+        private static Transform ResolveFollowTarget(uint targetNetworkId)
+        {
+            if (targetNetworkId == 0 || !NetworkTransportBridge.HasActive) return null;
+
+            Character targetCharacter = NetworkTransportBridge.Active.ResolveCharacter(targetNetworkId);
+            return targetCharacter != null ? targetCharacter.transform : null;
+        }
+
+        private void MarkOwnerPredictedCommand(ushort sequence)
+        {
+            NetworkCharacter networkCharacter = this.Character != null
+                ? this.Character.GetComponent<NetworkCharacter>()
+                : null;
+
+            if (networkCharacter == null || !networkCharacter.IsOwnerInstance) return;
+
+            m_PredictedCommandSequences.Add(sequence);
+        }
+
         private void ApplyDashLocally(NetworkMotionCommand command)
         {
             Vector3 direction = command.GetDirection();
             float speed = command.GetSpeed();
             float duration = command.GetDuration();
             float fade = command.GetFade();
-            
-            base.SetMotionTransient(direction, speed, duration, fade);
-            
+            float gravity = command.GetGravity();
+
+            // On a RemoteClient the active driver is UnitDriverNetworkRemote which
+            // owns the transform via interpolated server snapshots. Calling
+            // Character.Dash.Execute there has no effect on position because the
+            // remote driver's AddPosition is a no-op and OnUpdate overwrites the
+            // transform every frame from the snapshot buffer. Instead, inject
+            // forward-projected snapshots that match the dash trajectory so the
+            // remote representation moves at full fidelity for the duration.
+            var networkCharacter = this.Character != null
+                ? this.Character.GetComponent<NetworkCharacter>()
+                : null;
+
+            if (networkCharacter != null && networkCharacter.CurrentRole == NetworkCharacter.NetworkRole.RemoteClient)
+            {
+                var remoteDriver = networkCharacter.RemoteDriver;
+                if (remoteDriver != null)
+                {
+                    LogDash(
+                        $"BeginPredictedDash (remote) seq={command.sequenceNumber} character={this.Character.name} " +
+                        $"dir={FormatVector(direction)} speed={speed:F2} gravity={gravity:F2} " +
+                        $"duration={duration:F2} fade={fade:F2}");
+
+                    remoteDriver.BeginPredictedDash(direction, speed, duration, gravity);
+
+                    // Mark legs busy so subsequent commands honor the dash window.
+                    // Schedule release because BeginPredictedDash bypasses
+                    // Character.Dash.Execute's OnDashFinish (which is what
+                    // normally calls RemoveLegsBusy). Without this, legs stay
+                    // busy forever and subsequent gameplay (e.g. Block.RaiseGuard,
+                    // server-side ProcessBlockRequest) sees Busy.IsBusy=true and
+                    // rejects.
+                    if (this.Character?.Busy != null && !this.Character.Busy.AreLegsBusy)
+                    {
+                        this.Character.Busy.MakeLegsBusy();
+                        this.Character.StartCoroutine(ClearLegsBusyAfter(duration));
+                    }
+
+                    BumpDashCooldown();
+                    return;
+                }
+            }
+
+            // On the host viewing a non-locally-owned character (role=Server,
+            // not owner) Character.Dash.Execute relies on Character internals
+            // that may not run for a server-only proxy and the client's input
+            // stream is concurrently moving the character through the server
+            // driver. Drive the dash explicitly via the Character.Driver's
+            // AddPosition each frame so the host's authoritative copy of the
+            // dashing character actually translates and broadcasts the
+            // resulting position to other clients.
+            bool isServerProxyForRemoteOwner =
+                networkCharacter != null &&
+                networkCharacter.CurrentRole == NetworkCharacter.NetworkRole.Server &&
+                !networkCharacter.IsOwnerInstance;
+
+            if (isServerProxyForRemoteOwner)
+            {
+                LogDash(
+                    $"server manual dash drive seq={command.sequenceNumber} character={this.Character.name} " +
+                    $"dir={FormatVector(direction)} speed={speed:F2} gravity={gravity:F2} " +
+                    $"duration={duration:F2} fade={fade:F2}");
+
+                if (this.Character?.Busy != null && !this.Character.Busy.AreLegsBusy)
+                {
+                    this.Character.Busy.MakeLegsBusy();
+                }
+
+                this.Character.StartCoroutine(DriveServerDashRoutine(direction, speed, duration, releaseLegsBusy: true));
+                BumpDashCooldown();
+                return;
+            }
+
+            if (this.Character?.Dash != null)
+            {
+                LogDash(
+                    $"Character.Dash.Execute seq={command.sequenceNumber} character={this.Character.name} " +
+                    $"dir={FormatVector(direction)} speed={speed:F2} gravity={gravity:F2} " +
+                    $"duration={duration:F2} fade={fade:F2} legsBusy={this.Character.Busy.AreLegsBusy}");
+
+                if (!this.Character.Busy.AreLegsBusy)
+                {
+                    this.Character.Busy.MakeLegsBusy();
+                }
+
+                _ = this.Character.Dash.Execute(direction, speed, gravity, duration, fade);
+            }
+            else
+            {
+                LogDash(
+                    $"SetMotionTransient fallback seq={command.sequenceNumber}: Character.Dash missing " +
+                    $"dir={FormatVector(direction)} speed={speed:F2} duration={duration:F2} fade={fade:F2}");
+                base.SetMotionTransient(direction, speed, duration, fade);
+            }
+
+            BumpDashCooldown();
+        }
+
+        private void BumpDashCooldown()
+        {
             float now = Time.time;
             if (now - m_LastDashTime > m_Dash.Cooldown)
             {
                 m_DashesUsed = 0;
             }
-            
             m_DashesUsed++;
             m_LastDashTime = now;
+        }
+
+        private System.Collections.IEnumerator DriveServerDashRoutine(Vector3 direction, float speed, float duration, bool releaseLegsBusy = false)
+        {
+            if (direction.sqrMagnitude <= 0f)
+            {
+                if (releaseLegsBusy && this.Character?.Busy != null && this.Character.Busy.AreLegsBusy)
+                {
+                    this.Character.Busy.RemoveLegsBusy();
+                }
+                yield break;
+            }
+            Vector3 worldDirection = direction.normalized;
+
+            float elapsed = 0f;
+            while (elapsed < duration)
+            {
+                if (this.Character == null || this.Character.Driver == null)
+                {
+                    if (releaseLegsBusy && this.Character?.Busy != null && this.Character.Busy.AreLegsBusy)
+                    {
+                        this.Character.Busy.RemoveLegsBusy();
+                    }
+                    yield break;
+                }
+
+                float dt = Time.deltaTime;
+                if (dt <= 0f) { yield return null; continue; }
+
+                Vector3 step = worldDirection * speed * dt;
+                this.Character.Driver.AddPosition(step);
+
+                elapsed += dt;
+                yield return null;
+            }
+
+            // Mirror Character.Dash.Execute's OnDashFinish behavior for code
+            // paths that bypass it (server-proxy of a remote owner). Without
+            // this, Busy.AreLegsBusy stays true on the server forever and the
+            // server rejects subsequent block requests with CharacterBusy.
+            if (releaseLegsBusy && this.Character?.Busy != null && this.Character.Busy.AreLegsBusy)
+            {
+                this.Character.Busy.RemoveLegsBusy();
+            }
+        }
+
+        private System.Collections.IEnumerator ClearLegsBusyAfter(float delaySeconds)
+        {
+            if (delaySeconds > 0f) yield return new UnityEngine.WaitForSeconds(delaySeconds);
+            if (this.Character?.Busy != null && this.Character.Busy.AreLegsBusy)
+            {
+                this.Character.Busy.RemoveLegsBusy();
+            }
+        }
+
+        private void LogDash(string message)
+        {
+            if (!m_LogDashDiagnostics) return;
+            string characterName = this.Character != null ? this.Character.name : "NoCharacter";
+            Debug.Log($"[NetworkDashDebug][MotionController] {characterName}: {message}");
+        }
+
+        private void LogNavigation(string message)
+        {
+            if (!m_LogNavigationDiagnostics) return;
+            string characterName = this.Character != null ? this.Character.name : "NoCharacter";
+            Debug.Log($"[NetworkNavigationDebug][MotionController] {characterName}: {message}");
+        }
+
+        private void LogNavigationThrottled(string message)
+        {
+            if (!m_LogNavigationDiagnostics) return;
+
+            float interval = Mathf.Max(0.05f, m_NavigationDiagnosticsInterval);
+            if (Time.time - m_LastNavigationDiagnosticTime < interval) return;
+
+            m_LastNavigationDiagnosticTime = Time.time;
+            LogNavigation(message);
+        }
+
+        private static bool IsNavigationCommand(NetworkMotionCommandType commandType)
+        {
+            return commandType == NetworkMotionCommandType.MoveToPosition ||
+                   commandType == NetworkMotionCommandType.FollowTarget ||
+                   commandType == NetworkMotionCommandType.StopFollow;
+        }
+
+        private string FormatNavigationCommand(NetworkMotionCommand command)
+        {
+            return command.commandType switch
+            {
+                NetworkMotionCommandType.MoveToPosition =>
+                    $"MoveTo seq={command.sequenceNumber} target={FormatVector(command.GetPosition())} " +
+                    $"stop={command.GetStopDistance():F2} priority={command.priority}",
+                NetworkMotionCommandType.FollowTarget =>
+                    $"Follow seq={command.sequenceNumber} targetId={command.targetNetworkId} " +
+                    $"fallback={FormatVector(command.GetPosition())} min={command.GetFollowMinRadius():F2} " +
+                    $"max={command.GetFollowMaxRadius():F2} priority={command.priority}",
+                NetworkMotionCommandType.StopFollow =>
+                    $"StopFollow seq={command.sequenceNumber} priority={command.priority}",
+                _ => $"{command.commandType} seq={command.sequenceNumber}"
+            };
+        }
+
+        private string FormatDriver()
+        {
+            return this.Character?.Driver != null
+                ? this.Character.Driver.GetType().Name
+                : "null";
+        }
+
+        private string FormatNetworkContext()
+        {
+            NetworkCharacter networkCharacter = this.Character != null
+                ? this.Character.GetComponent<NetworkCharacter>()
+                : null;
+
+            return networkCharacter != null
+                ? $"netId={networkCharacter.NetworkId} role={networkCharacter.CurrentRole} owner={networkCharacter.IsOwnerInstance}"
+                : "netId=0 role=NoNetworkCharacter owner=false";
+        }
+
+        private static string FormatVector(Vector3 value)
+        {
+            return $"({value.x:F2},{value.y:F2},{value.z:F2})";
         }
 
         private void ApplyTeleportLocally(NetworkMotionCommand command)
@@ -846,6 +1965,7 @@ namespace Arawn.GameCreator2.Networking
             m_PendingCommands ??= new Queue<NetworkMotionCommand>(16);
             m_PendingCallbacks ??= new Dictionary<ushort, PendingCallbackEntry>(16);
             m_PendingCallbackRemovalBuffer ??= new List<ushort>(8);
+            m_PredictedCommandSequences ??= new HashSet<ushort>();
         }
 
         private ushort NextCommandSequence(bool reservePendingSlot)

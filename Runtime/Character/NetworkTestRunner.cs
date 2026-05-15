@@ -212,6 +212,7 @@ namespace Arawn.GameCreator2.Networking
             Assert("InputState: Y round-trip", Mathf.Abs(dir.y - (-1f)) < 0.002f);
             Assert("InputState: sequence", state.sequenceNumber == 10);
             Assert("InputState: deltaTime", Mathf.Abs(state.GetDeltaTime() - 0.016f) < 0.002f);
+            Assert("InputState: rotation default", Mathf.Abs(state.GetRotationY()) < 0.002f);
             Assert("InputState: jump flag", state.HasFlag(NetworkInputState.FLAG_JUMP));
             Assert("InputState: sprint flag", state.HasFlag(NetworkInputState.FLAG_SPRINT));
             Assert("InputState: no dash flag", !state.HasFlag(NetworkInputState.FLAG_DASH));
@@ -221,11 +222,25 @@ namespace Arawn.GameCreator2.Networking
         {
             // SecurityIntegration only fails closed in authoritative server context.
             // This runtime helper verifies the non-authoritative pass-through path.
-            var ctx = NetworkRequestContext.Create(42, NetworkCorrelation.Compose(42, (ushort)1));
-            Assert("Security: non-authoritative pass-through",
-                SecurityIntegration.ValidateModuleRequest(1, in ctx, "Core", "Move"));
-            Assert("Security: ownership pass-through (non-authoritative)",
-                SecurityIntegration.ValidateOwnership(1, 1001, "Core"));
+            //
+            // If a NetworkSecurityManager exists in the scene but hasn't been initialized
+            // (e.g. no transport/bootstrap is running yet), SecurityIntegration would
+            // otherwise classify a sender+actor request as "server-like" and reject.
+            // Temporarily relax that enforcement just for this test, then restore it.
+            bool previousEnforce = SecurityIntegration.EnforceSecurityManagerForServerLikeRequests;
+            SecurityIntegration.EnforceSecurityManagerForServerLikeRequests = false;
+            try
+            {
+                var ctx = NetworkRequestContext.Create(42, NetworkCorrelation.Compose(42, (ushort)1));
+                Assert("Security: non-authoritative pass-through",
+                    SecurityIntegration.ValidateModuleRequest(1, in ctx, "Core", "Move"));
+                Assert("Security: ownership pass-through (non-authoritative)",
+                    SecurityIntegration.ValidateOwnership(1, 1001, "Core"));
+            }
+            finally
+            {
+                SecurityIntegration.EnforceSecurityManagerForServerLikeRequests = previousEnforce;
+            }
         }
 
         private void TestRelevanceTiers()

@@ -11,13 +11,23 @@ This module provides network-aware shooter combat for GC2, enabling server-autho
 - Game Creator 2 Core
 - Game Creator 2 Shooter Module
 - GC2 Network Integration (base module)
-- A configured transport adapter (NGO/FishNet/Mirror/custom)
+- PurrNet integration or a configured custom transport adapter (NGO/FishNet/Mirror/custom)
 
 ## Installation
 
 1. Import the GC2 Network Integration base module
 2. Import this GC2 Shooter Network module
 3. The module will auto-detect GC2 Shooter via the `GC2_SHOOTER` define symbol
+
+## PurrNet Scene Setup Wizard
+
+For PurrNet projects, enable **Shooter** on the PurrNet wizard Modules page. The wizard creates/reuses `NetworkShooterManager` and `PurrNetShooterTransportBridge`.
+
+When a Player Prefab is assigned on the Scene page and prefab preparation is enabled, selecting Shooter adds `NetworkShooterController` to that prefab. The PurrNet bridge synchronizes owner aim, weapon state, shot requests/responses, shot broadcasts, bullet/tracer/VFX events, reload/weapon actions, hit validation, and impact broadcasts.
+
+The GC2 Shooter Sight patch is mandatory for PurrNet Shooter networking. The wizard checks it when Shooter is selected and blocks setup until `Game Creator > Networking Layer > Patches > Shooter Sight > Patch (Remote Camera Safety)` has been applied. This hook prevents remote character replicas from running local-only Sight OnEnter/OnExit instructions such as camera FOV, crosshair, view effects, and local IK side effects.
+
+GC2 bullets configured to use rigidbody impacts can broadcast the impact event and let clients apply the push locally. Add `NetworkShooterImpactProp` only to important props that need a stable network prop id and more controlled impact routing; lightweight crates and debris can use the default local impact path.
 
 ## Architecture
 

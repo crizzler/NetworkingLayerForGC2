@@ -11,6 +11,12 @@ This module provides complete network synchronization for the Abilities system, 
 - **Impacts** - Server-calculated AOE with synchronized hit detection
 - **Ability Learning** - Server-validated ability slot management
 
+## PurrNet Scene Setup Wizard
+
+For PurrNet projects, enable **Abilities** on the PurrNet wizard Modules page. The wizard creates/reuses the shared `NetworkAbilitiesController` and `PurrNetAbilitiesTransportBridge`.
+
+Abilities is not a per-player controller module. Player/NPC prefabs still need their Daimahou `Pawn`/`Caster` setup and game-specific loadouts. The PurrNet bridge supplies transport routing, role initialization, asset registration, projectile/impact sync, and request validation glue.
+
 ## Security Modes
 
 This module offers two security levels:
@@ -80,7 +86,7 @@ Editor/GameCreator2/Patches/
 
 - Add exactly one `NetworkAbilitiesController` to a shared bootstrap/manager GameObject in scene.
 - Do not add `NetworkAbilitiesController` per player character.
-- The Setup Wizard `Scene Objects` step can create/reuse the shared controller when `Ensure NetworkAbilitiesController` is enabled.
+- The PurrNet Scene Setup Wizard creates/reuses the shared controller when Abilities is selected on the Modules page.
 - `NetworkAbilitiesManager` is a static API/service (`NetworkAbilitiesManager.cs`), not a `MonoBehaviour` component. Do not add it to a GameObject.
 
 ### NetworkAbilitiesManager Role
@@ -225,6 +231,25 @@ Reserved message type IDs: **230-259**
 | 246 | AbilityStateRequest         | Client → Server    |
 | 247 | AbilityStateResponse        | Server → Client    |
 
+## PurrNet Setup
+
+When using PurrNet, add `PurrNetAbilitiesTransportBridge` to the same scene as the PurrNet `NetworkManager` and the shared `NetworkAbilitiesController`.
+
+The bridge:
+
+- Initializes `NetworkAbilitiesController` as server, client, or host from the active PurrNet session.
+- Wires every active Abilities transport delegate to PurrNet packets.
+- Registers configured `Ability`, `Projectile`, and `Impact` assets for hash lookup.
+- Auto-registers scene `Pawn` components that belong to `NetworkCharacter` instances.
+- Routes owner requests through the same server validation path used by the transport-agnostic API.
+
+The PurrNet Scene Setup Wizard and demo scene creator can add:
+
+- `Network Abilities Controller`
+- `PurrNet Abilities Bridge`
+
+Ability assets still need to be assigned to the bridge's registry arrays, and player/NPC prefabs still need their Daimahou `Pawn`/`Caster` setup. The bridge only supplies transport and registration glue; it does not create game-specific ability loadouts.
+
 ## Server Validation
 
 The server validates:
@@ -234,6 +259,26 @@ The server validates:
 - **Requirements met** (via RuntimeAbility.CanUse)
 - **Range validation** (with grace for latency)
 - **Cast queue** (prevents ability spam)
+
+## Ability Asset Authoring
+
+Avoid using Game Creator's global `Player` shortcut for networked ability projectile or VFX origins. `Player` is local-machine global state: on each observer it resolves to that machine's local player, not necessarily the pawn that cast the ability. This can make remote casts animate on the correct character while projectiles, muzzle flashes, or impact VFX originate from the wrong local player.
+
+For projectile spawn points, cast sockets, muzzle locations, and ability VFX roots, prefer Daimahou's `Ability Source` property. `Ability Source` resolves from the ability cast context and points to the actual caster for that cast, including remote network pawns.
+
+Recommended setup for a hand or weapon socket:
+
+1. Set the spawn point to a `Location` or `Position + Rotation`.
+2. For the position, use `Game Object Position`.
+3. For the game object, use `Character Bone`.
+4. For the character, use `Ability Source`.
+5. Pick the hand, weapon, or custom cast socket bone/transform.
+
+`Self` can work in some ability stages, but it may change as the ability creates runtime projectiles or nested effects. For ability and projectile contexts, `Ability Source` is the caster-safe choice.
+
+Reactive Gesture notifications are different: they are triggered with the `Character` that is playing the gesture, not the original ability `ExtendedArgs`. For notifications such as `Instantiate GameObject`, avoid `Player Position`; use `Self`/`Self Position` for the character root, or use `Game Object Position` -> `Character Bone` with the character set to `Self` for hand, weapon, or cast-socket VFX.
+
+Registered ability assets are patched in memory at runtime so common `Player` shortcut references in projectile spawn methods and reactive gesture notifications resolve to the cast source or gesture character. This protects bundled examples and older assets, but newly authored network abilities should still use `Ability Source` or `Self` explicitly.
 
 ## Integration with Ability Effects
 

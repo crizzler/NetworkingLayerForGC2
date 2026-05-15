@@ -10,6 +10,12 @@ The GC2 Networking Security System provides comprehensive server-authoritative p
 - **Violation Tracking**: Logs, warns, blocks, or kicks malicious clients
 - **Optional Source Patches**: Deep integration for maximum security
 
+## PurrNet Scene Setup Wizard
+
+For PurrNet projects, `Game Creator > Networking Layer > PurrNet Scene Setup Wizard` creates/reuses `NetworkSecurityManager` automatically as part of the always-on Core infrastructure. Keep it enabled in server/host scenes so all selected module managers can validate ownership, request rate, sequence/correlation, and module-specific rules.
+
+The wizard also creates the selected module managers and PurrNet bridges. Custom transports should create one `NetworkSecurityManager` manually and initialize it after the transport role is known.
+
 ## Architecture
 
 ```

@@ -21,6 +21,8 @@ namespace Arawn.GameCreator2.Networking.Editor
         private const string SYMBOL_DIALOGUE = "GC2_DIALOGUE";
         private const string SYMBOL_TRAVERSAL = "GC2_TRAVERSAL";
         private const string SYMBOL_ABILITIES = "GC2_ABILITIES";
+        private const string SYMBOL_TRANSPORT_INTEGRATION = "ARAWN_GC2_TRANSPORT_INTEGRATION";
+        private const string OBSOLETE_SYMBOL_PURRNET_TRANSPORT = "ARAWN_GC2_PURRNET_TRANSPORT";
 
         private const string GC2_PACKAGES_ROOT = "Assets/Plugins/GameCreator/Packages";
         private const string GC2_INVENTORY_DIR = GC2_PACKAGES_ROOT + "/Inventory";
@@ -32,6 +34,8 @@ namespace Arawn.GameCreator2.Networking.Editor
         private const string GC2_TRAVERSAL_DIR = GC2_PACKAGES_ROOT + "/Traversal";
 
         private const string ABILITIES_MODULE_DIR = "Assets/Plugins/DaimahouGames/Packages/Abilities";
+        private const string TRANSPORT_RUNTIME_ROOT = "Assets/Arawn/NetworkingLayerForGC2/Runtime/Transport";
+        private const string TRANSPORT_EDITOR_ROOT = "Assets/Arawn/NetworkingLayerForGC2/Editor/Transport";
 
         private static bool s_IsUpdating;
         private static bool s_PendingUpdate;
@@ -44,7 +48,6 @@ namespace Arawn.GameCreator2.Networking.Editor
             QueueUpdate();
         }
 
-        [MenuItem("Game Creator/Networking Layer/Refresh Define Symbols", priority = 30)]
         public static void RefreshNow()
         {
             s_NamespaceCache.Clear();
@@ -95,6 +98,8 @@ namespace Arawn.GameCreator2.Networking.Editor
                 ManageSymbol(symbolList, SYMBOL_DIALOGUE, IsDialogueInstalled());
                 ManageSymbol(symbolList, SYMBOL_TRAVERSAL, IsTraversalInstalled());
                 ManageSymbol(symbolList, SYMBOL_ABILITIES, IsAbilitiesInstalled());
+                ManageSymbol(symbolList, SYMBOL_TRANSPORT_INTEGRATION, IsTransportIntegrationInstalled());
+                RemoveSymbol(symbolList, OBSOLETE_SYMBOL_PURRNET_TRANSPORT);
 
                 string newSymbols = string.Join(";", symbolList);
                 if (newSymbols == currentSymbols) return;
@@ -160,6 +165,27 @@ namespace Arawn.GameCreator2.Networking.Editor
             return Directory.Exists(ABILITIES_MODULE_DIR) || IsNamespacePresentCached("DaimahouGames.Runtime.Abilities");
         }
 
+        private static bool IsTransportIntegrationInstalled()
+        {
+            return HasTransportSubdirectory(TRANSPORT_RUNTIME_ROOT) ||
+                   HasTransportSubdirectory(TRANSPORT_EDITOR_ROOT) ||
+                   IsNamespacePresentCached("Arawn.GameCreator2.Networking.Transport.PurrNet");
+        }
+
+        private static bool HasTransportSubdirectory(string rootPath)
+        {
+            if (!Directory.Exists(rootPath)) return false;
+
+            return Directory.EnumerateDirectories(rootPath).Any(directory =>
+            {
+                string directoryName = Path.GetFileName(directory);
+                if (string.IsNullOrWhiteSpace(directoryName)) return false;
+                if (directoryName.StartsWith(".", StringComparison.Ordinal)) return false;
+
+                return Directory.EnumerateFileSystemEntries(directory).Any();
+            });
+        }
+
         private static void ManageSymbol(List<string> symbolList, string symbol, bool shouldDefine)
         {
             if (shouldDefine)
@@ -173,6 +199,11 @@ namespace Arawn.GameCreator2.Networking.Editor
             {
                 symbolList.RemoveAll(existing => existing == symbol);
             }
+        }
+
+        private static void RemoveSymbol(List<string> symbolList, string symbol)
+        {
+            symbolList.RemoveAll(existing => existing == symbol);
         }
 
         private static bool IsNamespacePresentCached(string namespaceName)

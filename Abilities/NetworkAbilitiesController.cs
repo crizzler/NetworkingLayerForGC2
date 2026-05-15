@@ -8,6 +8,7 @@ using DaimahouGames.Runtime.Core.Common;
 using GameCreator.Runtime.Characters;
 using GameCreator.Runtime.Common;
 using Arawn.GameCreator2.Networking.Security;
+using DaimahouAutoConfirmInput = DaimahouGames.Runtime.Abilities.VisualScripting.AutoConfirmInput;
 
 // Suppress warnings for unused events and fields that are part of public API hooks
 #pragma warning disable CS0067 // Event is never used
@@ -206,6 +207,7 @@ namespace Arawn.GameCreator2.Networking
         private readonly Dictionary<ulong, PendingLearnRequest> m_PendingLearnRequests = new(16);
         private readonly Dictionary<ulong, PendingCooldownRequest> m_PendingCooldownRequests = new(16);
         private readonly Dictionary<ulong, PendingCancelRequest> m_PendingCancelRequests = new(16);
+        private readonly HashSet<uint> m_ClientVisualReplayCastIds = new();
         
         // Server-side tracking
         private readonly Dictionary<uint, CasterState> m_CasterStates = new(64);
@@ -526,7 +528,12 @@ namespace Arawn.GameCreator2.Networking
 
         private bool ValidatePatchedCastRequest(Caster caster, Ability ability, ExtendedArgs args)
         {
-            if (m_IsServer && args != null && args.Get<AutoConfirmInput>() != null)
+            if (args != null && args.Has<NetworkAbilityVisualReplayInput>())
+            {
+                return true;
+            }
+
+            if (m_IsServer && args != null && args.Has<DaimahouAutoConfirmInput>())
             {
                 return true;
             }
@@ -618,6 +625,7 @@ namespace Arawn.GameCreator2.Networking
             m_PendingLearnRequests.Clear();
             m_PendingCooldownRequests.Clear();
             m_PendingCancelRequests.Clear();
+            m_ClientVisualReplayCastIds.Clear();
             m_CasterStates.Clear();
             m_ActiveCasts.Clear();
             m_ActiveProjectiles.Clear();
@@ -719,6 +727,11 @@ namespace Arawn.GameCreator2.Networking
     /// Marker class for auto-confirm input (server/AI casts).
     /// </summary>
     public class AutoConfirmInput { }
+    
+    /// <summary>
+    /// Marker for client-only visual replays of server-approved ability casts.
+    /// </summary>
+    public class NetworkAbilityVisualReplayInput { }
     
     /// <summary>
     /// Marker class for tracking ability source.

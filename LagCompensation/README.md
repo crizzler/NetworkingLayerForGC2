@@ -15,6 +15,11 @@ Lag Compensation provides server-authoritative hit validation through position h
 - **Hit Zones**: Support for damage multipliers per body region
 - **High Performance**: Pooled allocations, batch operations for crowds
 
+## PurrNet Setup
+
+The PurrNet Scene Setup Wizard does not expose Lag Compensation as a separate module checkbox. It creates the combat managers and bridges that use lag compensation during server validation, while lag compensation history is still configured through `LagCompensationBootstrap` or direct `LagCompensationManager.Initialize(...)`.
+
+For Shooter, Melee, and Abilities sessions, add `LagCompensationBootstrap` to a persistent server/host object when you need rewind validation for custom entities. Characters can use `CharacterLagCompensation` to register their body bounds and hit zones.
 
 ## Quick Start
 

@@ -7,6 +7,7 @@ using UnityEngine;
 using GameCreator.Runtime.Characters;
 using GameCreator.Runtime.Common;
 using GameCreator.Editor.Characters;
+using Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches;
 using Arawn.GameCreator2.Networking.Security;
 
 namespace Arawn.GameCreator2.Networking.Editor
@@ -250,6 +251,7 @@ namespace Arawn.GameCreator2.Networking.Editor
             "Project-relative folder under Assets where generated registry/profile assets will be stored."
         );
 
+#if !ARAWN_GC2_TRANSPORT_INTEGRATION
         [MenuItem("Game Creator/Networking Layer/Scene Setup Wizard", priority = 0)]
         public static void OpenWizard()
         {
@@ -258,6 +260,7 @@ namespace Arawn.GameCreator2.Networking.Editor
             window.maxSize = new Vector2(960f, 1000f);
             window.Show();
         }
+#endif
 
         private void OnGUI()
         {
@@ -694,6 +697,25 @@ namespace Arawn.GameCreator2.Networking.Editor
             try
             {
                 var report = new SetupReport();
+                if (!ShooterSightPatchRequirement.EnsureAppliedWithPrompt(
+                        "Game Creator 2 Networking Setup Wizard",
+                        out string shooterSightPatchReport))
+                {
+                    return;
+                }
+
+                if (!string.IsNullOrEmpty(shooterSightPatchReport))
+                {
+                    if (shooterSightPatchReport.StartsWith("WARNING", StringComparison.Ordinal))
+                    {
+                        report.Warnings.AppendLine($"- {shooterSightPatchReport}");
+                    }
+                    else
+                    {
+                        report.Updated.AppendLine($"- {shooterSightPatchReport}");
+                    }
+                }
+
                 EnsureAssetFolder(m_OutputFolderPath);
 
                 GameObject setupRoot = null;
@@ -916,6 +938,8 @@ namespace Arawn.GameCreator2.Networking.Editor
             if (m_CreateCoreManager)
             {
                 EnsureSingletonComponent<NetworkCoreManager>("Network Core Manager", setupRoot, report);
+                EnsureSingletonComponent<NetworkAnimationManager>("Network Animation Manager", setupRoot, report);
+                EnsureSingletonComponent<NetworkMotionManager>("Network Motion Manager", setupRoot, report);
             }
 
 #if GC2_INVENTORY

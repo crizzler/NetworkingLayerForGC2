@@ -119,7 +119,7 @@ namespace Arawn.GameCreator2.Networking.Quests
         {
             if (m_LogNetworkMessages)
             {
-                Debug.Log($"[NetworkQuestsManager] Sending quest request: Action={request.Action}, RequestId={request.RequestId}");
+                Debug.Log($"[NetworkQuestSync][Manager] send request {DescribeRequest(request)}", this);
             }
 
             OnSendQuestRequest?.Invoke(request);
@@ -127,6 +127,8 @@ namespace Arawn.GameCreator2.Networking.Quests
 
         public async Task ReceiveQuestRequest(NetworkQuestRequest request, ulong clientId)
         {
+            LogNetwork($"receive request rawClient={clientId} {DescribeRequest(request)}");
+
             if (!m_IsServer)
             {
                 Debug.LogWarning("[NetworkQuestsManager] Non-server received quest request");
@@ -143,13 +145,8 @@ namespace Arawn.GameCreator2.Networking.Quests
                         "Quests",
                         nameof(NetworkQuestRequest)))
                 {
+                    LogNetwork($"reject request security sender={senderClientId} {DescribeRequest(request)}");
                     SendRejectedResponse(senderClientId, request, GetSecurityRejection(request.ActorNetworkId, request.CorrelationId));
-                    return;
-                }
-
-                if (!ValidateTargetOwnership(senderClientId, request.ActorNetworkId, request.TargetNetworkId, nameof(NetworkQuestRequest)))
-                {
-                    SendRejectedResponse(senderClientId, request, QuestRejectionReason.SecurityViolation);
                     return;
                 }
 
@@ -158,6 +155,7 @@ namespace Arawn.GameCreator2.Networking.Quests
                     QuestRejectionReason customResult = CustomQuestValidator.Invoke(request, senderClientId);
                     if (customResult != QuestRejectionReason.None)
                     {
+                        LogNetwork($"reject request custom reason={customResult} sender={senderClientId} {DescribeRequest(request)}");
                         SendRejectedResponse(senderClientId, request, customResult);
                         return;
                     }
@@ -165,6 +163,7 @@ namespace Arawn.GameCreator2.Networking.Quests
 
                 if (!CheckAndIncrementPendingRequests(clientId))
                 {
+                    LogNetwork($"reject request rateLimit sender={senderClientId} rawClient={clientId} {DescribeRequest(request)}");
                     SendRejectedResponse(senderClientId, request, QuestRejectionReason.RateLimitExceeded);
                     return;
                 }
@@ -173,18 +172,36 @@ namespace Arawn.GameCreator2.Networking.Quests
                 NetworkQuestsController controller = GetController(request.TargetNetworkId);
                 if (controller == null)
                 {
+                    LogNetwork($"reject request targetNotFound sender={senderClientId} {DescribeRequest(request)} controllers={m_Controllers.Count}");
                     SendRejectedResponse(senderClientId, request, QuestRejectionReason.TargetNotFound);
+                    return;
+                }
+
+                if (request.ShareMode == NetworkQuestShareMode.Personal &&
+                    !ValidateTargetOwnership(senderClientId, request.ActorNetworkId, request.TargetNetworkId, nameof(NetworkQuestRequest)))
+                {
+                    LogNetwork($"reject request ownership sender={senderClientId} {DescribeRequest(request)}");
+                    SendRejectedResponse(senderClientId, request, QuestRejectionReason.SecurityViolation);
+                    return;
+                }
+
+                if (!controller.IsNetworkRequestAllowed(request, out QuestRejectionReason profileRejection, out string profileError))
+                {
+                    LogNetwork($"reject request profile reason={profileRejection} sender={senderClientId} error='{profileError}' {DescribeRequest(request)}");
+                    SendRejectedResponse(senderClientId, request, profileRejection, profileError);
                     return;
                 }
 
                 NetworkQuestResponse response = await controller.ProcessQuestRequestAsync(request, senderClientId);
                 response.ActorNetworkId = request.ActorNetworkId;
                 response.CorrelationId = request.CorrelationId;
+                LogNetwork($"send response targetClient={senderClientId} {DescribeResponse(response)}");
                 OnSendQuestResponse?.Invoke(senderClientId, response);
             }
             catch (Exception exception)
             {
                 Debug.LogError($"[NetworkQuestsManager] Failed to process quest request: {exception.Message}");
+                LogNetwork($"reject request exception sender={senderClientId} exception={exception.Message} {DescribeRequest(request)}");
                 SendRejectedResponse(senderClientId, request, QuestRejectionReason.Exception);
             }
             finally
@@ -200,6 +217,7 @@ namespace Arawn.GameCreator2.Networking.Quests
         {
             uint actorId = response.ActorNetworkId != 0 ? response.ActorNetworkId : targetNetworkId;
             NetworkQuestsController controller = GetController(actorId);
+            LogNetwork($"route response targetNetworkId={targetNetworkId} actor={actorId} controller={(controller != null ? controller.name : "none")} {DescribeResponse(response)}");
             controller?.ReceiveQuestResponse(response);
         }
 
@@ -207,17 +225,46 @@ namespace Arawn.GameCreator2.Networking.Quests
         {
             if (!m_IsServer) return;
 
-            if (m_LogNetworkMessages)
+            LogNetwork($"broadcast quest change {DescribeBroadcast(broadcast)}");
+
+            if (broadcast.ShareMode != NetworkQuestShareMode.Personal)
             {
-                Debug.Log($"[NetworkQuestsManager] Broadcasting quest change: NetworkId={broadcast.NetworkId}, Action={broadcast.Action}");
+                MirrorSharedQuestChangeOnServer(broadcast);
             }
 
             OnBroadcastQuestChange?.Invoke(broadcast);
         }
 
+        private void MirrorSharedQuestChangeOnServer(NetworkQuestBroadcast broadcast)
+        {
+            // Keep server-side shared journals aligned so any client can continue
+            // a global or party quest that another actor started.
+            foreach (KeyValuePair<uint, NetworkQuestsController> pair in m_Controllers)
+            {
+                if (pair.Key == broadcast.NetworkId) continue;
+
+                LogNetwork($"mirror shared broadcast to server controller={pair.Key} name={(pair.Value != null ? pair.Value.name : "none")}");
+                pair.Value?.ReceiveQuestChangeBroadcast(broadcast);
+            }
+        }
+
         public void ReceiveQuestChangeBroadcast(NetworkQuestBroadcast broadcast)
         {
+            LogNetwork($"receive broadcast dispatch {DescribeBroadcast(broadcast)} controllers={m_Controllers.Count}");
+
+            if (broadcast.ShareMode != NetworkQuestShareMode.Personal)
+            {
+                foreach (KeyValuePair<uint, NetworkQuestsController> pair in m_Controllers)
+                {
+                    LogNetwork($"dispatch shared broadcast to controller={pair.Key} name={(pair.Value != null ? pair.Value.name : "none")}");
+                    pair.Value?.ReceiveQuestChangeBroadcast(broadcast);
+                }
+
+                return;
+            }
+
             NetworkQuestsController controller = GetController(broadcast.NetworkId);
+            LogNetwork($"dispatch personal broadcast to controller={broadcast.NetworkId} name={(controller != null ? controller.name : "none")}");
             controller?.ReceiveQuestChangeBroadcast(broadcast);
         }
 
@@ -225,10 +272,7 @@ namespace Arawn.GameCreator2.Networking.Quests
         {
             if (!m_IsServer) return;
 
-            if (m_LogNetworkMessages)
-            {
-                Debug.Log($"[NetworkQuestsManager] Broadcasting full snapshot: NetworkId={snapshot.NetworkId}, Quests={snapshot.QuestEntries?.Length ?? 0}");
-            }
+            LogNetwork($"broadcast full snapshot {DescribeSnapshot(snapshot)}");
 
             OnBroadcastFullSnapshot?.Invoke(snapshot);
         }
@@ -236,18 +280,22 @@ namespace Arawn.GameCreator2.Networking.Quests
         public void ReceiveFullSnapshot(NetworkQuestsSnapshot snapshot)
         {
             NetworkQuestsController controller = GetController(snapshot.NetworkId);
+            LogNetwork($"route full snapshot controller={snapshot.NetworkId} name={(controller != null ? controller.name : "none")} {DescribeSnapshot(snapshot)}");
             controller?.ReceiveFullSnapshot(snapshot);
         }
 
         public void SendSnapshotToClient(ulong clientId, NetworkQuestsSnapshot snapshot)
         {
             if (!m_IsServer) return;
+            LogNetwork($"send snapshot to client={clientId} {DescribeSnapshot(snapshot)}");
             OnSendSnapshotToClient?.Invoke(clientId, snapshot);
         }
 
         public void SendAllSnapshotsToClient(ulong clientId)
         {
             if (!m_IsServer) return;
+
+            LogNetwork($"send all snapshots to client={clientId} controllers={m_Controllers.Count}");
 
             foreach (KeyValuePair<uint, NetworkQuestsController> pair in m_Controllers)
             {
@@ -275,21 +323,76 @@ namespace Arawn.GameCreator2.Networking.Quests
                 : QuestRejectionReason.SecurityViolation;
         }
 
-        private void SendRejectedResponse(uint senderClientId, in NetworkQuestRequest request, QuestRejectionReason reason)
+        private void SendRejectedResponse(
+            uint senderClientId,
+            in NetworkQuestRequest request,
+            QuestRejectionReason reason,
+            string error = "")
         {
+            LogNetwork($"send rejected response targetClient={senderClientId} reason={reason} error='{error}' {DescribeRequest(request)}");
             OnSendQuestResponse?.Invoke(senderClientId, new NetworkQuestResponse
             {
                 RequestId = request.RequestId,
                 ActorNetworkId = request.ActorNetworkId,
                 CorrelationId = request.CorrelationId,
+                ProfileHash = request.ProfileHash,
+                ShareMode = request.ShareMode,
+                ScopeId = request.ScopeId,
                 Action = request.Action,
                 Authorized = false,
                 Applied = false,
                 RejectionReason = reason,
                 QuestHash = request.QuestHash,
                 QuestIdString = request.QuestIdString,
-                TaskId = request.TaskId
+                TaskId = request.TaskId,
+                Error = error ?? string.Empty
             });
+        }
+
+        private void LogNetwork(string message)
+        {
+            if (!m_LogNetworkMessages) return;
+            Debug.Log($"[NetworkQuestSync][Manager] {message}", this);
+        }
+
+        private static string DescribeQuestIdentity(string questIdString, int questHash)
+        {
+            return !string.IsNullOrEmpty(questIdString)
+                ? $"quest='{questIdString}' hash={questHash}"
+                : $"questHash={questHash}";
+        }
+
+        private static string DescribeRequest(in NetworkQuestRequest request)
+        {
+            return
+                $"requestId={request.RequestId} actor={request.ActorNetworkId} target={request.TargetNetworkId} " +
+                $"correlation={request.CorrelationId} action={request.Action} share={request.ShareMode} " +
+                $"profile={request.ProfileHash} {DescribeQuestIdentity(request.QuestIdString, request.QuestHash)} task={request.TaskId}";
+        }
+
+        private static string DescribeResponse(in NetworkQuestResponse response)
+        {
+            return
+                $"requestId={response.RequestId} actor={response.ActorNetworkId} correlation={response.CorrelationId} " +
+                $"action={response.Action} authorized={response.Authorized} applied={response.Applied} rejection={response.RejectionReason} " +
+                $"share={response.ShareMode} profile={response.ProfileHash} {DescribeQuestIdentity(response.QuestIdString, response.QuestHash)} " +
+                $"task={response.TaskId} questState={response.QuestState} taskState={response.TaskState} tracking={response.IsTracking} error='{response.Error}'";
+        }
+
+        private static string DescribeBroadcast(in NetworkQuestBroadcast broadcast)
+        {
+            return
+                $"networkId={broadcast.NetworkId} actor={broadcast.ActorNetworkId} correlation={broadcast.CorrelationId} " +
+                $"action={broadcast.Action} share={broadcast.ShareMode} profile={broadcast.ProfileHash} " +
+                $"{DescribeQuestIdentity(broadcast.QuestIdString, broadcast.QuestHash)} task={broadcast.TaskId} " +
+                $"questState={broadcast.QuestState} taskState={broadcast.TaskState} tracking={broadcast.IsTracking}";
+        }
+
+        private static string DescribeSnapshot(in NetworkQuestsSnapshot snapshot)
+        {
+            int questCount = snapshot.QuestEntries?.Length ?? 0;
+            int taskCount = snapshot.TaskEntries?.Length ?? 0;
+            return $"networkId={snapshot.NetworkId} serverTime={snapshot.ServerTime:0.###} quests={questCount} tasks={taskCount}";
         }
 
         private void RegisterOwnedEntityMapping(uint entityNetworkId)

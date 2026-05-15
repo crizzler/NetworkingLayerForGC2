@@ -6,7 +6,7 @@ namespace Arawn.GameCreator2.Networking
     /// <summary>
     /// Compressed input state for network transmission.
     /// Uses fixed-point encoding to minimize bandwidth.
-    /// Total size: 8 bytes (vs 24+ bytes for raw Vector3 + flags)
+    /// Total size: 10 bytes normally, 23 bytes when carrying an owner-authority pose sample.
     /// </summary>
     [Serializable]
     public struct NetworkInputState : IEquatable<NetworkInputState>
@@ -23,6 +23,15 @@ namespace Arawn.GameCreator2.Networking
         
         // Delta time in milliseconds (capped at 255ms)
         public byte deltaTimeMs;
+
+        // Owner-facing yaw (0-360 degrees mapped to 0-65535)
+        public ushort rotationY;
+
+        // Optional authority metadata. Position is only serialized when AUTHORITY_FLAG_POSITION is set.
+        public byte authorityFlags;
+        public int authorityPositionX;
+        public int authorityPositionY;
+        public int authorityPositionZ;
         
         // Flag constants
         public const byte FLAG_JUMP = 1;
@@ -33,20 +42,36 @@ namespace Arawn.GameCreator2.Networking
         public const byte FLAG_CUSTOM_2 = 32;
         public const byte FLAG_CUSTOM_3 = 64;
         public const byte FLAG_CUSTOM_4 = 128;
+
+        public const byte AUTHORITY_FLAG_POSITION = 1;
         
         /// <summary>
         /// Creates a compressed input state from raw input.
         /// </summary>
-        public static NetworkInputState Create(Vector2 input, ushort sequence, float deltaTime, byte flags = 0)
+        public static NetworkInputState Create(
+            Vector2 input,
+            ushort sequence,
+            float deltaTime,
+            byte flags = 0,
+            float rotationY = 0f,
+            Vector3? ownerAuthorityPosition = null)
         {
-            return new NetworkInputState
+            NetworkInputState state = new NetworkInputState
             {
                 inputX = (short)Mathf.Clamp(input.x * 32767f, -32767f, 32767f),
                 inputY = (short)Mathf.Clamp(input.y * 32767f, -32767f, 32767f),
                 sequenceNumber = sequence,
                 flags = flags,
-                deltaTimeMs = (byte)Mathf.Clamp(deltaTime * 1000f, 1f, 255f)
+                deltaTimeMs = (byte)Mathf.Clamp(deltaTime * 1000f, 1f, 255f),
+                rotationY = (ushort)(Mathf.Repeat(rotationY, 360f) / 360f * 65535f)
             };
+
+            if (ownerAuthorityPosition.HasValue)
+            {
+                state.SetOwnerAuthorityPosition(ownerAuthorityPosition.Value);
+            }
+
+            return state;
         }
         
         /// <summary>
@@ -64,20 +89,61 @@ namespace Arawn.GameCreator2.Networking
         {
             return deltaTimeMs / 1000f;
         }
+
+        /// <summary>
+        /// Gets the decompressed owner-facing yaw in degrees.
+        /// </summary>
+        public float GetRotationY()
+        {
+            return rotationY / 65535f * 360f;
+        }
         
         public bool HasFlag(byte flag) => (flags & flag) != 0;
+
+        public bool HasOwnerAuthorityPosition => (authorityFlags & AUTHORITY_FLAG_POSITION) != 0;
+
+        public void SetOwnerAuthorityPosition(Vector3 position)
+        {
+            authorityFlags |= AUTHORITY_FLAG_POSITION;
+            authorityPositionX = Mathf.RoundToInt(position.x * 100f);
+            authorityPositionY = Mathf.RoundToInt(position.y * 100f);
+            authorityPositionZ = Mathf.RoundToInt(position.z * 100f);
+        }
+
+        public Vector3 GetOwnerAuthorityPosition()
+        {
+            return new Vector3(
+                authorityPositionX / 100f,
+                authorityPositionY / 100f,
+                authorityPositionZ / 100f
+            );
+        }
         
         public bool Equals(NetworkInputState other)
         {
-            return inputX == other.inputX && 
-                   inputY == other.inputY && 
+            return inputX == other.inputX &&
+                   inputY == other.inputY &&
                    sequenceNumber == other.sequenceNumber &&
-                   flags == other.flags;
+                   flags == other.flags &&
+                   deltaTimeMs == other.deltaTimeMs &&
+                   rotationY == other.rotationY &&
+                   authorityFlags == other.authorityFlags &&
+                   authorityPositionX == other.authorityPositionX &&
+                   authorityPositionY == other.authorityPositionY &&
+                   authorityPositionZ == other.authorityPositionZ;
         }
         
         public override int GetHashCode()
         {
-            return HashCode.Combine(inputX, inputY, sequenceNumber, flags);
+            return HashCode.Combine(
+                inputX,
+                inputY,
+                sequenceNumber,
+                flags,
+                deltaTimeMs,
+                rotationY,
+                authorityFlags,
+                HashCode.Combine(authorityPositionX, authorityPositionY, authorityPositionZ));
         }
     }
     

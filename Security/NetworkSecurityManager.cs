@@ -30,6 +30,7 @@ namespace Arawn.GameCreator2.Networking.Security
         [SerializeField] private NetworkSecurityConfig m_MeleeConfig;
         [SerializeField] private NetworkSecurityConfig m_ShooterConfig;
         [SerializeField] private NetworkSecurityConfig m_AbilitiesConfig;
+        [SerializeField] private NetworkSecurityConfig m_VariablesConfig;
         
         [Header("Debug")]
         [SerializeField] private bool m_LogViolations = true;
@@ -144,6 +145,7 @@ namespace Arawn.GameCreator2.Networking.Security
             CreateRateLimiter("Melee");
             CreateRateLimiter("Shooter");
             CreateRateLimiter("Abilities");
+            CreateRateLimiter("Variables");
             
             m_Stats.Reset();
             
@@ -177,6 +179,7 @@ namespace Arawn.GameCreator2.Networking.Security
                 "Melee" => m_MeleeConfig ?? m_Config,
                 "Shooter" => m_ShooterConfig ?? m_Config,
                 "Abilities" => m_AbilitiesConfig ?? m_Config,
+                "Variables" => m_VariablesConfig ?? m_Config,
                 _ => m_Config
             };
         }

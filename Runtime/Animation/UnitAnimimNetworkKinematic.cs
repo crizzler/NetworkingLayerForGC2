@@ -188,7 +188,6 @@ namespace Arawn.GameCreator2.Networking
         
         // Network sync state
         [NonSerialized] private NetworkAnimimState m_LastSentState;
-        [NonSerialized] private NetworkAnimimState m_TargetState;
         [NonSerialized] private float m_LastSendTime;
         
         // ════════════════════════════════════════════════════════════════════════════════════════
@@ -340,25 +339,10 @@ namespace Arawn.GameCreator2.Networking
         
         private void UpdateAsRemoteClient()
         {
-            // Remote client interpolates toward target state
-            float deltaTime = Character.Time.DeltaTime;
-            float decay = Mathf.Lerp(1f, 25f, m_SmoothTime);
-            
-            Vector3 targetSpeed = m_TargetState.GetLocalSpeed();
-            m_LocalSpeed.x = MathUtils.ExponentialDecay(m_LocalSpeed.x, targetSpeed.x, decay, deltaTime);
-            m_LocalSpeed.y = MathUtils.ExponentialDecay(m_LocalSpeed.y, targetSpeed.y, decay, deltaTime);
-            m_LocalSpeed.z = MathUtils.ExponentialDecay(m_LocalSpeed.z, targetSpeed.z, decay, deltaTime);
-            
-            m_PivotSpeed = MathUtils.ExponentialDecay(m_PivotSpeed, m_TargetState.GetPivotSpeed(), DECAY_PIVOT, deltaTime);
-            m_Grounded = MathUtils.ExponentialDecay(m_Grounded, m_TargetState.GetGrounded(), DECAY_GROUNDED, deltaTime);
-            m_Stand = MathUtils.ExponentialDecay(m_Stand, m_TargetState.GetStandLevel(), DECAY_STAND, deltaTime);
-            
-            // Intent is calculated locally since it's not synced
-            IUnitMotion motion = Character.Motion;
-            m_Intent = motion.LinearSpeed > float.Epsilon
-                ? Vector3.ClampMagnitude(Transform.InverseTransformDirection(motion.MoveDirection) / motion.LinearSpeed, 1f)
-                : Vector3.zero;
-            
+            // Locomotion is cosmetic and can be derived from the already-interpolated
+            // remote driver. There is currently no transport message for NetworkAnimimState,
+            // so waiting for target states leaves remote players idle on pure clients.
+            CalculateAnimationValues();
             ApplyToAnimator();
         }
         
@@ -371,7 +355,6 @@ namespace Arawn.GameCreator2.Networking
         /// </summary>
         public void OnServerStateReceived(NetworkAnimimState state)
         {
-            m_TargetState = state;
         }
         
         /// <summary>
@@ -407,7 +390,7 @@ namespace Arawn.GameCreator2.Networking
             float targetPivot = facing.PivotSpeed;
             float targetGrounded = driver.IsGrounded ? 1f : 0f;
             float targetStand = motion.StandLevel.Current;
-            
+
             // Smooth values
             m_LocalSpeed.x = MathUtils.ExponentialDecay(m_LocalSpeed.x, targetSpeed.x, decay, deltaTime);
             m_LocalSpeed.y = MathUtils.ExponentialDecay(m_LocalSpeed.y, targetSpeed.y, decay, deltaTime);

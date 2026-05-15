@@ -1,6 +1,7 @@
 using System;
 using UnityEngine;
 using GameCreator.Runtime.Common;
+using GameCreator.Runtime.Cameras;
 using GameCreator.Runtime.Characters;
 
 namespace Arawn.GameCreator2.Networking
@@ -21,10 +22,14 @@ namespace Arawn.GameCreator2.Networking
 
         [SerializeField] private InputPropertyValueVector2 m_InputMove = InputValueVector2MotionPrimary.Create();
         [SerializeField] private InputPropertyButton m_InputJump = InputButtonJump.Create();
-        [SerializeField] private Transform m_CameraTransform;
+        [SerializeField] private PropertyGetGameObject m_Camera = GetGameObjectCameraMain.Create;
+
+        [SerializeField, HideInInspector] private Transform m_CameraTransform;
+        [SerializeField, HideInInspector] private bool m_UseDriverCamera = true;
 
         [Header("Network Settings")]
-        [SerializeField] private bool m_UseDriverCamera = true;
+        [Tooltip("Mirrors local input into GC2 Motion.MoveDirection so facing and animation units can read steering intent. Actual movement still uses the network driver.")]
+        [SerializeField] private bool m_UpdateMotionDirection = true;
         
         // MEMBERS: -------------------------------------------------------------------------------
 
@@ -33,6 +38,7 @@ namespace Arawn.GameCreator2.Networking
         [NonSerialized] private bool m_JumpConsumed;
         [NonSerialized] private bool m_IsInputEnabled = true;
         [NonSerialized] private UnitDriverNetworkClient m_NetworkDriver;
+        [NonSerialized] private NetworkCharacter m_NetworkCharacter;
 
         // PROPERTIES: ----------------------------------------------------------------------------
 
@@ -60,6 +66,7 @@ namespace Arawn.GameCreator2.Networking
             
             // Try to find network driver
             m_NetworkDriver = character.Driver as UnitDriverNetworkClient;
+            m_NetworkCharacter = character.GetComponent<NetworkCharacter>();
         }
 
         public override void OnDispose(Character character)
@@ -82,6 +89,7 @@ namespace Arawn.GameCreator2.Networking
             base.OnDisable();
             m_CurrentInput = Vector2.zero;
             m_JumpPressed = false;
+            ClearMotionDirection();
         }
 
         // UPDATE METHOD: -------------------------------------------------------------------------
@@ -89,18 +97,32 @@ namespace Arawn.GameCreator2.Networking
         public override void OnUpdate()
         {
             base.OnUpdate();
+            this.m_InputMove.OnUpdate();
+            this.m_InputJump.OnUpdate();
             
             if (this.Character == null) return;
+            if (!this.Character.IsPlayer && !TryRestoreLocalNetworkPlayerFlag())
+            {
+                m_CurrentInput = Vector2.zero;
+                m_JumpPressed = false;
+                this.InputDirection = Vector3.zero;
+                ClearMotionDirection();
+                return;
+            }
+
             if (!m_IsInputEnabled)
             {
                 m_CurrentInput = Vector2.zero;
                 m_JumpPressed = false;
                 this.InputDirection = Vector3.zero;
+                ClearMotionDirection();
                 return;
             }
             
             // Capture raw input
-            m_CurrentInput = m_InputMove.Read();
+            m_CurrentInput = this.m_IsControllable
+                ? m_InputMove.Read()
+                : Vector2.zero;
             
             // Clamp magnitude to prevent cheating with modified input
             if (m_CurrentInput.sqrMagnitude > 1f)
@@ -110,10 +132,12 @@ namespace Arawn.GameCreator2.Networking
             
             // Calculate input direction for GC2 compatibility
             this.InputDirection = GetMoveDirection(m_CurrentInput);
+            SetMotionDirection(this.InputDirection);
             
             OnInputCaptured?.Invoke(m_CurrentInput, m_JumpPressed);
             
             // Feed input to network driver if available
+            RefreshNetworkDriver();
             if (m_NetworkDriver != null)
             {
                 Transform camTransform = GetCameraTransform();
@@ -130,7 +154,7 @@ namespace Arawn.GameCreator2.Networking
         
         private void OnJumpPerformed()
         {
-            if (m_IsInputEnabled)
+            if (m_IsInputEnabled && this.Character != null && this.Character.IsPlayer)
             {
                 m_JumpPressed = true;
                 m_JumpConsumed = false;
@@ -140,10 +164,10 @@ namespace Arawn.GameCreator2.Networking
         private Vector3 GetMoveDirection(Vector2 input)
         {
             Vector3 direction = new Vector3(input.x, 0f, input.y);
-            
-            Camera cam = GetCamera();
-            Quaternion cameraRotation = cam != null
-                ? Quaternion.Euler(0f, cam.transform.eulerAngles.y, 0f)
+
+            Transform camera = GetCameraTransform();
+            Quaternion cameraRotation = camera != null
+                ? Quaternion.Euler(0f, camera.rotation.eulerAngles.y, 0f)
                 : Quaternion.identity;
             
             Vector3 moveDirection = cameraRotation * direction;
@@ -166,6 +190,8 @@ namespace Arawn.GameCreator2.Networking
             {
                 m_CurrentInput = Vector2.zero;
                 m_JumpPressed = false;
+                this.InputDirection = Vector3.zero;
+                ClearMotionDirection();
             }
         }
 
@@ -181,9 +207,13 @@ namespace Arawn.GameCreator2.Networking
             {
                 m_CurrentInput = m_CurrentInput.normalized;
             }
+
+            this.InputDirection = GetMoveDirection(m_CurrentInput);
+            SetMotionDirection(this.InputDirection);
             
             OnInputCaptured?.Invoke(m_CurrentInput, m_JumpPressed);
             
+            RefreshNetworkDriver();
             if (m_NetworkDriver != null)
             {
                 Transform camTransform = GetCameraTransform();
@@ -196,29 +226,22 @@ namespace Arawn.GameCreator2.Networking
         /// </summary>
         public void SetCamera(Transform cameraTransform)
         {
+            m_Camera = GetGameObjectInstance.Create(cameraTransform);
             m_CameraTransform = cameraTransform;
             m_UseDriverCamera = false;
         }
 
         /// <summary>
-        /// Use the driver's camera (if axonometry provides one).
+        /// Use GC2's main camera for input direction.
         /// </summary>
         public void UseDriverCamera()
         {
+            m_Camera = GetGameObjectCameraMain.Create;
+            m_CameraTransform = null;
             m_UseDriverCamera = true;
         }
 
         // HELPER METHODS: ------------------------------------------------------------------------
-
-        private Camera GetCamera()
-        {
-            if (!m_UseDriverCamera && m_CameraTransform != null)
-            {
-                return m_CameraTransform.GetComponent<Camera>();
-            }
-            
-            return ShortcutMainCamera.Get<Camera>();
-        }
 
         private Transform GetCameraTransform()
         {
@@ -226,9 +249,61 @@ namespace Arawn.GameCreator2.Networking
             {
                 return m_CameraTransform;
             }
-            
-            Camera cam = GetCamera();
-            return cam != null ? cam.transform : null;
+
+            m_Camera ??= GetGameObjectCameraMain.Create;
+            Args args = this.Character != null
+                ? new Args(this.Character.gameObject)
+                : Args.EMPTY;
+
+            Transform camera = m_Camera.Get<Transform>(args);
+            return camera != null ? camera : this.Camera;
         }
+
+        private void SetMotionDirection(Vector3 direction)
+        {
+            if (!m_UpdateMotionDirection) return;
+            if (this.Character?.Motion is not TUnitMotion motion) return;
+
+            float speed = motion.LinearSpeed;
+            Vector3 velocity = direction * speed;
+
+            motion.MoveDirection = velocity;
+            motion.MovePosition = this.Transform.position + velocity;
+        }
+
+        private void ClearMotionDirection()
+        {
+            SetMotionDirection(Vector3.zero);
+        }
+
+        private void RefreshNetworkDriver()
+        {
+            if (this.Character == null) return;
+            if (ReferenceEquals(m_NetworkDriver, this.Character.Driver)) return;
+            m_NetworkDriver = this.Character.Driver as UnitDriverNetworkClient;
+        }
+
+        private void RefreshNetworkCharacter()
+        {
+            if (this.Character == null) return;
+            if (m_NetworkCharacter != null) return;
+            m_NetworkCharacter = this.Character.GetComponent<NetworkCharacter>();
+        }
+
+        private bool TryRestoreLocalNetworkPlayerFlag()
+        {
+            RefreshNetworkDriver();
+            RefreshNetworkCharacter();
+
+            if (m_NetworkCharacter == null) return false;
+            if (m_NetworkCharacter.Role != NetworkCharacter.NetworkRole.LocalClient) return false;
+            if (!m_NetworkCharacter.IsOwnerInstance) return false;
+            if (m_NetworkDriver == null || !ReferenceEquals(m_NetworkDriver, this.Character.Driver)) return false;
+
+            this.Character.IsPlayer = true;
+            ShortcutPlayer.Change(this.Character.gameObject);
+            return true;
+        }
+
     }
 }

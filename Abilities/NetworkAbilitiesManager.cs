@@ -1,9 +1,15 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
+using System.Reflection;
+using System.Runtime.CompilerServices;
 using UnityEngine;
 using DaimahouGames.Runtime.Abilities;
+using DaimahouGames.Runtime.Core.Common;
 using DaimahouGames.Runtime.Pawns;
 using GameCreator.Runtime.Characters;
+using GameCreator.Runtime.Common;
+using DaimahouAbilitySource = DaimahouGames.Runtime.Abilities.AbiltySource;
 
 namespace Arawn.GameCreator2.Networking
 {
@@ -170,6 +176,8 @@ namespace Arawn.GameCreator2.Networking
         public static void RegisterAbility(Ability ability)
         {
             if (ability == null) return;
+
+            NetworkAbilityAssetSourcePatcher.PatchAbility(ability);
             
             int hash = ability.ID.Hash;
             s_AbilityRegistry[hash] = new AbilityRegistryEntry
@@ -322,6 +330,22 @@ namespace Arawn.GameCreator2.Networking
         public static void RegisterPawn(Pawn pawn, uint networkId)
         {
             if (pawn == null) return;
+            if (networkId == 0) return;
+
+            if (s_PawnToNetworkId.TryGetValue(pawn, out uint previousNetworkId) &&
+                previousNetworkId != networkId &&
+                s_NetworkIdToPawn.TryGetValue(previousNetworkId, out Pawn previousPawn) &&
+                previousPawn == pawn)
+            {
+                s_NetworkIdToPawn.Remove(previousNetworkId);
+            }
+
+            if (s_NetworkIdToPawn.TryGetValue(networkId, out Pawn existingPawn) &&
+                existingPawn != null &&
+                existingPawn != pawn)
+            {
+                s_PawnToNetworkId.Remove(existingPawn);
+            }
             
             s_NetworkIdToPawn[networkId] = pawn;
             s_PawnToNetworkId[pawn] = networkId;
@@ -408,6 +432,11 @@ namespace Arawn.GameCreator2.Networking
                     if (data is NetworkAbilityCastBroadcast castBroadcast)
                         controller.ReceiveCastBroadcast(castBroadcast);
                     break;
+
+                case MessageTypes.AbilityEffectBroadcast:
+                    if (data is NetworkAbilityEffectBroadcast effectBroadcast)
+                        controller.ReceiveEffectBroadcast(effectBroadcast);
+                    break;
                     
                 // Cooldowns
                 case MessageTypes.CooldownRequest:
@@ -457,11 +486,21 @@ namespace Arawn.GameCreator2.Networking
                     if (data is NetworkProjectileSpawnBroadcast projSpawn)
                         controller.ReceiveProjectileSpawnBroadcast(projSpawn);
                     break;
+
+                case MessageTypes.ProjectileEventBroadcast:
+                    if (data is NetworkProjectileEventBroadcast projEvent)
+                        controller.ReceiveProjectileEventBroadcast(projEvent);
+                    break;
                     
                 // Impacts
                 case MessageTypes.ImpactSpawnBroadcast:
                     if (data is NetworkImpactSpawnBroadcast impactSpawn)
                         controller.ReceiveImpactSpawnBroadcast(impactSpawn);
+                    break;
+
+                case MessageTypes.ImpactHitBroadcast:
+                    if (data is NetworkImpactHitBroadcast impactHit)
+                        controller.ReceiveImpactHitBroadcast(impactHit);
                     break;
             }
         }
@@ -698,6 +737,278 @@ namespace Arawn.GameCreator2.Networking
             return NetworkAbilitiesController.HasInstance
                 ? NetworkAbilitiesController.Instance.GetState()
                 : default;
+        }
+    }
+
+    /// <summary>
+    /// Rewrites projectile spawn sources in registered ability assets so Game Creator's local
+    /// Player shortcut resolves to the cast source while the ability is executing.
+    /// </summary>
+    internal static class NetworkAbilityAssetSourcePatcher
+    {
+        private static readonly HashSet<int> s_PatchedAbilities = new();
+
+        public static void PatchAbility(Ability ability)
+        {
+            if (ability == null) return;
+            if (!s_PatchedAbilities.Add(ability.GetInstanceID())) return;
+
+            IEnumerable<AbilityEffect> effects = ability.Effects;
+
+            var visited = new HashSet<object>(ReferenceComparer.Instance);
+            PatchObjectGraph(ability.Activator, visited);
+
+            if (effects == null) return;
+            foreach (AbilityEffect effect in effects)
+            {
+                PatchEffect(effect, visited);
+            }
+        }
+
+        private static void PatchEffect(AbilityEffect effect, HashSet<object> visited)
+        {
+            if (effect == null) return;
+            if (!visited.Add(effect)) return;
+
+            if (effect is AbilityEffectProjectile projectileEffect)
+            {
+                FieldInfo spawnMethodField = FindField(projectileEffect.GetType(), "m_SpawnMethod");
+                object spawnMethod = spawnMethodField?.GetValue(projectileEffect);
+                PatchObjectGraph(spawnMethod, visited);
+            }
+
+            foreach (FieldInfo field in GetInstanceFields(effect.GetType()))
+            {
+                object value = field.GetValue(effect);
+                if (value is AbilityEffect nestedEffect)
+                {
+                    PatchEffect(nestedEffect, visited);
+                    continue;
+                }
+
+                if (value is IEnumerable effects && value is not string)
+                {
+                    foreach (object item in effects)
+                    {
+                        if (item is AbilityEffect childEffect)
+                        {
+                            PatchEffect(childEffect, visited);
+                        }
+                    }
+                }
+            }
+        }
+
+        private static void PatchObjectGraph(object instance, HashSet<object> visited)
+        {
+            if (instance == null) return;
+
+            if (instance is DaimahouGames.Runtime.Characters.ReactiveGesture reactiveGesture)
+            {
+                PatchReactiveGesture(reactiveGesture, visited);
+                return;
+            }
+
+            Type type = instance.GetType();
+            if (ShouldSkip(type, instance)) return;
+            if (!type.IsValueType && !visited.Add(instance)) return;
+
+            if (instance is Array array)
+            {
+                for (int i = 0; i < array.Length; i++)
+                {
+                    object value = array.GetValue(i);
+                    if (TryReplacePlayerShortcut(value, out object replacement))
+                    {
+                        array.SetValue(replacement, i);
+                        value = replacement;
+                    }
+
+                    PatchObjectGraph(value, visited);
+                }
+
+                return;
+            }
+
+            foreach (FieldInfo field in GetInstanceFields(type))
+            {
+                object value = field.GetValue(instance);
+                if (value == null) continue;
+
+                if (TryReplacePlayerShortcut(value, out object replacement))
+                {
+                    field.SetValue(instance, replacement);
+                    value = replacement;
+                }
+
+                PatchObjectGraph(value, visited);
+            }
+        }
+
+        private static void PatchReactiveGesture(
+            DaimahouGames.Runtime.Characters.ReactiveGesture gesture,
+            HashSet<object> visited)
+        {
+            if (gesture == null) return;
+            if (!visited.Add(gesture)) return;
+
+            FieldInfo notifiesField = FindField(gesture.GetType(), "m_Notifies");
+            object notifies = notifiesField?.GetValue(gesture);
+            PatchObjectGraph(notifies, visited);
+        }
+
+        private static bool TryReplacePlayerShortcut(object value, out object replacement)
+        {
+            replacement = null;
+
+            switch (value)
+            {
+                case GetGameObjectPlayer:
+                    replacement = new NetworkAbilitySourceGameObject();
+                    return true;
+
+                case GetPositionCharactersPlayer:
+                    replacement = new NetworkAbilitySourcePosition();
+                    return true;
+
+                case GetRotationCharactersPlayer rotation:
+                    replacement = new NetworkAbilitySourceRotation(GetRotationUsesLocalSpace(rotation));
+                    return true;
+
+                default:
+                    return false;
+            }
+        }
+
+        private static bool GetRotationUsesLocalSpace(GetRotationCharactersPlayer rotation)
+        {
+            FieldInfo field = FindField(typeof(GetRotationCharactersPlayer), "m_Space");
+            return string.Equals(field?.GetValue(rotation)?.ToString(), "Local", StringComparison.Ordinal);
+        }
+
+        private static GameObject GetAbilitySource(Args args)
+        {
+            if (args is ExtendedArgs extendedArgs &&
+                extendedArgs.Has<DaimahouAbilitySource>())
+            {
+                GameObject source = extendedArgs.Get<DaimahouAbilitySource>().GameObject;
+                if (source != null) return source;
+            }
+
+            return args?.Self;
+        }
+
+        private static bool ShouldSkip(Type type, object instance)
+        {
+            return type.IsPrimitive ||
+                   type.IsEnum ||
+                   type == typeof(string) ||
+                   type == typeof(decimal) ||
+                   instance is UnityEngine.Object;
+        }
+
+        private static IEnumerable<FieldInfo> GetInstanceFields(Type type)
+        {
+            const BindingFlags flags = BindingFlags.Instance |
+                                       BindingFlags.Public |
+                                       BindingFlags.NonPublic |
+                                       BindingFlags.DeclaredOnly;
+
+            for (Type current = type; current != null; current = current.BaseType)
+            {
+                foreach (FieldInfo field in current.GetFields(flags))
+                {
+                    if (field.IsStatic) continue;
+                    yield return field;
+                }
+            }
+        }
+
+        private static FieldInfo FindField(Type type, string name)
+        {
+            for (Type current = type; current != null; current = current.BaseType)
+            {
+                FieldInfo field = current.GetField(
+                    name,
+                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+
+                if (field != null) return field;
+            }
+
+            return null;
+        }
+
+        [Serializable]
+        private sealed class NetworkAbilitySourceGameObject : PropertyTypeGetGameObject
+        {
+            public override GameObject Get(Args args) => GetAbilitySource(args);
+            public override GameObject Get(GameObject gameObject) => gameObject;
+            public override string String => "Ability Source";
+        }
+
+        [Serializable]
+        private sealed class NetworkAbilitySourcePosition : PropertyTypeGetPosition
+        {
+            public override Vector3 Get(Args args)
+            {
+                GameObject source = GetAbilitySource(args);
+                return source != null ? source.transform.position : default;
+            }
+
+            public override Vector3 Get(GameObject gameObject)
+            {
+                return gameObject != null ? gameObject.transform.position : default;
+            }
+
+            public override string String => "Ability Source Position";
+        }
+
+        [Serializable]
+        private sealed class NetworkAbilitySourceRotation : PropertyTypeGetRotation
+        {
+            [SerializeField] private bool m_UseLocalSpace;
+
+            public NetworkAbilitySourceRotation(bool useLocalSpace)
+            {
+                m_UseLocalSpace = useLocalSpace;
+            }
+
+            public override Quaternion Get(Args args)
+            {
+                GameObject source = GetAbilitySource(args);
+                return GetRotation(source);
+            }
+
+            public override Quaternion Get(GameObject gameObject)
+            {
+                return GetRotation(gameObject);
+            }
+
+            public override string String => $"{(m_UseLocalSpace ? "Local" : "Global")} Ability Source";
+
+            private Quaternion GetRotation(GameObject gameObject)
+            {
+                if (gameObject == null) return default;
+
+                return m_UseLocalSpace
+                    ? gameObject.transform.localRotation
+                    : gameObject.transform.rotation;
+            }
+        }
+
+        private sealed class ReferenceComparer : IEqualityComparer<object>
+        {
+            public static readonly ReferenceComparer Instance = new();
+
+            public new bool Equals(object x, object y)
+            {
+                return ReferenceEquals(x, y);
+            }
+
+            public int GetHashCode(object obj)
+            {
+                return RuntimeHelpers.GetHashCode(obj);
+            }
         }
     }
 }

@@ -22,15 +22,39 @@ namespace Arawn.GameCreator2.Networking.Shooter
         /// <returns>True if request was sent, false if invalid state.</returns>
         public bool RequestReload()
         {
-            if (m_IsServer) return false;
-            if (m_CurrentWeapon == null) return false;
-            if (m_ShooterStance == null) return false;
+            LogDiagnostics($"[ShooterAmmoDebug] local reload requested {BuildAmmoDebug()}");
+
+            if (m_IsServer && !m_IsLocalClient)
+            {
+                LogDiagnostics("reload request ignored on server instance");
+                return false;
+            }
+
+            if (m_CurrentWeapon == null)
+            {
+                LogDiagnosticsWarning("reload request ignored: no current shooter weapon");
+                return false;
+            }
+
+            if (m_ShooterStance == null)
+            {
+                LogDiagnosticsWarning("reload request ignored: no ShooterStance");
+                return false;
+            }
             
             // Don't request if already reloading
-            if (m_ShooterStance.Reloading.IsReloading) return false;
+            if (m_ShooterStance.Reloading.IsReloading)
+            {
+                LogDiagnostics("reload request ignored: already reloading");
+                return false;
+            }
             
             // Don't request if jammed
-            if (m_CurrentWeaponData != null && m_CurrentWeaponData.IsJammed) return false;
+            if (m_CurrentWeaponData != null && m_CurrentWeaponData.IsJammed)
+            {
+                LogDiagnostics("reload request ignored: weapon is jammed");
+                return false;
+            }
             
             uint networkId = m_NetworkCharacter != null ? m_NetworkCharacter.NetworkId : 0;
             
@@ -41,7 +65,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 CorrelationId = NetworkCorrelation.Compose(NetworkId, m_LastIssuedRequestId),
                 CharacterNetworkId = networkId,
                 WeaponHash = m_CurrentWeapon.Id.Hash,
-                ClientTimestamp = Time.time
+                ClientTimestamp = GetNetworkTime()
             };
 
             ulong pendingKey = GetPendingKey(request.ActorNetworkId, request.CorrelationId);
@@ -56,7 +80,20 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 Request = request,
                 SentTime = Time.time
             };
-            
+
+            if (OnReloadRequestSent == null)
+            {
+                LogDiagnosticsWarning(
+                    $"reload request has no listeners req={request.RequestId} actor={request.ActorNetworkId} " +
+                    $"weaponHash={request.WeaponHash}. NetworkShooterManager/transport bridge is not routing reloads.");
+            }
+            else
+            {
+                LogDiagnostics(
+                    $"reload request queued req={request.RequestId} actor={request.ActorNetworkId} " +
+                    $"weaponHash={request.WeaponHash} {BuildAmmoDebug(m_CurrentWeapon)}");
+            }
+
             OnReloadRequestSent?.Invoke(request);
             return true;
         }
@@ -94,8 +131,14 @@ namespace Arawn.GameCreator2.Networking.Shooter
         /// </summary>
         public NetworkReloadResponse ProcessReloadRequest(NetworkReloadRequest request, uint clientNetworkId)
         {
+            LogDiagnostics(
+                $"[ShooterAmmoDebug] server reload processing client={clientNetworkId} req={request.RequestId} " +
+                $"weaponHash={request.WeaponHash} {BuildAmmoDebug()}");
+
             if (!m_IsServer)
             {
+                LogDiagnosticsWarning(
+                    $"[ShooterAmmoDebug] server reload rejected: controller is not server req={request.RequestId}");
                 return new NetworkReloadResponse
                 {
                     RequestId = request.RequestId,
@@ -107,6 +150,9 @@ namespace Arawn.GameCreator2.Networking.Shooter
             // Validate weapon is equipped
             if (m_CurrentWeapon == null || m_CurrentWeapon.Id.Hash != request.WeaponHash)
             {
+                LogDiagnosticsWarning(
+                    $"[ShooterAmmoDebug] server reload rejected: weapon mismatch req={request.RequestId} " +
+                    $"requested={request.WeaponHash} {BuildAmmoDebug()}");
                 return new NetworkReloadResponse
                 {
                     RequestId = request.RequestId,
@@ -115,9 +161,21 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 };
             }
             
-            // Check if already reloading
-            if (m_ShooterStance.Reloading.IsReloading)
+            // Host-owned players start their local reload optimistically before the
+            // loopback request is validated on the same controller instance.
+            bool hostLocalReloadAlreadyStarted = m_IsLocalClient &&
+                m_ShooterStance.Reloading.IsReloading &&
+                m_ShooterStance.Reloading.WeaponReloading == m_CurrentWeapon;
+
+            LogDiagnostics(
+                $"[ShooterAmmoDebug] server reload state req={request.RequestId} " +
+                $"hostLocalAlreadyStarted={hostLocalReloadAlreadyStarted} {BuildAmmoDebug(m_CurrentWeapon)}");
+
+            if (m_ShooterStance.Reloading.IsReloading && !hostLocalReloadAlreadyStarted)
             {
+                LogDiagnosticsWarning(
+                    $"[ShooterAmmoDebug] server reload rejected: already reloading req={request.RequestId} " +
+                    $"{BuildAmmoDebug(m_CurrentWeapon)}");
                 return new NetworkReloadResponse
                 {
                     RequestId = request.RequestId,
@@ -129,6 +187,9 @@ namespace Arawn.GameCreator2.Networking.Shooter
             // Check if jammed
             if (m_CurrentWeaponData != null && m_CurrentWeaponData.IsJammed)
             {
+                LogDiagnosticsWarning(
+                    $"[ShooterAmmoDebug] server reload rejected: jammed req={request.RequestId} " +
+                    $"{BuildAmmoDebug(m_CurrentWeapon)}");
                 return new NetworkReloadResponse
                 {
                     RequestId = request.RequestId,
@@ -144,6 +205,9 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 int magazineSize = m_CurrentWeapon.Magazine.GetMagazineSize(m_CurrentWeaponData.WeaponArgs);
                 if (munition.InMagazine >= magazineSize)
                 {
+                    LogDiagnosticsWarning(
+                        $"[ShooterAmmoDebug] server reload rejected: magazine full req={request.RequestId} " +
+                        $"inMagazine={munition.InMagazine} magazineSize={magazineSize} {BuildAmmoDebug(m_CurrentWeapon)}");
                     return new NetworkReloadResponse
                     {
                         RequestId = request.RequestId,
@@ -169,6 +233,20 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 Vector2 quickWindow = reload.GetQuickReload();
                 quickStart = (byte)(quickWindow.x * 255f);
                 quickEnd = (byte)(quickWindow.y * 255f);
+            }
+
+            if (!hostLocalReloadAlreadyStarted)
+            {
+                LogDiagnostics(
+                    $"[ShooterAmmoDebug] server starting GC2 reload req={request.RequestId} " +
+                    $"{BuildAmmoDebug(m_CurrentWeapon)}");
+                _ = m_ShooterStance.Reloading.Reload(m_CurrentWeapon);
+            }
+            else
+            {
+                LogDiagnostics(
+                    $"[ShooterAmmoDebug] server reload already started locally req={request.RequestId} " +
+                    $"{BuildAmmoDebug(m_CurrentWeapon)}");
             }
             
             return new NetworkReloadResponse
@@ -200,6 +278,10 @@ namespace Arawn.GameCreator2.Networking.Shooter
         /// </summary>
         public void ReceiveReloadResponse(NetworkReloadResponse response)
         {
+            LogDiagnostics(
+                $"[ShooterAmmoDebug] reload response received req={response.RequestId} " +
+                $"validated={response.Validated} reason={response.RejectionReason} {BuildAmmoDebug()}");
+
             if (!TryTakePending(m_PendingReloads, response.ActorNetworkId, response.CorrelationId, out _) && m_LogShots)
             {
                 Debug.LogWarning($"[NetworkShooterController] Reload response dropped (stale/unknown): req={response.RequestId}, corr={response.CorrelationId}");
@@ -216,23 +298,171 @@ namespace Arawn.GameCreator2.Networking.Shooter
         /// </summary>
         public void ReceiveReloadBroadcast(NetworkReloadBroadcast broadcast)
         {
+            LogDiagnostics(
+                $"[ShooterAmmoDebug] reload broadcast received event={broadcast.EventType} " +
+                $"character={broadcast.CharacterNetworkId} weaponHash={broadcast.WeaponHash} " +
+                $"newAmmo={broadcast.NewAmmoCount} local={m_IsLocalClient} {BuildAmmoDebug()}");
+
             OnReloadBroadcastReceived?.Invoke(broadcast);
-            
-            // Remote clients play reload animation/effects
-            if (m_IsRemoteClient)
+
+            if (m_IsLocalClient)
             {
-                ShooterWeapon weapon = NetworkShooterManager.GetShooterWeaponByHash(broadcast.WeaponHash);
-                if (weapon != null && m_ShooterStance != null)
-                {
-                    // Trigger reload on remote client. GC2's ShooterStance.Reload drives
-                    // the reload animation and audio through the weapon's configured reload clip.
-                    // The animation sync via NetworkCharacter handles the visual playback.
-                    if (m_LogShots)
-                    {
-                        Debug.Log($"[NetworkShooterController] Remote reload broadcast: {weapon.name}");
-                    }
-                }
+                LogDiagnostics(
+                    $"[ShooterAmmoDebug] reload broadcast ignored on local owner event={broadcast.EventType} " +
+                    $"newAmmo={broadcast.NewAmmoCount} {BuildAmmoDebug()}");
+                return;
             }
+
+            ShooterWeapon weapon = NetworkShooterManager.GetShooterWeaponByHash(broadcast.WeaponHash);
+            if (weapon == null)
+            {
+                LogDiagnosticsWarning($"reload broadcast ignored: weapon hash {broadcast.WeaponHash} is not registered");
+                return;
+            }
+
+            TryGetShooterStance();
+            if (m_ShooterStance == null)
+            {
+                LogDiagnosticsWarning($"reload broadcast ignored: no ShooterStance for weapon {weapon.name}");
+                return;
+            }
+
+            m_CurrentWeapon = weapon;
+            m_CurrentWeaponData = m_ShooterStance.Get(weapon);
+
+            switch (broadcast.EventType)
+            {
+                case ReloadEventType.Started:
+                    PlayRemoteReload(weapon);
+                    break;
+
+                case ReloadEventType.Cancelled:
+                    StopRemoteReload(weapon, CancelReason.ForceStop);
+                    break;
+
+                case ReloadEventType.QuickReloadSuccess:
+                    StopRemoteReload(weapon, CancelReason.QuickReload);
+                    ApplyRemoteReloadAmmo(broadcast);
+                    break;
+
+                case ReloadEventType.QuickReloadFailed:
+                    StopRemoteReload(weapon, CancelReason.ForceStop);
+                    ApplyRemoteReloadAmmo(broadcast);
+                    break;
+
+                case ReloadEventType.PartialReload:
+                    StopRemoteReload(weapon, CancelReason.PartialReload);
+                    ApplyRemoteReloadAmmo(broadcast);
+                    break;
+
+                case ReloadEventType.Completed:
+                    ApplyRemoteReloadAmmo(broadcast);
+                    break;
+            }
+        }
+
+        private void PlayRemoteReload(ShooterWeapon weapon)
+        {
+            if (weapon == null) return;
+
+            TryGetShooterStance();
+            if (m_ShooterStance == null)
+            {
+                LogDiagnosticsWarning($"remote reload skipped: no ShooterStance for {weapon.name}");
+                return;
+            }
+
+            if (!m_Character.Combat.IsEquipped(weapon))
+            {
+                LogDiagnosticsWarning($"remote reload skipped: {weapon.name} is not equipped");
+                return;
+            }
+
+            if (m_ShooterStance.Reloading.IsReloading &&
+                m_ShooterStance.Reloading.WeaponReloading == weapon)
+            {
+                return;
+            }
+
+            LogDiagnostics($"playing remote reload weapon={weapon.name}");
+            _ = m_ShooterStance.Reloading.Reload(weapon);
+        }
+
+        private void StopRemoteReload(ShooterWeapon weapon, CancelReason reason)
+        {
+            if (weapon == null) return;
+
+            TryGetShooterStance();
+            if (m_ShooterStance == null) return;
+            if (!m_ShooterStance.Reloading.IsReloading) return;
+            if (m_ShooterStance.Reloading.WeaponReloading != weapon) return;
+
+            m_ShooterStance.Reloading.Stop(weapon, reason);
+        }
+
+        private void ApplyRemoteReloadAmmo(NetworkReloadBroadcast broadcast)
+        {
+            if (m_CurrentWeapon == null || m_Character == null) return;
+
+            if (m_Character.Combat.RequestMunition(m_CurrentWeapon) is ShooterMunition munition)
+            {
+                int previousAmmo = munition.InMagazine;
+                munition.InMagazine = broadcast.NewAmmoCount;
+                LogDiagnostics(
+                    $"[ShooterAmmoDebug] applied remote reload ammo event={broadcast.EventType} " +
+                    $"previous={previousAmmo} new={munition.InMagazine} {BuildAmmoDebug(m_CurrentWeapon)}");
+            }
+        }
+
+        internal bool IsReloadingWeapon(int weaponHash)
+        {
+            if (m_CurrentWeapon == null || m_CurrentWeapon.Id.Hash != weaponHash) return false;
+            if (m_ShooterStance == null) return false;
+
+            return m_ShooterStance.Reloading.IsReloading &&
+                   m_ShooterStance.Reloading.WeaponReloading == m_CurrentWeapon;
+        }
+
+        internal bool TryGetMagazineAmmo(int weaponHash, out ushort ammo)
+        {
+            ammo = 0;
+            if (m_CurrentWeapon == null || m_CurrentWeapon.Id.Hash != weaponHash)
+            {
+                LogDiagnosticsWarning(
+                    $"[ShooterAmmoDebug] TryGetMagazineAmmo failed: weapon mismatch requested={weaponHash} " +
+                    $"{BuildAmmoDebug()}");
+                return false;
+            }
+            if (m_Character == null)
+            {
+                LogDiagnosticsWarning(
+                    $"[ShooterAmmoDebug] TryGetMagazineAmmo failed: character missing requested={weaponHash}");
+                return false;
+            }
+
+            TryRefreshCurrentWeaponData();
+            Args args = GetShooterWeaponArgs(m_CurrentWeapon);
+            if (!m_CurrentWeapon.Magazine.GetHasMagazine(args))
+            {
+                LogDiagnostics(
+                    $"[ShooterAmmoDebug] TryGetMagazineAmmo weapon has no magazine weaponHash={weaponHash} " +
+                    $"{BuildAmmoDebug(m_CurrentWeapon)}");
+                return true;
+            }
+
+            if (m_Character.Combat.RequestMunition(m_CurrentWeapon) is not ShooterMunition munition)
+            {
+                LogDiagnosticsWarning(
+                    $"[ShooterAmmoDebug] TryGetMagazineAmmo failed: no munition weaponHash={weaponHash} " +
+                    $"{BuildAmmoDebug(m_CurrentWeapon)}");
+                return false;
+            }
+
+            ammo = (ushort)Mathf.Clamp(munition.InMagazine, 0, ushort.MaxValue);
+            LogDiagnostics(
+                $"[ShooterAmmoDebug] TryGetMagazineAmmo weaponHash={weaponHash} ammo={ammo} " +
+                $"{BuildAmmoDebug(m_CurrentWeapon)}");
+            return true;
         }
         
         // ════════════════════════════════════════════════════════════════════════════════════════
@@ -259,7 +489,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 CorrelationId = NetworkCorrelation.Compose(NetworkId, m_LastIssuedRequestId),
                 CharacterNetworkId = networkId,
                 WeaponHash = m_CurrentWeapon.Id.Hash,
-                ClientTimestamp = Time.time
+                ClientTimestamp = GetNetworkTime()
             };
 
             ulong pendingKey = GetPendingKey(request.ActorNetworkId, request.CorrelationId);
@@ -410,7 +640,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 CorrelationId = NetworkCorrelation.Compose(NetworkId, m_LastIssuedRequestId),
                 CharacterNetworkId = networkId,
                 WeaponHash = m_CurrentWeapon.Id.Hash,
-                ClientTimestamp = Time.time
+                ClientTimestamp = GetNetworkTime()
             };
 
             ulong pendingKey = GetPendingKey(request.ActorNetworkId, request.CorrelationId);
@@ -451,7 +681,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 CorrelationId = NetworkCorrelation.Compose(NetworkId, m_LastIssuedRequestId),
                 CharacterNetworkId = networkId,
                 WeaponHash = m_CurrentWeapon?.Id.Hash ?? 0,
-                ClientTimestamp = Time.time
+                ClientTimestamp = GetNetworkTime()
             };
             
             m_IsCharging = false;
@@ -643,7 +873,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 CharacterNetworkId = networkId,
                 WeaponHash = m_CurrentWeapon.Id.Hash,
                 NewSightHash = sightId.Hash,
-                ClientTimestamp = Time.time
+                ClientTimestamp = GetNetworkTime()
             };
 
             ulong pendingKey = GetPendingKey(request.ActorNetworkId, request.CorrelationId);
@@ -769,10 +999,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
             // Update remote client sight state
             if (m_IsRemoteClient && m_CurrentWeaponData != null)
             {
-                if (TryResolveSightIdByHash(m_CurrentWeapon.Sights, broadcast.NewSightHash, out IdString sightId))
-                {
-                    m_ShooterStance?.EnterSight(m_CurrentWeapon, sightId);
-                }
+                ApplyRemoteSightHash(m_CurrentWeapon, broadcast.NewSightHash);
             }
         }
         

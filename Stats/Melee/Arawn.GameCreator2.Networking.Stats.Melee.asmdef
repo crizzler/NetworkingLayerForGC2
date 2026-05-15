@@ -1,0 +1,35 @@
+{
+    "name": "Arawn.GameCreator2.Networking.Stats.Melee",
+    "rootNamespace": "Arawn.GameCreator2.Networking.Stats.Melee",
+    "references": [
+        "Arawn.GameCreator2.Networking",
+        "Arawn.GameCreator2.Networking.Stats",
+        "Arawn.GameCreator2.Networking.Melee",
+        "GameCreator.Runtime.Core",
+        "GameCreator.Runtime.Stats",
+        "GameCreator.Runtime.Melee"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [
+        "GC2_STATS",
+        "GC2_MELEE"
+    ],
+    "versionDefines": [
+        {
+            "name": "com.gamecreator.stats",
+            "expression": "",
+            "define": "GC2_STATS"
+        },
+        {
+            "name": "com.gamecreator.melee",
+            "expression": "",
+            "define": "GC2_MELEE"
+        }
+    ],
+    "noEngineReferences": false
+}

@@ -1,4 +1,5 @@
 #if GC2_SHOOTER
+using System.Collections;
 using UnityEngine;
 
 namespace Arawn.GameCreator2.Networking.Shooter
@@ -8,8 +9,16 @@ namespace Arawn.GameCreator2.Networking.Shooter
         public void ReceiveReloadRequest(uint clientNetworkId, NetworkReloadRequest request)
         {
             if (!m_IsServer) return;
+            LogDiagnostics(
+                $"[ShooterAmmoDebug] received reload request client={clientNetworkId} actor={request.ActorNetworkId} " +
+                $"character={request.CharacterNetworkId} req={request.RequestId} corr={request.CorrelationId} " +
+                $"weaponHash={request.WeaponHash}");
+
             if (!ValidateShooterRequest(clientNetworkId, request.ActorNetworkId, request.CorrelationId, nameof(NetworkReloadRequest)))
             {
+                LogDiagnosticsWarning(
+                    $"[ShooterAmmoDebug] reload request failed security validation client={clientNetworkId} " +
+                    $"actor={request.ActorNetworkId} req={request.RequestId} corr={request.CorrelationId}");
                 SendReloadResponseToClient?.Invoke(clientNetworkId, new NetworkReloadResponse
                 {
                     RequestId = request.RequestId,
@@ -22,6 +31,9 @@ namespace Arawn.GameCreator2.Networking.Shooter
             }
             if (!ValidateActorBinding(clientNetworkId, request.ActorNetworkId, request.CharacterNetworkId, nameof(NetworkReloadRequest), nameof(request.CharacterNetworkId)))
             {
+                LogDiagnosticsWarning(
+                    $"[ShooterAmmoDebug] reload request failed actor binding client={clientNetworkId} " +
+                    $"actor={request.ActorNetworkId} character={request.CharacterNetworkId} req={request.RequestId}");
                 SendReloadResponseToClient?.Invoke(clientNetworkId, new NetworkReloadResponse
                 {
                     RequestId = request.RequestId,
@@ -42,6 +54,9 @@ namespace Arawn.GameCreator2.Networking.Shooter
                     request.ActorNetworkId,
                     nameof(NetworkReloadRequest)))
             {
+                LogDiagnosticsWarning(
+                    $"[ShooterAmmoDebug] reload request rejected: queue full client={clientNetworkId} " +
+                    $"actor={request.ActorNetworkId} req={request.RequestId} queue={m_ServerReloadQueue.Count}");
                 SendReloadResponseToClient?.Invoke(clientNetworkId, new NetworkReloadResponse
                 {
                     RequestId = request.RequestId,
@@ -59,6 +74,9 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 Request = request,
                 ReceivedTime = Time.time
             });
+            LogDiagnostics(
+                $"[ShooterAmmoDebug] queued reload request client={clientNetworkId} actor={request.ActorNetworkId} " +
+                $"req={request.RequestId} queue={m_ServerReloadQueue.Count}");
         }
         
         private void ProcessServerReloadQueue()
@@ -79,9 +97,16 @@ namespace Arawn.GameCreator2.Networking.Shooter
         private void ProcessReloadRequest(QueuedReloadRequest queued)
         {
             var request = queued.Request;
+            LogDiagnostics(
+                $"[ShooterAmmoDebug] processing reload request client={queued.ClientNetworkId} " +
+                $"actor={request.ActorNetworkId} req={request.RequestId} weaponHash={request.WeaponHash}");
+
             NetworkReloadResponse response;
             if (request.ActorNetworkId == 0 || request.ActorNetworkId != request.CharacterNetworkId)
             {
+                LogDiagnosticsWarning(
+                    $"[ShooterAmmoDebug] reload request rejected before controller lookup: actor/character mismatch " +
+                    $"actor={request.ActorNetworkId} character={request.CharacterNetworkId} req={request.RequestId}");
                 response = new NetworkReloadResponse
                 {
                     RequestId = request.RequestId,
@@ -100,6 +125,9 @@ namespace Arawn.GameCreator2.Networking.Shooter
             }
             else
             {
+                LogDiagnosticsWarning(
+                    $"[ShooterAmmoDebug] reload request rejected: controller not found actor={request.ActorNetworkId} " +
+                    $"req={request.RequestId}");
                 response = new NetworkReloadResponse
                 {
                     RequestId = request.RequestId,
@@ -112,6 +140,9 @@ namespace Arawn.GameCreator2.Networking.Shooter
             response.CorrelationId = request.CorrelationId;
             
             SendReloadResponseToClient?.Invoke(queued.ClientNetworkId, response);
+            LogDiagnostics(
+                $"[ShooterAmmoDebug] reload response sent client={queued.ClientNetworkId} actor={request.ActorNetworkId} " +
+                $"req={request.RequestId} validated={response.Validated} reason={response.RejectionReason}");
             
             if (response.Validated)
             {
@@ -128,11 +159,85 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 
                 BroadcastReloadToAllClients?.Invoke(broadcast);
                 OnReloadValidated?.Invoke(broadcast);
+                LogDiagnostics(
+                    $"[ShooterAmmoDebug] reload start broadcast actor={request.ActorNetworkId} " +
+                    $"weaponHash={request.WeaponHash} event={broadcast.EventType} ammo={broadcast.NewAmmoCount}");
+
+                StartCoroutine(BroadcastReloadCompletionWhenFinished(
+                    controller,
+                    request.ActorNetworkId,
+                    request.WeaponHash));
                 
                 if (m_LogBroadcasts)
                 {
                     Debug.Log($"[NetworkShooterManager] Reload broadcast: {request.ActorNetworkId}");
                 }
+            }
+        }
+
+        private IEnumerator BroadcastReloadCompletionWhenFinished(
+            NetworkShooterController controller,
+            uint characterNetworkId,
+            int weaponHash)
+        {
+            const float startTimeout = 0.5f;
+            const float finishTimeout = 10f;
+
+            float startDeadline = Time.time + startTimeout;
+            float finishDeadline = Time.time + finishTimeout;
+            bool observedReloading = false;
+            bool loggedReloadingStart = false;
+
+            LogDiagnostics(
+                $"[ShooterAmmoDebug] reload completion watcher started character={characterNetworkId} " +
+                $"weaponHash={weaponHash}");
+
+            while (controller != null && Time.time < finishDeadline)
+            {
+                bool isReloading = controller.IsReloadingWeapon(weaponHash);
+                if (isReloading)
+                {
+                    observedReloading = true;
+                    if (!loggedReloadingStart)
+                    {
+                        loggedReloadingStart = true;
+                        controller.TryGetMagazineAmmo(weaponHash, out ushort ammoAtStart);
+                        LogDiagnostics(
+                            $"[ShooterAmmoDebug] reload completion watcher observed GC2 reload start " +
+                            $"character={characterNetworkId} weaponHash={weaponHash} ammo={ammoAtStart}");
+                    }
+                }
+                else if (observedReloading || Time.time >= startDeadline)
+                {
+                    break;
+                }
+
+                yield return null;
+            }
+
+            if (controller == null) yield break;
+
+            bool gotAmmo = controller.TryGetMagazineAmmo(weaponHash, out ushort ammo);
+            var broadcast = new NetworkReloadBroadcast
+            {
+                CharacterNetworkId = characterNetworkId,
+                WeaponHash = weaponHash,
+                NewAmmoCount = ammo,
+                EventType = observedReloading ? ReloadEventType.Completed : ReloadEventType.Cancelled
+            };
+
+            BroadcastReloadToAllClients?.Invoke(broadcast);
+            OnReloadValidated?.Invoke(broadcast);
+            LogDiagnostics(
+                $"[ShooterAmmoDebug] reload completion broadcast character={characterNetworkId} " +
+                $"weaponHash={weaponHash} event={broadcast.EventType} observedReloading={observedReloading} " +
+                $"gotAmmo={gotAmmo} ammo={ammo}");
+
+            if (m_LogBroadcasts)
+            {
+                Debug.Log(
+                    $"[NetworkShooterManager] Reload completion broadcast: {characterNetworkId}, " +
+                    $"event={broadcast.EventType}, ammo={ammo}");
             }
         }
         

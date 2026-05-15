@@ -155,10 +155,19 @@ namespace Arawn.GameCreator2.Networking.Combat
             // ═══════════════════════════════════════════════════════════════
             
             Vector3 attackerPosition = attackerCharacter.transform.position;
-            
-            if (m_LagManager.TryGetPositionAtTime(
-                request.AttackerNetworkId, 
-                result.ClientTimestamp, 
+            Quaternion attackerRotation = attackerCharacter.transform.rotation;
+
+            if (m_LagManager.TryGetStateAtTime(
+                    request.AttackerNetworkId,
+                    result.ClientTimestamp,
+                    out var attackerSnapshot))
+            {
+                attackerPosition = attackerSnapshot.position;
+                attackerRotation = attackerSnapshot.rotation;
+            }
+            else if (m_LagManager.TryGetPositionAtTime(
+                request.AttackerNetworkId,
+                result.ClientTimestamp,
                 out var historicalAttackerPos))
             {
                 attackerPosition = historicalAttackerPos;
@@ -197,14 +206,25 @@ namespace Arawn.GameCreator2.Networking.Combat
             // STEP 6: Validate attack arc/cone
             // ═══════════════════════════════════════════════════════════════
             
-            Vector3 attackDirection = request.StrikeDirection.normalized;
-            if (attackDirection == Vector3.zero)
+            Vector3 toTarget = targetSnapshot.position - attackerPosition;
+            Vector3 flatToTarget = Vector3.ProjectOnPlane(toTarget, Vector3.up);
+            if (flatToTarget.sqrMagnitude < 0.0001f)
             {
-                attackDirection = (targetSnapshot.position - attackerPosition).normalized;
+                flatToTarget = toTarget;
             }
-            
-            Vector3 toTarget = (targetSnapshot.position - attackerPosition).normalized;
-            float angle = Vector3.Angle(attackDirection, toTarget);
+
+            Vector3 attackDirection = Vector3.ProjectOnPlane(attackerRotation * Vector3.forward, Vector3.up);
+            if (attackDirection.sqrMagnitude < 0.0001f)
+            {
+                attackDirection = Vector3.ProjectOnPlane(attackerCharacter.transform.forward, Vector3.up);
+            }
+
+            if (attackDirection.sqrMagnitude < 0.0001f)
+            {
+                attackDirection = flatToTarget;
+            }
+
+            float angle = Vector3.Angle(attackDirection.normalized, flatToTarget.normalized);
             float attackArc = GetAttackArc(weapon, skill);
             float maxAngle = (attackArc * 0.5f) + Config.ArcTolerance;
             

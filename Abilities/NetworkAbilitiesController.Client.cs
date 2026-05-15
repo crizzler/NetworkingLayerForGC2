@@ -6,6 +6,7 @@ using DaimahouGames.Runtime.Pawns;
 using DaimahouGames.Runtime.Core.Common;
 using GameCreator.Runtime.Characters;
 using GameCreator.Runtime.Common;
+using DaimahouAutoConfirmInput = DaimahouGames.Runtime.Abilities.VisualScripting.AutoConfirmInput;
 
 namespace Arawn.GameCreator2.Networking
 {
@@ -56,9 +57,12 @@ namespace Arawn.GameCreator2.Networking
                 AutoConfirm = false
             };
             
-            if (m_IsClient && !m_IsServer)
+            if (m_IsClient)
             {
-                // Client-only: store pending and send to server
+                // Client and host both route through the transport. On host, the
+                // PurrNet bridge loops back with the real local PlayerID so
+                // server-side ownership validation receives a client id, not the
+                // caster network id.
                 ulong pendingKey = GetPendingKey(request.ActorNetworkId, request.CorrelationId, request.RequestId);
                 m_PendingCastRequests[pendingKey] = new PendingCastRequest
                 {
@@ -80,7 +84,7 @@ namespace Arawn.GameCreator2.Networking
             }
             else if (m_IsServer)
             {
-                // Server or Host: process directly
+                // Dedicated server-side casts have no client sender transport.
                 ProcessCastRequest(casterNetworkId, request);
             }
         }
@@ -101,6 +105,12 @@ namespace Arawn.GameCreator2.Networking
                 return;
             }
             
+            if (ability == null)
+            {
+                Debug.LogWarning("[NetworkAbilitiesController] Cannot cast null ability.");
+                return;
+            }
+
             ushort requestId = GetNextRequestId();
             
             byte targetType = (byte)(targetNetworkId != 0 ? 2 : 1);
@@ -119,7 +129,7 @@ namespace Arawn.GameCreator2.Networking
                 AutoConfirm = true
             };
             
-            if (m_IsClient && !m_IsServer)
+            if (m_IsClient)
             {
                 ulong pendingKey = GetPendingKey(request.ActorNetworkId, request.CorrelationId, request.RequestId);
                 m_PendingCastRequests[pendingKey] = new PendingCastRequest
@@ -169,7 +179,7 @@ namespace Arawn.GameCreator2.Networking
                 IsLearning = true
             };
             
-            if (m_IsClient && !m_IsServer)
+            if (m_IsClient)
             {
                 ulong pendingKey = GetPendingKey(request.ActorNetworkId, request.CorrelationId, request.RequestId);
                 m_PendingLearnRequests[pendingKey] = new PendingLearnRequest
@@ -211,7 +221,7 @@ namespace Arawn.GameCreator2.Networking
                 IsLearning = false
             };
             
-            if (m_IsClient && !m_IsServer)
+            if (m_IsClient)
             {
                 ulong pendingKey = GetPendingKey(request.ActorNetworkId, request.CorrelationId, request.RequestId);
                 m_PendingLearnRequests[pendingKey] = new PendingLearnRequest
@@ -254,7 +264,7 @@ namespace Arawn.GameCreator2.Networking
                 AbilityIdHash = ability.ID.Hash
             };
 
-            if (m_IsClient && !m_IsServer)
+            if (m_IsClient)
             {
                 ulong pendingKey = GetPendingKey(request.ActorNetworkId, request.CorrelationId, request.RequestId);
                 m_PendingCooldownRequests[pendingKey] = new PendingCooldownRequest
@@ -292,7 +302,7 @@ namespace Arawn.GameCreator2.Networking
                 CastInstanceId = castInstanceId
             };
 
-            if (m_IsClient && !m_IsServer)
+            if (m_IsClient)
             {
                 ulong pendingKey = GetPendingKey(request.ActorNetworkId, request.CorrelationId, request.RequestId);
                 m_PendingCancelRequests[pendingKey] = new PendingCancelRequest
@@ -346,17 +356,21 @@ namespace Arawn.GameCreator2.Networking
             if (!m_IsClient) return;
             
             OnCastBroadcastReceived?.Invoke(broadcast);
-            
-            // If this is for a remote player, play animations/VFX
-            uint localId = GetLocalPlayerNetworkId?.Invoke() ?? 0;
-            if (broadcast.CasterNetworkId != localId)
-            {
-                // Remote player casting - trigger visual representation
-                HandleRemoteCast(broadcast);
-            }
+
+            HandleVisualCast(broadcast);
+        }
+
+        /// <summary>
+        /// Client receives an ability effect broadcast for visual/audio sync.
+        /// </summary>
+        public void ReceiveEffectBroadcast(NetworkAbilityEffectBroadcast broadcast)
+        {
+            if (!m_IsClient) return;
+
+            OnEffectBroadcastReceived?.Invoke(broadcast);
         }
         
-        private void HandleRemoteCast(NetworkAbilityCastBroadcast broadcast)
+        private void HandleVisualCast(NetworkAbilityCastBroadcast broadcast)
         {
             // Get the pawn/character
             Pawn pawn = GetPawnByNetworkId?.Invoke(broadcast.CasterNetworkId);
@@ -371,22 +385,95 @@ namespace Arawn.GameCreator2.Networking
             switch (broadcast.CastState)
             {
                 case AbilityCastState.Started:
-                    // Play cast start animation/effects on remote
+                    if (!m_ClientVisualReplayCastIds.Add(broadcast.CastInstanceId))
+                    {
+                        return;
+                    }
+
+                    _ = ReplayVisualCast(pawn, caster, ability, broadcast);
                     if (m_DebugLog)
                     {
-                        Debug.Log($"[NetworkAbilitiesController] Remote cast started: {ability.name}");
+                        Debug.Log(
+                            $"[NetworkAbilitiesController] Visual cast replay started: " +
+                            $"{ability.name} caster={broadcast.CasterNetworkId} castId={broadcast.CastInstanceId}");
                     }
                     break;
                     
                 case AbilityCastState.Triggered:
-                    // Effects triggered
+                    // The visual replay runs the local ability timeline, including its own trigger point.
                     break;
                     
                 case AbilityCastState.Completed:
                 case AbilityCastState.Canceled:
+                    m_ClientVisualReplayCastIds.Remove(broadcast.CastInstanceId);
                     // Cleanup
                     break;
             }
+        }
+
+        private async System.Threading.Tasks.Task ReplayVisualCast(
+            Pawn pawn,
+            Caster caster,
+            Ability ability,
+            NetworkAbilityCastBroadcast broadcast)
+        {
+            if (pawn == null || caster == null || ability == null) return;
+
+            var args = new ExtendedArgs(pawn.gameObject);
+            args.Set(new NetworkAbilityVisualReplayInput());
+            args.Set(new DaimahouAutoConfirmInput());
+
+            Target target = ReconstructBroadcastTarget(broadcast);
+            if (IsValidBroadcastTarget(target))
+            {
+                args.Set(target);
+            }
+
+            try
+            {
+                bool success = await caster.Cast(ability, args);
+                if (m_DebugLog)
+                {
+                    Debug.Log(
+                        $"[NetworkAbilitiesController] Visual cast replay completed: " +
+                        $"{ability.name} caster={broadcast.CasterNetworkId} castId={broadcast.CastInstanceId} success={success}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning(
+                    $"[NetworkAbilitiesController] Visual cast replay failed: " +
+                    $"{ability.name} caster={broadcast.CasterNetworkId} castId={broadcast.CastInstanceId} " +
+                    $"{ex.Message}");
+            }
+            finally
+            {
+                m_ClientVisualReplayCastIds.Remove(broadcast.CastInstanceId);
+            }
+        }
+
+        private Target ReconstructBroadcastTarget(NetworkAbilityCastBroadcast broadcast)
+        {
+            switch (broadcast.TargetType)
+            {
+                case 1:
+                    return new Target(broadcast.TargetPosition);
+
+                case 2:
+                case 3:
+                    Pawn targetPawn = GetPawnByNetworkId?.Invoke(broadcast.TargetNetworkId);
+                    return targetPawn != null
+                        ? new Target(targetPawn)
+                        : new Target(broadcast.TargetPosition);
+
+                default:
+                    return default;
+            }
+        }
+
+        private static bool IsValidBroadcastTarget(Target target)
+        {
+            return target.HasPosition || target.GameObject != null;
         }
         
         /// <summary>
@@ -547,6 +634,16 @@ namespace Arawn.GameCreator2.Networking
                 instance.Initialize(extendedArgs, broadcast.Direction);
             }
         }
+
+        /// <summary>
+        /// Client receives projectile hit/destroy events.
+        /// </summary>
+        public void ReceiveProjectileEventBroadcast(NetworkProjectileEventBroadcast broadcast)
+        {
+            if (!m_IsClient) return;
+
+            OnProjectileEventReceived?.Invoke(broadcast);
+        }
         
         /// <summary>
         /// Client receives impact spawn broadcast.
@@ -567,6 +664,16 @@ namespace Arawn.GameCreator2.Networking
             );
             
             // Client-side impacts are visual only - server handles actual effects
+        }
+
+        /// <summary>
+        /// Client receives impact hit notifications.
+        /// </summary>
+        public void ReceiveImpactHitBroadcast(NetworkImpactHitBroadcast broadcast)
+        {
+            if (!m_IsClient) return;
+
+            OnImpactHitReceived?.Invoke(broadcast);
         }
     }
 }

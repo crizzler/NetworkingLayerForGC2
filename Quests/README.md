@@ -18,6 +18,12 @@ Patch menu:
 - `NetworkQuestsManager`
 - `NetworkQuestsController` (requires `Journal`)
 
+## PurrNet Scene Setup Wizard
+
+For PurrNet projects, enable **Quests** on the PurrNet wizard Modules page. The wizard creates/reuses `NetworkQuestsManager` and `PurrNetQuestsTransportBridge`.
+
+When a Player Prefab is assigned on the Scene page and prefab preparation is enabled, selecting Quests adds `NetworkQuestsController` to that prefab. Scene or NPC quest endpoints can still be configured manually when they are not part of the player prefab.
+
 ## Transport Wiring
 
 Wire the manager delegates to your transport layer:

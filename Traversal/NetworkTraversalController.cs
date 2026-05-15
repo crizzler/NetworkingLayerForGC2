@@ -57,6 +57,8 @@ namespace Arawn.GameCreator2.Networking.Traversal
 
         private TraversalStance m_TraversalStance;
         private bool m_HasStanceSubscription;
+        private bool m_HasActiveAuthoritativeRequest;
+        private NetworkTraversalRequest m_ActiveAuthoritativeRequest;
 
         private readonly Dictionary<ulong, PendingTraversalRequest> m_PendingRequests = new(16);
         private readonly Dictionary<uint, float> m_RecentlyAppliedCorrelations = new(16);
@@ -270,13 +272,22 @@ namespace Arawn.GameCreator2.Networking.Traversal
                 Action = action,
                 TraverseHash = traverseHash,
                 TraverseIdString = traverseId,
-                ActionIdHash = actionId.Hash,
+                ActionIdHash = GetOptionalStableHash(actionId.String),
                 ActionIdString = actionId.String,
-                StateIdHash = stateId.Hash,
+                StateIdHash = GetOptionalStableHash(stateId.String),
                 StateIdString = stateId.String,
                 ArgsSelfNetworkId = argsSelfNetworkId,
                 ArgsTargetNetworkId = argsTargetNetworkId
             };
+
+            LogTraversal(
+                $"request built action={request.Action} requestId={request.RequestId} " +
+                $"actor={request.ActorNetworkId} target={request.TargetNetworkId} " +
+                $"correlation={request.CorrelationId} alreadyApplied={alreadyAppliedLocally} " +
+                $"optimistic={m_OptimisticUpdates} traverse='{request.TraverseIdString}' " +
+                $"hash={request.TraverseHash} actionId='{request.ActionIdString}' actionHash={request.ActionIdHash} " +
+                $"stateId='{request.StateIdString}' stateHash={request.StateIdHash} " +
+                $"self={request.ArgsSelfNetworkId} targetArg={request.ArgsTargetNetworkId}");
 
             NetworkTraversalManager manager = NetworkTraversalManager.Instance;
             if (!m_IsServer && manager == null)
@@ -335,48 +346,64 @@ namespace Arawn.GameCreator2.Networking.Traversal
 
         public async Task<NetworkTraversalResponse> ProcessTraversalRequestAsync(NetworkTraversalRequest request, uint senderClientId)
         {
+            LogTraversal(
+                $"server processing request action={request.Action} requestId={request.RequestId} " +
+                $"sender={senderClientId} actor={request.ActorNetworkId} target={request.TargetNetworkId} " +
+                $"correlation={request.CorrelationId} traverse='{request.TraverseIdString}' hash={request.TraverseHash}");
+
             if (!Enum.IsDefined(typeof(TraversalActionType), request.Action))
             {
+                LogTraversal($"server rejected requestId={request.RequestId}: unknown action={request.Action}");
                 return CreateRejectedResponse(request, TraversalRejectionReason.InvalidAction, "Unknown traversal action");
             }
 
             if (!ValidateRequestIdentity(request, out string identityError))
             {
+                LogTraversal($"server rejected requestId={request.RequestId}: identity mismatch {identityError}");
                 return CreateRejectedResponse(request, TraversalRejectionReason.IdentityMismatch, identityError);
             }
 
             if (!TryResolveTraverseForRequest(request, out Traverse traverse, out TraversalRejectionReason resolutionError))
             {
+                LogTraversal(
+                    $"server rejected requestId={request.RequestId}: traverse resolution failed " +
+                    $"reason={resolutionError} traverse='{request.TraverseIdString}' hash={request.TraverseHash}");
                 return CreateRejectedResponse(request, resolutionError, "Traverse resolution failed");
             }
 
             bool applied;
             try
             {
-                applied = await ApplyAuthoritativeActionAsync(
-                    request.Action,
-                    traverse,
-                    request.ActionIdString,
-                    request.StateIdString,
-                    request.ArgsSelfNetworkId,
-                    request.ArgsTargetNetworkId);
+                applied = await ApplyRequestAuthoritativelyAsync(request, traverse);
             }
             catch (Exception exception)
             {
+                LogTraversal($"server exception requestId={request.RequestId}: {exception.Message}");
                 return CreateRejectedResponse(request, TraversalRejectionReason.Exception, exception.Message);
             }
 
             if (!applied)
             {
+                LogTraversal($"server rejected requestId={request.RequestId}: runtime did not apply action={request.Action}");
                 return CreateRejectedResponse(request, TraversalRejectionReason.InvalidState, "Traversal action rejected by runtime state");
             }
 
             NetworkTraversalResponse response = BuildSuccessResponse(request);
 
-            if (m_IsServer)
+            if (m_IsServer && !IsTraversalStartAction(request.Action))
             {
                 NetworkTraversalBroadcast broadcast = BuildBroadcast(request);
+                LogTraversal(
+                    $"server broadcasting action={broadcast.Action} requestId={request.RequestId} " +
+                    $"networkId={broadcast.NetworkId} traversing={broadcast.IsTraversing} " +
+                    $"traverse='{broadcast.TraverseIdString}' correlation={broadcast.CorrelationId}");
                 NetworkTraversalManager.Instance?.BroadcastTraversalChange(broadcast);
+            }
+            else if (m_IsServer)
+            {
+                LogTraversal(
+                    $"server start action accepted requestId={request.RequestId}; " +
+                    "motion-enter broadcasts start and motion-exit broadcasts snapshot");
             }
 
             if (m_LogAllChanges)
@@ -397,6 +424,10 @@ namespace Arawn.GameCreator2.Networking.Traversal
 
             if (!response.Authorized || !response.Applied)
             {
+                LogTraversal(
+                    $"client received rejected response requestId={response.RequestId} " +
+                    $"action={response.Action} reason={response.RejectionReason} error='{response.Error}'");
+
                 if (m_LogRejections)
                 {
                     Debug.LogWarning($"[NetworkTraversalController] Traversal request rejected: {response.RejectionReason} ({response.Error})");
@@ -408,8 +439,20 @@ namespace Arawn.GameCreator2.Networking.Traversal
 
             if (!m_IsServer)
             {
-                m_RecentlyAppliedCorrelations[response.CorrelationId] = Time.time;
-                if (!m_OptimisticUpdates)
+                bool alreadyApplied = response.CorrelationId != 0 &&
+                    m_RecentlyAppliedCorrelations.ContainsKey(response.CorrelationId);
+
+                LogTraversal(
+                    $"client received accepted response requestId={response.RequestId} action={response.Action} " +
+                    $"alreadyApplied={alreadyApplied} optimistic={m_OptimisticUpdates} " +
+                    $"traversing={response.IsTraversing} traverse='{response.TraverseIdString}'");
+
+                if (response.CorrelationId != 0)
+                {
+                    m_RecentlyAppliedCorrelations[response.CorrelationId] = Time.time;
+                }
+
+                if (!m_OptimisticUpdates && !alreadyApplied)
                 {
                     _ = ApplyActionFromResponseAsync(response);
                 }
@@ -419,10 +462,33 @@ namespace Arawn.GameCreator2.Networking.Traversal
         public async void ReceiveTraversalChangeBroadcast(NetworkTraversalBroadcast broadcast)
         {
             if (broadcast.NetworkId != NetworkId) return;
+            if (m_IsServer) return;
 
-            if (!m_IsServer && broadcast.CorrelationId != 0 &&
-                m_RecentlyAppliedCorrelations.Remove(broadcast.CorrelationId))
+            if (broadcast.CorrelationId != 0 &&
+                m_RecentlyAppliedCorrelations.ContainsKey(broadcast.CorrelationId))
             {
+                m_RecentlyAppliedCorrelations[broadcast.CorrelationId] = Time.time;
+                LogTraversal(
+                    $"client skipped predicted broadcast action={broadcast.Action} correlation={broadcast.CorrelationId} " +
+                    $"traverse='{broadcast.TraverseIdString}'");
+                return;
+            }
+
+            if (HasPendingRequestForCorrelation(broadcast.ActorNetworkId, broadcast.CorrelationId))
+            {
+                m_RecentlyAppliedCorrelations[broadcast.CorrelationId] = Time.time;
+            }
+
+            LogTraversal(
+                $"client applying broadcast action={broadcast.Action} actor={broadcast.ActorNetworkId} " +
+                $"correlation={broadcast.CorrelationId} traversing={broadcast.IsTraversing} " +
+                $"traverse='{broadcast.TraverseIdString}'");
+
+            if (!broadcast.IsTraversing && IsTraversalStartAction(broadcast.Action))
+            {
+                LogTraversal(
+                    $"client ignored non-traversing start broadcast action={broadcast.Action} " +
+                    $"correlation={broadcast.CorrelationId}");
                 return;
             }
 
@@ -473,6 +539,11 @@ namespace Arawn.GameCreator2.Networking.Traversal
             if (stance == null) return;
 
             bool currentlyTraversing = stance.Traverse != null;
+            LogTraversal(
+                $"client received snapshot serverTime={snapshot.ServerTime:F3} " +
+                $"snapshotTraversing={snapshot.IsTraversing} localTraversing={currentlyTraversing} " +
+                $"snapshotTraverse='{snapshot.TraverseIdString}' localTraverse='{FormatTraverse(stance.Traverse)}'");
+
             if (currentlyTraversing == snapshot.IsTraversing)
             {
                 return;
@@ -480,6 +551,7 @@ namespace Arawn.GameCreator2.Networking.Traversal
 
             if (!snapshot.IsTraversing)
             {
+                LogTraversal("client forcing traversal cancel from non-traversing snapshot");
                 bool previousSuppress = m_SuppressInterception;
                 m_SuppressInterception = true;
                 try
@@ -524,7 +596,7 @@ namespace Arawn.GameCreator2.Networking.Traversal
                 response.ArgsTargetNetworkId);
         }
 
-        private async Task<bool> ApplyAuthoritativeActionAsync(
+        private Task<bool> ApplyAuthoritativeActionAsync(
             TraversalActionType action,
             Traverse traverse,
             string actionIdString,
@@ -532,60 +604,121 @@ namespace Arawn.GameCreator2.Networking.Traversal
             uint argsSelfNetworkId,
             uint argsTargetNetworkId)
         {
-            if (m_Character == null) return false;
+            if (m_Character == null) return Task.FromResult(false);
 
             TraversalStance stance = ResolveTraversalStance();
-            if (stance == null) return false;
+            if (stance == null) return Task.FromResult(false);
 
             bool previousSuppress = m_SuppressInterception;
             m_SuppressInterception = true;
 
             try
             {
+                LogTraversal(
+                    $"apply authoritative begin action={action} traverse='{FormatTraverse(traverse)}' " +
+                    $"stanceTraverse='{FormatTraverse(stance.Traverse)}' self={argsSelfNetworkId} target={argsTargetNetworkId} " +
+                    $"position={FormatVector(m_Character.transform.position)}");
+
                 switch (action)
                 {
                     case TraversalActionType.RunTraverseLink:
-                        if (traverse is not TraverseLink traverseLink) return false;
-                        await traverseLink.Run(m_Character);
-                        return true;
+                        if (traverse is not TraverseLink traverseLink) return Task.FromResult(false);
+                        _ = ObserveAuthoritativeTraversalTask(
+                            traverseLink.Run(m_Character),
+                            action,
+                            FormatTraverse(traverseLink));
+                        LogTraversal($"apply authoritative started async traversal action={action}");
+                        return Task.FromResult(true);
 
                     case TraversalActionType.EnterTraverseInteractive:
-                        if (traverse is not TraverseInteractive traverseInteractive) return false;
-                        await traverseInteractive.Enter(m_Character, InteractiveTransitionData.None);
-                        return true;
+                        if (traverse is not TraverseInteractive traverseInteractive) return Task.FromResult(false);
+                        _ = ObserveAuthoritativeTraversalTask(
+                            traverseInteractive.Enter(m_Character, InteractiveTransitionData.None),
+                            action,
+                            FormatTraverse(traverseInteractive));
+                        LogTraversal($"apply authoritative started async traversal action={action}");
+                        return Task.FromResult(true);
 
                     case TraversalActionType.TryCancel:
                         stance.TryCancel(BuildArgs(argsSelfNetworkId, argsTargetNetworkId));
-                        return true;
+                        return Task.FromResult(true);
 
                     case TraversalActionType.ForceCancel:
-                        return stance.ForceCancel();
+                        return Task.FromResult(stance.ForceCancel());
 
                     case TraversalActionType.TryJump:
                         stance.TryJump();
-                        return true;
+                        return Task.FromResult(true);
 
                     case TraversalActionType.TryAction:
-                        if (string.IsNullOrEmpty(actionIdString)) return false;
+                        if (string.IsNullOrEmpty(actionIdString)) return Task.FromResult(false);
                         stance.TryAction(new IdString(actionIdString));
-                        return true;
+                        return Task.FromResult(true);
 
                     case TraversalActionType.TryStateEnter:
-                        if (string.IsNullOrEmpty(stateIdString)) return false;
+                        if (string.IsNullOrEmpty(stateIdString)) return Task.FromResult(false);
                         stance.TryStateEnter(new IdString(stateIdString));
-                        return true;
+                        return Task.FromResult(true);
 
                     case TraversalActionType.TryStateExit:
                         stance.TryStateExit();
-                        return true;
+                        return Task.FromResult(true);
 
                     default:
-                        return false;
+                        return Task.FromResult(false);
                 }
             }
             finally
             {
                 m_SuppressInterception = previousSuppress;
+            }
+        }
+
+        private async Task<bool> ApplyRequestAuthoritativelyAsync(
+            NetworkTraversalRequest request,
+            Traverse traverse)
+        {
+            bool previousHasActiveRequest = m_HasActiveAuthoritativeRequest;
+            NetworkTraversalRequest previousRequest = m_ActiveAuthoritativeRequest;
+
+            m_HasActiveAuthoritativeRequest = true;
+            m_ActiveAuthoritativeRequest = request;
+
+            try
+            {
+                return await ApplyAuthoritativeActionAsync(
+                    request.Action,
+                    traverse,
+                    request.ActionIdString,
+                    request.StateIdString,
+                    request.ArgsSelfNetworkId,
+                    request.ArgsTargetNetworkId);
+            }
+            finally
+            {
+                m_HasActiveAuthoritativeRequest = previousHasActiveRequest;
+                m_ActiveAuthoritativeRequest = previousRequest;
+            }
+        }
+
+        private async Task ObserveAuthoritativeTraversalTask(
+            Task traversalTask,
+            TraversalActionType action,
+            string traverseName)
+        {
+            try
+            {
+                await traversalTask;
+                LogTraversal(
+                    $"authoritative traversal task completed action={action} traverse='{traverseName}' " +
+                    $"position={FormatVector(m_Character != null ? m_Character.transform.position : transform.position)}");
+            }
+            catch (Exception exception)
+            {
+                Debug.LogError(
+                    $"[NetworkTraversalDebug][Controller] {name} netId={NetworkId} " +
+                    $"authoritative traversal task failed action={action} traverse='{traverseName}': {exception}",
+                    this);
             }
         }
 
@@ -673,19 +806,23 @@ namespace Arawn.GameCreator2.Networking.Traversal
         {
             error = string.Empty;
 
-            if (!MatchesId(request.ActionIdHash, request.ActionIdString))
+            if (!MatchesStableHash(request.ActionIdHash, request.ActionIdString, allowEmpty: true))
             {
-                error = "Action id hash does not match action id string";
-                return false;
+                LogTraversal(
+                    $"server accepted action id string despite hash mismatch " +
+                    $"actionId='{request.ActionIdString}' hash={request.ActionIdHash} " +
+                    $"expected={GetOptionalStableHash(request.ActionIdString)}");
             }
 
-            if (!MatchesId(request.StateIdHash, request.StateIdString))
+            if (!MatchesStableHash(request.StateIdHash, request.StateIdString, allowEmpty: true))
             {
-                error = "State id hash does not match state id string";
-                return false;
+                LogTraversal(
+                    $"server accepted state id string despite hash mismatch " +
+                    $"stateId='{request.StateIdString}' hash={request.StateIdHash} " +
+                    $"expected={GetOptionalStableHash(request.StateIdString)}");
             }
 
-            if (!MatchesId(request.TraverseHash, request.TraverseIdString, allowEmpty: true))
+            if (!MatchesStableHash(request.TraverseHash, request.TraverseIdString, allowEmpty: true))
             {
                 error = "Traverse hash does not match traverse id string";
                 return false;
@@ -725,6 +862,11 @@ namespace Arawn.GameCreator2.Networking.Traversal
             return true;
         }
 
+        private static int GetOptionalStableHash(string value)
+        {
+            return string.IsNullOrEmpty(value) ? 0 : StableHashUtility.GetStableHash(value);
+        }
+
         private static bool MatchesId(int hash, string value, bool allowEmpty = false)
         {
             if (string.IsNullOrEmpty(value))
@@ -735,7 +877,23 @@ namespace Arawn.GameCreator2.Networking.Traversal
             return new IdString(value).Hash == hash;
         }
 
+        private static bool MatchesStableHash(int hash, string value, bool allowEmpty = false)
+        {
+            if (string.IsNullOrEmpty(value))
+            {
+                return allowEmpty || hash == 0;
+            }
+
+            return StableHashUtility.GetStableHash(value) == hash;
+        }
+
         private static bool RequiresTraverse(TraversalActionType action)
+        {
+            return action == TraversalActionType.RunTraverseLink ||
+                   action == TraversalActionType.EnterTraverseInteractive;
+        }
+
+        private static bool IsTraversalStartAction(TraversalActionType action)
         {
             return action == TraversalActionType.RunTraverseLink ||
                    action == TraversalActionType.EnterTraverseInteractive;
@@ -745,6 +903,12 @@ namespace Arawn.GameCreator2.Networking.Traversal
         {
             uint pendingCorrelation = correlationId != 0 ? correlationId : requestId;
             return ((ulong)actorNetworkId << 32) | pendingCorrelation;
+        }
+
+        private bool HasPendingRequestForCorrelation(uint actorNetworkId, uint correlationId)
+        {
+            if (correlationId == 0) return false;
+            return m_PendingRequests.ContainsKey(GetPendingKey(actorNetworkId, correlationId, 0));
         }
 
         private void CleanupPendingRequests()
@@ -844,8 +1008,6 @@ namespace Arawn.GameCreator2.Networking.Traversal
 
         private void OnLocalTraversalMotionEnter()
         {
-            if (m_SuppressInterception) return;
-
             TraversalStance stance = m_TraversalStance;
             Traverse traverse = stance != null ? stance.Traverse : null;
             if (traverse == null) return;
@@ -855,20 +1017,39 @@ namespace Arawn.GameCreator2.Networking.Traversal
                 NetworkTraversalManager manager = NetworkTraversalManager.Instance;
                 if (manager != null)
                 {
+                    uint actorNetworkId = m_HasActiveAuthoritativeRequest
+                        ? m_ActiveAuthoritativeRequest.ActorNetworkId
+                        : NetworkId;
+                    uint correlationId = m_HasActiveAuthoritativeRequest
+                        ? m_ActiveAuthoritativeRequest.CorrelationId
+                        : 0;
+                    uint argsSelfNetworkId = m_HasActiveAuthoritativeRequest
+                        ? m_ActiveAuthoritativeRequest.ArgsSelfNetworkId
+                        : NetworkId;
+                    uint argsTargetNetworkId = m_HasActiveAuthoritativeRequest
+                        ? m_ActiveAuthoritativeRequest.ArgsTargetNetworkId
+                        : NetworkId;
+                    string traverseId = BuildTraverseId(traverse);
+
+                    LogTraversal(
+                        $"server motion enter broadcast traverse='{traverseId}' actor={actorNetworkId} " +
+                        $"correlation={correlationId} suppress={m_SuppressInterception} " +
+                        $"position={FormatVector(m_Character != null ? m_Character.transform.position : transform.position)}");
+
                     manager.BroadcastTraversalChange(new NetworkTraversalBroadcast
                     {
                         NetworkId = NetworkId,
-                        ActorNetworkId = NetworkId,
-                        CorrelationId = 0,
+                        ActorNetworkId = actorNetworkId,
+                        CorrelationId = correlationId,
                         Action = traverse is TraverseLink ? TraversalActionType.RunTraverseLink : TraversalActionType.EnterTraverseInteractive,
-                        TraverseHash = StableHashUtility.GetStableHash(BuildTraverseId(traverse)),
-                        TraverseIdString = BuildTraverseId(traverse),
+                        TraverseHash = StableHashUtility.GetStableHash(traverseId),
+                        TraverseIdString = traverseId,
                         ActionIdHash = 0,
                         ActionIdString = string.Empty,
                         StateIdHash = 0,
                         StateIdString = string.Empty,
-                        ArgsSelfNetworkId = NetworkId,
-                        ArgsTargetNetworkId = NetworkId,
+                        ArgsSelfNetworkId = argsSelfNetworkId,
+                        ArgsTargetNetworkId = argsTargetNetworkId,
                         IsTraversing = true,
                         ServerTime = Time.time
                     });
@@ -877,7 +1058,17 @@ namespace Arawn.GameCreator2.Networking.Traversal
                 return;
             }
 
+            if (m_SuppressInterception)
+            {
+                LogTraversal($"client motion enter suppressed traverse='{FormatTraverse(traverse)}'");
+                return;
+            }
+
             if (!m_IsLocalClient || m_IsRemoteClient) return;
+
+            LogTraversal(
+                $"client local motion enter request traverse='{FormatTraverse(traverse)}' " +
+                $"position={FormatVector(m_Character != null ? m_Character.transform.position : transform.position)}");
 
             if (traverse is TraverseLink link)
             {
@@ -891,11 +1082,20 @@ namespace Arawn.GameCreator2.Networking.Traversal
 
         private void OnLocalTraversalMotionExit()
         {
-            if (m_SuppressInterception) return;
-
             if (m_IsServer)
             {
-                NetworkTraversalManager.Instance?.BroadcastFullSnapshot(CaptureFullSnapshot());
+                NetworkTraversalSnapshot snapshot = CaptureFullSnapshot();
+                LogTraversal(
+                    $"server motion exit snapshot traverse='{snapshot.TraverseIdString}' " +
+                    $"traversing={snapshot.IsTraversing} suppress={m_SuppressInterception} " +
+                    $"position={FormatVector(m_Character != null ? m_Character.transform.position : transform.position)}");
+                NetworkTraversalManager.Instance?.BroadcastFullSnapshot(snapshot);
+                return;
+            }
+
+            if (m_SuppressInterception)
+            {
+                LogTraversal("client motion exit suppressed");
             }
         }
 
@@ -1033,6 +1233,33 @@ namespace Arawn.GameCreator2.Networking.Traversal
 
             NetworkCharacter networkCharacter = gameObject.GetComponent<NetworkCharacter>();
             return networkCharacter != null ? networkCharacter.NetworkId : 0;
+        }
+
+        private void LogTraversal(string message)
+        {
+            Debug.Log(
+                $"[NetworkTraversalDebug][Controller] {name} netId={NetworkId} role={FormatRole()} {message}",
+                this);
+        }
+
+        private string FormatRole()
+        {
+            if (m_IsServer && m_IsLocalClient) return "HostServerLocal";
+            if (m_IsServer) return "Server";
+            if (m_IsLocalClient) return "LocalClient";
+            if (m_IsRemoteClient) return "RemoteClient";
+            return "Uninitialized";
+        }
+
+        private static string FormatTraverse(Traverse traverse)
+        {
+            if (traverse == null) return "none";
+            return $"{traverse.name}:{traverse.GetType().Name}";
+        }
+
+        private static string FormatVector(Vector3 value)
+        {
+            return $"({value.x:F2},{value.y:F2},{value.z:F2})";
         }
 
         private ushort GetNextRequestId()

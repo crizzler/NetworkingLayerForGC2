@@ -28,6 +28,10 @@ namespace Arawn.GameCreator2.Networking
         [SerializeField] private float m_MaxExtrapolationTime = 0.25f;
         [SerializeField] private float m_SnapDistance = 5f;
 
+        [Header("Debug")]
+        [SerializeField] private bool m_LogMotionDiagnostics = true;
+        [SerializeField] private float m_MotionDiagnosticInterval = 0.5f;
+
         // MEMBERS: -------------------------------------------------------------------------------
 
         [NonSerialized] protected CharacterController m_Controller;
@@ -38,17 +42,21 @@ namespace Arawn.GameCreator2.Networking
         [NonSerialized] private Vector3 m_InterpolatedPosition;
         [NonSerialized] private Quaternion m_InterpolatedRotation;
         [NonSerialized] private float m_ServerTime;
-        [NonSerialized] private float m_LastSnapshotTime;
         [NonSerialized] private bool m_IsExtrapolating;
-        [NonSerialized] private float m_MinSnapshotInterval;
-        [NonSerialized] private float m_LastAcceptedSnapshotTime;
+        [NonSerialized] private bool m_WasExtrapolating;
+        [NonSerialized] private bool m_IsGrounded = true;
+        [NonSerialized] private bool m_IsJumping;
+        [NonSerialized] private bool m_HasLastReceivedSnapshot;
+        [NonSerialized] private float m_LastReceivedServerTimestamp;
+        [NonSerialized] private float m_LastReceivedSnapshotRealtime;
+        [NonSerialized] private float m_LastMotionDiagnosticRealtime;
 
         // INTERFACE PROPERTIES: ------------------------------------------------------------------
 
         public override Vector3 WorldMoveDirection => this.m_MoveDirection;
         public override Vector3 LocalMoveDirection => this.Transform.InverseTransformDirection(this.m_MoveDirection);
         public override float SkinWidth => this.m_Controller != null ? this.m_Controller.skinWidth : 0f;
-        public override bool IsGrounded => true; // Remote characters don't need local ground checks
+        public override bool IsGrounded => m_IsGrounded;
         public override Vector3 FloorNormal => Vector3.up;
 
         public override bool Collision
@@ -65,15 +73,13 @@ namespace Arawn.GameCreator2.Networking
         
         public bool IsExtrapolating => m_IsExtrapolating;
         public float InterpolationDelay => m_InterpolationDelay;
+        public bool IsJumping => m_IsJumping;
         
         public void ApplyTierSettings(NetworkRelevanceSettings settings)
         {
             m_InterpolationDelay = settings.interpolationDelay;
             m_MaxExtrapolationTime = settings.maxExtrapolationTime;
             m_SnapDistance = settings.snapDistance;
-            
-            float clampedRate = Mathf.Max(1f, settings.stateApplyRate);
-            m_MinSnapshotInterval = 1f / clampedRate;
         }
 
         // INITIALIZERS: --------------------------------------------------------------------------
@@ -91,8 +97,13 @@ namespace Arawn.GameCreator2.Networking
             m_InterpolatedPosition = this.Transform.position;
             m_InterpolatedRotation = this.Transform.rotation;
             m_ServerTime = 0f;
-            m_MinSnapshotInterval = 0f;
-            m_LastAcceptedSnapshotTime = -100f;
+            m_IsGrounded = true;
+            m_IsJumping = false;
+            m_WasExtrapolating = false;
+            m_HasLastReceivedSnapshot = false;
+            m_LastReceivedServerTimestamp = 0f;
+            m_LastReceivedSnapshotRealtime = -100f;
+            m_LastMotionDiagnosticRealtime = -100f;
 
             this.m_Controller = this.Character.GetComponent<CharacterController>();
             if (this.m_Controller == null)
@@ -114,11 +125,94 @@ namespace Arawn.GameCreator2.Networking
         public override void OnDispose(Character character)
         {
             base.OnDispose(character);
-            
-            if (this.m_Controller != null)
+            this.m_Controller = null;
+        }
+
+        // PREDICTIVE MOTION (CLIENT-SIDE): -------------------------------------------------------
+
+        /// <summary>
+        /// Synthesize forward-projected snapshots for a dash so the remote
+        /// representation moves at full fidelity instead of waiting for the
+        /// (slower) authoritative server position broadcasts.
+        ///
+        /// Real server snapshots that arrive afterwards will simply append to
+        /// the buffer with their actual timestamps and reconcile the position.
+        /// </summary>
+        public void BeginPredictedDash(Vector3 worldDirection, float speed, float duration, float gravity)
+        {
+            if (m_SnapshotBuffer == null) return;
+            if (duration <= 0f || speed <= 0f) return;
+            if (worldDirection.sqrMagnitude <= 0f) return;
+
+            Vector3 direction = worldDirection.normalized;
+
+            // Anchor at whatever the remote currently shows so there is no rubber-banding.
+            float renderTime = m_ServerTime - m_InterpolationDelay;
+            Vector3 anchorPosition = m_InterpolatedPosition;
+            float anchorRotationY = m_InterpolatedRotation.eulerAngles.y;
+
+            // Drop any pending snapshots whose timestamp is in the future of the
+            // anchor: they would override our prediction the moment we add it.
+            for (int i = m_SnapshotBuffer.Count - 1; i >= 0; i--)
             {
-                UnityEngine.Object.Destroy(this.m_Controller);
+                if ((float)m_SnapshotBuffer[i].timestamp > renderTime)
+                {
+                    m_SnapshotBuffer.RemoveAt(i);
+                }
             }
+
+            // Step the prediction at a fixed cadence; ~60 Hz matches typical
+            // remote-render rates and keeps the buffer small.
+            const float StepHz = 60f;
+            const float StepDt = 1f / StepHz;
+
+            int stepCount = Mathf.Max(2, Mathf.CeilToInt(duration * StepHz));
+            float stepDuration = duration / stepCount;
+            Vector3 horizontalVelocity = direction * speed;
+
+            float t = 0f;
+            Vector3 lastPosition = anchorPosition;
+            float startTimestamp = renderTime;
+
+            // First snapshot is the anchor itself so interpolation has both
+            // endpoints to lerp between when the next predicted point is added.
+            PushPredictedSnapshot(
+                timestamp: startTimestamp,
+                position: anchorPosition,
+                rotationY: anchorRotationY,
+                velocity: horizontalVelocity,
+                verticalVelocity: 0f);
+
+            for (int i = 1; i <= stepCount; i++)
+            {
+                t += stepDuration;
+                Vector3 nextPosition = anchorPosition + horizontalVelocity * t;
+
+                Vector3 segmentVelocity = (nextPosition - lastPosition) / Mathf.Max(StepDt, stepDuration);
+
+                PushPredictedSnapshot(
+                    timestamp: startTimestamp + t,
+                    position: nextPosition,
+                    rotationY: anchorRotationY,
+                    velocity: segmentVelocity,
+                    verticalVelocity: 0f);
+
+                lastPosition = nextPosition;
+            }
+        }
+
+        private void PushPredictedSnapshot(double timestamp, Vector3 position, float rotationY, Vector3 velocity, float verticalVelocity)
+        {
+            m_SnapshotBuffer.Add(new PositionSnapshot
+            {
+                timestamp = timestamp,
+                position = position,
+                rotation = Quaternion.Euler(0f, rotationY, 0f),
+                velocity = velocity,
+                rotationY = rotationY,
+                verticalVelocity = verticalVelocity,
+                flags = 0
+            });
         }
 
         // NETWORK STATE UPDATES: -----------------------------------------------------------------
@@ -131,26 +225,45 @@ namespace Arawn.GameCreator2.Networking
         {
             Vector3 position = state.GetPosition();
             float rotationY = state.GetRotationY();
-            
-            if (m_MinSnapshotInterval > 0f && m_SnapshotBuffer.Count > 0)
+            float realtime = Time.realtimeSinceStartup;
+
+            m_IsGrounded = state.IsGrounded;
+            m_IsJumping = state.IsJumping;
+
+            if (m_HasLastReceivedSnapshot)
             {
-                float delta = serverTimestamp - m_LastAcceptedSnapshotTime;
-                if (delta < m_MinSnapshotInterval)
+                float serverGap = serverTimestamp - m_LastReceivedServerTimestamp;
+                float receiveGap = realtime - m_LastReceivedSnapshotRealtime;
+                float expectedMaxGap = Mathf.Max(m_InterpolationDelay * 1.5f, 0.08f);
+
+                if (serverGap <= 0f)
                 {
-                    Vector3 latest = m_SnapshotBuffer[m_SnapshotBuffer.Count - 1].position;
-                    if (Vector3.Distance(position, latest) <= m_SnapDistance)
-                    {
-                        return;
-                    }
+                    LogRemoteMotionDiagnostic(
+                        $"received non-increasing snapshot timestamp current={serverTimestamp:F3} " +
+                        $"previous={m_LastReceivedServerTimestamp:F3} buffer={m_SnapshotBuffer.Count}",
+                        force: true);
+                }
+                else if (serverGap > expectedMaxGap || receiveGap > expectedMaxGap)
+                {
+                    LogRemoteMotionDiagnostic(
+                        $"snapshot gap serverGap={serverGap:F3}s receiveGap={receiveGap:F3}s " +
+                        $"expectedMax={expectedMaxGap:F3}s buffer={m_SnapshotBuffer.Count} " +
+                        $"serverTime={m_ServerTime:F3} delay={m_InterpolationDelay:F3}");
                 }
             }
-            
+
             // Check for teleport
             if (m_SnapshotBuffer.Count > 0)
             {
                 Vector3 lastPos = m_SnapshotBuffer[m_SnapshotBuffer.Count - 1].position;
-                if (Vector3.Distance(position, lastPos) > m_SnapDistance)
+                float distance = Vector3.Distance(position, lastPos);
+                if (distance > m_SnapDistance)
                 {
+                    LogRemoteMotionDiagnostic(
+                        $"remote snap distance={distance:F3} snapDistance={m_SnapDistance:F3} " +
+                        $"from={FormatVector(lastPos)} to={FormatVector(position)}",
+                        force: true);
+
                     // Teleport - clear buffer and snap
                     m_SnapshotBuffer.Clear();
                     TeleportTo(position, rotationY);
@@ -179,16 +292,17 @@ namespace Arawn.GameCreator2.Networking
                 verticalVelocity = state.GetVerticalVelocity(),
                 flags = state.flags
             });
-            
-            m_LastSnapshotTime = serverTimestamp;
-            m_LastAcceptedSnapshotTime = serverTimestamp;
-            
+
             // Trim old snapshots
             float minTime = serverTimestamp - 1f; // Keep 1 second of history
             while (m_SnapshotBuffer.Count > 2 && m_SnapshotBuffer[0].timestamp < minTime)
             {
                 m_SnapshotBuffer.RemoveAt(0);
             }
+
+            m_HasLastReceivedSnapshot = true;
+            m_LastReceivedServerTimestamp = serverTimestamp;
+            m_LastReceivedSnapshotRealtime = realtime;
         }
 
         /// <summary>
@@ -214,7 +328,16 @@ namespace Arawn.GameCreator2.Networking
             
             // Interpolate position
             InterpolatePosition(renderTime, deltaTime);
-            
+
+            if (m_IsExtrapolating != m_WasExtrapolating)
+            {
+                LogRemoteMotionDiagnostic(
+                    $"extrapolating {m_WasExtrapolating}->{m_IsExtrapolating} " +
+                    $"serverTime={m_ServerTime:F3} renderTime={renderTime:F3} " +
+                    $"buffer={m_SnapshotBuffer.Count} delay={m_InterpolationDelay:F3}");
+                m_WasExtrapolating = m_IsExtrapolating;
+            }
+
             // Apply interpolated transform
             ApplyInterpolatedTransform();
             
@@ -338,6 +461,25 @@ namespace Arawn.GameCreator2.Networking
             m_MoveDirection = Vector3.zero;
             
             ApplyInterpolatedTransform();
+        }
+
+        private void LogRemoteMotionDiagnostic(string message, bool force = false)
+        {
+            if (!m_LogMotionDiagnostics) return;
+
+            float now = Time.realtimeSinceStartup;
+            float interval = Mathf.Max(0.05f, m_MotionDiagnosticInterval);
+            if (!force && now - m_LastMotionDiagnosticRealtime < interval) return;
+
+            Debug.Log(
+                $"[NetworkMotionDebug][RemoteDriver] {this.Character?.name ?? "Character"}: {message}",
+                this.Character);
+            m_LastMotionDiagnosticRealtime = now;
+        }
+
+        private static string FormatVector(Vector3 value)
+        {
+            return $"({value.x:F3},{value.y:F3},{value.z:F3})";
         }
 
         // STANDARD DRIVER METHODS: ---------------------------------------------------------------

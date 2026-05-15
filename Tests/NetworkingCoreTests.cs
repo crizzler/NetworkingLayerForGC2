@@ -330,6 +330,17 @@ namespace Arawn.GameCreator2.Networking.Tests
             
             Assert.IsTrue(exceeded);
         }
+
+        [Test]
+        public void ViolationTracker_AfterThreshold_ReturnsFalseUntilWindowCrossesAgain()
+        {
+            var tracker = new ViolationTracker(3, 10f);
+
+            tracker.RecordViolation(1, SecurityViolationType.InvalidRequest, "1", 0f);
+            tracker.RecordViolation(1, SecurityViolationType.InvalidRequest, "2", 0.1f);
+            Assert.IsTrue(tracker.RecordViolation(1, SecurityViolationType.InvalidRequest, "3", 0.2f));
+            Assert.IsFalse(tracker.RecordViolation(1, SecurityViolationType.InvalidRequest, "4", 0.3f));
+        }
         
         [Test]
         public void ViolationTracker_OldViolations_Expire()
@@ -626,6 +637,13 @@ namespace Arawn.GameCreator2.Networking.Tests
         {
             var state = new NetworkInputState { deltaTimeMs = 100 }; // 100ms = 0.1s
             Assert.AreEqual(0.1f, state.GetDeltaTime(), 0.001f);
+        }
+
+        [Test]
+        public void InputState_GetRotationY_Decompresses()
+        {
+            var state = new NetworkInputState { rotationY = 32768 };
+            Assert.AreEqual(180f, state.GetRotationY(), 0.1f);
         }
         
         [Test]
@@ -1578,6 +1596,18 @@ namespace Arawn.GameCreator2.Networking.Tests
             Assert.IsTrue(state.HasFlag(NetworkInputState.FLAG_CROUCH));
             Assert.IsFalse(state.HasFlag(NetworkInputState.FLAG_DASH));
             Assert.IsFalse(state.HasFlag(NetworkInputState.FLAG_SPRINT));
+        }
+
+        [Test]
+        public void InputState_Create_RoundTripsRotation()
+        {
+            var state = NetworkInputState.Create(
+                UnityEngine.Vector2.zero,
+                sequence: 1,
+                deltaTime: 0.016f,
+                rotationY: 135f);
+
+            Assert.AreEqual(135f, state.GetRotationY(), 0.1f);
         }
 
         [Test]

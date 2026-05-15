@@ -598,6 +598,28 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public Vector2Int Position;
         public int RemainingStackCount;
     }
+
+    /// <summary>
+    /// Broadcast when an item is dropped into the world.
+    /// </summary>
+    [Serializable]
+    public struct NetworkItemDroppedBroadcast
+    {
+        public uint SourceBagNetworkId;
+        public NetworkRuntimeItem Item;
+        public Vector3 Position;
+    }
+
+    /// <summary>
+    /// Broadcast when a previously dropped world item is picked up or otherwise removed.
+    /// </summary>
+    [Serializable]
+    public struct NetworkDroppedItemRemovedBroadcast
+    {
+        public uint SourceBagNetworkId;
+        public long RuntimeIdHash;
+        public Vector3 Position;
+    }
     
     /// <summary>
     /// Broadcast when item is moved within bag.
@@ -788,6 +810,9 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public uint CorrelationId;
         public uint PickerBagNetworkId;
         public uint PropNetworkId;                 // NetworkId of the Prop object
+        public uint SourceBagNetworkId;            // Bag that originally dropped/spawned the prop
+        public long RuntimeIdHash;                 // Runtime item represented by the dropped prop
+        public Vector2Int DestinationPosition;
     }
     
     /// <summary>

@@ -30,7 +30,7 @@ namespace Arawn.EnemyMasses.Editor.GameCreator2
         private SerializedProperty m_UseLagCompensation;
         private SerializedProperty m_UseAnimationSync;
         private SerializedProperty m_UseCoreNetworking;
-        
+        private SerializedProperty m_PreRegisteredAnimationClips;        
         private SerializedProperty m_DisableVisualsOnServer;
         private SerializedProperty m_DisableAudioOnServer;
         
@@ -60,6 +60,7 @@ namespace Arawn.EnemyMasses.Editor.GameCreator2
             m_UseLagCompensation = serializedObject.FindProperty("m_UseLagCompensation");
             m_UseAnimationSync = serializedObject.FindProperty("m_UseAnimationSync");
             m_UseCoreNetworking = serializedObject.FindProperty("m_UseCoreNetworking");
+            m_PreRegisteredAnimationClips = serializedObject.FindProperty("m_PreRegisteredAnimationClips");
             
             m_DisableVisualsOnServer = serializedObject.FindProperty("m_DisableVisualsOnServer");
             m_DisableAudioOnServer = serializedObject.FindProperty("m_DisableAudioOnServer");
@@ -242,6 +243,16 @@ namespace Arawn.EnemyMasses.Editor.GameCreator2
             
             EditorGUILayout.PropertyField(m_UseAnimationSync, new GUIContent("Use Animation Sync",
                 "Auto-create UnitAnimimNetworkController for States and Gestures sync (attack anims, emotes, etc.)"));
+            
+            if (m_UseAnimationSync.boolValue)
+            {
+                EditorGUI.indentLevel++;
+                EditorGUILayout.PropertyField(m_PreRegisteredAnimationClips, new GUIContent("Pre Registered Clips",
+                    "Animation clips to pre-register at startup so remote peers can resolve broadcast hashes " +
+                    "(e.g., dash gesture clips referenced by a Network Dash instruction). Drop any clips that " +
+                    "are referenced only by instruction assets here so every peer can play them."), true);
+                EditorGUI.indentLevel--;
+            }
             
             EditorGUILayout.PropertyField(m_UseCoreNetworking, new GUIContent("Use Core Networking",
                 "Auto-create NetworkCoreController for Ragdoll, Props, Invincibility, Poise, and Busy synchronization"));

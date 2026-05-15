@@ -206,9 +206,11 @@ namespace Arawn.GameCreator2.Networking
             Vector3 direction = GetLocalDirection();
             float desiredYaw = Mathf.Atan2(direction.x, direction.z) * Mathf.Rad2Deg;
             
-            // Send request to server if angle changed significantly
-            float angleDelta = Mathf.Abs(Mathf.DeltaAngle(m_LastSentYaw, desiredYaw));
-            if (angleDelta >= m_MinAngleChange)
+            // Send a new target when input changes, then keep requesting while the
+            // validated server yaw is still catching up to that target.
+            float requestedDelta = Mathf.Abs(Mathf.DeltaAngle(m_LastSentYaw, desiredYaw));
+            float serverDelta = Mathf.Abs(Mathf.DeltaAngle(m_ServerYaw, desiredYaw));
+            if (requestedDelta >= m_MinAngleChange || serverDelta >= m_MinAngleChange)
             {
                 m_LastSentYaw = desiredYaw;
                 m_NetworkCharacter.RequestFacingUpdate(desiredYaw);

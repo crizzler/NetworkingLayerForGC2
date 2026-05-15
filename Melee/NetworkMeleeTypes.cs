@@ -7,6 +7,14 @@ using GameCreator.Runtime.Melee;
 
 namespace Arawn.GameCreator2.Networking.Melee
 {
+    public static class NetworkMeleeDebug
+    {
+        public static bool ForceSkillDiagnostics = false;
+        public static bool ForcePacketDiagnostics = false;
+        public static bool ForceInputLockDiagnostics = false;
+        public static bool ForceReactionDiagnostics = true;
+    }
+
     /// <summary>
     /// Network-optimized data types for GC2 Melee synchronization.
     /// </summary>
@@ -38,7 +46,7 @@ namespace Arawn.GameCreator2.Networking.Melee
         /// <summary>Hit point (compressed world position).</summary>
         public Vector3 HitPoint;
         
-        /// <summary>Strike direction (compressed normal).</summary>
+        /// <summary>Strike direction in the target's local space, matching GC2 ReactionInput/ShieldInput.</summary>
         public Vector3 StrikeDirection;
         
         /// <summary>Hash of the skill being used.</summary>
@@ -149,7 +157,7 @@ namespace Arawn.GameCreator2.Networking.Melee
         /// <summary>Hash of the equipped weapon.</summary>
         public int WeaponHash;
         
-        /// <summary>Current combo node ID.</summary>
+        /// <summary>Current opaque GC2 combo node ID.</summary>
         public short ComboNodeId;
         
         /// <summary>Current attack phase.</summary>
@@ -204,7 +212,7 @@ namespace Arawn.GameCreator2.Networking.Melee
         /// <summary>Hash of the weapon to use.</summary>
         public int WeaponHash;
 
-        /// <summary>Client-observed combo node id used for monotonic combo validation.</summary>
+        /// <summary>Client-observed opaque GC2 combo node id.</summary>
         public short ComboNodeId;
         
         /// <summary>Input key used.</summary>
@@ -258,6 +266,13 @@ namespace Arawn.GameCreator2.Networking.Melee
         public bool IsShieldRaised => (ShieldFlags & SHIELD_RAISED) != 0;
         public bool InParryWindow => (ShieldFlags & SHIELD_PARRY_WINDOW) != 0;
         public bool IsShieldBroken => (ShieldFlags & SHIELD_BROKEN) != 0;
+
+        public static NetworkMeleeWeaponState None => new NetworkMeleeWeaponState
+        {
+            WeaponHash = 0,
+            ShieldFlags = 0,
+            BlockTiming = 0
+        };
     }
     
     // ════════════════════════════════════════════════════════════════════════════════════════════
@@ -265,7 +280,7 @@ namespace Arawn.GameCreator2.Networking.Melee
     // ════════════════════════════════════════════════════════════════════════════════════════════
     
     /// <summary>
-    /// Network reaction broadcast. (~16 bytes)
+    /// Network reaction broadcast. (~17 bytes)
     /// </summary>
     [Serializable]
     public struct NetworkReactionBroadcast
@@ -279,25 +294,38 @@ namespace Arawn.GameCreator2.Networking.Melee
         /// <summary>Hash of the reaction to play.</summary>
         public int ReactionHash;
         
-        /// <summary>Reaction direction (compressed: 0-255 maps to -180 to 180 degrees).</summary>
+        /// <summary>Reaction horizontal yaw (compressed: 0-255 maps to -180 to 180 degrees).</summary>
         public byte Direction;
+
+        /// <summary>Reaction vertical component (compressed: 0-255 maps to -1 to 1).</summary>
+        public byte DirectionY;
         
         /// <summary>Reaction power (compressed: 0-255 maps to 0-10 power).</summary>
         public byte Power;
         
-        /// <summary>Convert direction angle to compressed byte.</summary>
+        /// <summary>Convert direction horizontal yaw to compressed byte.</summary>
         public static byte CompressDirection(Vector3 direction)
         {
             if (direction.sqrMagnitude < 0.001f) return 128; // Forward
             float angle = Mathf.Atan2(direction.x, direction.z) * Mathf.Rad2Deg;
             return (byte)Mathf.RoundToInt((angle + 180f) / 360f * 255f);
         }
+
+        /// <summary>Convert direction vertical component to compressed byte.</summary>
+        public static byte CompressDirectionY(Vector3 direction)
+        {
+            if (direction.sqrMagnitude < 0.001f) return 128;
+            float y = Mathf.Clamp(direction.normalized.y, -1f, 1f);
+            return (byte)Mathf.Clamp(Mathf.RoundToInt((y + 1f) * 0.5f * 255f), 0, 255);
+        }
         
-        /// <summary>Decompress direction byte to normalized vector.</summary>
+        /// <summary>Decompress direction bytes to normalized vector.</summary>
         public Vector3 GetDirection()
         {
             float angle = (Direction / 255f * 360f - 180f) * Mathf.Deg2Rad;
-            return new Vector3(Mathf.Sin(angle), 0f, Mathf.Cos(angle));
+            float y = Mathf.Clamp(DirectionY / 255f * 2f - 1f, -1f, 1f);
+            float horizontal = Mathf.Sqrt(Mathf.Max(0f, 1f - y * y));
+            return new Vector3(Mathf.Sin(angle) * horizontal, y, Mathf.Cos(angle) * horizontal);
         }
         
         /// <summary>Compress power (0-10 range) to byte.</summary>

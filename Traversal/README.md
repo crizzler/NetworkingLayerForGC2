@@ -17,6 +17,13 @@ Patch menu:
 
 - `NetworkTraversalManager`
 - `NetworkTraversalController` (requires `Character` + `NetworkCharacter`)
+- `PurrNetTraversalTransportBridge` when using PurrNet
+
+## PurrNet Scene Setup Wizard
+
+For PurrNet projects, enable **Traversal** on the PurrNet wizard Modules page. The wizard creates/reuses `NetworkTraversalManager` and `PurrNetTraversalTransportBridge`.
+
+When a Player Prefab is assigned on the Scene page and prefab preparation is enabled, selecting Traversal adds `NetworkTraversalController` to that prefab.
 
 ## Transport Wiring
 
