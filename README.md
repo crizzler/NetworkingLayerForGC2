@@ -83,7 +83,7 @@ Start here for transport wiring:
 - [Quickstart](https://arawn-software-publishing.gitbook.io/networking-layer-for-gc2/getting-started/quickstart)
 - [Public API](https://arawn-software-publishing.gitbook.io/networking-layer-for-gc2/getting-started/publish-your-docs)
 - [Patching Strategy](https://arawn-software-publishing.gitbook.io/networking-layer-for-gc2/misc/optional-patching-strategy)
-- [PurrNet Transport]([https://arawn-software-publishing.gitbook.io/networking-layer-for-gc2](https://arawn-software-publishing.gitbook.io/networking-layer-for-gc2/purrnet-overview))
+- [PurrNet Transport](https://arawn-software-publishing.gitbook.io/networking-layer-for-gc2](https://arawn-software-publishing.gitbook.io/networking-layer-for-gc2/purrnet-overview))
 - [Network Animation States](Documentation/network-animation-states.md)
 - [Network Dialogue](Documentation/network-dialogue.md)
 - [Network Quests](Documentation/network-quests.md)
