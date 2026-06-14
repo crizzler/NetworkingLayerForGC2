@@ -46,6 +46,12 @@ namespace Arawn.GameCreator2.Networking
         [NonSerialized] private float m_ExpectedMaxSpeed;
         [NonSerialized] private int m_SuppressedDuplicateInputs;
         [NonSerialized] private float m_LastMotionDiagnosticRealtime;
+        [NonSerialized] private float m_LastOwnerAuthorityPoseRealtime;
+        [NonSerialized] private float m_LastSuppressedExternalRootWriteRealtime;
+        [NonSerialized] private float m_LastAllowedExternalRootWriteRealtime;
+        [NonSerialized] private float m_LastExternalMoveDirectionRealtime;
+        [NonSerialized] private float m_LastExplicitMoveDirectionRealtime;
+        [NonSerialized] private bool m_PreserveExplicitMoveDirectionWhileTraversal;
         
         /// <summary>
         /// Maximum number of buffered inputs. Protects against memory growth from
@@ -55,6 +61,9 @@ namespace Arawn.GameCreator2.Networking
         private const float OWNER_AUTHORITY_POSITION_EPSILON = 0.005f;
         private const float OWNER_AUTHORITY_EXTRA_DISTANCE = 0.5f;
         private const float OWNER_AUTHORITY_ROOT_MOTION_THRESHOLD = 0.05f;
+        private const float OWNER_AUTHORITY_ROOT_WRITE_SUPPRESSION_SECONDS = 0.5f;
+        private const float EXTERNAL_MOVE_DIRECTION_SAMPLE_GRACE_SECONDS = 0.15f;
+        private const float EXPLICIT_MOVE_DIRECTION_SAMPLE_GRACE_SECONDS = 0.25f;
         
         [NonSerialized] protected int m_GroundFrame = -100;
         [NonSerialized] protected float m_GroundTime = -100f;
@@ -71,6 +80,24 @@ namespace Arawn.GameCreator2.Networking
         /// Fired when a speed violation is detected.
         /// </summary>
         public event Action<int> OnSpeedViolation;
+
+        /// <summary>
+        /// Fired after the server accepts an owner-authority pose sample. Optional modules
+        /// can use this to keep their own local pose state aligned with the accepted root.
+        /// </summary>
+        public static event Action<Character, Vector3> OwnerAuthorityPositionAccepted;
+
+        /// <summary>
+        /// Optional module hook. Return a non-empty reason to reject an owner-authority
+        /// pose sample before it is applied to the server transform.
+        /// </summary>
+        public static event Func<Character, Vector3, string> OwnerAuthorityPositionRejectionRequested;
+
+        /// <summary>
+        /// Optional module hook. Return a non-empty reason to allow an external root
+        /// SetPosition even while recent owner-authority poses would normally suppress it.
+        /// </summary>
+        public static event Func<Character, Vector3, string> ExternalRootPositionWriteAllowanceRequested;
 
         // INTERFACE PROPERTIES: ------------------------------------------------------------------
 
@@ -108,7 +135,17 @@ namespace Arawn.GameCreator2.Networking
 
         public void SetExternalMoveDirection(Vector3 velocity)
         {
+            SetExternalMoveDirection(velocity, false);
+        }
+
+        public void SetExternalMoveDirection(
+            Vector3 velocity,
+            bool preserveWhileTraversalLikeMotion)
+        {
             this.m_MoveDirection = velocity;
+            this.m_LastExplicitMoveDirectionRealtime = Time.realtimeSinceStartup;
+            this.m_PreserveExplicitMoveDirectionWhileTraversal =
+                preserveWhileTraversalLikeMotion && IsTraversalLikeAuthorityMotion();
         }
         
         public ushort LastProcessedInput => m_LastProcessedInput;
@@ -144,6 +181,12 @@ namespace Arawn.GameCreator2.Networking
             this.m_SpeedViolations = 0;
             this.m_SuppressedDuplicateInputs = 0;
             this.m_LastMotionDiagnosticRealtime = -100f;
+            this.m_LastOwnerAuthorityPoseRealtime = -100f;
+            this.m_LastSuppressedExternalRootWriteRealtime = -100f;
+            this.m_LastAllowedExternalRootWriteRealtime = -100f;
+            this.m_LastExternalMoveDirectionRealtime = -100f;
+            this.m_LastExplicitMoveDirectionRealtime = -100f;
+            this.m_PreserveExplicitMoveDirectionWhileTraversal = false;
             this.m_Controller = this.Character.GetComponent<CharacterController>();
             if (this.m_Controller == null)
             {
@@ -266,11 +309,67 @@ namespace Arawn.GameCreator2.Networking
             return $"({value.x:F3},{value.y:F3},{value.z:F3})";
         }
 
+        private static string FormatVector2(Vector2 value)
+        {
+            return $"({value.x:F3},{value.y:F3})";
+        }
+
+        private void LogTraversalPose(string message)
+        {
+            Debug.Log(
+                $"[TraversalPoseDebug][ServerDriver] {this.Character?.name ?? "Character"} " +
+                $"pos={FormatVector(this.Transform.position)} y={this.Transform.position.y:F3} " +
+                $"rotY={this.Transform.eulerAngles.y:F2} forward={FormatVector(this.Transform.forward)} " +
+                $"{message}",
+                this.Character);
+        }
+
+        private bool IsTraversalLikeAuthorityMotion()
+        {
+            if (this.Character == null) return false;
+            if (this.Character.RootMotionPosition > OWNER_AUTHORITY_ROOT_MOTION_THRESHOLD) return true;
+            return this.Character.Busy != null &&
+                   (this.Character.Busy.IsBusy || this.Character.Busy.AreLegsBusy);
+        }
+
+        private string FormatBusyState()
+        {
+            if (this.Character?.Busy == null) return "busy=null legsBusy=null";
+            return $"busy={this.Character.Busy.IsBusy} legsBusy={this.Character.Busy.AreLegsBusy}";
+        }
+
         private void ProcessSingleInput(NetworkInputState input, Transform cameraTransform)
         {
             Vector2 rawInput = input.GetInputDirection();
             float deltaTime = input.GetDeltaTime();
-            this.Transform.rotation = Quaternion.Euler(0f, input.GetRotationY(), 0f);
+            Vector3 positionBeforeInput = this.Transform.position;
+            float rotationYBeforeInput = this.Transform.eulerAngles.y;
+            float inputRotationY = input.GetRotationY();
+
+            if (input.HasOwnerAuthorityPosition)
+            {
+                Vector3 ownerPosition = input.GetOwnerAuthorityPosition();
+                LogTraversalPose(
+                    $"process-owner-authority-input-begin seq={input.sequenceNumber} dt={deltaTime:F3} " +
+                    $"rawInput={FormatVector2(rawInput)} inputRotY={inputRotationY:F2} " +
+                    $"before={FormatVector(positionBeforeInput)} beforeY={positionBeforeInput.y:F3} " +
+                    $"beforeRotY={rotationYBeforeInput:F2} ownerPos={FormatVector(ownerPosition)} " +
+                    $"ownerPosY={ownerPosition.y:F3} ownerDelta={FormatVector(ownerPosition - positionBeforeInput)} " +
+                    $"rootMotion={this.Character?.RootMotionPosition ?? 0f:F3} {FormatBusyState()}");
+            }
+
+            bool preserveExternalFacing = input.HasOwnerAuthorityPosition && IsTraversalLikeAuthorityMotion();
+            if (preserveExternalFacing)
+            {
+                LogTraversalPose(
+                    $"process-owner-authority-input-preserve-facing seq={input.sequenceNumber} " +
+                    $"inputRotY={inputRotationY:F2} currentRotY={this.Transform.eulerAngles.y:F2} " +
+                    $"rootMotion={this.Character?.RootMotionPosition ?? 0f:F3} {FormatBusyState()}");
+            }
+            else
+            {
+                this.Transform.rotation = Quaternion.Euler(0f, input.GetRotationY(), 0f);
+            }
             
             // Convert input to world direction
             Vector3 inputDirection = new Vector3(rawInput.x, 0f, rawInput.y);
@@ -319,7 +418,8 @@ namespace Arawn.GameCreator2.Networking
                 m_Controller.Move(totalMovement);
             }
 
-            if (TryApplyOwnerAuthorityPosition(input, deltaTime, out Vector3 ownerAuthorityDelta))
+            bool ownerAuthorityApplied = TryApplyOwnerAuthorityPosition(input, deltaTime, out Vector3 ownerAuthorityDelta);
+            if (ownerAuthorityApplied)
             {
                 translation = ownerAuthorityDelta;
             }
@@ -332,13 +432,29 @@ namespace Arawn.GameCreator2.Networking
                 m_GroundFrame = this.Character.Time.Frame;
             }
 
-            // Store move direction for animation
-            m_MoveDirection = translation / deltaTime;
+            // Store move direction for animation. GC2 Traversal drives the root through
+            // Driver.SetPosition/AddPosition outside the normal input simulation path; keep
+            // that externally recorded vector long enough for Animim to sample the climb axes.
+            if (!ShouldPreserveExternalMoveDirectionForAnimation())
+            {
+                m_MoveDirection = translation / deltaTime;
+            }
             
             // Update floor normal
             if (m_FloorNormal != null)
             {
                 m_FloorNormal.UpdateWithDelta(deltaTime);
+            }
+
+            if (input.HasOwnerAuthorityPosition)
+            {
+                LogTraversalPose(
+                    $"process-owner-authority-input-end seq={input.sequenceNumber} appliedOwnerPose={ownerAuthorityApplied} " +
+                    $"after={FormatVector(this.Transform.position)} afterY={this.Transform.position.y:F3} " +
+                    $"afterRotY={this.Transform.eulerAngles.y:F2} inputRotY={inputRotationY:F2} " +
+                    $"movedDelta={FormatVector(this.Transform.position - positionBeforeInput)} " +
+                    $"ownerDeltaApplied={FormatVector(ownerAuthorityDelta)} verticalSpeed={m_VerticalSpeed:F3} " +
+                    $"grounded={IsGrounded} rootMotion={this.Character?.RootMotionPosition ?? 0f:F3} {FormatBusyState()}");
             }
         }
 
@@ -355,14 +471,51 @@ namespace Arawn.GameCreator2.Networking
         {
             appliedDelta = Vector3.zero;
             if (!input.HasOwnerAuthorityPosition) return false;
-            if (!ShouldAcceptOwnerAuthorityPosition()) return false;
 
             Vector3 targetPosition = input.GetOwnerAuthorityPosition();
+            if (TryGetOwnerAuthorityPositionRejection(targetPosition, out string externalRejectionReason))
+            {
+                LogTraversalPose(
+                    $"owner-pose-rejected-external-hook seq={input.sequenceNumber} reason={externalRejectionReason} " +
+                    $"owner={FormatVector(targetPosition)} ownerY={targetPosition.y:F3} " +
+                    $"current={FormatVector(this.Transform.position)} currentY={this.Transform.position.y:F3} " +
+                    $"inputRotY={input.GetRotationY():F2} rootMotion={this.Character?.RootMotionPosition ?? 0f:F3} " +
+                    $"{FormatBusyState()}");
+                return false;
+            }
+
+            if (!ShouldAcceptOwnerAuthorityPosition(out string gateReason))
+            {
+                string busy = this.Character?.Busy != null
+                    ? this.Character.Busy.IsBusy.ToString()
+                    : "null";
+                string legsBusy = this.Character?.Busy != null
+                    ? this.Character.Busy.AreLegsBusy.ToString()
+                    : "null";
+
+                TraceTraversalMotion(
+                    $"owner pose rejected by server gate seq={input.sequenceNumber} reason={gateReason} " +
+                    $"owner={FormatVector(input.GetOwnerAuthorityPosition())} current={FormatVector(this.Transform.position)} " +
+                    $"rootMotion={this.Character?.RootMotionPosition ?? 0f:F3} " +
+                    $"busy={busy} legsBusy={legsBusy}");
+                LogTraversalPose(
+                    $"owner-pose-rejected-gate seq={input.sequenceNumber} reason={gateReason} " +
+                    $"owner={FormatVector(input.GetOwnerAuthorityPosition())} ownerY={input.GetOwnerAuthorityPosition().y:F3} " +
+                    $"current={FormatVector(this.Transform.position)} currentY={this.Transform.position.y:F3} " +
+                    $"inputRotY={input.GetRotationY():F2} {FormatBusyState()}");
+                return false;
+            }
+
             Vector3 currentPosition = this.Transform.position;
             Vector3 delta = targetPosition - currentPosition;
             float distance = delta.magnitude;
 
-            if (distance <= OWNER_AUTHORITY_POSITION_EPSILON) return false;
+            if (distance <= OWNER_AUTHORITY_POSITION_EPSILON)
+            {
+                MarkOwnerAuthorityPoseReceived();
+                NotifyOwnerAuthorityPositionAccepted(targetPosition);
+                return false;
+            }
 
             float speed = this.Character.Motion.LinearSpeed;
             float maxKineticDistance = speed * m_Config.maxSpeedMultiplier * deltaTime + OWNER_AUTHORITY_EXTRA_DISTANCE;
@@ -372,6 +525,15 @@ namespace Arawn.GameCreator2.Networking
             {
                 m_SpeedViolations++;
                 OnSpeedViolation?.Invoke(m_SpeedViolations);
+                TraceTraversalMotion(
+                    $"owner pose rejected by server distance seq={input.sequenceNumber} distance={distance:F3} " +
+                    $"max={maxAuthorityDistance:F3} current={FormatVector(currentPosition)} " +
+                    $"owner={FormatVector(targetPosition)} speedViolations={m_SpeedViolations}");
+                LogTraversalPose(
+                    $"owner-pose-rejected-distance seq={input.sequenceNumber} distance={distance:F3} " +
+                    $"max={maxAuthorityDistance:F3} current={FormatVector(currentPosition)} currentY={currentPosition.y:F3} " +
+                    $"owner={FormatVector(targetPosition)} ownerY={targetPosition.y:F3} " +
+                    $"inputRotY={input.GetRotationY():F2} speedViolations={m_SpeedViolations}");
                 LogServerMotionDiagnostic(
                     $"rejected owner authority position seq={input.sequenceNumber} distance={distance:F3} " +
                     $"max={maxAuthorityDistance:F3} current={FormatVector(currentPosition)} owner={FormatVector(targetPosition)}",
@@ -391,6 +553,19 @@ namespace Arawn.GameCreator2.Networking
             }
 
             appliedDelta = delta;
+            MarkOwnerAuthorityPoseReceived();
+            NotifyOwnerAuthorityPositionAccepted(targetPosition);
+            TraceTraversalMotion(
+                $"owner pose accepted by server seq={input.sequenceNumber} distance={distance:F3} " +
+                $"from={FormatVector(currentPosition)} to={FormatVector(targetPosition)} " +
+                $"rootMotion={this.Character.RootMotionPosition:F3} busy={this.Character.Busy.IsBusy} " +
+                $"legsBusy={this.Character.Busy.AreLegsBusy}");
+            LogTraversalPose(
+                $"owner-pose-accepted seq={input.sequenceNumber} distance={distance:F3} " +
+                $"from={FormatVector(currentPosition)} fromY={currentPosition.y:F3} " +
+                $"to={FormatVector(targetPosition)} toY={targetPosition.y:F3} " +
+                $"delta={FormatVector(delta)} inputRotY={input.GetRotationY():F2} " +
+                $"rootMotion={this.Character?.RootMotionPosition ?? 0f:F3} {FormatBusyState()}");
             LogServerMotionDiagnostic(
                 $"accepted owner authority position seq={input.sequenceNumber} distance={distance:F3} " +
                 $"rootMotion={this.Character.RootMotionPosition:F3} busy={this.Character.Busy.IsBusy} " +
@@ -399,11 +574,109 @@ namespace Arawn.GameCreator2.Networking
             return true;
         }
 
-        private bool ShouldAcceptOwnerAuthorityPosition()
+        private void NotifyOwnerAuthorityPositionAccepted(Vector3 position)
         {
-            if (this.Character == null) return false;
-            if (this.Character.RootMotionPosition > OWNER_AUTHORITY_ROOT_MOTION_THRESHOLD) return true;
-            return this.Character.Busy != null && this.Character.Busy.IsBusy;
+            try
+            {
+                OwnerAuthorityPositionAccepted?.Invoke(this.Character, position);
+            }
+            catch (Exception exception)
+            {
+                Debug.LogError(
+                    $"[TraversalPoseDebug][ServerDriver] {this.Character?.name ?? "Character"} " +
+                    $"owner-authority-pose-accepted hook failed position={FormatVector(position)}: " +
+                    $"{exception.Message}\n{exception.StackTrace}",
+                    this.Character);
+            }
+        }
+
+        private bool TryGetOwnerAuthorityPositionRejection(Vector3 targetPosition, out string reason)
+        {
+            reason = string.Empty;
+            Delegate[] handlers = OwnerAuthorityPositionRejectionRequested?.GetInvocationList();
+            if (handlers == null) return false;
+
+            foreach (Delegate handler in handlers)
+            {
+                if (handler is not Func<Character, Vector3, string> rejectionProvider) continue;
+
+                try
+                {
+                    string candidateReason = rejectionProvider.Invoke(this.Character, targetPosition);
+                    if (string.IsNullOrEmpty(candidateReason)) continue;
+
+                    reason = candidateReason;
+                    return true;
+                }
+                catch (Exception exception)
+                {
+                    Debug.LogError(
+                        $"[TraversalPoseDebug][ServerDriver] {this.Character?.name ?? "Character"} " +
+                        $"owner-authority rejection hook failed target={FormatVector(targetPosition)}: " +
+                        $"{exception.Message}\n{exception.StackTrace}",
+                        this.Character);
+                }
+            }
+
+            return false;
+        }
+
+        private void MarkOwnerAuthorityPoseReceived()
+        {
+            m_LastOwnerAuthorityPoseRealtime = Time.realtimeSinceStartup;
+        }
+
+        private bool ShouldAcceptOwnerAuthorityPosition(out string reason)
+        {
+            reason = string.Empty;
+
+            if (this.Character == null)
+            {
+                reason = "missing-character";
+                return false;
+            }
+
+            if (this.Character.RootMotionPosition > OWNER_AUTHORITY_ROOT_MOTION_THRESHOLD)
+            {
+                reason = "root-motion";
+                return true;
+            }
+
+            if (this.Character.Busy == null)
+            {
+                reason = "missing-busy";
+                return false;
+            }
+
+            // GC2 Traversal marks the legs busy while MotionLink drives the root with
+            // Driver.AddPosition. Owner-authority pose sync is only present when an
+            // approved networking controller enables it, so accepting legs-busy motion
+            // lets connected clients traverse without server reconciliation fighting the
+            // link animation.
+            if (this.Character.Busy.IsBusy)
+            {
+                reason = "character-busy";
+                return true;
+            }
+
+            if (this.Character.Busy.AreLegsBusy)
+            {
+                reason = "legs-busy";
+                return true;
+            }
+
+            reason = "not-root-motion-or-busy";
+            return false;
+        }
+
+        private void TraceTraversalMotion(string message)
+        {
+            if (!m_LogMotionDiagnostics) return;
+
+            Debug.Log(
+                $"[TraversalTrace][ServerDriver] {this.Character?.name ?? "Character"} " +
+                $"pos={FormatVector(this.Transform.position)} {message}",
+                this.Character);
         }
 
         private void UpdateGravity(float deltaTime)
@@ -470,14 +743,28 @@ namespace Arawn.GameCreator2.Networking
 
         private NetworkPositionState CreateCurrentState()
         {
-            return NetworkPositionState.Create(
+            NetworkPositionState state = NetworkPositionState.Create(
                 this.Transform.position,
                 this.Transform.eulerAngles.y,
                 m_VerticalSpeed,
                 m_LastProcessedInput,
                 IsGrounded,
-                m_VerticalSpeed > 0
+                m_VerticalSpeed > 0,
+                m_MoveDirection
             );
+
+            if (IsTraversalLikeAuthorityMotion())
+            {
+                LogTraversalPose(
+                    $"produce-authoritative-state seq={state.lastProcessedInput} " +
+                    $"statePos={FormatVector(state.GetPosition())} stateY={state.GetPosition().y:F3} " +
+                    $"stateRotY={state.GetRotationY():F2} verticalSpeed={state.GetVerticalVelocity():F3} " +
+                    $"moveVelocity={FormatVector(state.GetMoveVelocity())} " +
+                    $"flags=0x{state.flags:X2} grounded={state.IsGrounded} jumping={state.IsJumping} " +
+                    $"rootMotion={this.Character?.RootMotionPosition ?? 0f:F3} {FormatBusyState()}");
+            }
+
+            return state;
         }
         
         /// <summary>
@@ -532,17 +819,109 @@ namespace Arawn.GameCreator2.Networking
 
         public override void SetPosition(Vector3 position, bool teleport = false)
         {
+            Vector3 rootPosition = ToRootPosition(position);
+            if (!teleport && ShouldSuppressExternalRootPositionWrite(rootPosition))
+            {
+                return;
+            }
+
+            Vector3 before = this.Transform.position;
+
             if (m_Controller != null)
             {
                 m_Controller.enabled = false;
-                this.Transform.position = position;
+                this.Transform.position = rootPosition;
                 m_Controller.enabled = true;
             }
             else
             {
-                this.Transform.position = position;
+                this.Transform.position = rootPosition;
+            }
+
+            if (!teleport)
+            {
+                RecordExternalMoveVelocity(before);
             }
         }
+
+        private Vector3 ToRootPosition(Vector3 driverPosition)
+        {
+            float halfHeight = this.Character != null
+                ? this.Character.Motion.Height * 0.5f
+                : 0f;
+
+            return driverPosition + Vector3.up * halfHeight;
+        }
+
+        private bool ShouldSuppressExternalRootPositionWrite(Vector3 position)
+        {
+            if (!IsRecentOwnerAuthorityPoseActive) return false;
+            if (!IsTraversalLikeAuthorityMotion()) return false;
+
+            float now = Time.realtimeSinceStartup;
+            if (TryGetExternalRootPositionWriteAllowance(position, out string allowReason))
+            {
+                if (now - m_LastAllowedExternalRootWriteRealtime >= 0.25f)
+                {
+                    LogTraversalPose(
+                        $"allowed-external-set-position reason={allowReason} target={FormatVector(position)} " +
+                        $"targetY={position.y:F3} current={FormatVector(this.Transform.position)} " +
+                        $"currentY={this.Transform.position.y:F3} " +
+                        $"ownerAuthorityAge={(now - m_LastOwnerAuthorityPoseRealtime):F3} " +
+                        $"rootMotion={this.Character?.RootMotionPosition ?? 0f:F3} {FormatBusyState()}");
+                    m_LastAllowedExternalRootWriteRealtime = now;
+                }
+
+                return false;
+            }
+
+            if (now - m_LastSuppressedExternalRootWriteRealtime >= 0.25f)
+            {
+                LogTraversalPose(
+                    $"suppressed-external-set-position target={FormatVector(position)} " +
+                    $"targetY={position.y:F3} current={FormatVector(this.Transform.position)} " +
+                    $"currentY={this.Transform.position.y:F3} " +
+                    $"ownerAuthorityAge={(now - m_LastOwnerAuthorityPoseRealtime):F3} " +
+                    $"rootMotion={this.Character?.RootMotionPosition ?? 0f:F3} {FormatBusyState()}");
+                m_LastSuppressedExternalRootWriteRealtime = now;
+            }
+
+            return true;
+        }
+
+        private bool TryGetExternalRootPositionWriteAllowance(Vector3 position, out string reason)
+        {
+            reason = string.Empty;
+            Delegate[] handlers = ExternalRootPositionWriteAllowanceRequested?.GetInvocationList();
+            if (handlers == null) return false;
+
+            foreach (Delegate handler in handlers)
+            {
+                if (handler is not Func<Character, Vector3, string> allowanceProvider) continue;
+
+                try
+                {
+                    string candidateReason = allowanceProvider.Invoke(this.Character, position);
+                    if (string.IsNullOrEmpty(candidateReason)) continue;
+
+                    reason = candidateReason;
+                    return true;
+                }
+                catch (Exception exception)
+                {
+                    Debug.LogError(
+                        $"[TraversalPoseDebug][ServerDriver] {this.Character?.name ?? "Character"} " +
+                        $"external root write allowance hook failed target={FormatVector(position)}: " +
+                        $"{exception.Message}\n{exception.StackTrace}",
+                        this.Character);
+                }
+            }
+
+            return false;
+        }
+
+        private bool IsRecentOwnerAuthorityPoseActive =>
+            Time.realtimeSinceStartup - m_LastOwnerAuthorityPoseRealtime <= OWNER_AUTHORITY_ROOT_WRITE_SUPPRESSION_SECONDS;
 
         public override void SetRotation(Quaternion rotation)
         {
@@ -566,6 +945,8 @@ namespace Arawn.GameCreator2.Networking
 
         private void RecordExternalMoveVelocity(Vector3 before)
         {
+            if (ShouldPreserveExplicitMoveDirectionForAnimation()) return;
+
             float deltaTime = this.Character != null
                 ? this.Character.Time.DeltaTime
                 : Time.deltaTime;
@@ -577,6 +958,29 @@ namespace Arawn.GameCreator2.Networking
             if (actualDelta.sqrMagnitude <= 0.0000001f) return;
 
             this.m_MoveDirection = actualDelta / deltaTime;
+            this.m_LastExternalMoveDirectionRealtime = Time.realtimeSinceStartup;
+        }
+
+        private bool ShouldPreserveExternalMoveDirectionForAnimation()
+        {
+            if (ShouldPreserveExplicitMoveDirectionForAnimation()) return true;
+            if (!IsTraversalLikeAuthorityMotion()) return false;
+            return Time.realtimeSinceStartup - m_LastExternalMoveDirectionRealtime <=
+                   EXTERNAL_MOVE_DIRECTION_SAMPLE_GRACE_SECONDS;
+        }
+
+        private bool ShouldPreserveExplicitMoveDirectionForAnimation()
+        {
+            if (!IsTraversalLikeAuthorityMotion())
+            {
+                m_PreserveExplicitMoveDirectionWhileTraversal = false;
+                return false;
+            }
+
+            if (m_PreserveExplicitMoveDirectionWhileTraversal) return true;
+
+            return Time.realtimeSinceStartup - m_LastExplicitMoveDirectionRealtime <=
+                   EXPLICIT_MOVE_DIRECTION_SAMPLE_GRACE_SECONDS;
         }
 
         public override void AddRotation(Quaternion amount)

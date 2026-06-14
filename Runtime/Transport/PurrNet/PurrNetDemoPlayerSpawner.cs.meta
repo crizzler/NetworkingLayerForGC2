@@ -1,0 +1,18 @@
+fileFormatVersion: 2
+guid: a6b4c5f88bd44b01ab8fc803ed595b08
+MonoImporter:
+  externalObjects: {}
+  serializedVersion: 2
+  defaultReferences: []
+  executionOrder: 0
+  icon: {instanceID: 0}
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 379492
+  packageName: Multiplayer Integration for Game Creator 2 with PurrNet
+  packageVersion: 1.4.0
+  assetPath: Assets/Arawn/NetworkingLayerForGC2/Runtime/Transport/PurrNet/PurrNetDemoPlayerSpawner.cs
+  uploadId: 925150

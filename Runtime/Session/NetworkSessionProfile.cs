@@ -158,7 +158,7 @@ namespace Arawn.GameCreator2.Networking
             {
                 case NetworkSessionPreset.Duel:
                     serverSimulationRate = 60;
-                    serverStateBroadcastRate = 30;
+                    serverStateBroadcastRate = 60;
                     relevanceUpdateRate = 8f;
                     inputSendRate = 60;
                     inputRedundancy = 3;
@@ -173,18 +173,21 @@ namespace Arawn.GameCreator2.Networking
                     enableDistanceCulling = false;
                     cullDistance = 140f;
                     culledKeepAliveRate = 0f;
+                    near.stateApplyRate = 60;
                     near.syncIK = true;
                     near.syncAnimation = true;
                     near.syncCore = true;
                     near.syncCombat = true;
                     near.animationStateRate = 12f;
                     near.animationGestureRate = 24f;
+                    mid.stateApplyRate = 30;
                     mid.syncIK = true;
                     mid.syncAnimation = true;
                     mid.syncCore = true;
                     mid.syncCombat = true;
                     mid.animationStateRate = 10f;
                     mid.animationGestureRate = 18f;
+                    far.stateApplyRate = 15;
                     far.syncIK = false;
                     far.syncAnimation = true;
                     far.syncCore = true;

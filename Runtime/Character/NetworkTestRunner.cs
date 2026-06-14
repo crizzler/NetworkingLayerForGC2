@@ -199,6 +199,18 @@ namespace Arawn.GameCreator2.Networking
             Assert("PosState: grounded flag", state.IsGrounded);
             Assert("PosState: not jumping", !state.IsJumping);
             Assert("PosState: lastInput", state.lastProcessedInput == 42);
+
+            var velocityState = NetworkPositionState.Create(
+                Vector3.zero,
+                rotationY: 0f,
+                verticalVel: 0f,
+                lastInput: 43,
+                isGrounded: false,
+                isJumping: false,
+                moveVelocity: new Vector3(1f, 2f, -3f));
+            Vector3 velocity = velocityState.GetMoveVelocity();
+            Assert("PosState: move velocity flag", velocityState.HasMoveVelocity);
+            Assert("PosState: move velocity round-trip", Vector3.Distance(velocity, new Vector3(1f, 2f, -3f)) < 0.02f);
         }
 
         private void TestInputStateRoundTrip()

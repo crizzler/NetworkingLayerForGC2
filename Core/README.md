@@ -20,7 +20,7 @@ Server-authoritative networking for Game Creator 2 Core character features.
 For PurrNet projects, open `Game Creator > Networking Layer > PurrNet Scene Setup Wizard`.
 Core, Variables, Animation, and Motion are always included. The wizard creates/reuses `NetworkSecurityManager`, `NetworkCoreManager`, `NetworkAnimationManager`, `NetworkMotionManager`, `NetworkVariableManager`, `PurrNetTransportBridge`, `PurrNetVariableTransportBridge`, and `PurrNetAnimationMotionTransportBridge`.
 
-If a Player Prefab is assigned on the Scene page and prefab preparation is enabled, the wizard adds `NetworkIdentity`, `NetworkCharacter`, `PurrNetNetworkCharacterAuto`, network-ready GC2 character units, optional local-variable sync, and optional pre-registered Network State/Dash/Gesture clips.
+If a Player Prefab is assigned on the Scene page and prefab preparation is enabled, the wizard adds `NetworkIdentity`, `NetworkCharacter`, `PurrNetNetworkCharacterAuto`, network-ready GC2 character units, optional local-variable sync, and optional pre-registered Network Dash/Gesture clips.
 
 ## Architecture
 

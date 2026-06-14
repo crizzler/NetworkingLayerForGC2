@@ -769,14 +769,25 @@ namespace Arawn.GameCreator2.Networking
 
         public override void SetPosition(Vector3 position, bool teleport = false)
         {
+            Vector3 rootPosition = ToRootPosition(position);
+
             if (teleport)
             {
-                TeleportTo(position, this.Transform.eulerAngles.y);
+                TeleportTo(rootPosition, this.Transform.eulerAngles.y);
             }
             else
             {
-                this.Transform.position = position;
+                this.Transform.position = rootPosition;
             }
+        }
+
+        private Vector3 ToRootPosition(Vector3 driverPosition)
+        {
+            float halfHeight = this.Character != null
+                ? this.Character.Motion.Height * 0.5f
+                : 0f;
+
+            return driverPosition + Vector3.up * halfHeight;
         }
 
         public override void SetRotation(Quaternion rotation)

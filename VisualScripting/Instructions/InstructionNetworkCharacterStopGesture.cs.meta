@@ -1,2 +1,9 @@
 fileFormatVersion: 2
 guid: 70f977ed39222ef779f4dfc5e30b21bf
+AssetOrigin:
+  serializedVersion: 1
+  productId: 379492
+  packageName: Multiplayer Integration for Game Creator 2 with PurrNet
+  packageVersion: 1.4.0
+  assetPath: Assets/Arawn/NetworkingLayerForGC2/VisualScripting/Instructions/InstructionNetworkCharacterStopGesture.cs
+  uploadId: 925150

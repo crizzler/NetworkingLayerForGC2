@@ -432,9 +432,9 @@ namespace Arawn.GameCreator2.Networking
             Vector3 target = command.GetTargetPosition();
             
             // Validate warp target is on NavMesh
-            if (NavMesh.SamplePosition(target, out NavMeshHit hit, 2f, NavMesh.AllAreas))
+            if (TryResolveNavMeshRootPosition(target, 2f, out Vector3 rootPosition, out _))
             {
-                m_Agent.Warp(hit.position);
+                m_Agent.Warp(rootPosition);
                 m_Agent.isStopped = true;
                 m_Agent.velocity = Vector3.zero;
                 
@@ -442,7 +442,7 @@ namespace Arawn.GameCreator2.Networking
                 m_CurrentCornerIndex = 0;
                 
                 OnPathStateReady?.Invoke(NetworkNavMeshPathState.CreateNoPath(
-                    hit.position,
+                    rootPosition,
                     this.Transform.eulerAngles.y,
                     command.Sequence
                 ));
@@ -603,6 +603,61 @@ namespace Arawn.GameCreator2.Networking
 
         // HELPER METHODS: ------------------------------------------------------------------------
 
+        private float HalfHeight => this.Character != null
+            ? this.Character.Motion.Height * 0.5f
+            : 0f;
+
+        private bool TryResolveNavMeshRootPosition(
+            Vector3 requestedPosition,
+            float sampleDistance,
+            out Vector3 rootPosition,
+            out Vector3 surfacePosition)
+        {
+            float halfHeight = HalfHeight;
+            float distance = Mathf.Max(0.25f, sampleDistance);
+            float verticalTolerance = Mathf.Max(0.1f, this.SkinWidth * 2f);
+
+            if (TrySampleNavMeshSurface(requestedPosition, distance, verticalTolerance, out NavMeshHit surfaceHit))
+            {
+                surfacePosition = surfaceHit.position;
+                rootPosition = surfacePosition + Vector3.up * halfHeight;
+                return true;
+            }
+
+            Vector3 potentialSurface = requestedPosition - Vector3.up * halfHeight;
+            if (TrySampleNavMeshSurface(potentialSurface, distance, verticalTolerance, out surfaceHit))
+            {
+                surfacePosition = surfaceHit.position;
+                rootPosition = surfacePosition + Vector3.up * halfHeight;
+                return true;
+            }
+
+            if (NavMesh.SamplePosition(requestedPosition, out surfaceHit, distance, NavMesh.AllAreas))
+            {
+                surfacePosition = surfaceHit.position;
+                rootPosition = surfacePosition + Vector3.up * halfHeight;
+                return true;
+            }
+
+            surfacePosition = requestedPosition - Vector3.up * halfHeight;
+            rootPosition = requestedPosition;
+            return false;
+        }
+
+        private static bool TrySampleNavMeshSurface(
+            Vector3 position,
+            float sampleDistance,
+            float verticalTolerance,
+            out NavMeshHit hit)
+        {
+            if (!NavMesh.SamplePosition(position, out hit, sampleDistance, NavMesh.AllAreas))
+            {
+                return false;
+            }
+
+            return Mathf.Abs(position.y - hit.position.y) <= verticalTolerance;
+        }
+
         private static bool IsSequenceNewer(ushort a, ushort b)
         {
             return (short)(a - b) > 0;
@@ -612,8 +667,22 @@ namespace Arawn.GameCreator2.Networking
 
         public override void SetPosition(Vector3 position, bool teleport = false)
         {
-            position += Vector3.up * (this.Character.Motion.Height * 0.5f);
+            if (this.m_Agent == null)
+            {
+                this.Transform.position = position;
+                return;
+            }
+
+            float sampleDistance = Mathf.Max(2f, HalfHeight + 0.5f);
+            if (TryResolveNavMeshRootPosition(position, sampleDistance, out Vector3 rootPosition, out _))
+            {
+                this.m_Agent.Warp(rootPosition);
+                this.m_LastSentPosition = rootPosition;
+                return;
+            }
+
             this.m_Agent.Warp(position);
+            this.m_LastSentPosition = position;
         }
 
         public override void SetRotation(Quaternion rotation)

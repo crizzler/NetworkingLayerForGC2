@@ -150,7 +150,7 @@ namespace Arawn.GameCreator2.Networking
     /// <summary>
     /// Compressed position state for network transmission.
     /// Uses fixed-point encoding for position (supports -32768 to 32767 range with 0.01 precision).
-    /// Total size: 14 bytes (vs 28+ bytes for raw position + velocity)
+    /// Total size: 25 bytes (vs 40 bytes for raw position + rotation + velocity)
     /// </summary>
     [Serializable]
     public struct NetworkPositionState : IEquatable<NetworkPositionState>
@@ -165,6 +165,12 @@ namespace Arawn.GameCreator2.Networking
         
         // Vertical velocity encoded (multiply by 100)
         public short verticalVelocity;
+
+        // Authoritative move velocity encoded (multiply by 100). This is used by
+        // remote animation parameters; position/rotation remain snapshot-driven.
+        public short moveVelocityX;
+        public short moveVelocityY;
+        public short moveVelocityZ;
         
         // Flags: IsGrounded(1), IsJumping(2), IsDashing(4), etc.
         public byte flags;
@@ -176,6 +182,7 @@ namespace Arawn.GameCreator2.Networking
         public const byte FLAG_JUMPING = 2;
         public const byte FLAG_DASHING = 4;
         public const byte FLAG_SPRINTING = 8;
+        public const byte FLAG_HAS_MOVE_VELOCITY = 16;
         
         /// <summary>
         /// Creates a compressed position state.
@@ -188,9 +195,53 @@ namespace Arawn.GameCreator2.Networking
             bool isGrounded,
             bool isJumping)
         {
+            return Create(
+                position,
+                rotationY,
+                verticalVel,
+                lastInput,
+                isGrounded,
+                isJumping,
+                Vector3.zero,
+                false
+            );
+        }
+
+        public static NetworkPositionState Create(
+            Vector3 position,
+            float rotationY,
+            float verticalVel,
+            ushort lastInput,
+            bool isGrounded,
+            bool isJumping,
+            Vector3 moveVelocity)
+        {
+            return Create(
+                position,
+                rotationY,
+                verticalVel,
+                lastInput,
+                isGrounded,
+                isJumping,
+                moveVelocity,
+                true
+            );
+        }
+
+        private static NetworkPositionState Create(
+            Vector3 position,
+            float rotationY,
+            float verticalVel,
+            ushort lastInput,
+            bool isGrounded,
+            bool isJumping,
+            Vector3 moveVelocity,
+            bool hasMoveVelocity)
+        {
             byte flags = 0;
             if (isGrounded) flags |= FLAG_GROUNDED;
             if (isJumping) flags |= FLAG_JUMPING;
+            if (hasMoveVelocity) flags |= FLAG_HAS_MOVE_VELOCITY;
             
             return new NetworkPositionState
             {
@@ -199,6 +250,9 @@ namespace Arawn.GameCreator2.Networking
                 positionZ = Mathf.RoundToInt(position.z * 100f),
                 rotationY = (ushort)(Mathf.Repeat(rotationY, 360f) / 360f * 65535f),
                 verticalVelocity = (short)Mathf.Clamp(verticalVel * 100f, -32767f, 32767f),
+                moveVelocityX = (short)Mathf.Clamp(moveVelocity.x * 100f, -32767f, 32767f),
+                moveVelocityY = (short)Mathf.Clamp(moveVelocity.y * 100f, -32767f, 32767f),
+                moveVelocityZ = (short)Mathf.Clamp(moveVelocity.z * 100f, -32767f, 32767f),
                 flags = flags,
                 lastProcessedInput = lastInput
             };
@@ -227,10 +281,20 @@ namespace Arawn.GameCreator2.Networking
         {
             return verticalVelocity / 100f;
         }
+
+        public Vector3 GetMoveVelocity()
+        {
+            return new Vector3(
+                moveVelocityX / 100f,
+                moveVelocityY / 100f,
+                moveVelocityZ / 100f
+            );
+        }
         
         public bool IsGrounded => (flags & FLAG_GROUNDED) != 0;
         public bool IsJumping => (flags & FLAG_JUMPING) != 0;
         public bool IsDashing => (flags & FLAG_DASHING) != 0;
+        public bool HasMoveVelocity => (flags & FLAG_HAS_MOVE_VELOCITY) != 0;
         
         public bool Equals(NetworkPositionState other)
         {
@@ -312,7 +376,7 @@ namespace Arawn.GameCreator2.Networking
             {
                 position = state.GetPosition(),
                 rotation = Quaternion.Euler(0f, state.GetRotationY(), 0f),
-                velocity = Vector3.zero, // Will be calculated from position deltas
+                velocity = state.HasMoveVelocity ? state.GetMoveVelocity() : Vector3.zero,
                 rotationY = state.GetRotationY(),
                 verticalVelocity = state.GetVerticalVelocity(),
                 timestamp = time,

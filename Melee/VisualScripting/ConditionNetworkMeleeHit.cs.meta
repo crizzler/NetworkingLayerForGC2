@@ -1,2 +1,9 @@
 fileFormatVersion: 2
 guid: ad79d9d1b1cd8383d9e4d037bbc526c9
+AssetOrigin:
+  serializedVersion: 1
+  productId: 379492
+  packageName: Multiplayer Integration for Game Creator 2 with PurrNet
+  packageVersion: 1.4.0
+  assetPath: Assets/Arawn/NetworkingLayerForGC2/Melee/VisualScripting/ConditionNetworkMeleeHit.cs
+  uploadId: 925150

@@ -1,0 +1,14 @@
+fileFormatVersion: 2
+guid: 48b956e83b1a867c2a3c36688a8e4364
+AssemblyDefinitionImporter:
+  externalObjects: {}
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 379492
+  packageName: Multiplayer Integration for Game Creator 2 with PurrNet
+  packageVersion: 1.4.0
+  assetPath: Assets/Arawn/NetworkingLayerForGC2/Editor/Transport/PurrNet/Arawn.GameCreator2.Networking.Transport.PurrNet.Editor.asmdef
+  uploadId: 925150

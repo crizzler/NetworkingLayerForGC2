@@ -106,6 +106,21 @@ namespace Arawn.GameCreator2.Networking
                 m_CurrentInput = Vector2.zero;
                 return;
             }
+
+            if (NetworkGameplayInputBlocker.IsTextInputFocused())
+            {
+                m_CurrentInput = Vector2.zero;
+                this.InputDirection = Vector3.zero;
+
+                if (m_LastSentInput.sqrMagnitude > 0.01f)
+                {
+                    SendInputToNetwork();
+                }
+
+                RefreshNetworkDriver();
+                m_NetworkDriver?.ProcessLocalInput(Vector2.zero, this.Transform, false);
+                return;
+            }
             
             // Capture raw input
             m_CurrentInput = this.m_IsControllable 

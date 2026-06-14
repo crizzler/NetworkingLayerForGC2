@@ -16,7 +16,7 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
             "Plugins/GameCreator/Packages/Shooter/Runtime/ScriptableObjects/Sight.cs";
 
         public override string ModuleName => "ShooterSight";
-        public override string PatchVersion => "2.2.3-shooter-sight";
+        public override string PatchVersion => "2.2.4-shooter-sight";
         public override string DisplayName => "Shooter Sight Hook (Game Creator 2)";
 
         public override string PatchDescription =>
@@ -79,8 +79,21 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
         {
             string content = ReadFile(relativePath);
 
+            bool repairedMalformedPatchEndMarkers = relativePath.EndsWith("Sight.cs", StringComparison.Ordinal) &&
+                RepairMalformedPatchEndMarkers(ref content);
+
             ExistingPatchState existingPatchState = PrepareContentForPatch(relativePath, ref content);
-            if (existingPatchState == ExistingPatchState.SkipAlreadyPatched) return true;
+            if (existingPatchState == ExistingPatchState.SkipAlreadyPatched)
+            {
+                if (repairedMalformedPatchEndMarkers)
+                {
+                    WriteFile(relativePath, content);
+                    Debug.Log($"[GC2 Networking] Repaired malformed Shooter Sight patch markers in {relativePath}");
+                }
+
+                return true;
+            }
+
             if (existingPatchState == ExistingPatchState.Failed) return false;
 
             if (!relativePath.EndsWith("Sight.cs", StringComparison.Ordinal)) return false;
@@ -112,6 +125,35 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
             WriteFile(relativePath, content);
             Debug.Log($"[GC2 Networking] Patched {relativePath}");
             return true;
+        }
+
+        protected override bool VerifyPatchedFile(string relativePath, string content, out string failureReason)
+        {
+            if (!base.VerifyPatchedFile(relativePath, content, out failureReason))
+            {
+                return false;
+            }
+
+            if (!relativePath.EndsWith("Sight.cs", StringComparison.Ordinal))
+            {
+                return true;
+            }
+
+            Match malformedEndMarker = Regex.Match(
+                content,
+                @"(?m)^[ \t]*//\s*\[GC2_NETWORK_PATCH_END\][ \t]*\S",
+                RegexOptions.CultureInvariant,
+                TimeSpan.FromMilliseconds(250));
+
+            if (!malformedEndMarker.Success)
+            {
+                return true;
+            }
+
+            failureReason =
+                "Shooter Sight patch end marker is not on its own line. " +
+                "This can comment out the following method or class closing brace.";
+            return false;
         }
 
         private bool EnsurePatchMarker(ref string content)
@@ -203,7 +245,7 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
             }
 
             string statementPattern =
-                $@"(?m)^(?<indent>[ \t]*)(?:_\s*=\s*)?this\.{Regex.Escape(instructionField)}\.Run\s*\(\s*weaponData\.WeaponArgs\s*\)\s*;\s*$";
+                $@"(?m)^(?<indent>[ \t]*)(?:_\s*=\s*)?this\.{Regex.Escape(instructionField)}\.Run[ \t]*\([ \t]*weaponData\.WeaponArgs[ \t]*\)[ \t]*;[ \t]*$";
 
             Match statement = Regex.Match(
                 body,
@@ -228,6 +270,36 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                 .Insert(absoluteIndex, guardedStatement);
 
             return true;
+        }
+
+        private static bool RepairMalformedPatchEndMarkers(ref string content)
+        {
+            string original = content;
+
+            try
+            {
+                var malformedEndMarkerRegex = new Regex(
+                    @"(?m)^(?<indent>[ \t]*)//\s*\[GC2_NETWORK_PATCH_END\](?<suffix>[ \t]*\}.*)$",
+                    RegexOptions.CultureInvariant,
+                    TimeSpan.FromMilliseconds(250));
+
+                content = malformedEndMarkerRegex.Replace(content, match =>
+                {
+                    string indent = match.Groups["indent"].Value;
+                    string braceIndent = indent.EndsWith("    ", StringComparison.Ordinal)
+                        ? indent.Substring(0, indent.Length - 4)
+                        : indent;
+                    string suffix = match.Groups["suffix"].Value.TrimStart();
+
+                    return $"{indent}// [GC2_NETWORK_PATCH_END]\n{braceIndent}{suffix}";
+                });
+            }
+            catch (RegexMatchTimeoutException)
+            {
+                return false;
+            }
+
+            return !string.Equals(original, content, StringComparison.Ordinal);
         }
 
         private static bool TryFindMethodBodySpan(

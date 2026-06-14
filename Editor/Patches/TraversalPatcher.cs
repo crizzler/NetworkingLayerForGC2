@@ -10,19 +10,21 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
     public class TraversalPatcher : GC2PatcherBase
     {
         public override string ModuleName => "Traversal";
-        public override string PatchVersion => "2.1.0-traversal";
+        public override string PatchVersion => "2.2.0-traversal";
         public override string DisplayName => "Traversal (Game Creator 2)";
 
         public override string PatchDescription =>
             "This will modify the Game Creator 2 Traversal source code to add\n" +
             "server-authoritative networking hooks.\n\n" +
-            "TraverseLink.Run, TraverseInteractive.Enter, and TraversalStance\n" +
-            "action APIs will be validated through network hooks before local execution.";
+            "TraverseLink.Run, TraverseInteractive.Enter, MotionInteractive edge\n" +
+            "connections, and TraversalStance action APIs will be validated\n" +
+            "through network hooks before local execution.";
 
         protected override string[] FilesToPatch => new[]
         {
             "Plugins/GameCreator/Packages/Traversal/Runtime/Components/TraverseLink.cs",
             "Plugins/GameCreator/Packages/Traversal/Runtime/Components/TraverseInteractive.cs",
+            "Plugins/GameCreator/Packages/Traversal/Runtime/ScriptableObjects/MotionInteractive.cs",
             "Plugins/GameCreator/Packages/Traversal/Runtime/Stance/TraversalStance.cs"
         };
 
@@ -46,6 +48,15 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                 return new[] { "NetworkEnterValidator" };
             }
 
+            if (relativePath.EndsWith("MotionInteractive.cs"))
+            {
+                return new[]
+                {
+                    "NetworkEdgeConnectionResolver",
+                    "NetworkConnectionSkipTransitionResolver"
+                };
+            }
+
             if (relativePath.EndsWith("TraversalStance.cs"))
             {
                 return new[]
@@ -55,7 +66,8 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                     "NetworkTryJumpValidator",
                     "NetworkTryActionValidator",
                     "NetworkTryStateEnterValidator",
-                    "NetworkTryStateExitValidator"
+                    "NetworkTryStateExitValidator",
+                    "token != this.m_CurrentToken"
                 };
             }
 
@@ -77,6 +89,15 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                 return new Dictionary<string, int>
                 {
                     { "NetworkEnterValidator.Invoke", 1 }
+                };
+            }
+
+            if (relativePath.EndsWith("MotionInteractive.cs"))
+            {
+                return new Dictionary<string, int>
+                {
+                    { "NetworkEdgeConnectionResolver?.Invoke", 2 },
+                    { "NetworkConnectionSkipTransitionResolver.Invoke", 1 }
                 };
             }
 
@@ -114,6 +135,11 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                 return PatchTraverseInteractive(relativePath, content);
             }
 
+            if (relativePath.EndsWith("MotionInteractive.cs"))
+            {
+                return PatchMotionInteractive(relativePath, content);
+            }
+
             if (relativePath.EndsWith("TraversalStance.cs"))
             {
                 return PatchTraversalStance(relativePath, content);
@@ -124,15 +150,11 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
 
         private bool PatchTraverseLink(string relativePath, string content)
         {
-            if (!TryReplaceRequired(
+            if (!TryInsertAfterTypeOpeningBrace(
                     ref content,
-                    @"    [Serializable]
-    public class TraverseLink : Traverse
-    {
-        // EXPOSED MEMBERS: -----------------------------------------------------------------------",
-                    @"    [Serializable]
-    public class TraverseLink : Traverse
-    {
+                    "TraverseLink",
+                    "NetworkRunValidator",
+                    @"
         // [GC2_NETWORK_PATCH] Static hooks for server-authoritative networking
 
         public static System.Func<TraverseLink, Character, bool> NetworkRunValidator;
@@ -140,45 +162,31 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
         public static bool IsNetworkingActive => NetworkRunValidator != null;
 
         // [GC2_NETWORK_PATCH_END]
-
-        // EXPOSED MEMBERS: -----------------------------------------------------------------------",
-                    "[GC2 Networking] Could not patch TraverseLink class header in TraverseLink.cs."))
+",
+                    out string failureReason))
             {
-                return false;
+                return LogPatchFailure("TraverseLink class header", failureReason);
             }
 
-            if (!TryReplaceRequired(
+            if (!TryInsertAfterMethodAnchors(
                     ref content,
-                    @"        public async Task Run(Character character)
-        {
-            if (character == null) return;",
-                    @"        public async Task Run(Character character)
-        {
+                    "Run",
+                    "NetworkRunValidator.Invoke",
+                    @"
+
             // [GC2_NETWORK_PATCH] Server authority check
             if (NetworkRunValidator != null && !NetworkRunValidator.Invoke(this, character))
             {
                 return;
             }
-            // [GC2_NETWORK_PATCH_END]
-
-            if (character == null) return;",
-                    "[GC2 Networking] Could not patch TraverseLink.Run in TraverseLink.cs."))
+            // [GC2_NETWORK_PATCH_END]",
+                    out failureReason,
+                    @"if\s*\(\s*character\s*==\s*null\s*\)\s*return\s*;"))
             {
-                return false;
+                return LogPatchFailure("TraverseLink.Run", failureReason);
             }
 
-            if (!TryReplaceRequired(
-                    ref content,
-                    @"namespace GameCreator.Runtime.Traversal
-{",
-                    PatchMarker + @"
-// This file has been patched for GC2 Networking server authority.
-// Do not modify the patched sections manually.
-// Use Game Creator > Networking Layer > Patches > Traversal > Unpatch to restore.
-
-namespace GameCreator.Runtime.Traversal
-{",
-                    "[GC2 Networking] Could not add patch marker header in TraverseLink.cs."))
+            if (!EnsurePatchMarkerBeforeNamespace(ref content, "GameCreator.Runtime.Traversal"))
             {
                 return false;
             }
@@ -190,15 +198,11 @@ namespace GameCreator.Runtime.Traversal
 
         private bool PatchTraverseInteractive(string relativePath, string content)
         {
-            if (!TryReplaceRequired(
+            if (!TryInsertAfterTypeOpeningBrace(
                     ref content,
-                    @"    [Serializable]
-    public class TraverseInteractive : Traverse
-    {
-        public enum CharacterRotationMode",
-                    @"    [Serializable]
-    public class TraverseInteractive : Traverse
-    {
+                    "TraverseInteractive",
+                    "NetworkEnterValidator",
+                    @"
         // [GC2_NETWORK_PATCH] Static hooks for server-authoritative networking
 
         public static System.Func<TraverseInteractive, Character, InteractiveTransitionData, bool> NetworkEnterValidator;
@@ -206,45 +210,129 @@ namespace GameCreator.Runtime.Traversal
         public static bool IsNetworkingActive => NetworkEnterValidator != null;
 
         // [GC2_NETWORK_PATCH_END]
-
-        public enum CharacterRotationMode",
-                    "[GC2 Networking] Could not patch TraverseInteractive class header in TraverseInteractive.cs."))
+",
+                    out string failureReason))
             {
-                return false;
+                return LogPatchFailure("TraverseInteractive class header", failureReason);
             }
 
-            if (!TryReplaceRequired(
+            if (!TryInsertAfterMethodAnchors(
                     ref content,
-                    @"        public async Task Enter(Character character, InteractiveTransitionData transition)
-        {
-            if (character == null) return;",
-                    @"        public async Task Enter(Character character, InteractiveTransitionData transition)
-        {
+                    "Enter",
+                    "NetworkEnterValidator.Invoke",
+                    @"
+
             // [GC2_NETWORK_PATCH] Server authority check
             if (NetworkEnterValidator != null && !NetworkEnterValidator.Invoke(this, character, transition))
             {
                 return;
             }
-            // [GC2_NETWORK_PATCH_END]
+            // [GC2_NETWORK_PATCH_END]",
+                    out failureReason,
+                    @"if\s*\(\s*character\s*==\s*null\s*\)\s*return\s*;"))
+            {
+                return LogPatchFailure("TraverseInteractive.Enter", failureReason);
+            }
 
-            if (character == null) return;",
-                    "[GC2 Networking] Could not patch TraverseInteractive.Enter in TraverseInteractive.cs."))
+            if (!EnsurePatchMarkerBeforeNamespace(ref content, "GameCreator.Runtime.Traversal"))
             {
                 return false;
             }
 
-            if (!TryReplaceRequired(
-                    ref content,
-                    @"namespace GameCreator.Runtime.Traversal
-{",
-                    PatchMarker + @"
-// This file has been patched for GC2 Networking server authority.
-// Do not modify the patched sections manually.
-// Use Game Creator > Networking Layer > Patches > Traversal > Unpatch to restore.
+            WriteFile(relativePath, content);
+            Debug.Log($"[GC2 Networking] Patched {relativePath}");
+            return true;
+        }
 
-namespace GameCreator.Runtime.Traversal
-{",
-                    "[GC2 Networking] Could not add patch marker header in TraverseInteractive.cs."))
+        private bool PatchMotionInteractive(string relativePath, string content)
+        {
+            if (!TryInsertAfterTypeOpeningBrace(
+                    ref content,
+                    "MotionInteractive",
+                    "NetworkEdgeConnectionResolver",
+                    @"
+        // [GC2_NETWORK_PATCH] Static hooks for server-authoritative networking
+
+        public static System.Func<MotionInteractive, TraverseInteractive, Character, Vector3, Vector3, bool, Traverse> NetworkEdgeConnectionResolver;
+        public static System.Func<Traverse, Traverse, Character, bool> NetworkConnectionSkipTransitionResolver;
+
+        public static bool IsNetworkingActive =>
+            NetworkEdgeConnectionResolver != null ||
+            NetworkConnectionSkipTransitionResolver != null;
+
+        // [GC2_NETWORK_PATCH_END]
+",
+                    out string failureReason))
+            {
+                return LogPatchFailure("MotionInteractive class header", failureReason);
+            }
+
+            if (!TryReplaceRegexInMethod(
+                    ref content,
+                    "Enter",
+                    "NetworkConnectionSkipTransitionResolver.Invoke",
+                    @"[ \t]*_\s*=\s*Traverse\.ChangeTo\s*\(\s*traverse\s*,\s*nextTraverse\s*,\s*character\s*,\s*true\s*\)\s*;",
+                    @"                // [GC2_NETWORK_PATCH] Let networking decide whether interactive-to-interactive connections should run transition clips
+                bool skipTransition = NetworkConnectionSkipTransitionResolver == null ||
+                    NetworkConnectionSkipTransitionResolver.Invoke(traverse, nextTraverse, character);
+                _ = Traverse.ChangeTo(traverse, nextTraverse, character, skipTransition);
+                // [GC2_NETWORK_PATCH_END]",
+                    out failureReason))
+            {
+                return LogPatchFailure("MotionInteractive.Enter ChangeTo transition routing", failureReason);
+            }
+
+            if (!TryInsertAfterRegexInMethod(
+                    ref content,
+                    "OnUpdate",
+                    null,
+                    @"(?m)^[ \t]*if\s*\(\s*traverseInteractive\.ContinueA\s*!=\s*null\s*\)\s*\{.*?^[ \t]*return\s+traverseInteractive\.ContinueA\s*;\s*^[ \t]*\}",
+                    @"
+
+                    // [GC2_NETWORK_PATCH] Resolve configured edge connections through the network layer instead of auto-traversing locally
+                    Traverse networkConnection = NetworkEdgeConnectionResolver?.Invoke(
+                        this,
+                        traverseInteractive,
+                        character,
+                        currentLocalPosition,
+                        swizzleLocalInput,
+                        false);
+                    if (networkConnection != null)
+                    {
+                        return networkConnection;
+                    }
+                    // [GC2_NETWORK_PATCH_END]",
+                    out failureReason))
+            {
+                return LogPatchFailure("MotionInteractive edge A connection resolver", failureReason);
+            }
+
+            if (!TryInsertAfterRegexInMethod(
+                    ref content,
+                    "OnUpdate",
+                    null,
+                    @"(?m)^[ \t]*if\s*\(\s*traverseInteractive\.ContinueB\s*!=\s*null\s*\)\s*\{.*?^[ \t]*return\s+traverseInteractive\.ContinueB\s*;\s*^[ \t]*\}",
+                    @"
+
+                    // [GC2_NETWORK_PATCH] Resolve configured edge connections through the network layer instead of auto-traversing locally
+                    Traverse networkConnection = NetworkEdgeConnectionResolver?.Invoke(
+                        this,
+                        traverseInteractive,
+                        character,
+                        currentLocalPosition,
+                        swizzleLocalInput,
+                        true);
+                    if (networkConnection != null)
+                    {
+                        return networkConnection;
+                    }
+                    // [GC2_NETWORK_PATCH_END]",
+                    out failureReason))
+            {
+                return LogPatchFailure("MotionInteractive edge B connection resolver", failureReason);
+            }
+
+            if (!EnsurePatchMarkerBeforeNamespace(ref content, "GameCreator.Runtime.Traversal"))
             {
                 return false;
             }
@@ -256,15 +344,11 @@ namespace GameCreator.Runtime.Traversal
 
         private bool PatchTraversalStance(string relativePath, string content)
         {
-            if (!TryReplaceRequired(
+            if (!TryInsertAfterTypeOpeningBrace(
                     ref content,
-                    @"    public class TraversalStance : TStance
-    {
-        public static readonly int ID = ""Traversal"".GetHashCode();",
-                    @"    public class TraversalStance : TStance
-    {
-        public static readonly int ID = ""Traversal"".GetHashCode();
-
+                    "TraversalStance",
+                    "NetworkTryCancelValidator",
+                    @"
         // [GC2_NETWORK_PATCH] Static hooks for server-authoritative networking
 
         public static System.Func<TraversalStance, Args, bool> NetworkTryCancelValidator;
@@ -282,144 +366,150 @@ namespace GameCreator.Runtime.Traversal
             NetworkTryStateEnterValidator != null ||
             NetworkTryStateExitValidator != null;
 
-        // [GC2_NETWORK_PATCH_END]",
-                    "[GC2 Networking] Could not patch TraversalStance class header in TraversalStance.cs."))
+        // [GC2_NETWORK_PATCH_END]
+",
+                    out string failureReason))
             {
-                return false;
+                return LogPatchFailure("TraversalStance class header", failureReason);
             }
 
-            if (!TryReplaceRequired(
+            if (!TryInsertAfterMethodAnchors(
                     ref content,
-                    @"        public void TryCancel(Args args)
-        {
-            if (this.Traverse == null) return;",
-                    @"        public void TryCancel(Args args)
-        {
+                    "TryCancel",
+                    "NetworkTryCancelValidator.Invoke",
+                    @"
+
             // [GC2_NETWORK_PATCH] Server authority check
             if (NetworkTryCancelValidator != null && !NetworkTryCancelValidator.Invoke(this, args))
             {
                 return;
             }
-            // [GC2_NETWORK_PATCH_END]
-
-            if (this.Traverse == null) return;",
-                    "[GC2 Networking] Could not patch TraversalStance.TryCancel in TraversalStance.cs."))
+            // [GC2_NETWORK_PATCH_END]",
+                    out failureReason,
+                    @"if\s*\(\s*this\.Traverse\s*==\s*null\s*\)\s*return\s*;",
+                    @"if\s*\(\s*this\.m_CurrentToken\s*==\s*null\s*\)\s*return\s*;"))
             {
-                return false;
+                return LogPatchFailure("TraversalStance.TryCancel", failureReason);
             }
 
-            if (!TryReplaceRequired(
+            if (!TryInsertAfterMethodAnchors(
                     ref content,
-                    @"        public bool ForceCancel()
-        {
-            if (this.Traverse == null) return false;",
-                    @"        public bool ForceCancel()
-        {
+                    "ForceCancel",
+                    "NetworkForceCancelValidator.Invoke",
+                    @"
+
             // [GC2_NETWORK_PATCH] Server authority check
             if (NetworkForceCancelValidator != null && !NetworkForceCancelValidator.Invoke(this))
             {
                 return false;
             }
-            // [GC2_NETWORK_PATCH_END]
-
-            if (this.Traverse == null) return false;",
-                    "[GC2 Networking] Could not patch TraversalStance.ForceCancel in TraversalStance.cs."))
+            // [GC2_NETWORK_PATCH_END]",
+                    out failureReason,
+                    @"if\s*\(\s*this\.Traverse\s*==\s*null\s*\)\s*return\s+false\s*;",
+                    @"if\s*\(\s*this\.m_CurrentToken\s*==\s*null\s*\)\s*return\s+false\s*;",
+                    @"if\s*\(\s*this\.m_CurrentToken\.IsCancelled\s*\)\s*return\s+false\s*;"))
             {
-                return false;
+                return LogPatchFailure("TraversalStance.ForceCancel", failureReason);
             }
 
-            if (!TryReplaceRequired(
+            if (!TryInsertAfterMethodAnchors(
                     ref content,
-                    @"        public void TryJump()
-        {
-            if (this.Traverse == null) return;",
-                    @"        public void TryJump()
-        {
+                    "TryJump",
+                    "NetworkTryJumpValidator.Invoke",
+                    @"
+
             // [GC2_NETWORK_PATCH] Server authority check
             if (NetworkTryJumpValidator != null && !NetworkTryJumpValidator.Invoke(this))
             {
                 return;
             }
-            // [GC2_NETWORK_PATCH_END]
-
-            if (this.Traverse == null) return;",
-                    "[GC2 Networking] Could not patch TraversalStance.TryJump in TraversalStance.cs."))
+            // [GC2_NETWORK_PATCH_END]",
+                    out failureReason,
+                    @"if\s*\(\s*this\.Traverse\s*==\s*null\s*\)\s*return\s*;",
+                    @"if\s*\(\s*this\.m_CurrentToken\s*==\s*null\s*\)\s*return\s*;",
+                    @"if\s*\(\s*this\.InInteractiveTransition\s*\)\s*return\s*;"))
             {
-                return false;
+                return LogPatchFailure("TraversalStance.TryJump", failureReason);
             }
 
-            if (!TryReplaceRequired(
+            if (!TryInsertAfterMethodAnchors(
                     ref content,
-                    @"        public void TryAction(IdString actionId)
-        {
-            if (this.Traverse == null) return;",
-                    @"        public void TryAction(IdString actionId)
-        {
+                    "TryAction",
+                    "NetworkTryActionValidator.Invoke",
+                    @"
+
             // [GC2_NETWORK_PATCH] Server authority check
             if (NetworkTryActionValidator != null && !NetworkTryActionValidator.Invoke(this, actionId))
             {
                 return;
             }
-            // [GC2_NETWORK_PATCH_END]
-
-            if (this.Traverse == null) return;",
-                    "[GC2 Networking] Could not patch TraversalStance.TryAction in TraversalStance.cs."))
+            // [GC2_NETWORK_PATCH_END]",
+                    out failureReason,
+                    @"if\s*\(\s*this\.Traverse\s*==\s*null\s*\)\s*return\s*;",
+                    @"if\s*\(\s*this\.m_CurrentToken\s*==\s*null\s*\)\s*return\s*;",
+                    @"if\s*\(\s*this\.InInteractiveTransition\s*\)\s*return\s*;"))
             {
-                return false;
+                return LogPatchFailure("TraversalStance.TryAction", failureReason);
             }
 
-            if (!TryReplaceRequired(
+            if (!TryInsertAfterMethodAnchors(
                     ref content,
-                    @"        public void TryStateEnter(IdString stateId)
-        {
-            if (this.Traverse == null) return;",
-                    @"        public void TryStateEnter(IdString stateId)
-        {
+                    "TryStateEnter",
+                    "NetworkTryStateEnterValidator.Invoke",
+                    @"
+
             // [GC2_NETWORK_PATCH] Server authority check
             if (NetworkTryStateEnterValidator != null && !NetworkTryStateEnterValidator.Invoke(this, stateId))
             {
                 return;
             }
-            // [GC2_NETWORK_PATCH_END]
-
-            if (this.Traverse == null) return;",
-                    "[GC2 Networking] Could not patch TraversalStance.TryStateEnter in TraversalStance.cs."))
+            // [GC2_NETWORK_PATCH_END]",
+                    out failureReason,
+                    @"if\s*\(\s*this\.Traverse\s*==\s*null\s*\)\s*return\s*;",
+                    @"if\s*\(\s*this\.m_CurrentToken\s*==\s*null\s*\)\s*return\s*;",
+                    @"if\s*\(\s*this\.InInteractiveTransition\s*\)\s*return\s*;"))
             {
-                return false;
+                return LogPatchFailure("TraversalStance.TryStateEnter", failureReason);
             }
 
-            if (!TryReplaceRequired(
+            if (!TryInsertAfterMethodAnchors(
                     ref content,
-                    @"        public void TryStateExit()
-        {
-            if (this.Traverse == null) return;",
-                    @"        public void TryStateExit()
-        {
+                    "TryStateExit",
+                    "NetworkTryStateExitValidator.Invoke",
+                    @"
+
             // [GC2_NETWORK_PATCH] Server authority check
             if (NetworkTryStateExitValidator != null && !NetworkTryStateExitValidator.Invoke(this))
             {
                 return;
             }
-            // [GC2_NETWORK_PATCH_END]
-
-            if (this.Traverse == null) return;",
-                    "[GC2 Networking] Could not patch TraversalStance.TryStateExit in TraversalStance.cs."))
+            // [GC2_NETWORK_PATCH_END]",
+                    out failureReason,
+                    @"if\s*\(\s*this\.Traverse\s*==\s*null\s*\)\s*return\s*;",
+                    @"if\s*\(\s*this\.m_CurrentToken\s*==\s*null\s*\)\s*return\s*;",
+                    @"if\s*\(\s*this\.m_CurrentStateId\s*==\s*IdString\.EMPTY\s*\)\s*return\s*;"))
             {
-                return false;
+                return LogPatchFailure("TraversalStance.TryStateExit", failureReason);
             }
 
-            if (!TryReplaceRequired(
+            if (!TryInsertAtMethodStart(
                     ref content,
-                    @"namespace GameCreator.Runtime.Traversal
-{",
-                    PatchMarker + @"
-// This file has been patched for GC2 Networking server authority.
-// Do not modify the patched sections manually.
-// Use Game Creator > Networking Layer > Patches > Traversal > Unpatch to restore.
+                    "OnTraverseExit",
+                    "token != this.m_CurrentToken",
+                    @"
+            // [GC2_NETWORK_PATCH] Ignore stale exits from the previous interactive traverse during ChangeTo transitions
+            if (traverse != this.Traverse || token != this.m_CurrentToken)
+            {
+                return;
+            }
+            // [GC2_NETWORK_PATCH_END]
+",
+                    out failureReason))
+            {
+                return LogPatchFailure("TraversalStance.OnTraverseExit stale-exit guard", failureReason);
+            }
 
-namespace GameCreator.Runtime.Traversal
-{",
-                    "[GC2 Networking] Could not add patch marker header in TraversalStance.cs."))
+            if (!EnsurePatchMarkerBeforeNamespace(ref content, "GameCreator.Runtime.Traversal"))
             {
                 return false;
             }
@@ -428,5 +518,12 @@ namespace GameCreator.Runtime.Traversal
             Debug.Log($"[GC2 Networking] Patched {relativePath}");
             return true;
         }
+
+        private static bool LogPatchFailure(string context, string failureReason)
+        {
+            Debug.LogError($"[GC2 Networking] Could not patch {context}: {failureReason}");
+            return false;
+        }
+
     }
 }

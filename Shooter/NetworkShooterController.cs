@@ -594,13 +594,9 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 return;
             }
 
-            // Mirror the local GC2 pipeline (WeaponData.Shoot): the shooting-animation
-            // window only opens when a character fire gesture actually plays, with
-            // duration = clip.length - TransitionOut. Forcing a fallback duration here
-            // opened Shooting.IsShootingAnimation on observers for every replicated
-            // shot, and RigShooterHuman drops the free-hand IK while that window is
-            // open (unless Sight.ShootingUsesIK is ticked) — remote players' off-hand
-            // visibly popped off the weapon on each shot. No fire gesture -> no window.
+            // Mirror GC2's local shooting pipeline: only open the shooting-animation
+            // window when a fire gesture actually played. Forcing a fallback duration
+            // on observers can drop the off-hand IK for weapons without fire clips.
             float duration = animationDuration;
 
             try
@@ -613,9 +609,6 @@ namespace Arawn.GameCreator2.Networking.Shooter
                     m_CurrentWeaponData,
                     m_Character != null ? m_Character.Time.Time : Time.time);
 
-                // Only mark the shooting-animation window when a fire gesture really
-                // played. LastShotFrame/LastShotTime above stay unconditional: they
-                // drive remote HumanRecoil and fire-rate bookkeeping, not IK.
                 if (duration > 0f)
                 {
                     SHOOTING_ON_SHOOT_METHOD?.Invoke(m_ShooterStance.Shooting, new object[] { duration });

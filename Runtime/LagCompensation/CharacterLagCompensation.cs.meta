@@ -1,2 +1,9 @@
 fileFormatVersion: 2
 guid: 4bf0d664fa23bb8ecb1f64bff929a6b6
+AssetOrigin:
+  serializedVersion: 1
+  productId: 379492
+  packageName: Multiplayer Integration for Game Creator 2 with PurrNet
+  packageVersion: 1.4.0
+  assetPath: Assets/Arawn/NetworkingLayerForGC2/Runtime/LagCompensation/CharacterLagCompensation.cs
+  uploadId: 925150

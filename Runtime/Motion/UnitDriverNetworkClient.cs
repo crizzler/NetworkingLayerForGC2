@@ -55,6 +55,9 @@ namespace Arawn.GameCreator2.Networking
         [NonSerialized] private float m_ReconciliationSuppressedUntil;
         [NonSerialized] private float m_OwnerAuthorityPoseSyncUntil;
         [NonSerialized] private float m_LastMotionDiagnosticRealtime;
+        [NonSerialized] private float m_LastExternalMoveDirectionRealtime;
+        [NonSerialized] private float m_LastExplicitMoveDirectionRealtime;
+        [NonSerialized] private bool m_PreserveExplicitMoveDirectionWhileTraversal;
         
         // Input buffering
         [NonSerialized] private List<NetworkInputState> m_UnacknowledgedInputs;
@@ -124,7 +127,17 @@ namespace Arawn.GameCreator2.Networking
 
         public void SetExternalMoveDirection(Vector3 velocity)
         {
+            SetExternalMoveDirection(velocity, false);
+        }
+
+        public void SetExternalMoveDirection(
+            Vector3 velocity,
+            bool preserveWhileTraversalLikeMotion)
+        {
             this.m_MoveDirection = velocity;
+            this.m_LastExplicitMoveDirectionRealtime = Time.realtimeSinceStartup;
+            this.m_PreserveExplicitMoveDirectionWhileTraversal =
+                preserveWhileTraversalLikeMotion && IsTraversalLikeAuthorityMotion();
         }
 
         /// <summary>
@@ -152,6 +165,9 @@ namespace Arawn.GameCreator2.Networking
 
             m_OwnerAuthorityPoseSyncUntil = until;
             ClearVisualReconciliationOffset();
+            LogTraversalPose(
+                $"owner-authority-pose-sync-enabled duration={duration:F3} until={m_OwnerAuthorityPoseSyncUntil:F3} " +
+                $"rootMotion={this.Character?.RootMotionPosition ?? 0f:F3} {FormatBusyState()}");
         }
         
         /// <summary>
@@ -192,6 +208,7 @@ namespace Arawn.GameCreator2.Networking
         private const int PREDICTION_HISTORY_CAPACITY = 128;
         private const float EXTERNAL_AUTHORITY_POSITION_THRESHOLD = 0.005f;
         private const float EXTERNAL_AUTHORITY_ROTATION_THRESHOLD = 0.25f;
+        private const float EXTERNAL_MOVE_DIRECTION_SAMPLE_GRACE_SECONDS = 0.15f;
 
         // INITIALIZERS: --------------------------------------------------------------------------
 
@@ -223,6 +240,9 @@ namespace Arawn.GameCreator2.Networking
             this.m_ReconciliationSuppressedUntil = 0f;
             this.m_OwnerAuthorityPoseSyncUntil = 0f;
             this.m_LastMotionDiagnosticRealtime = -100f;
+            this.m_LastExternalMoveDirectionRealtime = -100f;
+            this.m_LastExplicitMoveDirectionRealtime = -100f;
+            this.m_PreserveExplicitMoveDirectionWhileTraversal = false;
             this.m_Controller = this.Character.GetComponent<CharacterController>();
             if (this.m_Controller == null)
             {
@@ -335,6 +355,18 @@ namespace Arawn.GameCreator2.Networking
                     ownerAuthorityPosition
                 );
 
+                if (ownerAuthorityPosition.HasValue)
+                {
+                    LogTraversalPose(
+                        $"send-owner-authority-input seq={input.sequenceNumber} dt={input.GetDeltaTime():F3} " +
+                        $"rawInput={FormatVector2(m_LastInputDirection)} networkInput={FormatVector2(networkInput)} " +
+                        $"inputRotY={input.GetRotationY():F2} transformRotY={this.Transform.eulerAngles.y:F2} " +
+                        $"ownerPos={FormatVector(input.GetOwnerAuthorityPosition())} " +
+                        $"ownerPosY={input.GetOwnerAuthorityPosition().y:F3} " +
+                        $"currentSeq={m_CurrentSequence} unacked={m_UnacknowledgedInputs.Count} " +
+                        $"rootMotion={this.Character.RootMotionPosition:F3} {FormatBusyState()}");
+                }
+
                 // Store for potential resend.
                 m_UnacknowledgedInputs.Add(input);
 
@@ -407,7 +439,10 @@ namespace Arawn.GameCreator2.Networking
                 m_GroundFrame = this.Character.Time.Frame;
             }
 
-            m_MoveDirection = translation / deltaTime;
+            if (!ShouldPreserveExternalMoveDirectionForAnimation())
+            {
+                m_MoveDirection = translation / deltaTime;
+            }
         }
 
         private void ApplyInputPrediction(NetworkInputState input, Transform cameraTransform)
@@ -459,7 +494,10 @@ namespace Arawn.GameCreator2.Networking
                 m_GroundFrame = this.Character.Time.Frame;
             }
 
-            m_MoveDirection = translation / deltaTime;
+            if (!ShouldPreserveExternalMoveDirectionForAnimation())
+            {
+                m_MoveDirection = translation / deltaTime;
+            }
         }
 
         private Vector3 ApplyRootMotionBlend(Vector3 kineticMovement)
@@ -538,6 +576,20 @@ namespace Arawn.GameCreator2.Networking
                 
                 if (ownerAuthorityPoseActive)
                 {
+                    LogTraversalPose(
+                        $"apply-server-state-owner-authority-active seq={serverState.lastProcessedInput} " +
+                        $"server={FormatVector(serverPosition)} serverY={serverPosition.y:F3} " +
+                        $"serverRotY={serverRotationY:F2} predicted={FormatVector(predictedPosition)} " +
+                        $"predictedY={predictedPosition.y:F3} predictedRotY={predictedState.rotationY:F2} " +
+                        $"error={positionError:F3} history={m_PredictionHistoryCount} " +
+                        $"unacked={m_UnacknowledgedInputs.Count} currentSeq={m_CurrentSequence} " +
+                        $"rootMotion={this.Character.RootMotionPosition:F3} {FormatBusyState()}");
+                    TraceTraversalMotion(
+                        $"owner pose active: skipped correction with prediction seq={serverState.lastProcessedInput} " +
+                        $"error={positionError:F3} server={FormatVector(serverPosition)} predicted={FormatVector(predictedPosition)} " +
+                        $"current={FormatVector(this.Transform.position)} history={m_PredictionHistoryCount} " +
+                        $"unacked={m_UnacknowledgedInputs.Count} currentSeq={m_CurrentSequence} " +
+                        $"rootMotion={this.Character.RootMotionPosition:F3}");
                     LogClientMotionDiagnostic(
                         $"owner authority pose active; skipped server correction seq={serverState.lastProcessedInput} " +
                         $"error={positionError:F3} server={FormatVector(serverPosition)} predicted={FormatVector(predictedPosition)} " +
@@ -547,10 +599,22 @@ namespace Arawn.GameCreator2.Networking
                 }
                 else if (externalAuthorityApplied)
                 {
+                    TraceTraversalMotion(
+                        $"external authority correction applied seq={serverState.lastProcessedInput} " +
+                        $"server={FormatVector(serverPosition)} current={FormatVector(this.Transform.position)} " +
+                        $"history={m_PredictionHistoryCount} unacked={m_UnacknowledgedInputs.Count}");
                     OnReconciliation?.Invoke(positionError);
                 }
                 else if (positionError > m_Config.reconciliationThreshold)
                 {
+                    TraceTraversalMotion(
+                        $"reconcile applying seq={serverState.lastProcessedInput} error={positionError:F3} " +
+                        $"mode={(positionError > m_Config.maxReconciliationDistance ? "teleport" : "smooth")} " +
+                        $"threshold={m_Config.reconciliationThreshold:F3} max={m_Config.maxReconciliationDistance:F3} " +
+                        $"server={FormatVector(serverPosition)} predicted={FormatVector(predictedPosition)} " +
+                        $"current={FormatVector(this.Transform.position)} history={m_PredictionHistoryCount} " +
+                        $"unacked={m_UnacknowledgedInputs.Count} currentSeq={m_CurrentSequence} " +
+                        $"rootMotion={this.Character.RootMotionPosition:F3}");
                     LogClientMotionDiagnostic(
                         $"reconcile seq={serverState.lastProcessedInput} error={positionError:F3} " +
                         $"threshold={m_Config.reconciliationThreshold:F3} max={m_Config.maxReconciliationDistance:F3} " +
@@ -584,6 +648,17 @@ namespace Arawn.GameCreator2.Networking
             }
             else if (ownerAuthorityPoseActive)
             {
+                LogTraversalPose(
+                    $"apply-server-state-owner-authority-active-no-prediction seq={serverState.lastProcessedInput} " +
+                    $"server={FormatVector(serverState.GetPosition())} serverY={serverState.GetPosition().y:F3} " +
+                    $"serverRotY={serverState.GetRotationY():F2} history={m_PredictionHistoryCount} " +
+                    $"unacked={m_UnacknowledgedInputs.Count} currentSeq={m_CurrentSequence} " +
+                    $"rootMotion={this.Character.RootMotionPosition:F3} {FormatBusyState()}");
+                TraceTraversalMotion(
+                    $"owner pose active: skipped correction without prediction seq={serverState.lastProcessedInput} " +
+                    $"server={FormatVector(serverState.GetPosition())} current={FormatVector(this.Transform.position)} " +
+                    $"history={m_PredictionHistoryCount} unacked={m_UnacknowledgedInputs.Count} currentSeq={m_CurrentSequence} " +
+                    $"rootMotion={this.Character.RootMotionPosition:F3}");
                 LogClientMotionDiagnostic(
                     $"owner authority pose active; skipped server correction without prediction seq={serverState.lastProcessedInput} " +
                     $"server={FormatVector(serverState.GetPosition())} current={FormatVector(this.Transform.position)} " +
@@ -592,7 +667,11 @@ namespace Arawn.GameCreator2.Networking
             }
             else if (externalAuthorityActive)
             {
-                TryApplyExternalAuthorityState(serverState, -1);
+                bool applied = TryApplyExternalAuthorityState(serverState, -1);
+                TraceTraversalMotion(
+                    $"external authority active without prediction seq={serverState.lastProcessedInput} applied={applied} " +
+                    $"server={FormatVector(serverState.GetPosition())} current={FormatVector(this.Transform.position)} " +
+                    $"history={m_PredictionHistoryCount} unacked={m_UnacknowledgedInputs.Count}");
             }
             else if (m_PredictionHistoryCount > 0)
             {
@@ -823,9 +902,44 @@ namespace Arawn.GameCreator2.Networking
             m_LastMotionDiagnosticRealtime = now;
         }
 
+        private void TraceTraversalMotion(string message)
+        {
+            if (!m_LogMotionDiagnostics) return;
+
+            Debug.Log(
+                $"[TraversalTrace][ClientDriver] {this.Character?.name ?? "Character"} " +
+                $"pos={FormatVector(this.Transform.position)} {message}",
+                this.Character);
+        }
+
+        private void LogTraversalPose(string message)
+        {
+            Debug.Log(
+                $"[TraversalPoseDebug][ClientDriver] {this.Character?.name ?? "Character"} " +
+                $"pos={FormatVector(this.Transform.position)} y={this.Transform.position.y:F3} " +
+                $"rotY={this.Transform.eulerAngles.y:F2} forward={FormatVector(this.Transform.forward)} " +
+                $"ownerPoseActive={IsOwnerAuthorityPoseSyncActive} " +
+                $"ownerPoseRemaining={Mathf.Max(0f, m_OwnerAuthorityPoseSyncUntil - Time.time):F3} " +
+                $"reconcileSuppressedRemaining={Mathf.Max(0f, m_ReconciliationSuppressedUntil - Time.time):F3} " +
+                $"isReconciling={m_IsReconciling} visualOffset={FormatVector(m_ReconciliationVisualOffset)} " +
+                $"{message}",
+                this.Character);
+        }
+
+        private string FormatBusyState()
+        {
+            if (this.Character?.Busy == null) return "busy=null legsBusy=null";
+            return $"busy={this.Character.Busy.IsBusy} legsBusy={this.Character.Busy.AreLegsBusy}";
+        }
+
         private static string FormatVector(Vector3 value)
         {
             return $"({value.x:F3},{value.y:F3},{value.z:F3})";
+        }
+
+        private static string FormatVector2(Vector2 value)
+        {
+            return $"({value.x:F3},{value.y:F3})";
         }
 
         // HELPER METHODS: ------------------------------------------------------------------------
@@ -957,7 +1071,8 @@ namespace Arawn.GameCreator2.Networking
                 m_VerticalSpeed,
                 lastInput,
                 IsGrounded,
-                m_VerticalSpeed > 0f
+                m_VerticalSpeed > 0f,
+                m_MoveDirection
             );
         }
 
@@ -997,16 +1112,33 @@ namespace Arawn.GameCreator2.Networking
 
         public override void SetPosition(Vector3 position, bool teleport = false)
         {
+            Vector3 rootPosition = ToRootPosition(position);
+            Vector3 before = this.Transform.position;
+
             if (m_Controller != null)
             {
                 m_Controller.enabled = false;
-                this.Transform.position = position;
+                this.Transform.position = rootPosition;
                 m_Controller.enabled = true;
             }
             else
             {
-                this.Transform.position = position;
+                this.Transform.position = rootPosition;
             }
+
+            if (!teleport)
+            {
+                RecordExternalMoveVelocity(before);
+            }
+        }
+
+        private Vector3 ToRootPosition(Vector3 driverPosition)
+        {
+            float halfHeight = this.Character != null
+                ? this.Character.Motion.Height * 0.5f
+                : 0f;
+
+            return driverPosition + Vector3.up * halfHeight;
         }
 
         public override void SetRotation(Quaternion rotation)
@@ -1031,6 +1163,8 @@ namespace Arawn.GameCreator2.Networking
 
         private void RecordExternalMoveVelocity(Vector3 before)
         {
+            if (ShouldPreserveExplicitMoveDirectionForAnimation()) return;
+
             float deltaTime = this.Character != null
                 ? this.Character.Time.DeltaTime
                 : Time.deltaTime;
@@ -1042,6 +1176,37 @@ namespace Arawn.GameCreator2.Networking
             if (actualDelta.sqrMagnitude <= 0.0000001f) return;
 
             this.m_MoveDirection = actualDelta / deltaTime;
+            this.m_LastExternalMoveDirectionRealtime = Time.realtimeSinceStartup;
+        }
+
+        private bool ShouldPreserveExternalMoveDirectionForAnimation()
+        {
+            if (ShouldPreserveExplicitMoveDirectionForAnimation()) return true;
+            if (!IsTraversalLikeAuthorityMotion()) return false;
+            return Time.realtimeSinceStartup - m_LastExternalMoveDirectionRealtime <=
+                   EXTERNAL_MOVE_DIRECTION_SAMPLE_GRACE_SECONDS;
+        }
+
+        private bool ShouldPreserveExplicitMoveDirectionForAnimation()
+        {
+            if (!IsTraversalLikeAuthorityMotion())
+            {
+                m_PreserveExplicitMoveDirectionWhileTraversal = false;
+                return false;
+            }
+
+            if (m_PreserveExplicitMoveDirectionWhileTraversal) return true;
+
+            return Time.realtimeSinceStartup - m_LastExplicitMoveDirectionRealtime <=
+                   EXTERNAL_MOVE_DIRECTION_SAMPLE_GRACE_SECONDS;
+        }
+
+        private bool IsTraversalLikeAuthorityMotion()
+        {
+            if (this.Character == null) return false;
+            if (this.Character.RootMotionPosition > 0.05f) return true;
+            return this.Character.Busy != null &&
+                   (this.Character.Busy.IsBusy || this.Character.Busy.AreLegsBusy);
         }
 
         public override void AddRotation(Quaternion amount)

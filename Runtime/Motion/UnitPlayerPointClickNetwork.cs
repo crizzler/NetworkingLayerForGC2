@@ -226,6 +226,19 @@ namespace Arawn.GameCreator2.Networking
                 return;
             }
 
+            if (NetworkGameplayInputBlocker.IsTextInputFocused())
+            {
+                if (m_IsHolding && m_StopOnRelease)
+                {
+                    RequestStopMovement();
+                }
+
+                m_IsHolding = false;
+                m_PressThisFrame = false;
+                m_MovePerformedThisFrame = false;
+                return;
+            }
+
             if (m_HoldToMove && m_IsHolding && !m_MovePerformedThisFrame)
             {
                 if (m_StopOnRelease)
@@ -270,6 +283,7 @@ namespace Arawn.GameCreator2.Networking
             if (!this.Character.IsPlayer) return;
             if (!this.Character.Player.IsControllable) return;
             if (!m_IsInputEnabled) return;
+            if (NetworkGameplayInputBlocker.IsTextInputFocused()) return;
             
             m_PressThisFrame = true;
             ProcessClick(true);
@@ -281,6 +295,7 @@ namespace Arawn.GameCreator2.Networking
             if (!this.m_IsControllable) return;
             if (!m_IsInputEnabled) return;
             if (!m_HoldToMove) return;
+            if (NetworkGameplayInputBlocker.IsTextInputFocused()) return;
 
             m_MovePerformedThisFrame = true;
             if (!m_IsHolding)
@@ -306,6 +321,7 @@ namespace Arawn.GameCreator2.Networking
         {
             if (!this.Character.IsPlayer) return;
             if (!m_IsInputEnabled) return;
+            if (NetworkGameplayInputBlocker.IsTextInputFocused()) return;
             
             RequestStopMovement();
         }

@@ -1,2 +1,9 @@
 fileFormatVersion: 2
 guid: 5c6977391a1903eb0a8776564703db3b
+AssetOrigin:
+  serializedVersion: 1
+  productId: 379492
+  packageName: Multiplayer Integration for Game Creator 2 with PurrNet
+  packageVersion: 1.4.0
+  assetPath: Assets/Arawn/NetworkingLayerForGC2/Shooter/VisualScripting/ConditionNetworkShooterHit.cs
+  uploadId: 925150

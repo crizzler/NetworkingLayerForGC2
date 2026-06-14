@@ -169,6 +169,15 @@ namespace Arawn.GameCreator2.Networking
                 SendStopToNetwork();
                 return;
             }
+
+            if (NetworkGameplayInputBlocker.IsTextInputFocused())
+            {
+                this.m_PointerPress = false;
+                this.m_Pointer = Vector3.zero;
+                this.m_WasPressed = false;
+                SendStopToNetwork();
+                return;
+            }
             
             // Update GC2 InputDirection for compatibility
             this.InputDirection = m_Direction;
@@ -250,6 +259,7 @@ namespace Arawn.GameCreator2.Networking
             if (!this.Character.IsPlayer) return;
             if (!this.Character.Player.IsControllable) return;
             if (!m_IsInputEnabled) return;
+            if (NetworkGameplayInputBlocker.IsTextInputFocused()) return;
 
             this.m_PointerPress = true;
         }
@@ -258,6 +268,7 @@ namespace Arawn.GameCreator2.Networking
         {
             if (!this.Character.IsPlayer) return;
             if (!m_IsInputEnabled) return;
+            if (NetworkGameplayInputBlocker.IsTextInputFocused()) return;
             
             this.m_Pointer = this.GetFollowPoint();
             this.m_Direction = (this.m_Pointer - this.Character.Feet).normalized;
@@ -267,6 +278,7 @@ namespace Arawn.GameCreator2.Networking
         private void OnCancelPointer()
         {
             if (!m_IsInputEnabled) return;
+            if (NetworkGameplayInputBlocker.IsTextInputFocused()) return;
             
             // Send stop when pointer released
             if (m_StopOnRelease && m_WasPressed)

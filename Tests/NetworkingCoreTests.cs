@@ -1495,6 +1495,26 @@ namespace Arawn.GameCreator2.Networking.Tests
         }
 
         [Test]
+        public void PositionState_Create_RoundTripsMoveVelocity()
+        {
+            var state = NetworkPositionState.Create(
+                UnityEngine.Vector3.zero,
+                rotationY: 0f,
+                verticalVel: 0f,
+                lastInput: 0,
+                isGrounded: false,
+                isJumping: false,
+                moveVelocity: new UnityEngine.Vector3(1.25f, 4f, -0.5f)
+            );
+
+            var velocity = state.GetMoveVelocity();
+            Assert.IsTrue(state.HasMoveVelocity);
+            Assert.AreEqual(1.25f, velocity.x, 0.02f);
+            Assert.AreEqual(4f, velocity.y, 0.02f);
+            Assert.AreEqual(-0.5f, velocity.z, 0.02f);
+        }
+
+        [Test]
         public void PositionState_Flags_Grounded()
         {
             var state = NetworkPositionState.Create(

@@ -25,6 +25,13 @@ For PurrNet projects, enable **Traversal** on the PurrNet wizard Modules page. T
 
 When a Player Prefab is assigned on the Scene page and prefab preparation is enabled, selecting Traversal adds `NetworkTraversalController` to that prefab.
 
+One-click climb reference scene:
+
+- `Game Creator > Networking Layer > Demos > Create PurrNet Climb Demo Scene`
+- Copies `Example_4_Climb` into the PurrNet demo folder.
+- Removes the original standalone sample player, then adds PurrNet, the traversal manager/bridge, a traversal-ready network player prefab, spawn points, and demo host/join UI.
+- Use this scene to verify free-climb (`TraverseInteractive`) and ledge-climb (`TraverseLink`) behavior before wiring a customer project.
+
 ## Transport Wiring
 
 Wire the manager delegates to your transport layer:

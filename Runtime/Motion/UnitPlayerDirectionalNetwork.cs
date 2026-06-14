@@ -1,8 +1,11 @@
 using System;
+using System.Reflection;
 using UnityEngine;
+using UnityEngine.EventSystems;
 using GameCreator.Runtime.Common;
 using GameCreator.Runtime.Cameras;
 using GameCreator.Runtime.Characters;
+using UnityEngine.UI;
 
 namespace Arawn.GameCreator2.Networking
 {
@@ -51,6 +54,12 @@ namespace Arawn.GameCreator2.Networking
         /// Fired when any input changes. Useful for UI feedback or debug.
         /// </summary>
         public event Action<Vector2, bool> OnInputCaptured;
+
+        /// <summary>
+        /// Allows feature-specific systems, such as Traversal, to consume jump input before
+        /// it is sent to the network movement driver as a regular jump.
+        /// </summary>
+        public event Func<bool> EventTryConsumeJump;
 
         // INITIALIZERS: --------------------------------------------------------------------------
 
@@ -118,6 +127,24 @@ namespace Arawn.GameCreator2.Networking
                 ClearMotionDirection();
                 return;
             }
+
+            if (NetworkGameplayInputBlocker.IsTextInputFocused())
+            {
+                m_CurrentInput = Vector2.zero;
+                m_JumpPressed = false;
+                m_JumpConsumed = false;
+                this.InputDirection = Vector3.zero;
+                ClearMotionDirection();
+
+                RefreshNetworkDriver();
+                if (m_NetworkDriver != null)
+                {
+                    Transform camTransform = GetCameraTransform();
+                    m_NetworkDriver.ProcessLocalInput(Vector2.zero, camTransform, false);
+                }
+
+                return;
+            }
             
             // Capture raw input
             m_CurrentInput = this.m_IsControllable
@@ -135,6 +162,7 @@ namespace Arawn.GameCreator2.Networking
             SetMotionDirection(this.InputDirection);
             
             OnInputCaptured?.Invoke(m_CurrentInput, m_JumpPressed);
+            TryConsumeJumpExternally();
             
             // Feed input to network driver if available
             RefreshNetworkDriver();
@@ -154,7 +182,10 @@ namespace Arawn.GameCreator2.Networking
         
         private void OnJumpPerformed()
         {
-            if (m_IsInputEnabled && this.Character != null && this.Character.IsPlayer)
+            if (m_IsInputEnabled &&
+                !NetworkGameplayInputBlocker.IsTextInputFocused() &&
+                this.Character != null &&
+                this.Character.IsPlayer)
             {
                 m_JumpPressed = true;
                 m_JumpConsumed = false;
@@ -212,6 +243,7 @@ namespace Arawn.GameCreator2.Networking
             SetMotionDirection(this.InputDirection);
             
             OnInputCaptured?.Invoke(m_CurrentInput, m_JumpPressed);
+            TryConsumeJumpExternally();
             
             RefreshNetworkDriver();
             if (m_NetworkDriver != null)
@@ -283,6 +315,39 @@ namespace Arawn.GameCreator2.Networking
             m_NetworkDriver = this.Character.Driver as UnitDriverNetworkClient;
         }
 
+        private bool TryConsumeJumpExternally()
+        {
+            if (!m_JumpPressed) return false;
+            if (EventTryConsumeJump == null) return false;
+
+            bool consumed = false;
+            foreach (Delegate subscriber in EventTryConsumeJump.GetInvocationList())
+            {
+                try
+                {
+                    if (subscriber is Func<bool> handler && handler.Invoke())
+                    {
+                        consumed = true;
+                    }
+                }
+                catch (Exception exception)
+                {
+                    Debug.LogException(exception);
+                }
+            }
+
+            if (!consumed) return false;
+
+            Debug.Log(
+                $"[TraversalConnectionDebug][NetworkDirectionalInput] jump consumed externally " +
+                $"character='{(this.Character != null ? this.Character.name : "null")}' " +
+                $"input=({m_CurrentInput.x:F3},{m_CurrentInput.y:F3})");
+
+            m_JumpConsumed = true;
+            m_JumpPressed = false;
+            return true;
+        }
+
         private void RefreshNetworkCharacter()
         {
             if (this.Character == null) return;
@@ -304,6 +369,31 @@ namespace Arawn.GameCreator2.Networking
             ShortcutPlayer.Change(this.Character.gameObject);
             return true;
         }
+    }
 
+    internal static class NetworkGameplayInputBlocker
+    {
+        public static bool IsTextInputFocused()
+        {
+            EventSystem eventSystem = EventSystem.current;
+            GameObject selected = eventSystem != null ? eventSystem.currentSelectedGameObject : null;
+            if (selected == null) return false;
+
+            InputField inputField = selected.GetComponent<InputField>();
+            if (inputField != null)
+            {
+                return inputField.isFocused;
+            }
+
+            Component tmpInputField = selected.GetComponent("TMP_InputField");
+            if (tmpInputField == null) return false;
+
+            PropertyInfo isFocused = tmpInputField.GetType().GetProperty(
+                "isFocused",
+                BindingFlags.Instance | BindingFlags.Public
+            );
+
+            return isFocused?.GetValue(tmpInputField) is true;
+        }
     }
 }

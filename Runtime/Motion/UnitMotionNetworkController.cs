@@ -57,6 +57,7 @@ namespace Arawn.GameCreator2.Networking
         private const float MOVE_DIRECTION_MINIMUM_SEND_INTERVAL = 0.05f;
         private const float MOVE_DIRECTION_HEARTBEAT_INTERVAL = 0.12f;
         private const float MOVE_DIRECTION_CHANGE_THRESHOLD = 0.05f;
+        private const int TRAVERSAL_MOVE_DIRECTION_PRIORITY = 9;
 
         [NonSerialized] private byte m_ConfigVersion;
         [NonSerialized] private NetworkMotionConfig m_LastSentConfig;
@@ -577,6 +578,8 @@ namespace Arawn.GameCreator2.Networking
         /// </summary>
         public override void MoveToDirection(Vector3 velocity, Space space, int priority)
         {
+            bool preserveTraversalAnimationDirection = IsTraversalMoveDirectionPriority(priority);
+
             if (m_IsServer)
             {
                 ushort sequence = NextCommandSequence(false);
@@ -584,6 +587,12 @@ namespace Arawn.GameCreator2.Networking
                 // Server applies directly
                 StopNavigationRoutine();
                 base.MoveToDirection(velocity, space, priority);
+                if (preserveTraversalAnimationDirection && IsLocalOwnerInstance())
+                {
+                    SetDriverExternalMoveDirection(
+                        ResolveWorldMoveVelocity(velocity, space),
+                        true);
+                }
                 
                 // Broadcast to clients
                 var command = NetworkMotionCommand.CreateMoveToDirection(
@@ -592,6 +601,13 @@ namespace Arawn.GameCreator2.Networking
             }
             else
             {
+                if (preserveTraversalAnimationDirection)
+                {
+                    SetDriverExternalMoveDirection(
+                        ResolveWorldMoveVelocity(velocity, space),
+                        true);
+                }
+
                 if (!ShouldSendMoveDirectionCommand(velocity, space, priority))
                 {
                     return;
@@ -620,6 +636,10 @@ namespace Arawn.GameCreator2.Networking
             StopNavigationRoutine();
             base.StopToDirection(priority);
             MarkMoveDirectionCommandSent(Vector3.zero, Space.World, priority, Time.unscaledTime);
+            if (IsTraversalMoveDirectionPriority(priority))
+            {
+                SetDriverExternalMoveDirection(Vector3.zero, false);
+            }
 
             var command = NetworkMotionCommand.CreateStopDirection(priority, sequence);
             if (m_IsServer)
@@ -905,6 +925,9 @@ namespace Arawn.GameCreator2.Networking
                         Space space = command.IsWorldSpace() ? Space.World : Space.Self;
                         StopNavigationRoutine();
                         base.MoveToDirection(velocity, space, command.priority);
+                        SetDriverExternalMoveDirection(
+                            ResolveWorldMoveVelocity(velocity, space),
+                            IsTraversalMoveDirectionPriority(command.priority));
                         OnBroadcastCommand?.Invoke(command);
                     }
                     return result;
@@ -968,6 +991,10 @@ namespace Arawn.GameCreator2.Networking
                     result = NetworkMotionResult.Approved(command.sequenceNumber);
                     StopNavigationRoutine();
                     base.StopToDirection(command.priority);
+                    if (IsTraversalMoveDirectionPriority(command.priority))
+                    {
+                        SetDriverExternalMoveDirection(Vector3.zero, false);
+                    }
                     OnBroadcastCommand?.Invoke(command);
                     return result;
 
@@ -1008,6 +1035,9 @@ namespace Arawn.GameCreator2.Networking
                     Space space = command.IsWorldSpace() ? Space.World : Space.Self;
                     StopNavigationRoutine();
                     base.MoveToDirection(velocity, space, command.priority);
+                    SetDriverExternalMoveDirection(
+                        ResolveWorldMoveVelocity(velocity, space),
+                        IsTraversalMoveDirectionPriority(command.priority));
                     break;
 
                 case NetworkMotionCommandType.MoveToPosition:
@@ -1040,6 +1070,10 @@ namespace Arawn.GameCreator2.Networking
                 case NetworkMotionCommandType.StopDirection:
                     StopNavigationRoutine();
                     base.StopToDirection(command.priority);
+                    if (IsTraversalMoveDirectionPriority(command.priority))
+                    {
+                        SetDriverExternalMoveDirection(Vector3.zero, false);
+                    }
                     break;
             }
         }
@@ -1095,7 +1129,7 @@ namespace Arawn.GameCreator2.Networking
                 return NetworkMotionResult.Rejected(command.sequenceNumber, 
                     NetworkMotionResult.REJECT_TOO_FAR);
             }
-            
+
             return NetworkMotionResult.Approved(command.sequenceNumber);
         }
 
@@ -1358,18 +1392,41 @@ namespace Arawn.GameCreator2.Networking
             SetDriverExternalMoveDirection(direction.normalized * ResolveNavigationSpeed());
         }
 
-        private void SetDriverExternalMoveDirection(Vector3 velocity)
+        private void SetDriverExternalMoveDirection(
+            Vector3 velocity,
+            bool preserveWhileTraversalLikeMotion = false)
         {
             switch (this.Character?.Driver)
             {
                 case UnitDriverNetworkClient clientDriver:
-                    clientDriver.SetExternalMoveDirection(velocity);
+                    clientDriver.SetExternalMoveDirection(velocity, preserveWhileTraversalLikeMotion);
                     break;
 
                 case UnitDriverNetworkServer serverDriver:
-                    serverDriver.SetExternalMoveDirection(velocity);
+                    serverDriver.SetExternalMoveDirection(velocity, preserveWhileTraversalLikeMotion);
                     break;
             }
+        }
+
+        private bool IsTraversalMoveDirectionPriority(int priority)
+        {
+            return priority == TRAVERSAL_MOVE_DIRECTION_PRIORITY;
+        }
+
+        private Vector3 ResolveWorldMoveVelocity(Vector3 velocity, Space space)
+        {
+            if (space == Space.World) return velocity;
+            return this.Character != null
+                ? this.Character.transform.TransformDirection(velocity)
+                : velocity;
+        }
+
+        private bool IsLocalOwnerInstance()
+        {
+            if (this.Character == null) return false;
+
+            NetworkCharacter networkCharacter = this.Character.GetComponent<NetworkCharacter>();
+            return networkCharacter == null || networkCharacter.IsOwnerInstance;
         }
 
         private bool GetNavigationDriveDecision(out string reason)
@@ -1776,7 +1833,11 @@ namespace Arawn.GameCreator2.Networking
                     this.Character.Busy.MakeLegsBusy();
                 }
 
-                this.Character.StartCoroutine(DriveServerDashRoutine(direction, speed, duration, releaseLegsBusy: true));
+                this.Character.StartCoroutine(DriveServerDashRoutine(
+                    direction,
+                    speed,
+                    duration,
+                    releaseLegsBusy: true));
                 BumpDashCooldown();
                 return;
             }
@@ -1817,7 +1878,11 @@ namespace Arawn.GameCreator2.Networking
             m_LastDashTime = now;
         }
 
-        private System.Collections.IEnumerator DriveServerDashRoutine(Vector3 direction, float speed, float duration, bool releaseLegsBusy = false)
+        private System.Collections.IEnumerator DriveServerDashRoutine(
+            Vector3 direction,
+            float speed,
+            float duration,
+            bool releaseLegsBusy = false)
         {
             if (direction.sqrMagnitude <= 0f)
             {

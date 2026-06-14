@@ -1,0 +1,25 @@
+{
+    "name": "Arawn.GameCreator2.Networking.Transport.PurrNet.Editor",
+    "rootNamespace": "Arawn.GameCreator2.Networking.Transport.PurrNet.Editor",
+    "references": [
+        "Arawn.GameCreator2.Networking",
+        "Arawn.GameCreator2.Networking.Editor",
+        "Arawn.GameCreator2.Networking.Transport.PurrNet",
+        "PurrNet.Runtime",
+        "PurrNet.Editor",
+        "GameCreator.Runtime.Core",
+        "GameCreator.Editor.Core",
+        "UnityEngine.UI"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

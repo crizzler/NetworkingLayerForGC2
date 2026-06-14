@@ -1,8 +1,11 @@
 #if GC2_TRAVERSAL
 using System;
 using System.Collections.Generic;
+using System.Reflection;
 using System.Threading.Tasks;
 using Arawn.GameCreator2.Networking.Security;
+using GameCreator.Runtime.Characters;
+using GameCreator.Runtime.Traversal;
 using UnityEngine;
 
 namespace Arawn.GameCreator2.Networking.Traversal
@@ -52,6 +55,18 @@ namespace Arawn.GameCreator2.Networking.Traversal
 
         public Func<NetworkTraversalRequest, uint, TraversalRejectionReason> CustomTraversalValidator;
 
+        private const BindingFlags TRAVERSAL_STANCE_FIELD_FLAGS =
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+
+        private static readonly PropertyInfo s_TraversalStanceRelativePositionProperty =
+            typeof(TraversalStance).GetProperty("RelativePosition", TRAVERSAL_STANCE_FIELD_FLAGS);
+
+        private static readonly PropertyInfo s_TraversalStanceInInteractiveTransitionProperty =
+            typeof(TraversalStance).GetProperty("InInteractiveTransition", TRAVERSAL_STANCE_FIELD_FLAGS);
+
+        private static float s_LastOwnerAuthorityPoseSyncLogRealtime = -100f;
+        private static bool s_LoggedMissingTransitionProperty;
+
         public bool IsServer
         {
             get => m_IsServer;
@@ -72,15 +87,158 @@ namespace Arawn.GameCreator2.Networking.Traversal
             SecurityIntegration.SetModuleServerContext("Traversal", m_IsServer);
             SecurityIntegration.EnsureSecurityManagerInitialized(m_IsServer, ResolveSecurityTimeProvider);
             SyncPatchHooks();
+            InstallOwnerAuthorityPoseSyncHook();
         }
 
         private void OnDisable()
         {
             SecurityIntegration.SetModuleServerContext("Traversal", false);
+            UninstallOwnerAuthorityPoseSyncHook();
             if (m_PatchHooks != null)
             {
                 m_PatchHooks.Initialize(false, false);
             }
+        }
+
+        private static void InstallOwnerAuthorityPoseSyncHook()
+        {
+            UnitDriverNetworkServer.OwnerAuthorityPositionAccepted -= SyncTraversalRelativePositionFromOwnerAuthority;
+            UnitDriverNetworkServer.OwnerAuthorityPositionAccepted += SyncTraversalRelativePositionFromOwnerAuthority;
+            UnitDriverNetworkServer.OwnerAuthorityPositionRejectionRequested -= RejectOwnerAuthorityPoseDuringInteractiveTransition;
+            UnitDriverNetworkServer.OwnerAuthorityPositionRejectionRequested += RejectOwnerAuthorityPoseDuringInteractiveTransition;
+            UnitDriverNetworkServer.ExternalRootPositionWriteAllowanceRequested -= AllowInteractiveTraversalRootWrite;
+            UnitDriverNetworkServer.ExternalRootPositionWriteAllowanceRequested += AllowInteractiveTraversalRootWrite;
+        }
+
+        private static void UninstallOwnerAuthorityPoseSyncHook()
+        {
+            UnitDriverNetworkServer.OwnerAuthorityPositionAccepted -= SyncTraversalRelativePositionFromOwnerAuthority;
+            UnitDriverNetworkServer.OwnerAuthorityPositionRejectionRequested -= RejectOwnerAuthorityPoseDuringInteractiveTransition;
+            UnitDriverNetworkServer.ExternalRootPositionWriteAllowanceRequested -= AllowInteractiveTraversalRootWrite;
+        }
+
+        private static string RejectOwnerAuthorityPoseDuringInteractiveTransition(Character character, Vector3 ownerAuthorityPosition)
+        {
+            if (!TryGetActiveInteractiveTraversal(character, out TraversalStance stance, out TraverseInteractive interactive))
+            {
+                return string.Empty;
+            }
+
+            if (!TryGetInInteractiveTransition(character, stance, out bool inTransition) || !inTransition)
+            {
+                return string.Empty;
+            }
+
+            return $"traversal-interactive-transition:{interactive.name}";
+        }
+
+        private static string AllowInteractiveTraversalRootWrite(Character character, Vector3 rootPosition)
+        {
+            if (!TryGetActiveInteractiveTraversal(character, out TraversalStance stance, out TraverseInteractive interactive))
+            {
+                return string.Empty;
+            }
+
+            return TryGetInInteractiveTransition(character, stance, out bool inTransition) && inTransition
+                ? $"traversal-interactive-transition:{interactive.name}"
+                : $"traversal-interactive:{interactive.name}";
+        }
+
+        private static void SyncTraversalRelativePositionFromOwnerAuthority(Character character, Vector3 ownerAuthorityPosition)
+        {
+            if (!TryGetActiveInteractiveTraversal(character, out TraversalStance stance, out TraverseInteractive interactive))
+            {
+                return;
+            }
+
+            if (interactive.MotionInteractive == null) return;
+
+            if (s_TraversalStanceRelativePositionProperty == null)
+            {
+                Debug.LogError(
+                    $"[TraversalPoseDebug][Manager] {character.name} failed to sync owner-authority traversal pose: " +
+                    "TraversalStance.RelativePosition property was not found",
+                    character);
+                return;
+            }
+
+            Vector3 anchorPosition = interactive.MotionInteractive.CharacterPosition(character);
+            Vector3 localPosition = interactive.Transform.InverseTransformPoint(anchorPosition);
+            Vector3 previousRelative = s_TraversalStanceRelativePositionProperty.GetValue(stance) is Vector3 previous
+                ? previous
+                : default;
+
+            float halfWidth = interactive.Width * 0.5f;
+            localPosition.x = Mathf.Clamp(localPosition.x, -halfWidth, halfWidth);
+            localPosition.y = 0f;
+            localPosition.z = Mathf.Clamp(localPosition.z, interactive.PositionA, interactive.PositionB);
+
+            s_TraversalStanceRelativePositionProperty.SetValue(stance, localPosition);
+
+            float now = Time.realtimeSinceStartup;
+            if ((localPosition - previousRelative).sqrMagnitude <= 0.0001f &&
+                now - s_LastOwnerAuthorityPoseSyncLogRealtime < 0.25f)
+            {
+                return;
+            }
+
+            Debug.Log(
+                $"[TraversalPoseDebug][Manager] synced owner-authority traversal relative position " +
+                $"character='{character.name}' traverse='{interactive.name}:{interactive.GetType().Name}' " +
+                $"ownerRoot={FormatVector(ownerAuthorityPosition)} anchor={FormatVector(anchorPosition)} " +
+                $"previousRelative={FormatVector(previousRelative)} relative={FormatVector(localPosition)} " +
+                $"boundsA={interactive.PositionA:F3} boundsB={interactive.PositionB:F3} width={interactive.Width:F3}",
+                character);
+            s_LastOwnerAuthorityPoseSyncLogRealtime = now;
+        }
+
+        private static bool TryGetActiveInteractiveTraversal(
+            Character character,
+            out TraversalStance stance,
+            out TraverseInteractive interactive)
+        {
+            stance = null;
+            interactive = null;
+
+            if (character == null || character.Combat == null) return false;
+
+            stance = character.Combat.RequestStance<TraversalStance>();
+            if (stance == null) return false;
+
+            interactive = stance.Traverse as TraverseInteractive;
+            return interactive != null;
+        }
+
+        private static bool TryGetInInteractiveTransition(
+            Character character,
+            TraversalStance stance,
+            out bool inTransition)
+        {
+            inTransition = false;
+            if (stance == null) return false;
+
+            if (s_TraversalStanceInInteractiveTransitionProperty == null)
+            {
+                if (!s_LoggedMissingTransitionProperty)
+                {
+                    Debug.LogError(
+                        $"[TraversalPoseDebug][Manager] {(character != null ? character.name : "Character")} " +
+                        "failed to inspect traversal transition state: " +
+                        "TraversalStance.InInteractiveTransition property was not found",
+                        character);
+                    s_LoggedMissingTransitionProperty = true;
+                }
+
+                return false;
+            }
+
+            if (s_TraversalStanceInInteractiveTransitionProperty.GetValue(stance) is not bool value)
+            {
+                return false;
+            }
+
+            inTransition = value;
+            return true;
         }
 
         public void RegisterController(uint networkId, NetworkTraversalController controller)
@@ -135,6 +293,11 @@ namespace Arawn.GameCreator2.Networking.Traversal
             uint senderClientId = GetSenderClientId(clientId);
             bool pendingIncremented = false;
 
+            TraceTraversal(
+                $"receive request rawClient={clientId} sender={senderClientId} requestId={request.RequestId} " +
+                $"actor={request.ActorNetworkId} target={request.TargetNetworkId} correlation={request.CorrelationId} " +
+                $"action={request.Action} traverse='{request.TraverseIdString}' hash={request.TraverseHash}");
+
             try
             {
                 if (!SecurityIntegration.ValidateModuleRequest(
@@ -180,13 +343,24 @@ namespace Arawn.GameCreator2.Networking.Traversal
                 NetworkTraversalController controller = GetController(request.TargetNetworkId);
                 if (controller == null)
                 {
+                    TraceTraversal(
+                        $"reject no controller requestId={request.RequestId} target={request.TargetNetworkId} " +
+                        $"registered={m_Controllers.Count}");
                     SendRejectedResponse(senderClientId, request, TraversalRejectionReason.TargetNotFound);
                     return;
                 }
 
+                TraceTraversal(
+                    $"validated request requestId={request.RequestId} sender={senderClientId} " +
+                    $"target={request.TargetNetworkId} controller='{controller.name}'");
+
                 NetworkTraversalResponse response = await controller.ProcessTraversalRequestAsync(request, senderClientId);
                 response.ActorNetworkId = request.ActorNetworkId;
                 response.CorrelationId = request.CorrelationId;
+                TraceTraversal(
+                    $"send response requestId={response.RequestId} sender={senderClientId} " +
+                    $"authorized={response.Authorized} applied={response.Applied} rejection={response.RejectionReason} " +
+                    $"traversing={response.IsTraversing} traverse='{response.TraverseIdString}' error='{response.Error}'");
                 OnSendTraversalResponse?.Invoke(senderClientId, response);
             }
             catch (Exception exception)
@@ -294,6 +468,11 @@ namespace Arawn.GameCreator2.Networking.Traversal
 
         private void SendRejectedResponse(uint senderClientId, in NetworkTraversalRequest request, TraversalRejectionReason reason)
         {
+            TraceTraversal(
+                $"reject requestId={request.RequestId} sender={senderClientId} actor={request.ActorNetworkId} " +
+                $"target={request.TargetNetworkId} correlation={request.CorrelationId} action={request.Action} " +
+                $"reason={reason} traverse='{request.TraverseIdString}' hash={request.TraverseHash}");
+
             OnSendTraversalResponse?.Invoke(senderClientId, new NetworkTraversalResponse
             {
                 RequestId = request.RequestId,
@@ -378,6 +557,16 @@ namespace Arawn.GameCreator2.Networking.Traversal
 
             m_PendingRequestCounts[clientId] = count + 1;
             return true;
+        }
+
+        private void TraceTraversal(string message)
+        {
+            Debug.Log($"[TraversalTrace][Manager] server={m_IsServer} controllers={m_Controllers.Count} {message}", this);
+        }
+
+        private static string FormatVector(Vector3 value)
+        {
+            return $"({value.x:F3},{value.y:F3},{value.z:F3})";
         }
 
         private void DecrementPendingRequests(ulong clientId)

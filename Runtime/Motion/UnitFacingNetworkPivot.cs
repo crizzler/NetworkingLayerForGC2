@@ -132,6 +132,12 @@ namespace Arawn.GameCreator2.Networking
         public override void OnUpdate()
         {
             if (Character.IsDead) return;
+
+            if (IsExternalMotionOwningFacing())
+            {
+                SyncNetworkYawToCurrentRotation();
+                return;
+            }
             
             if (m_IsNetworkInitialized && m_NetworkCharacter != null)
             {
@@ -321,6 +327,20 @@ namespace Arawn.GameCreator2.Networking
                 Transform.rotation * Character.Animim.RootMotionDeltaRotation,
                 Character.RootMotionRotation
             );
+        }
+
+        private bool IsExternalMotionOwningFacing()
+        {
+            if (Character?.Busy == null) return false;
+            return Character.Busy.IsBusy || Character.Busy.AreLegsBusy;
+        }
+
+        private void SyncNetworkYawToCurrentRotation()
+        {
+            float currentYaw = Transform.eulerAngles.y;
+            m_ServerYaw = currentYaw;
+            m_ClientYaw = currentYaw;
+            m_LastSentYaw = currentYaw;
         }
         
         // ════════════════════════════════════════════════════════════════════════════════════════

@@ -214,11 +214,22 @@ namespace Arawn.GameCreator2.Networking
             {
                 LogDash(
                     message.Command,
-                    $"skipped owner predicted broadcast character={message.CharacterNetworkId} seq={message.Command.sequenceNumber}");
+                    $"skipped owner predicted broadcast character={message.CharacterNetworkId}");
                 return;
             }
 
-            LogDash(message.Command, $"applying broadcast character={message.CharacterNetworkId}");
+            // On a host, server-originated broadcasts are looped back through the
+            // client receive path. Server-side controllers have already applied
+            // the command before broadcasting it, so applying the echo starts a
+            // second dash drive on the same authoritative proxy.
+            if (m_IsServer && controller.IsServer)
+            {
+                return;
+            }
+
+            LogDash(
+                message.Command,
+                $"applying broadcast character={message.CharacterNetworkId}");
             controller.ApplyBroadcastCommand(message.Command);
         }
 
@@ -231,7 +242,9 @@ namespace Arawn.GameCreator2.Networking
                 LogDash(command, $"cannot send local command: SendCommandToServer has no listeners character={binding.NetworkId}");
             }
 
-            LogDash(command, $"sending local command to server character={binding.NetworkId}");
+            LogDash(
+                command,
+                $"sending local command to server character={binding.NetworkId}");
             SendCommandToServer?.Invoke(new NetworkMotionCommandMessage
             {
                 CharacterNetworkId = binding.NetworkId,
@@ -249,7 +262,9 @@ namespace Arawn.GameCreator2.Networking
                 LogDash(command, $"cannot broadcast command: BroadcastCommandToClients has no listeners character={binding.NetworkId}");
             }
 
-            LogDash(command, $"broadcasting command character={binding.NetworkId}");
+            LogDash(
+                command,
+                $"broadcasting command character={binding.NetworkId}");
             BroadcastCommandToClients?.Invoke(new NetworkMotionCommandMessage
             {
                 CharacterNetworkId = binding.NetworkId,

@@ -4,10 +4,6 @@ This module adds server-authoritative networking for **Game Creator 2 Dialogue**
 
 Compile symbol: `GC2_DIALOGUE` (auto-enabled when `com.gamecreator.dialogue` is present).
 
-Detailed setup guide:
-
-- `Assets/Arawn/NetworkingLayerForGC2/Documentation/network-dialogue.md`
-
 ## Authority Modes
 
 - Coop and most production flows: interception mode is usually enough, no source patch required.
@@ -95,11 +91,11 @@ For MMO-style dialogue where one player can skip while another keeps listening, 
 - leader-driven dialogue, where only the host/party leader can send `Continue` and `Choice`
 - all-ready dialogue, where each client can mark their local UI ready and the server advances only after all relevant clients are ready or a timeout expires
 
-The PurrNet demo scene uses shared lockstep because it is the clearest way to verify transport synchronization. Production projects can layer custom validators, custom instructions, or project-specific pacing state on top to choose a different policy per conversation.
+The PurrNet demo scene uses shared lockstep because it is the clearest way to verify transport synchronization. Production projects can layer a dialogue profile or custom instructions on top to choose a different pacing policy per conversation.
 
 ## Network Instructions
 
-Use the network Dialogue instructions when you want Instruction List level authority without modifying Game Creator source:
+Use the network Dialogue instructions when you want graph-level authority without modifying Game Creator source:
 
 - `Network Play Dialogue`
 - `Network Stop Dialogue`
@@ -111,7 +107,7 @@ These instructions call `NetworkDialogueController` request APIs and let the ser
 ## Interception Fallback
 
 `NetworkDialogueController` listens to local Dialogue events on owner clients and forwards them as network requests.
-This lets existing GC2 Dialogue instructions/UI continue to work without immediately rewriting every Instruction List.
+This lets existing GC2 Dialogue instructions/UI continue to work without immediate graph rewrites.
 
 For strictest competitive behavior, combine `Request*` APIs with the Dialogue patcher.
 

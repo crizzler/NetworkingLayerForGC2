@@ -50,6 +50,12 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
         {
             PatchStatusWindow.ShowWindow();
         }
+
+        [MenuItem("Game Creator/Networking Layer/Patches/Patch All Installed", false, 51)]
+        public static void PatchAllInstalled()
+        {
+            ApplyAllInstalledPatches(showDialogs: true);
+        }
         
         // ════════════════════════════════════════════════════════════════════════════════════════
         // CORE MENU ITEMS
@@ -272,8 +278,142 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                     "Failed to apply the patch. The source files may have been\n" +
                     "modified in a way that's incompatible with this patcher.\n\n" +
                     "Please check the Console for details.",
+                "OK");
+            }
+        }
+
+        internal static bool ApplyAllInstalledPatches(bool showDialogs)
+        {
+            var pendingPatchers = new List<GC2PatcherBase>();
+            var compatibilityWarnings = new List<string>();
+
+            foreach (GC2PatcherBase patcher in GetAllPatchers())
+            {
+                if (!patcher.ValidateFilesExist() || patcher.IsPatched())
+                {
+                    continue;
+                }
+
+                pendingPatchers.Add(patcher);
+                if (!patcher.TryValidateVersionCompatibility(out string compatibilityMessage))
+                {
+                    compatibilityWarnings.Add($"{patcher.DisplayName}: {compatibilityMessage}");
+                }
+            }
+
+            if (pendingPatchers.Count == 0)
+            {
+                if (showDialogs)
+                {
+                    EditorUtility.DisplayDialog(
+                        "Patch All Installed",
+                        "No installed GC2 modules need patching.",
+                        "OK");
+                }
+
+                return true;
+            }
+
+            if (showDialogs)
+            {
+                string moduleList = BuildModuleList(pendingPatchers);
+                bool confirm = EditorUtility.DisplayDialog(
+                    "Patch All Installed GC2 Modules",
+                    "This will patch every installed, currently unpatched GC2 module in the order shown in the status window.\n\n" +
+                    moduleList + "\n\n" +
+                    "Backups will be created before each module is patched.",
+                    "Patch All",
+                    "Cancel");
+
+                if (!confirm)
+                {
+                    return false;
+                }
+
+                if (compatibilityWarnings.Count > 0)
+                {
+                    bool continueAnyway = EditorUtility.DisplayDialog(
+                        "Version Compatibility Warning",
+                        "Some installed modules do not match the versions this patcher was authored against:\n\n" +
+                        string.Join("\n", compatibilityWarnings) + "\n\n" +
+                        "The patchers use structural and fuzzy matching and roll back on verification failure, but a large upstream change may still require a patcher update.",
+                        "Continue Anyway",
+                        "Cancel");
+
+                    if (!continueAnyway)
+                    {
+                        return false;
+                    }
+                }
+            }
+
+            try
+            {
+                for (int i = 0; i < pendingPatchers.Count; i++)
+                {
+                    GC2PatcherBase patcher = pendingPatchers[i];
+                    float progress = pendingPatchers.Count > 0 ? (float) i / pendingPatchers.Count : 1f;
+
+                    if (EditorUtility.DisplayCancelableProgressBar(
+                            "GC2 Networking Patch All",
+                            $"Patching {patcher.DisplayName}...",
+                            progress))
+                    {
+                        Debug.LogWarning("[GC2 Networking] Patch All cancelled by user.");
+                        if (showDialogs)
+                        {
+                            EditorUtility.DisplayDialog(
+                                "Patch All Cancelled",
+                                "Patch All was cancelled. Any module that was currently being patched rolled back from its backup.",
+                                "OK");
+                        }
+
+                        return false;
+                    }
+
+                    if (patcher.ApplyPatch())
+                    {
+                        continue;
+                    }
+
+                    if (showDialogs)
+                    {
+                        EditorUtility.DisplayDialog(
+                            "Patch All Failed",
+                            $"Failed while patching {patcher.DisplayName}.\n\n" +
+                            "The failed module rolled back from its backup. Check the Console for the exact insertion or verification failure.",
+                            "OK");
+                    }
+
+                    return false;
+                }
+            }
+            finally
+            {
+                EditorUtility.ClearProgressBar();
+                AssetDatabase.Refresh();
+            }
+
+            if (showDialogs)
+            {
+                EditorUtility.DisplayDialog(
+                    "Patch All Complete",
+                    $"Applied {pendingPatchers.Count} GC2 networking patch(es).",
                     "OK");
             }
+
+            return true;
+        }
+
+        private static string BuildModuleList(List<GC2PatcherBase> patchers)
+        {
+            var lines = new List<string>(patchers.Count);
+            foreach (GC2PatcherBase patcher in patchers)
+            {
+                lines.Add($"- {patcher.DisplayName}");
+            }
+
+            return string.Join("\n", lines);
         }
         
         private static void RemovePatch(string moduleName)
@@ -434,11 +574,21 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
             EditorGUILayout.Space(10);
             
             EditorGUILayout.BeginHorizontal();
+            GUI.enabled = !m_IsOperationRunning && HasPatchableInstalledModules();
+            if (GUILayout.Button("Patch All Installed", GUILayout.Height(25)))
+            {
+                QueuePatchAllOperation();
+                GUIUtility.ExitGUI();
+            }
+
+            GUI.enabled = !m_IsOperationRunning;
             if (GUILayout.Button("Refresh", GUILayout.Height(25)))
             {
                 RefreshStatuses(force: true);
                 Repaint();
             }
+
+            GUI.enabled = true;
             EditorGUILayout.EndHorizontal();
         }
 
@@ -487,6 +637,43 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                     Repaint();
                 }
             };
+        }
+
+        private void QueuePatchAllOperation()
+        {
+            if (m_IsOperationRunning) return;
+
+            m_IsOperationRunning = true;
+            m_OperationLabel = "Patching all installed GC2 modules...";
+            Repaint();
+
+            EditorApplication.delayCall += () =>
+            {
+                try
+                {
+                    GC2PatchManager.ApplyAllInstalledPatches(showDialogs: true);
+                }
+                finally
+                {
+                    m_IsOperationRunning = false;
+                    m_OperationLabel = string.Empty;
+                    RefreshStatuses(force: true);
+                    Repaint();
+                }
+            };
+        }
+
+        private bool HasPatchableInstalledModules()
+        {
+            foreach (PatchStatus status in m_StatusCache.Values)
+            {
+                if (status.IsInstalled && !status.IsPatched)
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
         
         private void DrawModuleStatus(string moduleName, PatchStatus status)

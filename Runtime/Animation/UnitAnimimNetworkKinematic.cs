@@ -136,6 +136,12 @@ namespace Arawn.GameCreator2.Networking
     [Serializable]
     public class UnitAnimimNetworkKinematic : TUnitAnimim
     {
+        public delegate bool AnimationInputOverride(
+            Character character,
+            ref Vector3 targetIntent,
+            ref Vector3 targetSpeed,
+            Vector3 currentSpeed);
+
         private const float DECAY_PIVOT = 5f;
         private const float DECAY_GROUNDED = 10f;
         private const float DECAY_STAND = 5f;
@@ -160,6 +166,8 @@ namespace Arawn.GameCreator2.Networking
 
         private static readonly int K_GROUNDED = Animator.StringToHash("Grounded");
         private static readonly int K_STAND = Animator.StringToHash("Stand");
+
+        public static AnimationInputOverride TraversalAnimationInputOverride;
         
         // ════════════════════════════════════════════════════════════════════════════════════════
         // EXPOSED MEMBERS
@@ -386,6 +394,12 @@ namespace Arawn.GameCreator2.Networking
             Vector3 targetSpeed = motion.LinearSpeed > float.Epsilon
                 ? driver.LocalMoveDirection / motion.LinearSpeed
                 : Vector3.zero;
+
+            TraversalAnimationInputOverride?.Invoke(
+                Character,
+                ref targetIntent,
+                ref targetSpeed,
+                m_LocalSpeed);
             
             float targetPivot = facing.PivotSpeed;
             float targetGrounded = driver.IsGrounded ? 1f : 0f;

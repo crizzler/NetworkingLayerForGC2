@@ -11,7 +11,7 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
     public class ShooterPatcher : GC2PatcherBase
     {
         public override string ModuleName => "Shooter";
-        public override string PatchVersion => "2.2.2-shooter";
+        public override string PatchVersion => "2.2.3-shooter";
         public override string DisplayName => "Shooter (Game Creator 2)";
         
         public override string PatchDescription =>
@@ -430,6 +430,12 @@ namespace GameCreator.Runtime.Shooter
                 return false;
             }
             
+            if (!EnsureRuntimePatchMarker(ref content))
+            {
+                Debug.LogError("[GC2 Networking] Could not add Shooter patch marker in ShooterStance.cs.");
+                return false;
+            }
+
             WriteFile(relativePath, content);
             Debug.Log($"[GC2 Networking] Patched {relativePath}");
             return true;
@@ -573,6 +579,12 @@ namespace GameCreator.Runtime.Shooter
                 }
             }
             
+            if (!EnsureRuntimePatchMarker(ref content))
+            {
+                Debug.LogError("[GC2 Networking] Could not add Shooter patch marker in WeaponData.cs.");
+                return false;
+            }
+
             WriteFile(relativePath, content);
             Debug.Log($"[GC2 Networking] Patched {relativePath}");
             return true;
@@ -580,12 +592,16 @@ namespace GameCreator.Runtime.Shooter
 
         private bool PatchShooterWeapon(string relativePath, string content)
         {
+            NormalizeShooterWeaponHookSections(ref content);
+
             if (!content.Contains("NetworkHitDetected"))
             {
                 const string lastShotData = "        public static ShotData LastShotData { get; private set; }";
                 const string patchedLastShotData =
-                    "        public static ShotData LastShotData { get; private set; }\n" +
-                    "        public static Action<ShotData, Args> NetworkHitDetected;";
+                    "        public static ShotData LastShotData { get; private set; }\n\n" +
+                    "        // [GC2_NETWORK_PATCH] Reports Shooter hit data to networking validation.\n" +
+                    "        public static Action<ShotData, Args> NetworkHitDetected;\n" +
+                    "        // [GC2_NETWORK_PATCH_END]";
 
                 if (!TryReplaceWithFlexibleWhitespace(ref content, lastShotData, patchedLastShotData))
                 {
@@ -604,7 +620,9 @@ namespace GameCreator.Runtime.Shooter
                     "        private static void RuntimeInitializeOnLoad()\n" +
                     "        {\n" +
                     "            LastShotData = default;\n" +
-                    "            NetworkHitDetected = null;";
+                    "            // [GC2_NETWORK_PATCH] Clear networking hit callbacks on domain reload.\n" +
+                    "            NetworkHitDetected = null;\n" +
+                    "            // [GC2_NETWORK_PATCH_END]";
 
                 if (!TryReplaceWithFlexibleWhitespace(ref content, resetAnchor, patchedResetAnchor))
                 {
@@ -623,13 +641,21 @@ namespace GameCreator.Runtime.Shooter
                     "        internal void OnHit(ShotData data, Args args)\n" +
                     "        {\n" +
                     "            LastShotData = data;\n" +
-                    "            NetworkHitDetected?.Invoke(data, args);";
+                    "            // [GC2_NETWORK_PATCH] Forward hit claims to networking validation before GC2 side effects.\n" +
+                    "            NetworkHitDetected?.Invoke(data, args);\n" +
+                    "            // [GC2_NETWORK_PATCH_END]";
 
                 if (!TryReplaceWithFlexibleWhitespace(ref content, onHitAnchor, patchedOnHitAnchor))
                 {
                     Debug.LogError("[GC2 Networking] Could not inject NetworkHitDetected invocation in ShooterWeapon.cs.");
                     return false;
                 }
+            }
+
+            if (!EnsureRuntimePatchMarker(ref content))
+            {
+                Debug.LogError("[GC2 Networking] Could not add Shooter patch marker in ShooterWeapon.cs.");
+                return false;
             }
 
             WriteFile(relativePath, content);
@@ -639,6 +665,8 @@ namespace GameCreator.Runtime.Shooter
 
         private bool PatchAim(string relativePath, string content)
         {
+            NormalizeAimHookSections(ref content);
+
             if (!content.Contains("NetworkAimPointResolver"))
             {
                 const string classAnchor =
@@ -647,7 +675,9 @@ namespace GameCreator.Runtime.Shooter
                 const string patchedClassAnchor =
                     "    public class Aim\n" +
                     "    {\n" +
-                    "        public static Func<Args, Aim, Vector3?> NetworkAimPointResolver;";
+                    "        // [GC2_NETWORK_PATCH] Allows networking code to provide replicated aim points.\n" +
+                    "        public static Func<Args, Aim, Vector3?> NetworkAimPointResolver;\n" +
+                    "        // [GC2_NETWORK_PATCH_END]";
 
                 if (!TryReplaceWithFlexibleWhitespace(ref content, classAnchor, patchedClassAnchor))
                 {
@@ -666,8 +696,10 @@ namespace GameCreator.Runtime.Shooter
                 const string patchedGetPointAnchor =
                     "        public Vector3 GetPoint(Args args)\n" +
                     "        {\n" +
+                    "            // [GC2_NETWORK_PATCH] Prefer network-resolved aim points when available.\n" +
                     "            Vector3? networkAimPoint = NetworkAimPointResolver?.Invoke(args, this);\n" +
-                    "            if (networkAimPoint.HasValue) return networkAimPoint.Value;\n\n" +
+                    "            if (networkAimPoint.HasValue) return networkAimPoint.Value;\n" +
+                    "            // [GC2_NETWORK_PATCH_END]\n\n" +
                     "            return this.m_Aim.GetPoint(args);\n" +
                     "        }";
 
@@ -678,9 +710,103 @@ namespace GameCreator.Runtime.Shooter
                 }
             }
 
+            if (!EnsureRuntimePatchMarker(ref content))
+            {
+                Debug.LogError("[GC2 Networking] Could not add Shooter patch marker in Aim.cs.");
+                return false;
+            }
+
             WriteFile(relativePath, content);
             Debug.Log($"[GC2 Networking] Patched {relativePath}");
             return true;
+        }
+
+        private bool EnsureRuntimePatchMarker(ref string content)
+        {
+            if (ContainsPatchMarker(content))
+            {
+                return true;
+            }
+
+            Match namespaceMatch = Regex.Match(
+                content,
+                @"(?m)^[ \t]*namespace\s+GameCreator\.Runtime\.Shooter\b.*$",
+                RegexOptions.CultureInvariant);
+
+            if (!namespaceMatch.Success)
+            {
+                return false;
+            }
+
+            string header =
+                PatchMarker + "\n" +
+                "// This file has been patched for GC2 Networking server authority.\n" +
+                "// Do not modify the patched sections manually.\n" +
+                "// Use Game Creator > Networking Layer > Patches > Shooter > Unpatch to restore.\n\n";
+
+            content = content.Insert(namespaceMatch.Index, header);
+            return true;
+        }
+
+        private static void NormalizeShooterWeaponHookSections(ref string content)
+        {
+            TryReplaceWithFlexibleWhitespace(
+                ref content,
+                "        public static ShotData LastShotData { get; private set; }\n" +
+                "        public static Action<ShotData, Args> NetworkHitDetected;",
+                "        public static ShotData LastShotData { get; private set; }\n\n" +
+                "        // [GC2_NETWORK_PATCH] Reports Shooter hit data to networking validation.\n" +
+                "        public static Action<ShotData, Args> NetworkHitDetected;\n" +
+                "        // [GC2_NETWORK_PATCH_END]");
+
+            TryReplaceWithFlexibleWhitespace(
+                ref content,
+                "            LastShotData = default;\n" +
+                "            NetworkHitDetected = null;",
+                "            LastShotData = default;\n" +
+                "            // [GC2_NETWORK_PATCH] Clear networking hit callbacks on domain reload.\n" +
+                "            NetworkHitDetected = null;\n" +
+                "            // [GC2_NETWORK_PATCH_END]");
+
+            TryReplaceWithFlexibleWhitespace(
+                ref content,
+                "            LastShotData = data;\n" +
+                "            NetworkHitDetected?.Invoke(data, args);",
+                "            LastShotData = data;\n" +
+                "            // [GC2_NETWORK_PATCH] Forward hit claims to networking validation before GC2 side effects.\n" +
+                "            NetworkHitDetected?.Invoke(data, args);\n" +
+                "            // [GC2_NETWORK_PATCH_END]");
+        }
+
+        private static void NormalizeAimHookSections(ref string content)
+        {
+            TryReplaceWithFlexibleWhitespace(
+                ref content,
+                "    public class Aim\n" +
+                "    {\n" +
+                "        public static Func<Args, Aim, Vector3?> NetworkAimPointResolver;",
+                "    public class Aim\n" +
+                "    {\n" +
+                "        // [GC2_NETWORK_PATCH] Allows networking code to provide replicated aim points.\n" +
+                "        public static Func<Args, Aim, Vector3?> NetworkAimPointResolver;\n" +
+                "        // [GC2_NETWORK_PATCH_END]");
+
+            TryReplaceWithFlexibleWhitespace(
+                ref content,
+                "        public Vector3 GetPoint(Args args)\n" +
+                "        {\n" +
+                "            Vector3? networkAimPoint = NetworkAimPointResolver?.Invoke(args, this);\n" +
+                "            if (networkAimPoint.HasValue) return networkAimPoint.Value;\n\n" +
+                "            return this.m_Aim.GetPoint(args);\n" +
+                "        }",
+                "        public Vector3 GetPoint(Args args)\n" +
+                "        {\n" +
+                "            // [GC2_NETWORK_PATCH] Prefer network-resolved aim points when available.\n" +
+                "            Vector3? networkAimPoint = NetworkAimPointResolver?.Invoke(args, this);\n" +
+                "            if (networkAimPoint.HasValue) return networkAimPoint.Value;\n" +
+                "            // [GC2_NETWORK_PATCH_END]\n\n" +
+                "            return this.m_Aim.GetPoint(args);\n" +
+                "        }");
         }
 
         private bool TryInsertWeaponDataNetworkingHeader(ref string content)

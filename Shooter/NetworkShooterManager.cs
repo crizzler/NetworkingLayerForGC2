@@ -2,6 +2,7 @@
 using System;
 using System.Collections.Generic;
 using UnityEngine;
+using UnityEngine.AI;
 using GameCreator.Runtime.Characters;
 using GameCreator.Runtime.Common;
 using GameCreator.Runtime.Shooter;
@@ -76,6 +77,21 @@ namespace Arawn.GameCreator2.Networking.Shooter
         
         [Tooltip("Maximum time in the past for shot validation (seconds).")]
         [SerializeField] private float m_MaxRewindTime = 0.5f;
+
+        [Header("Server Damage Safety")]
+        [Tooltip("Prevents the built-in fallback hit reaction from moving server-authoritative NavMesh characters. " +
+                 "Use a custom ApplyDamageFunc if a project needs authored hit reactions for these targets.")]
+        [SerializeField] private bool m_SuppressFallbackHitReactionsForServerNavMesh = true;
+
+        [Tooltip("If fallback hit reactions are allowed for server NavMesh targets, remove vertical hit direction before choosing the reaction.")]
+        [SerializeField] private bool m_FlattenServerNavMeshHitReactionDirection = true;
+
+        [Tooltip("If fallback hit reactions are allowed for server NavMesh targets, snap the character back to the NavMesh after the reaction request.")]
+        [SerializeField] private bool m_ResnapServerNavMeshAfterHitReaction = true;
+
+        [Tooltip("Maximum NavMesh sample distance used when resnapping a server NavMesh target after a hit reaction.")]
+        [Min(0.25f)]
+        [SerializeField] private float m_ServerNavMeshHitReactionSnapDistance = 2f;
         
         [Header("Debug")]
         [Tooltip("Logs Shooter manager/controller registration and missing transport delegate wiring.")]
@@ -1040,6 +1056,22 @@ namespace Arawn.GameCreator2.Networking.Shooter
 
             uint shooterNetworkId = request.ActorNetworkId != 0 ? request.ActorNetworkId : request.ShooterNetworkId;
             var attackerNetworkChar = GetCharacterByNetworkId(shooterNetworkId);
+            bool targetUsesServerNavMesh = UsesServerAuthoritativeNavMesh(targetCharacter, targetNetworkChar);
+
+            if (targetUsesServerNavMesh && m_SuppressFallbackHitReactionsForServerNavMesh)
+            {
+                if (m_LogHitRequests || NetworkShooterDebug.ForceDiagnostics)
+                {
+                    Debug.Log(
+                        $"[NetworkShooterManager] Suppressed fallback hit reaction for server NavMesh target " +
+                        $"target={targetCharacter.name} damage={damage:F2} hitPoint={request.HitPoint} hitNormal={request.HitNormal}",
+                        targetCharacter);
+                }
+
+                return;
+            }
+
+            Vector3 beforeReactionPosition = targetCharacter.transform.position;
             Vector3 incomingDirection;
 
             if (request.HitNormal.sqrMagnitude > 0.0001f)
@@ -1055,6 +1087,14 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 incomingDirection = targetCharacter.transform.forward;
             }
 
+            if (targetUsesServerNavMesh && m_FlattenServerNavMeshHitReactionDirection)
+            {
+                incomingDirection = FlattenHitDirectionForNavMesh(
+                    incomingDirection,
+                    targetCharacter,
+                    attackerNetworkChar);
+            }
+
             Vector3 localDirection = targetCharacter.transform.InverseTransformDirection(incomingDirection).normalized;
             if (localDirection.sqrMagnitude < 0.0001f)
             {
@@ -1065,10 +1105,91 @@ namespace Arawn.GameCreator2.Networking.Shooter
             var args = new Args(attackerNetworkChar != null ? attackerNetworkChar.gameObject : null, targetCharacter.gameObject);
             _ = targetCharacter.Combat.GetHitReaction(reactionInput, args, null);
 
+            if (targetUsesServerNavMesh && m_ResnapServerNavMeshAfterHitReaction)
+            {
+                ResnapServerNavMeshTargetAfterHitReaction(targetCharacter, beforeReactionPosition, request);
+            }
+
             if (m_LogHitRequests)
             {
                 Debug.Log(
                     $"[NetworkShooterManager] Applied built-in server reaction damage={damage:F2} target={targetCharacter.name}");
+            }
+        }
+
+        private static bool UsesServerAuthoritativeNavMesh(
+            Character targetCharacter,
+            NetworkCharacter targetNetworkChar)
+        {
+            if (targetCharacter?.Driver is UnitDriverNavmeshNetworkServer) return true;
+            if (targetNetworkChar == null || !targetNetworkChar.IsServerInstance) return false;
+            if (!targetNetworkChar.IsServerAuthoritativeNPC) return false;
+            if (targetCharacter.GetComponent<NavMeshAgent>() == null) return false;
+
+            string driverName = targetCharacter.Driver?.GetType().Name;
+            return targetCharacter.Driver is UnitDriverNetworkServer ||
+                   (!string.IsNullOrEmpty(driverName) &&
+                    driverName.IndexOf("Navmesh", StringComparison.OrdinalIgnoreCase) >= 0);
+        }
+
+        private static Vector3 FlattenHitDirectionForNavMesh(
+            Vector3 incomingDirection,
+            Character targetCharacter,
+            NetworkCharacter attackerNetworkChar)
+        {
+            Vector3 flattened = Vector3.ProjectOnPlane(incomingDirection, Vector3.up);
+            if (flattened.sqrMagnitude > 0.0001f) return flattened.normalized;
+
+            if (targetCharacter != null && attackerNetworkChar != null)
+            {
+                flattened = Vector3.ProjectOnPlane(
+                    targetCharacter.transform.position - attackerNetworkChar.transform.position,
+                    Vector3.up);
+
+                if (flattened.sqrMagnitude > 0.0001f) return flattened.normalized;
+            }
+
+            return targetCharacter != null ? targetCharacter.transform.forward : Vector3.forward;
+        }
+
+        private void ResnapServerNavMeshTargetAfterHitReaction(
+            Character targetCharacter,
+            Vector3 beforeReactionPosition,
+            NetworkShooterHitRequest request)
+        {
+            if (targetCharacter == null) return;
+
+            NavMeshAgent agent = targetCharacter.GetComponent<NavMeshAgent>();
+            if (agent == null) return;
+
+            Vector3 currentPosition = targetCharacter.transform.position;
+            float halfHeight = targetCharacter.Motion != null
+                ? targetCharacter.Motion.Height * 0.5f
+                : 0f;
+
+            Vector3 sampleOrigin = currentPosition - Vector3.up * halfHeight;
+            float sampleDistance = Mathf.Max(0.25f, m_ServerNavMeshHitReactionSnapDistance);
+
+            if (!NavMesh.SamplePosition(sampleOrigin, out NavMeshHit hit, sampleDistance, NavMesh.AllAreas))
+            {
+                return;
+            }
+
+            Vector3 snappedRoot = hit.position + Vector3.up * halfHeight;
+            float verticalDrift = Mathf.Abs(currentPosition.y - snappedRoot.y);
+            bool needsSnap = !agent.isOnNavMesh || verticalDrift > 0.05f;
+
+            if (!needsSnap) return;
+
+            agent.Warp(snappedRoot);
+
+            if (m_LogHitRequests || NetworkShooterDebug.ForceDiagnostics)
+            {
+                Debug.Log(
+                    $"[NetworkShooterManager] Resnapped server NavMesh target after hit reaction " +
+                    $"target={targetCharacter.name} before={beforeReactionPosition} current={currentPosition} " +
+                    $"snapped={snappedRoot} hitPoint={request.HitPoint}",
+                    targetCharacter);
             }
         }
         
