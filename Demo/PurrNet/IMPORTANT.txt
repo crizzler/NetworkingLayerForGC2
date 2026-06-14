@@ -1,6 +1,0 @@
-IMPORTANT
-=========
-
-All demo scenes require the GC2 Demo packages for Melee, Shooter, etc. as dependencies.
-
-If the scripts have not loaded even though the Scripting Define Symbols are set correctly, restart Unity.
