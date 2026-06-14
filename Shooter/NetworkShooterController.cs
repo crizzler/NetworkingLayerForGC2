@@ -594,9 +594,14 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 return;
             }
 
-            float duration = animationDuration > 0f
-                ? animationDuration
-                : GetFallbackRemoteShotDuration(weapon, args);
+            // Mirror the local GC2 pipeline (WeaponData.Shoot): the shooting-animation
+            // window only opens when a character fire gesture actually plays, with
+            // duration = clip.length - TransitionOut. Forcing a fallback duration here
+            // opened Shooting.IsShootingAnimation on observers for every replicated
+            // shot, and RigShooterHuman drops the free-hand IK while that window is
+            // open (unless Sight.ShootingUsesIK is ticked) — remote players' off-hand
+            // visibly popped off the weapon on each shot. No fire gesture -> no window.
+            float duration = animationDuration;
 
             try
             {
@@ -608,26 +613,23 @@ namespace Arawn.GameCreator2.Networking.Shooter
                     m_CurrentWeaponData,
                     m_Character != null ? m_Character.Time.Time : Time.time);
 
-                SHOOTING_ON_SHOOT_METHOD?.Invoke(m_ShooterStance.Shooting, new object[] { duration });
-                LogDiagnostics($"marked remote shooter shot state duration={duration:F2}");
+                // Only mark the shooting-animation window when a fire gesture really
+                // played. LastShotFrame/LastShotTime above stay unconditional: they
+                // drive remote HumanRecoil and fire-rate bookkeeping, not IK.
+                if (duration > 0f)
+                {
+                    SHOOTING_ON_SHOOT_METHOD?.Invoke(m_ShooterStance.Shooting, new object[] { duration });
+                    LogDiagnostics($"marked remote shooter shot state duration={duration:F2}");
+                }
+                else
+                {
+                    LogDiagnostics("remote shooter shot state: no fire gesture, Shooting.OnShoot skipped");
+                }
             }
             catch (Exception exception)
             {
                 LogDiagnosticsWarning($"remote shooter shot state marker failed: {exception.GetType().Name}");
             }
-        }
-
-        private static float GetFallbackRemoteShotDuration(ShooterWeapon weapon, Args args)
-        {
-            if (weapon == null) return 0.1f;
-
-            float fireRate = weapon.Fire.FireRate(args);
-            if (float.IsNaN(fireRate) || float.IsInfinity(fireRate) || fireRate <= float.Epsilon)
-            {
-                return 0.1f;
-            }
-
-            return Mathf.Clamp(0.75f / fireRate, 0.08f, 0.25f);
         }
 
         // ════════════════════════════════════════════════════════════════════════════════════════
