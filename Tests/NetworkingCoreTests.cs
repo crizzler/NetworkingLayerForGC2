@@ -1515,6 +1515,35 @@ namespace Arawn.GameCreator2.Networking.Tests
         }
 
         [Test]
+        public void PositionState_Create_RoundTripsMotionSupport()
+        {
+            var state = NetworkPositionState.Create(
+                new UnityEngine.Vector3(12f, 3f, -6f),
+                rotationY: 270f,
+                verticalVel: -2f,
+                lastInput: 77,
+                isGrounded: true,
+                isJumping: false,
+                moveVelocity: new UnityEngine.Vector3(0.5f, 0f, 1.5f),
+                supportId: 98765u,
+                supportLocalPosition: new UnityEngine.Vector3(1.25f, 0.5f, -3.75f),
+                supportLocalYaw: 35f
+            );
+
+            UnityEngine.Vector3 localPosition = state.GetSupportLocalPosition();
+            Assert.IsTrue(state.HasSupport);
+            Assert.AreEqual(98765u, state.supportId);
+            Assert.AreEqual(1.25f, localPosition.x, 0.02f);
+            Assert.AreEqual(0.5f, localPosition.y, 0.02f);
+            Assert.AreEqual(-3.75f, localPosition.z, 0.02f);
+            Assert.AreEqual(35f, state.GetSupportLocalYaw(), 0.1f);
+
+            state.ClearSupport();
+            Assert.IsFalse(state.HasSupport);
+            Assert.AreEqual(0u, state.supportId);
+        }
+
+        [Test]
         public void PositionState_Flags_Grounded()
         {
             var state = NetworkPositionState.Create(
@@ -1568,6 +1597,35 @@ namespace Arawn.GameCreator2.Networking.Tests
                 new UnityEngine.Vector3(1f, 2f, 3f), 0f, 0f, 0, false, false);
             var b = NetworkPositionState.Create(
                 new UnityEngine.Vector3(4f, 5f, 6f), 0f, 0f, 0, false, false);
+
+            Assert.IsFalse(a.Equals(b));
+        }
+
+        [Test]
+        public void PositionState_Equals_DifferentSupportId()
+        {
+            var a = NetworkPositionState.Create(
+                UnityEngine.Vector3.zero,
+                0f,
+                0f,
+                0,
+                true,
+                false,
+                UnityEngine.Vector3.zero,
+                11u,
+                UnityEngine.Vector3.zero,
+                0f);
+            var b = NetworkPositionState.Create(
+                UnityEngine.Vector3.zero,
+                0f,
+                0f,
+                0,
+                true,
+                false,
+                UnityEngine.Vector3.zero,
+                12u,
+                UnityEngine.Vector3.zero,
+                0f);
 
             Assert.IsFalse(a.Equals(b));
         }

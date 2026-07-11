@@ -150,7 +150,7 @@ namespace Arawn.GameCreator2.Networking
     /// <summary>
     /// Compressed position state for network transmission.
     /// Uses fixed-point encoding for position (supports -32768 to 32767 range with 0.01 precision).
-    /// Total size: 25 bytes (vs 40 bytes for raw position + rotation + velocity)
+    /// Total size: 43 bytes with motion support data.
     /// </summary>
     [Serializable]
     public struct NetworkPositionState : IEquatable<NetworkPositionState>
@@ -171,6 +171,13 @@ namespace Arawn.GameCreator2.Networking
         public short moveVelocityX;
         public short moveVelocityY;
         public short moveVelocityZ;
+
+        // Optional support/platform frame. World position/rotation remain populated as fallback.
+        public uint supportId;
+        public int supportLocalPositionX;
+        public int supportLocalPositionY;
+        public int supportLocalPositionZ;
+        public ushort supportLocalYaw;
         
         // Flags: IsGrounded(1), IsJumping(2), IsDashing(4), etc.
         public byte flags;
@@ -183,6 +190,7 @@ namespace Arawn.GameCreator2.Networking
         public const byte FLAG_DASHING = 4;
         public const byte FLAG_SPRINTING = 8;
         public const byte FLAG_HAS_MOVE_VELOCITY = 16;
+        public const byte FLAG_HAS_SUPPORT = 32;
         
         /// <summary>
         /// Creates a compressed position state.
@@ -228,6 +236,33 @@ namespace Arawn.GameCreator2.Networking
             );
         }
 
+        public static NetworkPositionState Create(
+            Vector3 position,
+            float rotationY,
+            float verticalVel,
+            ushort lastInput,
+            bool isGrounded,
+            bool isJumping,
+            Vector3 moveVelocity,
+            uint supportId,
+            Vector3 supportLocalPosition,
+            float supportLocalYaw)
+        {
+            NetworkPositionState state = Create(
+                position,
+                rotationY,
+                verticalVel,
+                lastInput,
+                isGrounded,
+                isJumping,
+                moveVelocity,
+                true
+            );
+
+            state.SetSupport(supportId, supportLocalPosition, supportLocalYaw);
+            return state;
+        }
+
         private static NetworkPositionState Create(
             Vector3 position,
             float rotationY,
@@ -256,6 +291,32 @@ namespace Arawn.GameCreator2.Networking
                 flags = flags,
                 lastProcessedInput = lastInput
             };
+        }
+
+        public void SetSupport(uint supportId, Vector3 localPosition, float localYaw)
+        {
+            if (supportId == 0)
+            {
+                ClearSupport();
+                return;
+            }
+
+            flags |= FLAG_HAS_SUPPORT;
+            this.supportId = supportId;
+            supportLocalPositionX = Mathf.RoundToInt(localPosition.x * 100f);
+            supportLocalPositionY = Mathf.RoundToInt(localPosition.y * 100f);
+            supportLocalPositionZ = Mathf.RoundToInt(localPosition.z * 100f);
+            supportLocalYaw = (ushort)(Mathf.Repeat(localYaw, 360f) / 360f * 65535f);
+        }
+
+        public void ClearSupport()
+        {
+            flags &= unchecked((byte)~FLAG_HAS_SUPPORT);
+            supportId = 0;
+            supportLocalPositionX = 0;
+            supportLocalPositionY = 0;
+            supportLocalPositionZ = 0;
+            supportLocalYaw = 0;
         }
         
         /// <summary>
@@ -290,23 +351,57 @@ namespace Arawn.GameCreator2.Networking
                 moveVelocityZ / 100f
             );
         }
+
+        public Vector3 GetSupportLocalPosition()
+        {
+            return new Vector3(
+                supportLocalPositionX / 100f,
+                supportLocalPositionY / 100f,
+                supportLocalPositionZ / 100f
+            );
+        }
+
+        public float GetSupportLocalYaw()
+        {
+            return supportLocalYaw / 65535f * 360f;
+        }
         
         public bool IsGrounded => (flags & FLAG_GROUNDED) != 0;
         public bool IsJumping => (flags & FLAG_JUMPING) != 0;
         public bool IsDashing => (flags & FLAG_DASHING) != 0;
         public bool HasMoveVelocity => (flags & FLAG_HAS_MOVE_VELOCITY) != 0;
+        public bool HasSupport => (flags & FLAG_HAS_SUPPORT) != 0 && supportId != 0;
         
         public bool Equals(NetworkPositionState other)
         {
             return positionX == other.positionX &&
                    positionY == other.positionY &&
                    positionZ == other.positionZ &&
-                   rotationY == other.rotationY;
+                   rotationY == other.rotationY &&
+                   verticalVelocity == other.verticalVelocity &&
+                   moveVelocityX == other.moveVelocityX &&
+                   moveVelocityY == other.moveVelocityY &&
+                   moveVelocityZ == other.moveVelocityZ &&
+                   supportId == other.supportId &&
+                   supportLocalPositionX == other.supportLocalPositionX &&
+                   supportLocalPositionY == other.supportLocalPositionY &&
+                   supportLocalPositionZ == other.supportLocalPositionZ &&
+                   supportLocalYaw == other.supportLocalYaw &&
+                   flags == other.flags &&
+                   lastProcessedInput == other.lastProcessedInput;
         }
         
         public override int GetHashCode()
         {
-            return HashCode.Combine(positionX, positionY, positionZ, rotationY);
+            return HashCode.Combine(
+                positionX,
+                positionY,
+                positionZ,
+                rotationY,
+                verticalVelocity,
+                HashCode.Combine(moveVelocityX, moveVelocityY, moveVelocityZ, flags),
+                HashCode.Combine(supportId, supportLocalPositionX, supportLocalPositionY, supportLocalPositionZ),
+                HashCode.Combine(supportLocalYaw, lastProcessedInput));
         }
     }
     
@@ -369,6 +464,11 @@ namespace Arawn.GameCreator2.Networking
         public float verticalVelocity;
         public double timestamp;
         public byte flags;
+        public uint supportId;
+        public Vector3 supportLocalPosition;
+        public float supportLocalYaw;
+
+        public bool HasSupport => (flags & NetworkPositionState.FLAG_HAS_SUPPORT) != 0 && supportId != 0;
         
         public static PositionSnapshot Create(NetworkPositionState state, double time)
         {
@@ -380,7 +480,10 @@ namespace Arawn.GameCreator2.Networking
                 rotationY = state.GetRotationY(),
                 verticalVelocity = state.GetVerticalVelocity(),
                 timestamp = time,
-                flags = state.flags
+                flags = state.flags,
+                supportId = state.supportId,
+                supportLocalPosition = state.GetSupportLocalPosition(),
+                supportLocalYaw = state.GetSupportLocalYaw()
             };
         }
     }

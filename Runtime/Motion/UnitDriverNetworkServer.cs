@@ -743,15 +743,37 @@ namespace Arawn.GameCreator2.Networking
 
         private NetworkPositionState CreateCurrentState()
         {
-            NetworkPositionState state = NetworkPositionState.Create(
-                this.Transform.position,
-                this.Transform.eulerAngles.y,
-                m_VerticalSpeed,
-                m_LastProcessedInput,
-                IsGrounded,
-                m_VerticalSpeed > 0,
-                m_MoveDirection
-            );
+            Vector3 position = this.Transform.position;
+            float rotationY = this.Transform.eulerAngles.y;
+            bool isGrounded = IsGrounded;
+
+            NetworkPositionState state = TryCaptureSupportState(
+                    position,
+                    rotationY,
+                    isGrounded,
+                    out uint supportId,
+                    out Vector3 supportLocalPosition,
+                    out float supportLocalYaw)
+                ? NetworkPositionState.Create(
+                    position,
+                    rotationY,
+                    m_VerticalSpeed,
+                    m_LastProcessedInput,
+                    isGrounded,
+                    m_VerticalSpeed > 0,
+                    m_MoveDirection,
+                    supportId,
+                    supportLocalPosition,
+                    supportLocalYaw)
+                : NetworkPositionState.Create(
+                    position,
+                    rotationY,
+                    m_VerticalSpeed,
+                    m_LastProcessedInput,
+                    isGrounded,
+                    m_VerticalSpeed > 0,
+                    m_MoveDirection
+                );
 
             if (IsTraversalLikeAuthorityMotion())
             {
@@ -765,6 +787,31 @@ namespace Arawn.GameCreator2.Networking
             }
 
             return state;
+        }
+
+        private bool TryCaptureSupportState(
+            Vector3 position,
+            float rotationY,
+            bool isGrounded,
+            out uint supportId,
+            out Vector3 supportLocalPosition,
+            out float supportLocalYaw)
+        {
+            supportId = 0;
+            supportLocalPosition = Vector3.zero;
+            supportLocalYaw = 0f;
+
+            if (!isGrounded) return false;
+            if (!TryProbeGround(out RaycastHit hit)) return false;
+            if (!NetworkMotionSupportAnchor.TryResolveFromHit(hit, out NetworkMotionSupportAnchor support)) return false;
+
+            supportId = support.SupportId;
+            if (supportId == 0) return false;
+
+            Transform supportTransform = support.transform;
+            supportLocalPosition = supportTransform.InverseTransformPoint(position);
+            supportLocalYaw = Mathf.DeltaAngle(supportTransform.eulerAngles.y, rotationY);
+            return true;
         }
         
         /// <summary>

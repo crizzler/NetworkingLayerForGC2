@@ -239,14 +239,15 @@ namespace Arawn.GameCreator2.Networking
         /// </summary>
         public void AddSnapshot(NetworkPositionState state, float serverTimestamp)
         {
-            Vector3 position = state.GetPosition();
-            float rotationY = state.GetRotationY();
+            PositionSnapshot incomingSnapshot = PositionSnapshot.Create(state, serverTimestamp);
+            Vector3 position = ResolveSnapshotWorldPosition(incomingSnapshot);
+            float rotationY = ResolveSnapshotWorldRotation(incomingSnapshot).eulerAngles.y;
             float realtime = Time.realtimeSinceStartup;
             Vector3 previousSnapshotPosition = m_SnapshotBuffer.Count > 0
-                ? m_SnapshotBuffer[m_SnapshotBuffer.Count - 1].position
+                ? ResolveSnapshotWorldPosition(m_SnapshotBuffer[m_SnapshotBuffer.Count - 1])
                 : this.Transform.position;
             float previousSnapshotRotationY = m_SnapshotBuffer.Count > 0
-                ? m_SnapshotBuffer[m_SnapshotBuffer.Count - 1].rotationY
+                ? ResolveSnapshotWorldRotation(m_SnapshotBuffer[m_SnapshotBuffer.Count - 1]).eulerAngles.y
                 : this.Transform.eulerAngles.y;
             float snapshotDistance = Vector3.Distance(position, previousSnapshotPosition);
             float snapshotYDelta = position.y - previousSnapshotPosition.y;
@@ -302,7 +303,7 @@ namespace Arawn.GameCreator2.Networking
             // Check for teleport
             if (m_SnapshotBuffer.Count > 0)
             {
-                Vector3 lastPos = m_SnapshotBuffer[m_SnapshotBuffer.Count - 1].position;
+                Vector3 lastPos = ResolveSnapshotWorldPosition(m_SnapshotBuffer[m_SnapshotBuffer.Count - 1]);
                 float distance = Vector3.Distance(position, lastPos);
                 if (distance > m_SnapDistance)
                 {
@@ -327,20 +328,12 @@ namespace Arawn.GameCreator2.Networking
                 float timeDelta = serverTimestamp - (float)lastSnapshot.timestamp;
                 if (!state.HasMoveVelocity && timeDelta > 0.001f)
                 {
-                    velocity = (position - lastSnapshot.position) / timeDelta;
+                    velocity = (position - ResolveSnapshotWorldPosition(lastSnapshot)) / timeDelta;
                 }
             }
-            
-            m_SnapshotBuffer.Add(new PositionSnapshot
-            {
-                timestamp = serverTimestamp,
-                position = position,
-                rotation = Quaternion.Euler(0f, rotationY, 0f),
-                velocity = velocity,
-                rotationY = rotationY,
-                verticalVelocity = state.GetVerticalVelocity(),
-                flags = state.flags
-            });
+
+            incomingSnapshot.velocity = velocity;
+            m_SnapshotBuffer.Add(incomingSnapshot);
 
             // Trim old snapshots
             float minTime = serverTimestamp - 1f; // Keep 1 second of history
@@ -475,8 +468,8 @@ namespace Arawn.GameCreator2.Networking
             if (m_SnapshotBuffer.Count == 1)
             {
                 // Only one snapshot, use it directly
-                m_InterpolatedPosition = m_SnapshotBuffer[0].position;
-                m_InterpolatedRotation = m_SnapshotBuffer[0].rotation;
+                m_InterpolatedPosition = ResolveSnapshotWorldPosition(m_SnapshotBuffer[0]);
+                m_InterpolatedRotation = ResolveSnapshotWorldRotation(m_SnapshotBuffer[0]);
                 m_MoveDirection = m_SnapshotBuffer[0].velocity;
                 m_IsExtrapolating = false;
                 return;
@@ -505,9 +498,18 @@ namespace Arawn.GameCreator2.Networking
                 float duration = (float)(after.Value.timestamp - before.Value.timestamp);
                 float elapsed = (float)(renderTime - before.Value.timestamp);
                 float t = duration > 0 ? Mathf.Clamp01(elapsed / duration) : 0f;
-                
-                m_InterpolatedPosition = Vector3.Lerp(before.Value.position, after.Value.position, t);
-                m_InterpolatedRotation = Quaternion.Slerp(before.Value.rotation, after.Value.rotation, t);
+
+                if (TryInterpolateSupportedPose(before.Value, after.Value, t, out Vector3 supportedPosition, out Quaternion supportedRotation))
+                {
+                    m_InterpolatedPosition = supportedPosition;
+                    m_InterpolatedRotation = supportedRotation;
+                }
+                else
+                {
+                    m_InterpolatedPosition = Vector3.Lerp(before.Value.position, after.Value.position, t);
+                    m_InterpolatedRotation = Quaternion.Slerp(before.Value.rotation, after.Value.rotation, t);
+                }
+
                 m_MoveDirection = Vector3.Lerp(before.Value.velocity, after.Value.velocity, t);
                 m_IsExtrapolating = false;
             }
@@ -518,17 +520,35 @@ namespace Arawn.GameCreator2.Networking
                 
                 if (timeSinceLastSnapshot <= m_MaxExtrapolationTime)
                 {
-                    // Extrapolate using velocity
-                    m_InterpolatedPosition = before.Value.position + before.Value.velocity * timeSinceLastSnapshot;
-                    m_InterpolatedRotation = ExtrapolateRotation(before.Value, timeSinceLastSnapshot);
+                    if (TryExtrapolateSupportedPose(before.Value, timeSinceLastSnapshot, out Vector3 supportedPosition, out Quaternion supportedRotation))
+                    {
+                        m_InterpolatedPosition = supportedPosition;
+                        m_InterpolatedRotation = supportedRotation;
+                    }
+                    else
+                    {
+                        // Extrapolate using velocity
+                        m_InterpolatedPosition = before.Value.position + before.Value.velocity * timeSinceLastSnapshot;
+                        m_InterpolatedRotation = ExtrapolateRotation(before.Value, timeSinceLastSnapshot);
+                    }
+
                     m_MoveDirection = before.Value.velocity;
                     m_IsExtrapolating = true;
                 }
                 else
                 {
                     // Too long without update - stop extrapolating
-                    m_InterpolatedPosition = before.Value.position + before.Value.velocity * m_MaxExtrapolationTime;
-                    m_InterpolatedRotation = ExtrapolateRotation(before.Value, m_MaxExtrapolationTime);
+                    if (TryExtrapolateSupportedPose(before.Value, m_MaxExtrapolationTime, out Vector3 supportedPosition, out Quaternion supportedRotation))
+                    {
+                        m_InterpolatedPosition = supportedPosition;
+                        m_InterpolatedRotation = supportedRotation;
+                    }
+                    else
+                    {
+                        m_InterpolatedPosition = before.Value.position + before.Value.velocity * m_MaxExtrapolationTime;
+                        m_InterpolatedRotation = ExtrapolateRotation(before.Value, m_MaxExtrapolationTime);
+                    }
+
                     m_MoveDirection = Vector3.zero;
                     m_IsExtrapolating = true;
                 }
@@ -536,11 +556,72 @@ namespace Arawn.GameCreator2.Networking
             else if (after.HasValue)
             {
                 // Only future snapshot - use it
-                m_InterpolatedPosition = after.Value.position;
-                m_InterpolatedRotation = after.Value.rotation;
+                m_InterpolatedPosition = ResolveSnapshotWorldPosition(after.Value);
+                m_InterpolatedRotation = ResolveSnapshotWorldRotation(after.Value);
                 m_MoveDirection = after.Value.velocity;
                 m_IsExtrapolating = false;
             }
+        }
+
+        private bool TryInterpolateSupportedPose(
+            PositionSnapshot before,
+            PositionSnapshot after,
+            float t,
+            out Vector3 position,
+            out Quaternion rotation)
+        {
+            position = Vector3.zero;
+            rotation = Quaternion.identity;
+
+            if (!before.HasSupport || !after.HasSupport) return false;
+            if (before.supportId != after.supportId) return false;
+            if (!NetworkMotionSupportAnchor.TryResolve(before.supportId, out NetworkMotionSupportAnchor support)) return false;
+
+            Vector3 localPosition = Vector3.Lerp(before.supportLocalPosition, after.supportLocalPosition, t);
+            float localYaw = Mathf.LerpAngle(before.supportLocalYaw, after.supportLocalYaw, t);
+            position = support.transform.TransformPoint(localPosition);
+            rotation = ResolveSupportWorldRotation(support.transform, localYaw);
+            return true;
+        }
+
+        private bool TryExtrapolateSupportedPose(
+            PositionSnapshot snapshot,
+            float timeSinceSnapshot,
+            out Vector3 position,
+            out Quaternion rotation)
+        {
+            position = Vector3.zero;
+            rotation = Quaternion.identity;
+
+            if (!snapshot.HasSupport) return false;
+            if (!NetworkMotionSupportAnchor.TryResolve(snapshot.supportId, out NetworkMotionSupportAnchor support)) return false;
+
+            Vector3 localVelocity = support.transform.InverseTransformDirection(snapshot.velocity);
+            Vector3 localPosition = snapshot.supportLocalPosition + localVelocity * timeSinceSnapshot;
+            position = support.transform.TransformPoint(localPosition);
+            rotation = ResolveSupportWorldRotation(support.transform, snapshot.supportLocalYaw);
+            return true;
+        }
+
+        private Vector3 ResolveSnapshotWorldPosition(PositionSnapshot snapshot)
+        {
+            return snapshot.HasSupport &&
+                   NetworkMotionSupportAnchor.TryResolve(snapshot.supportId, out NetworkMotionSupportAnchor support)
+                ? support.transform.TransformPoint(snapshot.supportLocalPosition)
+                : snapshot.position;
+        }
+
+        private Quaternion ResolveSnapshotWorldRotation(PositionSnapshot snapshot)
+        {
+            return snapshot.HasSupport &&
+                   NetworkMotionSupportAnchor.TryResolve(snapshot.supportId, out NetworkMotionSupportAnchor support)
+                ? ResolveSupportWorldRotation(support.transform, snapshot.supportLocalYaw)
+                : snapshot.rotation;
+        }
+
+        private static Quaternion ResolveSupportWorldRotation(Transform supportTransform, float supportLocalYaw)
+        {
+            return Quaternion.Euler(0f, supportTransform.eulerAngles.y + supportLocalYaw, 0f);
         }
 
         private Quaternion ExtrapolateRotation(PositionSnapshot snapshot, float timeSinceSnapshot)

@@ -97,9 +97,9 @@ namespace Arawn.GameCreator2.Networking
         // ════════════════════════════════════════════════════════════════════════════════════════
         
         /// <summary>
-        /// Called by UnitFacingNetworkPivot when it initializes.
+        /// Called by a network facing unit when it initializes.
         /// </summary>
-        public void OnFacingUnitRegistered(UnitFacingNetworkPivot facingUnit)
+        public void OnFacingUnitRegistered(INetworkFacingUnit facingUnit)
         {
             m_NetworkFacingUnit = facingUnit;
 
@@ -110,7 +110,7 @@ namespace Arawn.GameCreator2.Networking
         }
         
         /// <summary>
-        /// Called by UnitFacingNetworkPivot when it is disposed.
+        /// Called by a network facing unit when it is disposed.
         /// </summary>
         public void OnFacingUnitUnregistered()
         {

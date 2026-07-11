@@ -211,6 +211,29 @@ namespace Arawn.GameCreator2.Networking
             Vector3 velocity = velocityState.GetMoveVelocity();
             Assert("PosState: move velocity flag", velocityState.HasMoveVelocity);
             Assert("PosState: move velocity round-trip", Vector3.Distance(velocity, new Vector3(1f, 2f, -3f)) < 0.02f);
+
+            var supportedState = NetworkPositionState.Create(
+                new Vector3(20f, 4f, -8f),
+                rotationY: 270f,
+                verticalVel: -2f,
+                lastInput: 44,
+                isGrounded: true,
+                isJumping: false,
+                moveVelocity: new Vector3(0.5f, 0f, 1.5f),
+                supportId: 12345u,
+                supportLocalPosition: new Vector3(1.25f, 0.5f, -3.75f),
+                supportLocalYaw: 35f);
+
+            Assert("PosState: support flag", supportedState.HasSupport);
+            Assert("PosState: support id", supportedState.supportId == 12345u);
+            Assert(
+                "PosState: support local position round-trip",
+                Vector3.Distance(supportedState.GetSupportLocalPosition(), new Vector3(1.25f, 0.5f, -3.75f)) < 0.02f);
+            Assert("PosState: support local yaw round-trip", Mathf.Abs(supportedState.GetSupportLocalYaw() - 35f) < 0.1f);
+
+            supportedState.ClearSupport();
+            Assert("PosState: support clear flag", !supportedState.HasSupport);
+            Assert("PosState: support clear id", supportedState.supportId == 0);
         }
 
         private void TestInputStateRoundTrip()

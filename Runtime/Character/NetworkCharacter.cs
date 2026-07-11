@@ -228,7 +228,7 @@ namespace Arawn.GameCreator2.Networking
         private UnitMotionNetworkController m_MotionController;
         private CharacterLagCompensation m_LagCompensation;
         private NetworkCombatInterceptor m_CombatInterceptor;
-        private UnitFacingNetworkPivot m_NetworkFacingUnit;
+        private INetworkFacingUnit m_NetworkFacingUnit;
         private UnitAnimimNetworkKinematic m_NetworkAnimimUnit;
         private UnitAnimimNetworkController m_AnimimController;
         private bool m_HasCachedFootstepsState;
@@ -345,7 +345,7 @@ namespace Arawn.GameCreator2.Networking
         public NetworkCombatInterceptor CombatInterceptor => m_CombatInterceptor;
         
         /// <summary>The network facing unit for server-authoritative facing.</summary>
-        public UnitFacingNetworkPivot NetworkFacingUnit => m_NetworkFacingUnit;
+        public INetworkFacingUnit NetworkFacingUnit => m_NetworkFacingUnit;
         
         /// <summary>The animation sync controller for States and Gestures.</summary>
         public UnitAnimimNetworkController AnimimController => m_AnimimController;

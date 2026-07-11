@@ -30,7 +30,7 @@ namespace Arawn.GameCreator2.Networking
                  "Use for characters where facing direction affects gameplay (backstabs, cone attacks, etc.)")]
     
     [Serializable]
-    public class UnitFacingNetworkPivot : TUnitFacing
+    public class UnitFacingNetworkPivot : TUnitFacing, INetworkFacingUnit
     {
         private enum DirectionFrom
         {

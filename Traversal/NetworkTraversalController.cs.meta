@@ -4,6 +4,6 @@ AssetOrigin:
   serializedVersion: 1
   productId: 379492
   packageName: Multiplayer Integration for Game Creator 2 with PurrNet
-  packageVersion: 1.4.0
+  packageVersion: 1.5.0
   assetPath: Assets/Arawn/NetworkingLayerForGC2/Traversal/NetworkTraversalController.cs
-  uploadId: 925150
+  uploadId: 935232
