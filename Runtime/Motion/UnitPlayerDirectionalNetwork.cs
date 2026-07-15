@@ -40,7 +40,7 @@ namespace Arawn.GameCreator2.Networking
         [NonSerialized] private bool m_JumpPressed;
         [NonSerialized] private bool m_JumpConsumed;
         [NonSerialized] private bool m_IsInputEnabled = true;
-        [NonSerialized] private UnitDriverNetworkClient m_NetworkDriver;
+        [NonSerialized] private INetworkDirectionalInputSink m_InputSink;
         [NonSerialized] private NetworkCharacter m_NetworkCharacter;
 
         // PROPERTIES: ----------------------------------------------------------------------------
@@ -73,8 +73,8 @@ namespace Arawn.GameCreator2.Networking
             // Register jump event
             this.m_InputJump.RegisterPerform(OnJumpPerformed);
             
-            // Try to find network driver
-            m_NetworkDriver = character.Driver as UnitDriverNetworkClient;
+            // Try to find a network prediction input sink.
+            m_InputSink = character.Driver as INetworkDirectionalInputSink;
             m_NetworkCharacter = character.GetComponent<NetworkCharacter>();
         }
 
@@ -137,10 +137,10 @@ namespace Arawn.GameCreator2.Networking
                 ClearMotionDirection();
 
                 RefreshNetworkDriver();
-                if (m_NetworkDriver != null)
+                if (m_InputSink != null)
                 {
                     Transform camTransform = GetCameraTransform();
-                    m_NetworkDriver.ProcessLocalInput(Vector2.zero, camTransform, false);
+                    m_InputSink.ProcessDirectionalInput(Vector2.zero, camTransform, false);
                 }
 
                 return;
@@ -166,10 +166,10 @@ namespace Arawn.GameCreator2.Networking
             
             // Feed input to network driver if available
             RefreshNetworkDriver();
-            if (m_NetworkDriver != null)
+            if (m_InputSink != null)
             {
                 Transform camTransform = GetCameraTransform();
-                m_NetworkDriver.ProcessLocalInput(m_CurrentInput, camTransform, m_JumpPressed && !m_JumpConsumed);
+                m_InputSink.ProcessDirectionalInput(m_CurrentInput, camTransform, m_JumpPressed && !m_JumpConsumed);
                 
                 // Consume jump after sending
                 if (m_JumpPressed)
@@ -246,10 +246,10 @@ namespace Arawn.GameCreator2.Networking
             TryConsumeJumpExternally();
             
             RefreshNetworkDriver();
-            if (m_NetworkDriver != null)
+            if (m_InputSink != null)
             {
                 Transform camTransform = GetCameraTransform();
-                m_NetworkDriver.ProcessLocalInput(m_CurrentInput, camTransform, m_JumpPressed);
+                m_InputSink.ProcessDirectionalInput(m_CurrentInput, camTransform, m_JumpPressed);
             }
         }
 
@@ -311,8 +311,8 @@ namespace Arawn.GameCreator2.Networking
         private void RefreshNetworkDriver()
         {
             if (this.Character == null) return;
-            if (ReferenceEquals(m_NetworkDriver, this.Character.Driver)) return;
-            m_NetworkDriver = this.Character.Driver as UnitDriverNetworkClient;
+            if (ReferenceEquals(m_InputSink, this.Character.Driver)) return;
+            m_InputSink = this.Character.Driver as INetworkDirectionalInputSink;
         }
 
         private bool TryConsumeJumpExternally()
@@ -363,7 +363,7 @@ namespace Arawn.GameCreator2.Networking
             if (m_NetworkCharacter == null) return false;
             if (m_NetworkCharacter.Role != NetworkCharacter.NetworkRole.LocalClient) return false;
             if (!m_NetworkCharacter.IsOwnerInstance) return false;
-            if (m_NetworkDriver == null || !ReferenceEquals(m_NetworkDriver, this.Character.Driver)) return false;
+            if (m_InputSink == null || !ReferenceEquals(m_InputSink, this.Character.Driver)) return false;
 
             this.Character.IsPlayer = true;
             ShortcutPlayer.Change(this.Character.gameObject);

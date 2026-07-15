@@ -146,6 +146,12 @@ namespace Arawn.GameCreator2.Networking
         
         /// <summary>Hash of the prop prefab (for lookup).</summary>
         public int PropHash;
+
+        /// <summary>
+        /// Server-assigned instance ID. Required by <see cref="PropActionType.DetachInstance"/>.
+        /// Zero for attach, detach-by-prefab, and detach-all requests.
+        /// </summary>
+        public int PropInstanceId;
         
         /// <summary>Hash of the bone name to attach to.</summary>
         public int BoneHash;
@@ -158,7 +164,7 @@ namespace Arawn.GameCreator2.Networking
         public short RotationY;
         public short RotationZ;
         
-        public const int SIZE_BYTES = 32;
+        public const int SIZE_BYTES = 36;
         
         public void SetLocalRotation(Quaternion rotation)
         {
@@ -250,6 +256,57 @@ namespace Arawn.GameCreator2.Networking
             );
         }
     }
+
+    /// <summary>
+    /// Authoritative, transport-safe description of a locally-instantiated character prop.
+    /// No scene object reference is synchronized; every peer resolves <see cref="PropHash"/>
+    /// through its local registry and recreates the attachment idempotently.
+    /// </summary>
+    [Serializable]
+    public struct NetworkPropAttachmentState
+    {
+        public uint CharacterNetworkId;
+        public int PropInstanceId;
+        public int PropHash;
+        public int BoneHash;
+        public Vector3 LocalPosition;
+        public short RotationX;
+        public short RotationY;
+        public short RotationZ;
+
+        public void SetLocalRotation(Quaternion rotation)
+        {
+            Vector3 euler = rotation.eulerAngles;
+            RotationX = (short)(euler.x / 360f * 32767f);
+            RotationY = (short)(euler.y / 360f * 32767f);
+            RotationZ = (short)(euler.z / 360f * 32767f);
+        }
+
+        public Quaternion GetLocalRotation()
+        {
+            return Quaternion.Euler(
+                RotationX / 32767f * 360f,
+                RotationY / 32767f * 360f,
+                RotationZ / 32767f * 360f
+            );
+        }
+
+        public NetworkPropBroadcast ToBroadcast(PropActionType actionType)
+        {
+            return new NetworkPropBroadcast
+            {
+                CharacterNetworkId = CharacterNetworkId,
+                ActionType = actionType,
+                PropHash = PropHash,
+                BoneHash = BoneHash,
+                PropInstanceId = PropInstanceId,
+                LocalPosition = LocalPosition,
+                RotationX = RotationX,
+                RotationY = RotationY,
+                RotationZ = RotationZ
+            };
+        }
+    }
     
     /// <summary>
     /// Types of prop actions.
@@ -265,7 +322,7 @@ namespace Arawn.GameCreator2.Networking
         /// <summary>Detach a prefab (destroy instance).</summary>
         DetachPrefab = 2,
         
-        /// <summary>Detach an instance (don't destroy).</summary>
+        /// <summary>Detach one exact server-assigned network prop instance.</summary>
         DetachInstance = 3,
         
         /// <summary>Detach all props.</summary>
@@ -288,7 +345,14 @@ namespace Arawn.GameCreator2.Networking
         NotOwner = 8,
         ProtocolMismatch = 9,
         SecurityViolation = 10,
-        Timeout = 11
+        Timeout = 11,
+
+        /// <summary>
+        /// The requested action cannot be represented consistently across peers. In particular,
+        /// arbitrary existing GameObject instances must be network-spawned instead of attached
+        /// through the cosmetic prop descriptor protocol.
+        /// </summary>
+        UnsupportedAction = 12
     }
     
     // ════════════════════════════════════════════════════════════════════════════════════════
@@ -597,7 +661,8 @@ namespace Arawn.GameCreator2.Networking
         NotOwner = 5,
         ProtocolMismatch = 6,
         SecurityViolation = 7,
-        Timeout = 8
+        Timeout = 8,
+        InvalidValue = 9
     }
     
     // ════════════════════════════════════════════════════════════════════════════════════════
@@ -808,6 +873,19 @@ namespace Arawn.GameCreator2.Networking
             
             return flags;
         }
+    }
+
+    /// <summary>
+    /// Full-replacement persistent Core state for one character. Transient interactions are
+    /// intentionally excluded. Reapplying the same snapshot is safe and does not duplicate props.
+    /// </summary>
+    [Serializable]
+    public struct NetworkCoreSnapshot
+    {
+        public NetworkCoreState State;
+        public NetworkPropAttachmentState[] Props;
+
+        public uint CharacterNetworkId => State.CharacterNetworkId;
     }
     
     /// <summary>

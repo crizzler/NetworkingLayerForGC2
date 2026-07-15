@@ -78,6 +78,50 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 $"[ShooterAmmoDebug] queued reload request client={clientNetworkId} actor={request.ActorNetworkId} " +
                 $"req={request.RequestId} queue={m_ServerReloadQueue.Count}");
         }
+
+        /// <summary>
+        /// [Server] Validates an active/quick reload attempt and broadcasts the result.
+        /// </summary>
+        public void ReceiveQuickReloadRequest(uint clientNetworkId, NetworkQuickReloadRequest request)
+        {
+            if (!m_IsServer) return;
+            if (!ValidateShooterRequest(
+                    clientNetworkId,
+                    request.ActorNetworkId,
+                    request.CorrelationId,
+                    nameof(NetworkQuickReloadRequest)) ||
+                !ValidateActorBinding(
+                    clientNetworkId,
+                    request.ActorNetworkId,
+                    request.CharacterNetworkId,
+                    nameof(NetworkQuickReloadRequest),
+                    nameof(request.CharacterNetworkId)))
+            {
+                return;
+            }
+
+            bool succeeded = m_Controllers.TryGetValue(request.ActorNetworkId, out var controller) &&
+                             controller != null &&
+                             controller.ProcessQuickReloadRequest(request, clientNetworkId);
+            ushort ammo = 0;
+            if (controller != null)
+            {
+                controller.TryGetMagazineAmmo(request.WeaponHash, out ammo);
+            }
+
+            var broadcast = new NetworkReloadBroadcast
+            {
+                CharacterNetworkId = request.ActorNetworkId,
+                WeaponHash = request.WeaponHash,
+                NewAmmoCount = ammo,
+                EventType = succeeded
+                    ? ReloadEventType.QuickReloadSuccess
+                    : ReloadEventType.QuickReloadFailed
+            };
+
+            BroadcastReloadToAllClients?.Invoke(broadcast);
+            OnReloadValidated?.Invoke(broadcast);
+        }
         
         private void ProcessServerReloadQueue()
         {
@@ -544,6 +588,46 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 Request = request,
                 ReceivedTime = Time.time
             });
+        }
+
+        /// <summary>
+        /// [Server] Validates charge cancellation and broadcasts the authoritative state.
+        /// </summary>
+        public void ReceiveChargeCancelRequest(uint clientNetworkId, NetworkChargeCancelRequest request)
+        {
+            if (!m_IsServer) return;
+            if (!ValidateShooterRequest(
+                    clientNetworkId,
+                    request.ActorNetworkId,
+                    request.CorrelationId,
+                    nameof(NetworkChargeCancelRequest)) ||
+                !ValidateActorBinding(
+                    clientNetworkId,
+                    request.ActorNetworkId,
+                    request.CharacterNetworkId,
+                    nameof(NetworkChargeCancelRequest),
+                    nameof(request.CharacterNetworkId)))
+            {
+                return;
+            }
+
+            if (!m_Controllers.TryGetValue(request.ActorNetworkId, out var controller) ||
+                controller == null ||
+                !controller.ProcessChargeCancelRequest(request, clientNetworkId))
+            {
+                return;
+            }
+
+            var broadcast = new NetworkChargeBroadcast
+            {
+                CharacterNetworkId = request.ActorNetworkId,
+                WeaponHash = request.WeaponHash,
+                ChargeRatio = 0,
+                EventType = ChargeEventType.Cancelled
+            };
+
+            BroadcastChargeToAllClients?.Invoke(broadcast);
+            OnChargeStateChanged?.Invoke(broadcast);
         }
         
         private void ProcessServerChargeQueue()

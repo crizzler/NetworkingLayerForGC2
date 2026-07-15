@@ -16,7 +16,7 @@ namespace Arawn.GameCreator2.Networking
     [Description("Client-side driver with prediction and reconciliation. " +
                  "Provides responsive local movement that syncs with server authority.")]
     [Serializable]
-    public class UnitDriverNetworkClient : TUnitDriver
+    public class UnitDriverNetworkClient : TUnitDriver, INetworkDirectionalInputSink
     {
         // EXPOSED MEMBERS: -----------------------------------------------------------------------
 
@@ -392,6 +392,11 @@ namespace Arawn.GameCreator2.Networking
             {
                 UpdateReconciliation(deltaTime);
             }
+        }
+
+        public void ProcessDirectionalInput(Vector2 inputDirection, Transform cameraTransform, bool jump)
+        {
+            ProcessLocalInput(inputDirection, cameraTransform, jump);
         }
 
         /// <summary>

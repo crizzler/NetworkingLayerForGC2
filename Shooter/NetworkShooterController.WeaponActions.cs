@@ -105,7 +105,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
         /// <returns>True if request was sent.</returns>
         public bool RequestQuickReload(float normalizedTime)
         {
-            if (m_IsServer) return false;
+            if (m_IsServer && !m_IsLocalClient) return false;
             if (m_CurrentWeapon == null) return false;
             if (!m_ShooterStance.Reloading.IsReloading) return false;
             
@@ -123,6 +123,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
             
             // Quick reload is sent immediately, no pending tracking needed
             // The response will be in the reload broadcast
+            OnQuickReloadRequestSent?.Invoke(request);
             return true;
         }
         
@@ -266,11 +267,17 @@ namespace Arawn.GameCreator2.Networking.Shooter
         {
             if (!m_IsServer) return false;
             if (m_CurrentWeapon == null) return false;
+            if (m_CurrentWeapon.Id.Hash != request.WeaponHash) return false;
             if (!m_ShooterStance.Reloading.IsReloading) return false;
 
             Vector2 quickWindow = m_ShooterStance.Reloading.QuickReloadRange;
             float normalizedAttempt = Mathf.Clamp01(request.AttemptTime);
-            return normalizedAttempt >= quickWindow.x && normalizedAttempt <= quickWindow.y;
+            bool succeeded = normalizedAttempt >= quickWindow.x && normalizedAttempt <= quickWindow.y;
+            if (succeeded)
+            {
+                StopRemoteReload(m_CurrentWeapon, CancelReason.QuickReload);
+            }
+            return succeeded;
         }
         
         /// <summary>
@@ -475,7 +482,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
         /// <returns>True if request was sent.</returns>
         public bool RequestFixJam()
         {
-            if (m_IsServer) return false;
+            if (m_IsServer && !m_IsLocalClient) return false;
             if (m_CurrentWeapon == null) return false;
             if (m_CurrentWeaponData == null || !m_CurrentWeaponData.IsJammed) return false;
             if (m_ShooterStance.Jamming.IsFixing) return false;
@@ -588,8 +595,8 @@ namespace Arawn.GameCreator2.Networking.Shooter
         {
             OnWeaponJammed?.Invoke(broadcast);
             
-            // Apply jam state on remote clients
-            if (m_IsRemoteClient && m_CurrentWeaponData != null)
+            // Apply to every non-owner presentation, including a host observing a remote player.
+            if (!m_IsLocalClient && m_CurrentWeaponData != null)
             {
                 m_CurrentWeaponData.IsJammed = true;
             }
@@ -602,8 +609,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
         {
             OnJamFixed?.Invoke(broadcast);
             
-            // Apply fix state on remote clients
-            if (m_IsRemoteClient && m_CurrentWeaponData != null && broadcast.Success)
+            if (!m_IsLocalClient && m_CurrentWeaponData != null && broadcast.Success)
             {
                 m_CurrentWeaponData.IsJammed = false;
             }
@@ -619,7 +625,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
         /// <returns>True if request was sent.</returns>
         public bool RequestChargeStart()
         {
-            if (m_IsServer) return false;
+            if (m_IsServer && !m_IsLocalClient) return false;
             if (m_CurrentWeapon == null) return false;
             if (m_CurrentWeapon.Fire.Mode != ShootMode.Charge) return false;
             if (m_IsCharging) return false;
@@ -659,7 +665,8 @@ namespace Arawn.GameCreator2.Networking.Shooter
             // Start charging optimistically
             m_IsCharging = true;
             m_ChargeStartTime = Time.time;
-            
+
+            OnChargeStartRequestSent?.Invoke(request);
             return true;
         }
         
@@ -669,7 +676,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
         /// <returns>True if request was sent.</returns>
         public bool RequestChargeCancel()
         {
-            if (m_IsServer) return false;
+            if (m_IsServer && !m_IsLocalClient) return false;
             if (!m_IsCharging) return false;
             
             uint networkId = m_NetworkCharacter != null ? m_NetworkCharacter.NetworkId : 0;
@@ -685,8 +692,20 @@ namespace Arawn.GameCreator2.Networking.Shooter
             };
             
             m_IsCharging = false;
-            
-            // Request sent through manager
+
+            OnChargeCancelRequestSent?.Invoke(request);
+            return true;
+        }
+
+        /// <summary>
+        /// [Server] Applies a validated charge cancellation.
+        /// </summary>
+        public bool ProcessChargeCancelRequest(NetworkChargeCancelRequest request, uint clientNetworkId)
+        {
+            if (!m_IsServer) return false;
+            if (m_CurrentWeapon == null || m_CurrentWeapon.Id.Hash != request.WeaponHash) return false;
+
+            m_IsCharging = false;
             return true;
         }
         
@@ -802,8 +821,8 @@ namespace Arawn.GameCreator2.Networking.Shooter
         {
             OnChargeBroadcastReceived?.Invoke(broadcast);
             
-            // Update remote client charge state
-            if (m_IsRemoteClient)
+            // Includes host-side presentation of remote actors.
+            if (!m_IsLocalClient)
             {
                 float chargeRatio = broadcast.ChargeRatio / 255f;
                 
@@ -849,7 +868,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
         /// <returns>True if request was sent.</returns>
         public bool RequestSightSwitch(IdString sightId)
         {
-            if (m_IsServer) return false;
+            if (m_IsServer && !m_IsLocalClient) return false;
             if (m_CurrentWeapon == null) return false;
             
             // Don't switch if already using this sight
@@ -888,7 +907,8 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 Request = request,
                 SentTime = Time.time
             };
-            
+
+            OnSightSwitchRequestSent?.Invoke(request);
             return true;
         }
         
@@ -964,6 +984,8 @@ namespace Arawn.GameCreator2.Networking.Shooter
                     RejectionReason = SightSwitchRejectionReason.AlreadyUsingSight
                 };
             }
+
+            ApplyRemoteSightHash(m_CurrentWeapon, request.NewSightHash);
             
             return new NetworkSightSwitchResponse
             {
@@ -996,8 +1018,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
         {
             OnSightSwitchBroadcastReceived?.Invoke(broadcast);
             
-            // Update remote client sight state
-            if (m_IsRemoteClient && m_CurrentWeaponData != null)
+            if (!m_IsLocalClient && m_CurrentWeaponData != null)
             {
                 ApplyRemoteSightHash(m_CurrentWeapon, broadcast.NewSightHash);
             }

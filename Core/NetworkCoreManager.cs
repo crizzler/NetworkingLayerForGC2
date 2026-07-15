@@ -136,18 +136,24 @@ namespace Arawn.GameCreator2.Networking
         public Action<NetworkInteractionRequest> SendInteractionRequestToServer;
         public Action<uint, NetworkInteractionResponse> SendInteractionResponseToClient;
         public Action<NetworkInteractionBroadcast> BroadcastInteraction;
+        public Action<NetworkInteractionFocusBroadcast> BroadcastInteractionFocus;
+
+        // Persistent state snapshots (server -> one client)
+        public Action<uint, NetworkCoreSnapshot> SendCoreSnapshotToClient;
         
         // Utility delegates
         public Func<float> GetServerTime;
         public Func<uint, Character> GetCharacterByNetworkId;
         public Func<uint> GetLocalPlayerNetworkId;
+        public Func<GameObject, uint> GetNetworkIdForGameObject;
         
         // ════════════════════════════════════════════════════════════════════════════════════════
         // PRIVATE FIELDS
         // ════════════════════════════════════════════════════════════════════════════════════════
         
         private Dictionary<int, GameObject> m_PropHashToPrefab;
-        private Dictionary<int, Transform> m_BoneHashCache;
+        private Dictionary<(int CharacterInstanceId, int BoneHash), Transform> m_BoneHashCache;
+        private readonly HashSet<int> m_LegacyControllerWarnings = new();
         private NetworkCorePatchHooks m_PatchHooks;
         private bool m_IsInitialized;
         private bool m_IsServer;
@@ -208,6 +214,15 @@ namespace Arawn.GameCreator2.Networking
             m_IsServer = isServer;
             m_IsClient = isClient;
 
+            if (m_CoreController != null && m_CoreController.gameObject != gameObject)
+            {
+                Debug.LogWarning(
+                    $"[NetworkCoreManager] The assigned Core controller on '{m_CoreController.name}' is a legacy " +
+                    "per-character endpoint. A manager-owned controller will be used instead.", this);
+                m_CoreController.enabled = false;
+                m_CoreController = null;
+            }
+
             if (m_CoreController == null)
             {
                 m_CoreController = GetComponent<NetworkCoreController>();
@@ -216,6 +231,9 @@ namespace Arawn.GameCreator2.Networking
                     m_CoreController = gameObject.AddComponent<NetworkCoreController>();
                 }
             }
+
+            DisableLegacyCoreControllers();
+            NetworkCoreController.ClaimManagerOwnedSingleton(m_CoreController);
             
             m_CoreController.Initialize(isServer, isClient);
             SecurityIntegration.SetModuleServerContext("Core", isServer);
@@ -247,7 +265,7 @@ namespace Arawn.GameCreator2.Networking
                 }
             }
             
-            m_BoneHashCache = new Dictionary<int, Transform>();
+            m_BoneHashCache = new Dictionary<(int, int), Transform>();
         }
         
         private void WireController()
@@ -278,13 +296,16 @@ namespace Arawn.GameCreator2.Networking
             m_CoreController.SendInteractionRequestToServer = req => SendInteractionRequestToServer?.Invoke(req);
             m_CoreController.SendInteractionResponseToClient = (id, resp) => SendInteractionResponseToClient?.Invoke(id, resp);
             m_CoreController.BroadcastInteractionToClients = bc => BroadcastInteraction?.Invoke(bc);
+            m_CoreController.BroadcastInteractionFocusToClients = bc => BroadcastInteractionFocus?.Invoke(bc);
             
             // Wire utility delegates
             m_CoreController.GetServerTime = () => GetServerTime?.Invoke() ?? Time.time;
             m_CoreController.GetCharacterByNetworkId = id => GetCharacterByNetworkId?.Invoke(id);
             m_CoreController.GetLocalPlayerNetworkId = () => GetLocalPlayerNetworkId?.Invoke() ?? 0;
+            m_CoreController.GetNetworkIdForGameObject = gameObject =>
+                GetNetworkIdForGameObject?.Invoke(gameObject) ?? 0;
             m_CoreController.GetPropPrefabByHash = GetPropPrefabByHash;
-            m_CoreController.GetBoneByHash = GetBoneByHash;
+            m_CoreController.GetBoneByHashForCharacter = GetBoneByHash;
         }
         
         private void UnwireController()
@@ -314,12 +335,14 @@ namespace Arawn.GameCreator2.Networking
             m_CoreController.SendInteractionRequestToServer = null;
             m_CoreController.SendInteractionResponseToClient = null;
             m_CoreController.BroadcastInteractionToClients = null;
+            m_CoreController.BroadcastInteractionFocusToClients = null;
             
             m_CoreController.GetServerTime = null;
             m_CoreController.GetCharacterByNetworkId = null;
             m_CoreController.GetLocalPlayerNetworkId = null;
+            m_CoreController.GetNetworkIdForGameObject = null;
             m_CoreController.GetPropPrefabByHash = null;
-            m_CoreController.GetBoneByHash = null;
+            m_CoreController.GetBoneByHashForCharacter = null;
         }
 
         private void SyncPatchHooks()
@@ -354,11 +377,47 @@ namespace Arawn.GameCreator2.Networking
             return m_PropHashToPrefab.TryGetValue(hash, out var prefab) ? prefab : null;
         }
         
-        private Transform GetBoneByHash(int hash)
+        private Transform GetBoneByHash(Character character, int hash)
         {
-            // Bone cache is per-character, simplified here
-            // Full implementation would lookup character's skeleton
-            return m_BoneHashCache.TryGetValue(hash, out var bone) ? bone : null;
+            if (character == null) return null;
+            if (hash == 0) return character.transform;
+
+            var key = (character.GetInstanceID(), hash);
+            if (m_BoneHashCache.TryGetValue(key, out Transform cached) && cached != null &&
+                (cached == character.transform || cached.IsChildOf(character.transform)))
+            {
+                return cached;
+            }
+
+            Transform[] bones = character.GetComponentsInChildren<Transform>(true);
+            for (int i = 0; i < bones.Length; i++)
+            {
+                Transform candidate = bones[i];
+                if (StableHashUtility.GetStableHash(candidate.name) != hash) continue;
+                m_BoneHashCache[key] = candidate;
+                return candidate;
+            }
+
+            return null;
+        }
+
+        private void DisableLegacyCoreControllers()
+        {
+            NetworkCoreController[] controllers = FindObjectsByType<NetworkCoreController>(
+                FindObjectsInactive.Include, FindObjectsSortMode.None);
+            for (int i = 0; i < controllers.Length; i++)
+            {
+                NetworkCoreController controller = controllers[i];
+                if (controller == null || controller == m_CoreController) continue;
+                controller.enabled = false;
+                if (m_LegacyControllerWarnings.Add(controller.GetInstanceID()))
+                {
+                    Debug.LogWarning(
+                        $"[NetworkCoreManager] Disabled legacy per-character NetworkCoreController on " +
+                        $"'{controller.name}'. Remove it from the character prefab; Core routing is manager-owned.",
+                        controller);
+                }
+            }
         }
         
         /// <summary>
@@ -845,6 +904,38 @@ namespace Arawn.GameCreator2.Networking
             if (m_CoreController == null) return;
             m_CoreController.ReceiveInteractionBroadcast(broadcast);
         }
+
+        /// <summary>[Client] Called when an interaction focus/blur broadcast arrives.</summary>
+        public void ReceiveInteractionFocusBroadcast(NetworkInteractionFocusBroadcast broadcast)
+        {
+            if (m_CoreController == null) return;
+            m_CoreController.ReceiveInteractionFocusBroadcast(broadcast);
+        }
+
+        /// <summary>[Client] Apply or retain a full persistent Core snapshot.</summary>
+        public bool ReceiveCoreSnapshot(NetworkCoreSnapshot snapshot)
+        {
+            return m_CoreController != null && m_CoreController.ReceiveCoreSnapshot(snapshot);
+        }
+
+        /// <summary>[Server] Capture persistent Core state for one character.</summary>
+        public bool TryCaptureCoreSnapshot(uint characterNetworkId, out NetworkCoreSnapshot snapshot)
+        {
+            snapshot = default;
+            return m_IsServer && m_CoreController != null &&
+                   m_CoreController.TryCaptureCoreSnapshot(characterNetworkId, out snapshot);
+        }
+
+        /// <summary>[Server] Send one character snapshot to one client.</summary>
+        public bool SendSnapshotToClient(uint clientNetworkId, uint characterNetworkId)
+        {
+            if (!TryCaptureCoreSnapshot(characterNetworkId, out NetworkCoreSnapshot snapshot))
+                return false;
+            if (SendCoreSnapshotToClient == null) return false;
+
+            SendCoreSnapshotToClient.Invoke(clientNetworkId, snapshot);
+            return true;
+        }
         
         // ════════════════════════════════════════════════════════════════════════════════════════
         // CONVENIENCE CLIENT METHODS
@@ -876,7 +967,7 @@ namespace Arawn.GameCreator2.Networking
             Action<NetworkPropResponse> callback = null)
         {
             int propHash = GetPropHash(propId);
-            int boneHash = GetBoneHash(boneName);
+            int boneHash = string.IsNullOrEmpty(boneName) ? 0 : GetBoneHash(boneName);
             m_CoreController?.RequestAttachProp(characterNetworkId, propHash, boneHash, 
                 localPosition, localRotation, callback);
         }
@@ -889,6 +980,20 @@ namespace Arawn.GameCreator2.Networking
         {
             int propHash = GetPropHash(propId);
             m_CoreController?.RequestDetachProp(characterNetworkId, propHash, callback);
+        }
+
+        /// <summary>[Client] Request removal of one exact server-assigned prop.</summary>
+        public void RequestDetachPropInstance(uint characterNetworkId, int propInstanceId,
+            Action<NetworkPropResponse> callback = null)
+        {
+            m_CoreController?.RequestDetachPropInstance(characterNetworkId, propInstanceId, callback);
+        }
+
+        /// <summary>[Client] Request removal of all network-managed props.</summary>
+        public void RequestDetachAllProps(uint characterNetworkId,
+            Action<NetworkPropResponse> callback = null)
+        {
+            m_CoreController?.RequestDetachAllProps(characterNetworkId, callback);
         }
         
         /// <summary>
@@ -972,6 +1077,82 @@ namespace Arawn.GameCreator2.Networking
         public void ServerResetPoise(uint characterNetworkId)
         {
             m_CoreController?.ServerResetPoise(characterNetworkId);
+        }
+
+        /// <summary>[Server] Attach a registered prop and broadcast its descriptor.</summary>
+        public bool TryServerAttachProp(uint characterNetworkId, string propId, string boneName,
+            Vector3 localPosition, Quaternion localRotation, out int propInstanceId,
+            out PropRejectReason rejectReason)
+        {
+            return TryServerAttachProp(characterNetworkId, GetPropHash(propId),
+                string.IsNullOrEmpty(boneName) ? 0 : GetBoneHash(boneName), localPosition,
+                localRotation, out propInstanceId, out rejectReason);
+        }
+
+        /// <summary>[Server] Attach a registered prop using precomputed stable hashes.</summary>
+        public bool TryServerAttachProp(uint characterNetworkId, int propHash, int boneHash,
+            Vector3 localPosition, Quaternion localRotation, out int propInstanceId,
+            out PropRejectReason rejectReason)
+        {
+            propInstanceId = 0;
+            rejectReason = PropRejectReason.NotAuthorized;
+            return m_CoreController != null && m_CoreController.TryServerAttachProp(
+                characterNetworkId, propHash, boneHash, localPosition, localRotation,
+                out propInstanceId, out rejectReason);
+        }
+
+        /// <summary>[Server] Detach one exact network prop.</summary>
+        public bool TryServerDetachProp(uint characterNetworkId, int propInstanceId,
+            out PropRejectReason rejectReason)
+        {
+            rejectReason = PropRejectReason.NotAuthorized;
+            return m_CoreController != null && m_CoreController.TryServerDetachProp(
+                characterNetworkId, propInstanceId, out rejectReason);
+        }
+
+        /// <summary>[Server] Detach every network-managed prop.</summary>
+        public bool ServerDetachAllProps(uint characterNetworkId,
+            out PropRejectReason rejectReason)
+        {
+            rejectReason = PropRejectReason.NotAuthorized;
+            return m_CoreController != null &&
+                   m_CoreController.ServerDetachAllProps(characterNetworkId, out rejectReason);
+        }
+
+        /// <summary>
+        /// Drop snapshot/attachment state for a despawned character before its network ID can be
+        /// reused. Server callers also notify observers with an idempotent detach-all broadcast.
+        /// </summary>
+        public void ForgetCharacterState(uint characterNetworkId)
+        {
+            m_CoreController?.ForgetCharacterState(characterNetworkId, m_IsServer);
+            if (m_BoneHashCache == null) return;
+
+            var remove = new List<(int CharacterInstanceId, int BoneHash)>();
+            foreach (KeyValuePair<(int CharacterInstanceId, int BoneHash), Transform> pair in
+                     m_BoneHashCache)
+            {
+                if (pair.Value == null ||
+                    pair.Value.GetComponentInParent<NetworkCharacter>()?.NetworkId == characterNetworkId)
+                {
+                    remove.Add(pair.Key);
+                }
+            }
+
+            for (int i = 0; i < remove.Count; i++) m_BoneHashCache.Remove(remove[i]);
+        }
+
+        /// <summary>[Server] Broadcast transient focus/blur presentation state.</summary>
+        public void ServerBroadcastInteractionFocus(uint characterNetworkId, uint targetNetworkId,
+            bool isFocus)
+        {
+            if (!m_IsServer) return;
+            BroadcastInteractionFocus?.Invoke(new NetworkInteractionFocusBroadcast
+            {
+                CharacterNetworkId = characterNetworkId,
+                TargetNetworkId = targetNetworkId,
+                IsFocus = isFocus
+            });
         }
     }
 }

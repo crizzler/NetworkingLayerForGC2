@@ -34,10 +34,19 @@ namespace Arawn.GameCreator2.Networking
         [Header("Ragdoll Settings")]
         [Tooltip("Minimum time between ragdoll state changes.")]
         [SerializeField] private float m_RagdollCooldown = 0.5f;
+
+        [Tooltip("Maximum magnitude of a client-requested ragdoll impulse.")]
+        [SerializeField] private float m_MaxRagdollForce = 1000f;
+
+        [Tooltip("Maximum distance from the character for a client-requested force point.")]
+        [SerializeField] private float m_MaxRagdollForcePointDistance = 10f;
         
         [Header("Props Settings")]
         [Tooltip("Maximum props per character.")]
         [SerializeField] private int m_MaxPropsPerCharacter = 10;
+
+        [Tooltip("Maximum magnitude of a locally attached prop offset.")]
+        [SerializeField] private float m_MaxPropLocalOffset = 10f;
         
         [Header("Invincibility Settings")]
         [Tooltip("Maximum invincibility duration allowed.")]
@@ -49,10 +58,20 @@ namespace Arawn.GameCreator2.Networking
         [Header("Poise Settings")]
         [Tooltip("Enable poise damage validation.")]
         [SerializeField] private bool m_ValidatePoiseDamage = true;
+
+        [Tooltip("Maximum absolute value accepted in one poise request.")]
+        [SerializeField] private float m_MaxPoiseRequestValue = 10000f;
+
+        [Header("Busy Settings")]
+        [Tooltip("Maximum server-approved duration for a timed busy state.")]
+        [SerializeField] private float m_MaxBusyTimeout = 30f;
         
         [Header("Interaction Settings")]
         [Tooltip("Maximum interaction range for validation.")]
         [SerializeField] private float m_MaxInteractionRange = 5f;
+
+        [Tooltip("Maximum distance between an unkeyed client's claimed point and the resolved server target.")]
+        [SerializeField] private float m_InteractionPositionTolerance = 3f;
         
         [Tooltip("Enable interaction cooldown per target.")]
         [SerializeField] private float m_InteractionCooldown = 0.5f;
@@ -106,6 +125,8 @@ namespace Arawn.GameCreator2.Networking
         public event Action<NetworkInteractionResponse> OnInteractionResponseReceived;
         public event Action<uint, NetworkInteractionRequest> OnInteractionRequestReceived;
         public event Action<NetworkInteractionBroadcast> OnInteractionBroadcastReceived;
+        public event Action<NetworkInteractionFocusBroadcast> OnInteractionFocusBroadcastReceived;
+        public event Action<NetworkCoreSnapshot> OnCoreSnapshotReceived;
         
         // ════════════════════════════════════════════════════════════════════════════════════════
         // DELEGATES (Network Integration Points)
@@ -140,13 +161,17 @@ namespace Arawn.GameCreator2.Networking
         public Action<NetworkInteractionRequest> SendInteractionRequestToServer;
         public Action<uint, NetworkInteractionResponse> SendInteractionResponseToClient;
         public Action<NetworkInteractionBroadcast> BroadcastInteractionToClients;
+        public Action<NetworkInteractionFocusBroadcast> BroadcastInteractionFocusToClients;
         
         // Utility
         public Func<float> GetServerTime;
         public Func<uint, Character> GetCharacterByNetworkId;
         public Func<uint> GetLocalPlayerNetworkId;
+        public Func<GameObject, uint> GetNetworkIdForGameObject;
         public Func<int, GameObject> GetPropPrefabByHash;
+        [Obsolete("Use GetBoneByHashForCharacter so bone hashes are resolved against the correct character.")]
         public Func<int, Transform> GetBoneByHash;
+        public Func<Character, int, Transform> GetBoneByHashForCharacter;
         
         // ════════════════════════════════════════════════════════════════════════════════════════
         // PRIVATE FIELDS
@@ -185,6 +210,12 @@ namespace Arawn.GameCreator2.Networking
             uint pendingCorrelation = correlationId != 0 ? correlationId : requestId;
             return ((ulong)actorNetworkId << 32) | pendingCorrelation;
         }
+
+        private static bool IsFinite(float value) =>
+            !float.IsNaN(value) && !float.IsInfinity(value);
+
+        private static bool IsFinite(Vector3 value) =>
+            IsFinite(value.x) && IsFinite(value.y) && IsFinite(value.z);
         
         // Pending requests (client-side)
         private readonly Dictionary<ulong, PendingRagdollRequest> m_PendingRagdollRequests = new(16);
@@ -199,8 +230,9 @@ namespace Arawn.GameCreator2.Networking
         private readonly Dictionary<uint, float> m_InvincibilityCooldowns = new(64);
         private readonly Dictionary<(uint, uint), float> m_InteractionCooldowns = new(128);
         
-        // Props tracking (server-side)
-        private readonly Dictionary<uint, List<int>> m_CharacterProps = new(64);
+        // Authoritative prop descriptors. Clients mirror these records so broadcasts and
+        // late-join snapshots can be applied idempotently.
+        private readonly Dictionary<uint, List<NetworkPropAttachmentState>> m_CharacterProps = new(64);
         private int m_NextPropInstanceId = 1;
         
         // Statistics
@@ -360,6 +392,15 @@ namespace Arawn.GameCreator2.Networking
         public bool IsServer => m_IsServer;
         public bool IsClient => m_IsClient;
         public NetworkCoreStats Stats => m_Stats;
+
+        /// <summary>
+        /// Makes the manager-owned endpoint the compatibility singleton even when a legacy
+        /// character-level component happened to awaken first.
+        /// </summary>
+        internal static void ClaimManagerOwnedSingleton(NetworkCoreController controller)
+        {
+            if (controller != null) s_Instance = controller;
+        }
         
         // ════════════════════════════════════════════════════════════════════════════════════════
         // UNITY LIFECYCLE
@@ -368,6 +409,8 @@ namespace Arawn.GameCreator2.Networking
         private void Update()
         {
             if (!m_IsClient) return;
+
+            RetryPendingCoreState();
 
             float now = Time.time;
             float cleanupInterval = Mathf.Max(0.1f, m_PendingCleanupIntervalSeconds);
@@ -393,6 +436,19 @@ namespace Arawn.GameCreator2.Networking
             ClearCooldowns();
             m_Stats.Reset();
             m_LastPendingCleanupTime = Time.time;
+            m_PendingCoreSnapshots.Clear();
+            m_PendingPropBroadcasts.Clear();
+            m_PendingRagdollBroadcasts.Clear();
+            m_PendingInvincibilityBroadcasts.Clear();
+            m_PendingPoiseBroadcasts.Clear();
+            m_PendingBusyBroadcasts.Clear();
+
+            // PurrNet drives one final inactive role transition on shutdown. Clear persistent
+            // descriptors there so a later session cannot inherit attachments from reused IDs.
+            if (!isServer && !isClient)
+            {
+                ClearAllTrackedPropState();
+            }
             
             if (m_DebugLog)
             {
@@ -465,6 +521,7 @@ namespace Arawn.GameCreator2.Networking
     /// </summary>
     public class NetworkPropTracker : MonoBehaviour
     {
+        public uint CharacterNetworkId;
         public int InstanceId;
         public int PropHash;
     }

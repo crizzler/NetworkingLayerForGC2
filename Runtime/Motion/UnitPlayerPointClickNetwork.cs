@@ -75,7 +75,7 @@ namespace Arawn.GameCreator2.Networking
         // MEMBERS: -------------------------------------------------------------------------------
         
         [NonSerialized] private RaycastHit[] m_HitBuffer;
-        [NonSerialized] private UnitDriverNavmeshNetworkClient m_NetworkDriver;
+        [NonSerialized] private INetworkNavMeshCommandSink m_CommandSink;
         
         [NonSerialized] private bool m_IsInputEnabled = true;
         [NonSerialized] private float m_LastClickTime;
@@ -160,8 +160,7 @@ namespace Arawn.GameCreator2.Networking
             
             m_ClickHistory = new Queue<ClickRecord>(32);
             
-            // Try to find network driver
-            m_NetworkDriver = character.Driver as UnitDriverNavmeshNetworkClient;
+            m_CommandSink = character.Driver as INetworkNavMeshCommandSink;
         }
         
         public override void OnDispose(Character character)
@@ -381,9 +380,9 @@ namespace Arawn.GameCreator2.Networking
             
             // Send to network driver
             RefreshNetworkDriver();
-            if (m_NetworkDriver != null)
+            if (m_CommandSink != null)
             {
-                m_NetworkDriver.RequestMoveToPosition(destination);
+                m_CommandSink.RequestMoveToPosition(destination);
             }
             else
             {
@@ -499,9 +498,9 @@ namespace Arawn.GameCreator2.Networking
             RecordClick(destination);
             
             RefreshNetworkDriver();
-            if (m_NetworkDriver != null)
+            if (m_CommandSink != null)
             {
-                m_NetworkDriver.RequestMoveToPosition(destination);
+                m_CommandSink.RequestMoveToPosition(destination);
             }
             else
             {
@@ -523,9 +522,9 @@ namespace Arawn.GameCreator2.Networking
         {
             RefreshNetworkDriver();
 
-            if (m_NetworkDriver != null)
+            if (m_CommandSink != null)
             {
-                m_NetworkDriver.RequestStop(true);
+                m_CommandSink.RequestStop(true);
             }
             else
             {
@@ -544,14 +543,19 @@ namespace Arawn.GameCreator2.Networking
         /// </summary>
         public void SetNetworkDriver(UnitDriverNavmeshNetworkClient driver)
         {
-            m_NetworkDriver = driver;
+            m_CommandSink = driver;
+        }
+
+        public void SetNetworkCommandSink(INetworkNavMeshCommandSink commandSink)
+        {
+            m_CommandSink = commandSink;
         }
 
         private void RefreshNetworkDriver()
         {
             if (this.Character == null) return;
-            if (ReferenceEquals(m_NetworkDriver, this.Character.Driver)) return;
-            m_NetworkDriver = this.Character.Driver as UnitDriverNavmeshNetworkClient;
+            if (ReferenceEquals(m_CommandSink, this.Character.Driver)) return;
+            m_CommandSink = this.Character.Driver as INetworkNavMeshCommandSink;
         }
 
         // STRING: --------------------------------------------------------------------------------

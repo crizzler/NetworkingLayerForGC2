@@ -45,6 +45,11 @@ namespace Arawn.GameCreator2.Networking.Shooter
         
         [Tooltip("Show optimistic hit effects before server confirmation.")]
         [SerializeField] private bool m_OptimisticHitEffects = true;
+
+        [Header("Fallback Presentation")]
+        [Tooltip("Generate simple tracer/impact primitives when no registered Shooter asset can present a confirmed event. " +
+                 "Disabled by default so missing optional visuals do not create debug geometry in production.")]
+        [SerializeField] private bool m_UseGeneratedFallbackPresentation = false;
         
         [Tooltip("Maximum pending shots before flush.")]
         [SerializeField] private int m_MaxPendingShots = 16;
@@ -96,12 +101,24 @@ namespace Arawn.GameCreator2.Networking.Shooter
         
         /// <summary>Called when a reload request is sent to server.</summary>
         public event Action<NetworkReloadRequest> OnReloadRequestSent;
+
+        /// <summary>Called when an active/quick reload attempt is sent to server.</summary>
+        public event Action<NetworkQuickReloadRequest> OnQuickReloadRequestSent;
         
         /// <summary>Called when a reload event is broadcast.</summary>
         public event Action<NetworkReloadBroadcast> OnReloadBroadcastReceived;
         
         /// <summary>Called when a fix jam request is sent to server.</summary>
         public event Action<NetworkFixJamRequest> OnFixJamRequestSent;
+
+        /// <summary>Called when charging is requested from the server.</summary>
+        public event Action<NetworkChargeStartRequest> OnChargeStartRequestSent;
+
+        /// <summary>Called when charge cancellation is requested from the server.</summary>
+        public event Action<NetworkChargeCancelRequest> OnChargeCancelRequestSent;
+
+        /// <summary>Called when a sight switch is requested from the server.</summary>
+        public event Action<NetworkSightSwitchRequest> OnSightSwitchRequestSent;
         
         /// <summary>Called when a weapon jams (broadcast received).</summary>
         public event Action<NetworkJamBroadcast> OnWeaponJammed;
@@ -149,7 +166,11 @@ namespace Arawn.GameCreator2.Networking.Shooter
             BindingFlags.Instance | BindingFlags.NonPublic);
         private readonly Dictionary<ulong, PendingShotRequest> m_PendingShots = new(16);
         private readonly Dictionary<ulong, PendingHitRequest> m_PendingHits = new(32);
+        private readonly List<RecentOptimisticShotPresentation> m_RecentOptimisticShotPresentations = new(8);
+        private readonly List<RecentOptimisticHitPresentation> m_RecentOptimisticHitPresentations = new(16);
         private readonly HashSet<int> m_ProcessedHits = new(64);
+        private readonly HashSet<int> m_MissingShotEffectWeaponHashes = new();
+        private readonly HashSet<int> m_MissingHitEffectWeaponHashes = new();
         
         // Validated shots (for hit validation)
         private readonly Dictionary<ushort, ValidatedShot> m_ValidatedShots = new(16);
@@ -180,6 +201,13 @@ namespace Arawn.GameCreator2.Networking.Shooter
         private float m_NextWeaponSyncSkipDiagnosticTime;
         private float m_NextAimSyncSkipDiagnosticTime;
         private float m_NextRemoteAimResolverDiagnosticTime;
+        private int m_RemoteWeaponApplyVersion;
+        private int m_AppliedRemoteWeaponVersion;
+        private bool m_RemoteWeaponApplyRunning;
+        private NetworkWeaponState m_DesiredRemoteWeaponState;
+        private ShooterWeapon m_DesiredRemoteWeapon;
+        private GameObject m_DesiredRemoteWeaponModelPrefab;
+        private Handle m_DesiredRemoteWeaponHandle;
         
         // Current weapon tracking
         private ShooterWeapon m_CurrentWeapon;
@@ -277,6 +305,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
             public NetworkShotRequest Request;
             public float SentTime;
             public bool OptimisticPlayed;
+            public bool NativeNotificationObserved;
             public float PendingSentTime => SentTime;
         }
         
@@ -286,6 +315,18 @@ namespace Arawn.GameCreator2.Networking.Shooter
             public float SentTime;
             public bool OptimisticPlayed;
             public float PendingSentTime => SentTime;
+        }
+
+        private struct RecentOptimisticShotPresentation
+        {
+            public NetworkShotRequest Request;
+            public float ExpiresAt;
+        }
+
+        private struct RecentOptimisticHitPresentation
+        {
+            public NetworkShooterHitRequest Request;
+            public float ExpiresAt;
         }
         
         private struct ValidatedShot
@@ -348,6 +389,12 @@ namespace Arawn.GameCreator2.Networking.Shooter
         {
             get => m_OptimisticHitEffects;
             set => m_OptimisticHitEffects = value;
+        }
+
+        public bool UseGeneratedFallbackPresentation
+        {
+            get => m_UseGeneratedFallbackPresentation;
+            set => m_UseGeneratedFallbackPresentation = value;
         }
         
         /// <summary>Whether this is running on the server.</summary>
@@ -970,7 +1017,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
             m_CurrentWeaponData = m_ShooterStance.Get(m_CurrentWeapon);
         }
 
-        public async void ApplyRemoteWeaponState(
+        public void ApplyRemoteWeaponState(
             NetworkWeaponState state,
             ShooterWeapon weapon,
             GameObject modelPrefab,
@@ -988,6 +1035,77 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 LogDiagnosticsWarning($"remote weapon state skipped because Character is missing weaponHash={state.WeaponHash}");
                 return;
             }
+
+            // Keep exactly one asynchronous reconciliation loop alive. Version checks alone are
+            // insufficient when two GC2 Equip/Unequip tasks overlap: the older task can still
+            // finish last and mutate Combat through its equip events. Serializing the operations
+            // guarantees the newest desired state is the final operation applied.
+            m_DesiredRemoteWeaponState = state;
+            m_DesiredRemoteWeapon = weapon;
+            m_DesiredRemoteWeaponModelPrefab = modelPrefab;
+            m_DesiredRemoteWeaponHandle = handle;
+            m_RemoteWeaponApplyVersion++;
+
+            if (!m_RemoteWeaponApplyRunning)
+            {
+                ApplyLatestRemoteWeaponState();
+            }
+        }
+
+        private async void ApplyLatestRemoteWeaponState()
+        {
+            if (m_RemoteWeaponApplyRunning) return;
+            m_RemoteWeaponApplyRunning = true;
+
+            try
+            {
+                while (!m_IsLocalClient &&
+                       m_AppliedRemoteWeaponVersion != m_RemoteWeaponApplyVersion)
+                {
+                    int applyVersion = m_RemoteWeaponApplyVersion;
+                    NetworkWeaponState state = m_DesiredRemoteWeaponState;
+                    ShooterWeapon weapon = m_DesiredRemoteWeapon;
+                    GameObject modelPrefab = m_DesiredRemoteWeaponModelPrefab;
+                    Handle handle = m_DesiredRemoteWeaponHandle;
+
+                    await ApplyRemoteWeaponStateVersion(
+                        applyVersion,
+                        state,
+                        weapon,
+                        modelPrefab,
+                        handle);
+
+                    if (applyVersion == m_RemoteWeaponApplyVersion)
+                    {
+                        m_AppliedRemoteWeaponVersion = applyVersion;
+                    }
+                }
+            }
+            catch (Exception exception)
+            {
+                Debug.LogException(exception, this);
+                // Do not spin forever on a persistent GC2 failure. A later replicated state
+                // advances the version and starts a fresh reconciliation pass.
+                m_AppliedRemoteWeaponVersion = m_RemoteWeaponApplyVersion;
+            }
+            finally
+            {
+                m_RemoteWeaponApplyRunning = false;
+                if (!m_IsLocalClient &&
+                    m_AppliedRemoteWeaponVersion != m_RemoteWeaponApplyVersion)
+                {
+                    ApplyLatestRemoteWeaponState();
+                }
+            }
+        }
+
+        private async System.Threading.Tasks.Task ApplyRemoteWeaponStateVersion(
+            int applyVersion,
+            NetworkWeaponState state,
+            ShooterWeapon weapon,
+            GameObject modelPrefab,
+            Handle handle)
+        {
 
             LogDiagnostics(
                 $"apply remote weapon state weaponHash={state.WeaponHash} ammo={state.AmmoInMagazine} " +
@@ -1016,15 +1134,18 @@ namespace Arawn.GameCreator2.Networking.Shooter
                     if (m_Character.Combat.IsEquipped(weaponToUnequip))
                     {
                         await m_Character.Combat.Unequip(weaponToUnequip, new Args(m_Character.gameObject));
+                        if (applyVersion != m_RemoteWeaponApplyVersion) return;
                     }
                 }
 
                 RemoveShooterProp(previousWeaponHash, previousProp);
                 await UnequipEquippedShooterWeapons();
+                if (applyVersion != m_RemoteWeaponApplyVersion) return;
 
                 m_CurrentWeapon = null;
                 m_CurrentWeaponData = null;
-                m_LastWeaponState = NetworkWeaponState.None;
+                // WeaponHash 0 still carries authoritative lean/presentation state.
+                m_LastWeaponState = state;
                 ApplyRemoteLeanState(state);
                 LogDiagnostics("applied remote shooter unequip state");
                 return;
@@ -1033,21 +1154,31 @@ namespace Arawn.GameCreator2.Networking.Shooter
             if (weapon == null)
             {
                 LogDiagnosticsWarning($"remote weapon state skipped because weapon hash {state.WeaponHash} is not registered");
+                // Preserve the authoritative state even when this peer cannot reconstruct the
+                // optional visual. Non-visual state/event routing must continue.
+                m_LastWeaponState = state;
+                ApplyRemoteLeanState(state);
                 return;
             }
 
             NetworkShooterManager.RegisterShooterWeapon(weapon);
             bool wasReloading = m_LastWeaponState.IsReloading;
             bool wasEquipped = m_CurrentWeapon == weapon || m_Character.Combat.IsEquipped(weapon);
-            m_CurrentWeapon = weapon;
-            TryGetShooterStance();
 
             await UnequipNonShooterWeapons();
+            if (applyVersion != m_RemoteWeaponApplyVersion) return;
+
+            await UnequipOtherShooterWeapons(weapon);
+            if (applyVersion != m_RemoteWeaponApplyVersion) return;
+
+            m_CurrentWeapon = weapon;
+            TryGetShooterStance();
 
             GameObject model = m_Character.Combat.GetProp(weapon);
             if (wasEquipped && model == null)
             {
                 await m_Character.Combat.Unequip(weapon, new Args(m_Character.gameObject));
+                if (applyVersion != m_RemoteWeaponApplyVersion) return;
                 wasEquipped = false;
             }
 
@@ -1059,6 +1190,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
             if (!m_Character.Combat.IsEquipped(weapon) && model != null)
             {
                 await m_Character.Combat.Equip(weapon, model, new Args(m_Character.gameObject, model));
+                if (applyVersion != m_RemoteWeaponApplyVersion) return;
             }
 
             if (m_ShooterStance != null)
@@ -1099,6 +1231,27 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 $"applied remote weapon state weapon={weapon.name} equipped={m_Character.Combat.IsEquipped(weapon)} " +
                 $"weaponData={(m_CurrentWeaponData != null)} prop={(m_Character.Combat.GetProp(weapon) != null)} " +
                 $"flags=0x{appliedState.StateFlags:X2}");
+        }
+
+        private async System.Threading.Tasks.Task UnequipOtherShooterWeapons(
+            ShooterWeapon desiredWeapon)
+        {
+            if (m_Character?.Combat?.Weapons == null) return;
+
+            Weapon[] equippedWeapons = m_Character.Combat.Weapons;
+            for (int i = 0; i < equippedWeapons.Length; i++)
+            {
+                if (equippedWeapons[i]?.Asset is not ShooterWeapon shooterWeapon) continue;
+                if (shooterWeapon == desiredWeapon) continue;
+                if (!m_Character.Combat.IsEquipped(shooterWeapon)) continue;
+
+                GameObject prop = m_Character.Combat.GetProp(shooterWeapon);
+                StopRemoteReload(shooterWeapon, CancelReason.ForceStop);
+                await m_Character.Combat.Unequip(
+                    shooterWeapon,
+                    new Args(m_Character.gameObject));
+                RemoveShooterProp(shooterWeapon.Id.Hash, prop);
+            }
         }
 
         private async System.Threading.Tasks.Task UnequipEquippedShooterWeapons()
@@ -1403,6 +1556,22 @@ namespace Arawn.GameCreator2.Networking.Shooter
         {
             float timeout = 2f;
             float currentTime = Time.time;
+
+            for (int i = m_RecentOptimisticShotPresentations.Count - 1; i >= 0; i--)
+            {
+                if (m_RecentOptimisticShotPresentations[i].ExpiresAt < currentTime)
+                {
+                    m_RecentOptimisticShotPresentations.RemoveAt(i);
+                }
+            }
+
+            for (int i = m_RecentOptimisticHitPresentations.Count - 1; i >= 0; i--)
+            {
+                if (m_RecentOptimisticHitPresentations[i].ExpiresAt < currentTime)
+                {
+                    m_RecentOptimisticHitPresentations.RemoveAt(i);
+                }
+            }
 
             PendingRequestCleanup.RemoveTimedOut(m_PendingShots, s_SharedPendingRemovalBuffer, currentTime, timeout);
             PendingRequestCleanup.RemoveTimedOut(m_PendingHits, s_SharedPendingRemovalBuffer, currentTime, timeout);

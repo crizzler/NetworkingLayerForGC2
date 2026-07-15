@@ -159,6 +159,10 @@ namespace Arawn.GameCreator2.Networking
 
         [Tooltip("Enable Core feature networking (Ragdoll, Props, Invincibility, Poise, Busy, Interaction)")]
         [SerializeField] private bool m_UseCoreNetworking = true;
+
+        [Header("Prediction")]
+        [Tooltip("Movement prediction backend. Built-in keeps the transport-agnostic GC2 prediction path. PurrDiction is used only when a matching optional backend component is installed.")]
+        [SerializeField] private NetworkPredictionBackend m_PredictionBackend = NetworkPredictionBackend.BuiltIn;
         
         [Header("Network Identity")]
         [Tooltip("Use automatic network IDs (transport runtime id if available, otherwise stable scene hash).")]
@@ -212,6 +216,7 @@ namespace Arawn.GameCreator2.Networking
         private NetworkRelevanceTier m_CurrentRelevanceTier = NetworkRelevanceTier.Near;
         private NetworkSessionProfile m_ResolvedSessionProfile;
         private NetworkTransportBridge m_RegisteredBridge;
+        private INetworkCharacterPredictionBackend m_ActivePredictionBackend;
         private readonly Dictionary<uint, float> m_LastStateBroadcastPerClient = new Dictionary<uint, float>(32);
 
         // Network state (manual sync if not using transport)
@@ -238,6 +243,7 @@ namespace Arawn.GameCreator2.Networking
         
         // Core networking controller (Ragdoll, Props, Invincibility, Poise, Busy, Interaction)
         private NetworkCoreController m_CoreController;
+        private bool m_LegacyCoreControllerWarningLogged;
         
         // ════════════════════════════════════════════════════════════════════════════════════════
         // EVENTS
@@ -350,11 +356,23 @@ namespace Arawn.GameCreator2.Networking
         /// <summary>The animation sync controller for States and Gestures.</summary>
         public UnitAnimimNetworkController AnimimController => m_AnimimController;
         
-        /// <summary>The Core networking controller for Ragdoll, Props, Invincibility, Poise, Busy, Interaction.</summary>
-        public NetworkCoreController CoreController => m_CoreController;
+        /// <summary>
+        /// The shared Core networking controller for Ragdoll, Props, Invincibility,
+        /// Poise, Busy, and Interaction. Core routing is manager-owned; characters do
+        /// not create their own transport-less controller instances.
+        /// </summary>
+        public NetworkCoreController CoreController =>
+            m_CoreController != null
+                ? m_CoreController
+                : NetworkCoreManager.Instance != null
+                    ? NetworkCoreManager.Instance.CoreController
+                    : null;
         
         /// <summary>Current network role (alias for Role for compatibility with facing unit).</summary>
         public NetworkRole CurrentRole => m_CurrentRole;
+
+        /// <summary>Movement prediction backend requested for this character.</summary>
+        public NetworkPredictionBackend PredictionBackend => m_PredictionBackend;
         
         // Core Feature System modes
         public RemoteSystemMode RagdollMode => m_RagdollMode;

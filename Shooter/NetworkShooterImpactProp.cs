@@ -43,6 +43,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
 
         private bool m_HasActiveMotion;
         private NetworkShooterImpactMotion m_ActiveMotion;
+        private float m_LastAppliedServerTime = float.MinValue;
 
         public uint NetworkId => ResolveNetworkId();
 
@@ -164,14 +165,21 @@ namespace Arawn.GameCreator2.Networking.Shooter
 
         public void ApplyImpactMotion(NetworkShooterImpactMotion motion)
         {
+            ApplyImpactMotion(motion, fromSnapshot: false);
+        }
+
+        private void ApplyImpactMotion(NetworkShooterImpactMotion motion, bool fromSnapshot)
+        {
             if (motion.PropNetworkId == 0 || motion.PropNetworkId != NetworkId) return;
-            if (m_HasActiveMotion && motion.StartTime < m_ActiveMotion.StartTime) return;
+            if (!fromSnapshot && motion.StartTime < m_LastAppliedServerTime) return;
+            if (!fromSnapshot && m_HasActiveMotion && motion.StartTime < m_ActiveMotion.StartTime) return;
 
             CacheRigidbody();
             ConfigureRigidbodyForKinematicMotion();
 
             m_ActiveMotion = motion;
             m_HasActiveMotion = true;
+            m_LastAppliedServerTime = Mathf.Max(m_LastAppliedServerTime, motion.StartTime);
 
             float now = GetNetworkTime();
             float duration = Mathf.Max(0.0001f, motion.Duration);
@@ -183,6 +191,51 @@ namespace Arawn.GameCreator2.Networking.Shooter
 
             Log($"applied impact motion start={motion.StartPosition} target={motion.TargetPosition} " +
                 $"duration={motion.Duration:F3} strength={motion.ImpactStrength:F2}");
+        }
+
+        /// <summary>
+        /// Captures the persistent pose and any active deterministic motion for late joiners.
+        /// </summary>
+        public NetworkShooterImpactPropSnapshot CaptureSnapshot(float serverTime)
+        {
+            return new NetworkShooterImpactPropSnapshot
+            {
+                PropNetworkId = NetworkId,
+                Position = transform.position,
+                Rotation = transform.rotation,
+                HasActiveMotion = m_HasActiveMotion,
+                ActiveMotion = m_HasActiveMotion ? m_ActiveMotion : default,
+                ServerTime = serverTime
+            };
+        }
+
+        /// <summary>
+        /// Applies a full late-join snapshot idempotently.
+        /// </summary>
+        public void ApplySnapshot(NetworkShooterImpactPropSnapshot snapshot)
+        {
+            if (snapshot.PropNetworkId == 0 || snapshot.PropNetworkId != NetworkId) return;
+            if (snapshot.ServerTime < m_LastAppliedServerTime) return;
+
+            CacheRigidbody();
+            ConfigureRigidbodyForKinematicMotion();
+
+            if (snapshot.HasActiveMotion &&
+                snapshot.ActiveMotion.PropNetworkId == snapshot.PropNetworkId)
+            {
+                // The snapshot timestamp supersedes the embedded motion's earlier start time.
+                // Apply it as part of this full replacement, then use the snapshot timestamp to
+                // reject any delayed pre-snapshot motion packet.
+                ApplyImpactMotion(snapshot.ActiveMotion, fromSnapshot: true);
+                m_LastAppliedServerTime = Mathf.Max(m_LastAppliedServerTime, snapshot.ServerTime);
+                return;
+            }
+
+            m_LastAppliedServerTime = snapshot.ServerTime;
+            m_HasActiveMotion = false;
+            m_ActiveMotion = default;
+            ApplyPose(snapshot.Position, snapshot.Rotation);
+            Log($"applied pose snapshot position={snapshot.Position} serverTime={snapshot.ServerTime:F3}");
         }
 
         public static bool TryGet(uint networkId, out NetworkShooterImpactProp prop)
@@ -257,6 +310,17 @@ namespace Arawn.GameCreator2.Networking.Shooter
             }
 
             prop.ApplyImpactMotion(motion);
+            return true;
+        }
+
+        public static bool TryApplySnapshot(NetworkShooterImpactPropSnapshot snapshot)
+        {
+            if (!TryFindExisting(snapshot.PropNetworkId, out NetworkShooterImpactProp prop))
+            {
+                return false;
+            }
+
+            prop.ApplySnapshot(snapshot);
             return true;
         }
 

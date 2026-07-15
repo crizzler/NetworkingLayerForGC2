@@ -58,6 +58,7 @@ namespace Arawn.GameCreator2.Networking
         {
             if (m_IsInitialized) return;
             m_IsInitialized = true;
+            m_ActivePredictionBackend = null;
             
             ResolveSessionProfile();
             
@@ -97,13 +98,17 @@ namespace Arawn.GameCreator2.Networking
         private void AssignDriverForRole()
         {
             // Create the appropriate driver at runtime based on role
-            IUnitDriver driver = m_CurrentRole switch
+            IUnitDriver driver = TryCreateExternalPredictionDriver();
+            if (driver == null)
             {
-                NetworkRole.Server => CreateServerDriver(),
-                NetworkRole.LocalClient => CreateClientDriver(),
-                NetworkRole.RemoteClient => CreateRemoteDriver(),
-                _ => null
-            };
+                driver = m_CurrentRole switch
+                {
+                    NetworkRole.Server => CreateServerDriver(),
+                    NetworkRole.LocalClient => CreateClientDriver(),
+                    NetworkRole.RemoteClient => CreateRemoteDriver(),
+                    _ => null
+                };
+            }
             
             if (driver != null)
             {
@@ -117,6 +122,56 @@ namespace Arawn.GameCreator2.Networking
                 
                 OnDriverAssigned?.Invoke(driver);
             }
+
+            m_ActivePredictionBackend?.Initialize(
+                this,
+                m_CurrentRole,
+                m_RuntimeIsServer,
+                m_RuntimeIsOwner,
+                m_RuntimeIsHost);
+        }
+
+        private IUnitDriver TryCreateExternalPredictionDriver()
+        {
+            if (m_PredictionBackend == NetworkPredictionBackend.BuiltIn) return null;
+
+            INetworkCharacterPredictionBackend backend = FindPredictionBackend(m_PredictionBackend);
+            if (backend == null)
+            {
+                Debug.LogWarning(
+                    $"[NetworkCharacter] Prediction backend '{m_PredictionBackend}' was requested on '{name}', " +
+                    "but no matching backend component was found. Falling back to Built-in prediction.",
+                    this);
+                return null;
+            }
+
+            IUnitDriver driver = backend.CreateDriver(this, m_CurrentRole);
+            if (driver == null)
+            {
+                Debug.LogWarning(
+                    $"[NetworkCharacter] Prediction backend '{m_PredictionBackend}' on '{name}' did not provide a GC2 driver. " +
+                    "Falling back to Built-in prediction.",
+                    this);
+                return null;
+            }
+
+            m_ActivePredictionBackend = backend;
+            return driver;
+        }
+
+        private INetworkCharacterPredictionBackend FindPredictionBackend(NetworkPredictionBackend backend)
+        {
+            var behaviours = GetComponents<MonoBehaviour>();
+            for (int i = 0; i < behaviours.Length; i++)
+            {
+                if (behaviours[i] is INetworkCharacterPredictionBackend candidate &&
+                    candidate.Backend == backend)
+                {
+                    return candidate;
+                }
+            }
+
+            return null;
         }
         
         private UnitDriverNetworkServer CreateServerDriver()
@@ -472,18 +527,28 @@ namespace Arawn.GameCreator2.Networking
                 NetworkAnimationManager.Instance?.RegisterController(m_AnimimController);
             }
             
-            // Setup Core networking controller if enabled (Ragdoll, Props, Invincibility, Poise, Busy, Interaction)
+            // Core networking is routed by the single controller owned by
+            // NetworkCoreManager. Older prefabs may still contain the previously
+            // auto-added per-character controller; keep it from competing with the
+            // manager-owned transport endpoint.
             if (m_UseCoreNetworking)
             {
-                m_CoreController = GetComponent<NetworkCoreController>();
-                if (m_CoreController == null)
+                NetworkCoreController legacyController = GetComponent<NetworkCoreController>();
+                NetworkCoreManager coreManager = NetworkCoreManager.Instance;
+                m_CoreController = coreManager != null ? coreManager.CoreController : null;
+
+                if (legacyController != null && legacyController != m_CoreController)
                 {
-                    m_CoreController = gameObject.AddComponent<NetworkCoreController>();
+                    legacyController.enabled = false;
+                    if (!m_LegacyCoreControllerWarningLogged)
+                    {
+                        m_LegacyCoreControllerWarningLogged = true;
+                        Debug.LogWarning(
+                            $"[NetworkCharacter] Disabled legacy per-character NetworkCoreController on '{name}'. " +
+                            "Core networking is now owned by NetworkCoreManager; remove this component from the prefab.",
+                            this);
+                    }
                 }
-                m_CoreController.Initialize(
-                    m_RuntimeIsServer,
-                    m_RuntimeIsOwner
-                );
             }
         }
         
@@ -644,6 +709,7 @@ namespace Arawn.GameCreator2.Networking
             
             m_ClientDriver?.ApplySessionProfile(m_ResolvedSessionProfile);
             m_ServerDriver?.ApplySessionProfile(m_ResolvedSessionProfile);
+            m_ActivePredictionBackend?.ApplySessionProfile(m_ResolvedSessionProfile);
             
             if (m_RemoteDriver != null)
             {
@@ -654,6 +720,8 @@ namespace Arawn.GameCreator2.Networking
         
         private void WireMovementEvents()
         {
+            if (m_ActivePredictionBackend != null) return;
+
             if (m_ClientDriver != null)
             {
                 m_ClientDriver.OnSendInput -= OnClientInputReady;
@@ -689,9 +757,13 @@ namespace Arawn.GameCreator2.Networking
             
             m_RegisteredBridge = bridge;
             m_RegisteredBridge.RegisterCharacter(this);
-            m_RegisteredBridge.OnInputReceivedServer += OnBridgeInputReceivedServer;
-            m_RegisteredBridge.OnStateReceivedClient += OnBridgeStateReceivedClient;
-            m_TransportCallbacksWired = true;
+
+            if (m_ActivePredictionBackend == null)
+            {
+                m_RegisteredBridge.OnInputReceivedServer += OnBridgeInputReceivedServer;
+                m_RegisteredBridge.OnStateReceivedClient += OnBridgeStateReceivedClient;
+                m_TransportCallbacksWired = true;
+            }
             
             if (m_ResolvedSessionProfile == null && m_RegisteredBridge.GlobalSessionProfile != null)
             {
@@ -772,6 +844,7 @@ namespace Arawn.GameCreator2.Networking
         
         private void OnBridgeInputReceivedServer(uint senderClientId, uint characterNetworkId, NetworkInputState[] inputs)
         {
+            if (m_ActivePredictionBackend != null) return;
             if (!m_RuntimeIsServer) return;
             if (characterNetworkId != NetworkId) return;
             if (inputs == null || inputs.Length == 0) return;
@@ -867,6 +940,7 @@ namespace Arawn.GameCreator2.Networking
         
         private void OnBridgeStateReceivedClient(uint characterNetworkId, NetworkPositionState state, float serverTime)
         {
+            if (m_ActivePredictionBackend != null) return;
             if (characterNetworkId != NetworkId) return;
 
             if (m_NetworkFacingUnit != null)
@@ -906,6 +980,7 @@ namespace Arawn.GameCreator2.Networking
         
         private void ProcessServerSimulation(float deltaTime)
         {
+            if (m_ActivePredictionBackend != null) return;
             if (m_ServerDriver == null) return;
             
             float simulationRate = m_ResolvedSessionProfile != null
@@ -957,10 +1032,9 @@ namespace Arawn.GameCreator2.Networking
                 m_AnimimController.SetRateLimits(settings.animationStateRate, settings.animationGestureRate);
             }
             
-            if (m_CoreController != null)
-            {
-                m_CoreController.enabled = m_UseCoreNetworking && settings.syncCore;
-            }
+            // The Core controller is shared by all characters and must never be
+            // toggled by an individual character's relevance tier. Feature-level
+            // relevance is evaluated by the Core manager for the target character.
             
             if (m_CombatInterceptor != null)
             {

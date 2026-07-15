@@ -103,6 +103,12 @@ namespace Arawn.GameCreator2.Networking.Melee
 
         /// <summary>Called when the locally equipped melee weapon changes.</summary>
         public event Action<NetworkMeleeWeaponState> OnWeaponStateChanged;
+
+        /// <summary>
+        /// Sender-aware weapon state event for split-screen and multiple locally owned characters.
+        /// The original <see cref="OnWeaponStateChanged"/> event remains available for compatibility.
+        /// </summary>
+        public event Action<NetworkMeleeController, NetworkMeleeWeaponState> OnWeaponStateChangedWithSender;
         
         // ════════════════════════════════════════════════════════════════════════════════════════
         // PRIVATE FIELDS
@@ -120,6 +126,7 @@ namespace Arawn.GameCreator2.Networking.Melee
         // Hit interception state
         private static readonly List<ulong> s_SharedPendingRemovalBuffer = new(16);
         private readonly Dictionary<ulong, PendingHit> m_PendingHits = new(8);
+        private readonly List<RecentOptimisticHitPresentation> m_RecentOptimisticHitPresentations = new(8);
         private readonly HashSet<int> m_ProcessedHits = new(32);
         private ushort m_NextRequestId = 1;
         private ushort m_LastIssuedRequestId = 1;
@@ -195,6 +202,11 @@ namespace Arawn.GameCreator2.Networking.Melee
 
         // Weapon state tracking
         private NetworkMeleeWeaponState m_LastWeaponState;
+        private NetworkMeleeWeaponState m_DesiredRemoteWeaponState;
+        private MeleeWeapon m_DesiredRemoteWeapon;
+        private uint m_RemoteWeaponApplyVersion;
+        private uint m_AppliedRemoteWeaponVersion;
+        private bool m_RemoteWeaponApplyRunning;
         
         // Lag compensation validator (server-only)
         private MeleeLagCompensationValidator m_Validator;
@@ -217,6 +229,12 @@ namespace Arawn.GameCreator2.Networking.Melee
             public float SentTime;
             public bool OptimisticPlayed;
             public float PendingSentTime => SentTime;
+        }
+
+        private struct RecentOptimisticHitPresentation
+        {
+            public NetworkMeleeHitRequest Request;
+            public float ExpiresAt;
         }
         
         private struct PendingBlockRequest : ITimedPendingRequest
@@ -291,6 +309,9 @@ namespace Arawn.GameCreator2.Networking.Melee
         
         /// <summary>Current attack state for network sync.</summary>
         public NetworkAttackState AttackState => m_LastAttackState;
+
+        /// <summary>Latest local or remotely applied persistent weapon state.</summary>
+        public NetworkMeleeWeaponState CurrentWeaponState => m_LastWeaponState;
         
         /// <summary>Whether optimistic effects are enabled.</summary>
         public bool OptimisticEffects
@@ -595,7 +616,7 @@ namespace Arawn.GameCreator2.Networking.Melee
             GameObject target = m_Character != null ? m_Character.Combat.Targets.Primary : null;
             if (target == null) return $"target=null selfPos={transform.position}";
 
-            var targetNetChar = target.GetComponent<NetworkCharacter>();
+            var targetNetChar = target.GetComponentInParent<NetworkCharacter>();
             float distance = Vector3.Distance(transform.position, target.transform.position);
             return $"target={target.name}#{(targetNetChar != null ? targetNetChar.NetworkId.ToString() : "noNet")} targetDistance={distance:F2} selfPos={transform.position}";
         }
@@ -854,6 +875,7 @@ namespace Arawn.GameCreator2.Networking.Melee
         
         private void OnDestroy()
         {
+            m_RemoteWeaponApplyVersion++;
             UnsubscribeFromMeleeStance();
 
             if (m_Character != null)
@@ -941,7 +963,14 @@ namespace Arawn.GameCreator2.Networking.Melee
         {
             m_IsServer = isServer;
             m_IsLocalClient = isLocalClient;
-            m_IsRemoteClient = !isServer && !isLocalClient;
+            m_IsRemoteClient = !isLocalClient;
+
+            if (m_IsLocalClient)
+            {
+                // Invalidate any remote apply operation when ownership changes on a host.
+                m_RemoteWeaponApplyVersion++;
+                m_DesiredRemoteWeapon = null;
+            }
             
             if (m_LogHits)
             {
@@ -1117,7 +1146,7 @@ namespace Arawn.GameCreator2.Networking.Melee
             m_LastWeaponState = NetworkMeleeWeaponState.None;
             if (!m_IsLocalClient) return;
 
-            OnWeaponStateChanged?.Invoke(m_LastWeaponState);
+            RaiseWeaponStateChanged(m_LastWeaponState);
             LogMeleeSync(
                 $"non-melee weapon equipped ({weapon?.GetType().Name ?? "null"}). Clearing melee weapon state.");
         }
@@ -1331,8 +1360,14 @@ namespace Arawn.GameCreator2.Networking.Melee
             }
 
             m_LastWeaponState = state;
-            OnWeaponStateChanged?.Invoke(state);
+            RaiseWeaponStateChanged(state);
             LogMeleeSync($"weapon state changed weaponHash={state.WeaponHash} flags=0x{state.ShieldFlags:X2}");
+        }
+
+        private void RaiseWeaponStateChanged(NetworkMeleeWeaponState state)
+        {
+            OnWeaponStateChanged?.Invoke(state);
+            OnWeaponStateChangedWithSender?.Invoke(this, state);
         }
 
         private NetworkMeleeWeaponState BuildWeaponState()
@@ -1346,33 +1381,84 @@ namespace Arawn.GameCreator2.Networking.Melee
             };
         }
 
-        public async void ApplyRemoteWeaponState(NetworkMeleeWeaponState state, MeleeWeapon weapon)
+        public void ApplyRemoteWeaponState(NetworkMeleeWeaponState state, MeleeWeapon weapon)
         {
             if (m_IsLocalClient) return;
             if (m_Character == null) return;
 
-            if (state.WeaponHash == 0)
+            m_DesiredRemoteWeaponState = state;
+            m_DesiredRemoteWeapon = weapon;
+            m_RemoteWeaponApplyVersion++;
+
+            if (!m_RemoteWeaponApplyRunning)
             {
-                MeleeWeapon current = GetCurrentMeleeWeapon();
-                if (current != null && m_Character.Combat.IsEquipped(current))
+                ApplyLatestRemoteWeaponState();
+            }
+        }
+
+        private async void ApplyLatestRemoteWeaponState()
+        {
+            if (m_RemoteWeaponApplyRunning) return;
+            m_RemoteWeaponApplyRunning = true;
+
+            try
+            {
+                while (!m_IsLocalClient && m_AppliedRemoteWeaponVersion != m_RemoteWeaponApplyVersion)
                 {
-                    await m_Character.Combat.Unequip(current, new Args(m_Character.gameObject));
+                    uint applyVersion = m_RemoteWeaponApplyVersion;
+                    NetworkMeleeWeaponState state = m_DesiredRemoteWeaponState;
+                    MeleeWeapon weapon = m_DesiredRemoteWeapon;
+
+                    if (state.WeaponHash == 0)
+                    {
+                        if (!await UnequipOtherMeleeWeapons(null, applyVersion))
+                        {
+                            continue;
+                        }
+                    }
+                    else if (weapon != null)
+                    {
+                        RegisterWeaponAndSkills(weapon);
+                        await UnequipNonMeleeWeapons();
+                        if (applyVersion != m_RemoteWeaponApplyVersion) continue;
+
+                        if (!await UnequipOtherMeleeWeapons(weapon, applyVersion))
+                        {
+                            continue;
+                        }
+
+                        if (applyVersion == m_RemoteWeaponApplyVersion &&
+                            !m_Character.Combat.IsEquipped(weapon))
+                        {
+                            await m_Character.Combat.Equip(weapon, null, new Args(m_Character.gameObject));
+                        }
+                    }
+
+                    if (applyVersion == m_RemoteWeaponApplyVersion)
+                    {
+                        m_LastWeaponState = state;
+                        m_AppliedRemoteWeaponVersion = applyVersion;
+                    }
+                    // If a newer state arrived while an awaited GC2 operation was running, loop
+                    // again and reconcile to that newest state. Stale operations cannot win.
                 }
-
-                m_LastWeaponState = state;
-                return;
             }
-
-            if (weapon == null) return;
-
-            RegisterWeaponAndSkills(weapon);
-            await UnequipNonMeleeWeapons();
-            if (!m_Character.Combat.IsEquipped(weapon))
+            catch (Exception exception)
             {
-                await m_Character.Combat.Equip(weapon, null, new Args(m_Character.gameObject));
+                Debug.LogException(exception, this);
+                // Avoid a tight retry loop on a persistent GC2 equip failure. A newer replicated
+                // state increments the version and starts a fresh reconciliation attempt.
+                m_AppliedRemoteWeaponVersion = m_RemoteWeaponApplyVersion;
             }
+            finally
+            {
+                m_RemoteWeaponApplyRunning = false;
 
-            m_LastWeaponState = state;
+                if (!m_IsLocalClient && m_AppliedRemoteWeaponVersion != m_RemoteWeaponApplyVersion)
+                {
+                    ApplyLatestRemoteWeaponState();
+                }
+            }
         }
 
         private async System.Threading.Tasks.Task UnequipNonMeleeWeapons()
@@ -1388,6 +1474,28 @@ namespace Arawn.GameCreator2.Networking.Melee
 
                 await m_Character.Combat.Unequip(asset, new Args(m_Character.gameObject));
             }
+        }
+
+        private async System.Threading.Tasks.Task<bool> UnequipOtherMeleeWeapons(
+            MeleeWeapon desiredWeapon,
+            uint applyVersion)
+        {
+            if (m_Character?.Combat?.Weapons == null) return true;
+
+            Weapon[] equippedWeapons = m_Character.Combat.Weapons;
+            for (int i = 0; i < equippedWeapons.Length; i++)
+            {
+                if (equippedWeapons[i]?.Asset is not MeleeWeapon meleeWeapon) continue;
+                if (meleeWeapon == desiredWeapon) continue;
+                if (!m_Character.Combat.IsEquipped(meleeWeapon)) continue;
+
+                await m_Character.Combat.Unequip(
+                    meleeWeapon,
+                    new Args(m_Character.gameObject));
+                if (applyVersion != m_RemoteWeaponApplyVersion) return false;
+            }
+
+            return true;
         }
         
         // ════════════════════════════════════════════════════════════════════════════════════════
@@ -1526,7 +1634,9 @@ namespace Arawn.GameCreator2.Networking.Melee
                 }
 
                 fromObject = m_MeleeStance.Args?.Target;
-                var fromNetworkCharacter = fromObject != null ? fromObject.GetComponent<NetworkCharacter>() : null;
+                var fromNetworkCharacter = fromObject != null
+                    ? fromObject.GetComponentInParent<NetworkCharacter>()
+                    : null;
                 if (fromNetworkCharacter != null)
                 {
                     fromNetworkId = fromNetworkCharacter.NetworkId;
@@ -1740,7 +1850,7 @@ namespace Arawn.GameCreator2.Networking.Melee
             var target = m_Character.Combat.Targets.Primary;
             if (target != null)
             {
-                var targetNetChar = target.GetComponent<NetworkCharacter>();
+                var targetNetChar = target.GetComponentInParent<NetworkCharacter>();
                 if (targetNetChar != null) targetNetworkId = targetNetChar.NetworkId;
             }
 
@@ -1883,6 +1993,14 @@ namespace Arawn.GameCreator2.Networking.Melee
         {
             float timeout = 2f; // 2 second timeout
             float currentTime = Time.time;
+
+            for (int i = m_RecentOptimisticHitPresentations.Count - 1; i >= 0; i--)
+            {
+                if (m_RecentOptimisticHitPresentations[i].ExpiresAt < currentTime)
+                {
+                    m_RecentOptimisticHitPresentations.RemoveAt(i);
+                }
+            }
 
             PendingRequestCleanup.RemoveTimedOut(
                 m_PendingHits,

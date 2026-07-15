@@ -39,6 +39,9 @@ namespace Arawn.GameCreator2.Networking.Shooter
             LogDiagnostics($"disabled; registeredControllers={m_Controllers.Count}");
             SecurityIntegration.SetModuleServerContext("Shooter", false);
             m_ValidatedShotReferences.Clear();
+            m_PendingShotBroadcasts.Clear();
+            m_PendingHitBroadcasts.Clear();
+            m_PendingImpactMotions.Clear();
 
             if (m_PatchHooks != null)
             {
@@ -106,6 +109,11 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 previous.OnShotRequestSent -= OnControllerShotRequestSent;
                 previous.OnHitDetected -= OnControllerHitDetected;
                 previous.OnReloadRequestSent -= OnControllerReloadRequestSent;
+                previous.OnQuickReloadRequestSent -= OnControllerQuickReloadRequestSent;
+                previous.OnFixJamRequestSent -= OnControllerFixJamRequestSent;
+                previous.OnChargeStartRequestSent -= OnControllerChargeStartRequestSent;
+                previous.OnChargeCancelRequestSent -= OnControllerChargeCancelRequestSent;
+                previous.OnSightSwitchRequestSent -= OnControllerSightSwitchRequestSent;
             }
 
             m_Controllers[networkId] = controller;
@@ -113,10 +121,20 @@ namespace Arawn.GameCreator2.Networking.Shooter
             controller.OnShotRequestSent -= OnControllerShotRequestSent;
             controller.OnHitDetected -= OnControllerHitDetected;
             controller.OnReloadRequestSent -= OnControllerReloadRequestSent;
+            controller.OnQuickReloadRequestSent -= OnControllerQuickReloadRequestSent;
+            controller.OnFixJamRequestSent -= OnControllerFixJamRequestSent;
+            controller.OnChargeStartRequestSent -= OnControllerChargeStartRequestSent;
+            controller.OnChargeCancelRequestSent -= OnControllerChargeCancelRequestSent;
+            controller.OnSightSwitchRequestSent -= OnControllerSightSwitchRequestSent;
 
             controller.OnShotRequestSent += OnControllerShotRequestSent;
             controller.OnHitDetected += OnControllerHitDetected;
             controller.OnReloadRequestSent += OnControllerReloadRequestSent;
+            controller.OnQuickReloadRequestSent += OnControllerQuickReloadRequestSent;
+            controller.OnFixJamRequestSent += OnControllerFixJamRequestSent;
+            controller.OnChargeStartRequestSent += OnControllerChargeStartRequestSent;
+            controller.OnChargeCancelRequestSent += OnControllerChargeCancelRequestSent;
+            controller.OnSightSwitchRequestSent += OnControllerSightSwitchRequestSent;
 
             var networkCharacter = controller.GetComponent<NetworkCharacter>();
             LogDiagnostics(
@@ -125,6 +143,8 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 $"server={controller.IsServer} localClient={controller.IsLocalClient} " +
                 $"transportDelegates shot={(SendShotRequestToServer != null)} hit={(SendHitRequestToServer != null)} " +
                 $"reload={(SendReloadRequestToServer != null)}");
+
+            FlushPendingTransientBroadcasts();
         }
 
         /// <summary>
@@ -140,6 +160,11 @@ namespace Arawn.GameCreator2.Networking.Shooter
                     controller.OnShotRequestSent -= OnControllerShotRequestSent;
                     controller.OnHitDetected -= OnControllerHitDetected;
                     controller.OnReloadRequestSent -= OnControllerReloadRequestSent;
+                    controller.OnQuickReloadRequestSent -= OnControllerQuickReloadRequestSent;
+                    controller.OnFixJamRequestSent -= OnControllerFixJamRequestSent;
+                    controller.OnChargeStartRequestSent -= OnControllerChargeStartRequestSent;
+                    controller.OnChargeCancelRequestSent -= OnControllerChargeCancelRequestSent;
+                    controller.OnSightSwitchRequestSent -= OnControllerSightSwitchRequestSent;
                 }
 
                 m_Controllers.Remove(networkId);
@@ -173,6 +198,12 @@ namespace Arawn.GameCreator2.Networking.Shooter
         {
             if (!m_IsClient)
             {
+                if (m_IsServer && TryServerQueueTrustedShot(request))
+                {
+                    OnShotRequestSent?.Invoke(request);
+                    return;
+                }
+
                 LogDiagnosticsWarning(
                     $"dropped shot request because manager is not client actor={request.ActorNetworkId} req={request.RequestId}");
                 return;
@@ -242,6 +273,36 @@ namespace Arawn.GameCreator2.Networking.Shooter
             }
 
             SendReloadRequestToServer?.Invoke(request);
+        }
+
+        private void OnControllerQuickReloadRequestSent(NetworkQuickReloadRequest request)
+        {
+            if (!m_IsClient) return;
+            SendQuickReloadRequestToServer?.Invoke(request);
+        }
+
+        private void OnControllerFixJamRequestSent(NetworkFixJamRequest request)
+        {
+            if (!m_IsClient) return;
+            SendFixJamRequestToServer?.Invoke(request);
+        }
+
+        private void OnControllerChargeStartRequestSent(NetworkChargeStartRequest request)
+        {
+            if (!m_IsClient) return;
+            SendChargeStartRequestToServer?.Invoke(request);
+        }
+
+        private void OnControllerChargeCancelRequestSent(NetworkChargeCancelRequest request)
+        {
+            if (!m_IsClient) return;
+            SendChargeCancelRequestToServer?.Invoke(request);
+        }
+
+        private void OnControllerSightSwitchRequestSent(NetworkSightSwitchRequest request)
+        {
+            if (!m_IsClient) return;
+            SendSightSwitchRequestToServer?.Invoke(request);
         }
     }
 }

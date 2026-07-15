@@ -68,6 +68,15 @@ namespace Arawn.GameCreator2.Networking.Shooter
         [Tooltip("Drop queued requests older than this many seconds.")]
         [SerializeField] private float m_MaxQueueAgeSeconds = 1.5f;
 
+        [Header("Client Presentation Recovery")]
+        [Tooltip("Briefly retain cosmetic broadcasts while their character controller is still spawning.")]
+        [Min(0.05f)]
+        [SerializeField] private float m_TransientBroadcastLifetime = 0.75f;
+
+        [Tooltip("Maximum transient cosmetic broadcasts retained for spawn-order recovery.")]
+        [Min(8)]
+        [SerializeField] private int m_MaxPendingTransientBroadcasts = 128;
+
         [Tooltip("How long a validated shot reference remains valid for hit binding.")]
         [SerializeField] private float m_ValidatedShotLifetime = 2f;
 
@@ -191,6 +200,13 @@ namespace Arawn.GameCreator2.Networking.Shooter
         /// <summary>Optional server-side material hash resolver for hit effects.</summary>
         public Func<NetworkShooterHitRequest, int> ResolveMaterialHashFunc;
 
+        /// <summary>
+        /// Optional client-side resolver that maps the authoritative material hash and
+        /// locally detected collider object to the object used by GC2 MaterialSounds.
+        /// Return the fallback object when no custom variant is needed.
+        /// </summary>
+        public Func<int, GameObject, GameObject> ResolveMaterialTargetFunc;
+
         /// <summary>Optional server-side damage application hook.</summary>
         public Action<NetworkShooterHitRequest, float> ApplyDamageFunc;
         
@@ -238,6 +254,29 @@ namespace Arawn.GameCreator2.Networking.Shooter
         
         // Controller registry
         private readonly Dictionary<uint, NetworkShooterController> m_Controllers = new(32);
+        private readonly List<PendingShotBroadcast> m_PendingShotBroadcasts = new(16);
+        private readonly List<PendingHitBroadcast> m_PendingHitBroadcasts = new(16);
+        private readonly List<PendingImpactMotion> m_PendingImpactMotions = new(8);
+
+        private struct PendingShotBroadcast
+        {
+            public NetworkShotBroadcast Broadcast;
+            public float ReceivedTime;
+        }
+
+        private struct PendingHitBroadcast
+        {
+            public NetworkShooterHitBroadcast Broadcast;
+            public float ReceivedTime;
+            public bool NeedsShooter;
+            public bool NeedsTarget;
+        }
+
+        private struct PendingImpactMotion
+        {
+            public NetworkShooterImpactMotion Motion;
+            public float ReceivedTime;
+        }
         
         // Server request queues
         private readonly Queue<QueuedShotRequest> m_ServerShotQueue = new(64);
@@ -354,6 +393,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
             public uint ClientNetworkId;
             public NetworkShotRequest Request;
             public float ReceivedTime;
+            public bool TrustedServerOrigin;
         }
         
         private struct QueuedHitRequest
@@ -361,6 +401,8 @@ namespace Arawn.GameCreator2.Networking.Shooter
             public uint ClientNetworkId;
             public NetworkShooterHitRequest Request;
             public float ReceivedTime;
+            public bool TrustedServerOrigin;
+            public bool NativeDamageWillApply;
         }
         
         private struct QueuedReloadRequest
@@ -429,6 +471,11 @@ namespace Arawn.GameCreator2.Networking.Shooter
         
         private void Update()
         {
+            if (m_IsClient)
+            {
+                FlushPendingTransientBroadcasts();
+            }
+
             if (m_IsServer)
             {
                 CleanupStaleValidatedShotReferences();
@@ -521,12 +568,47 @@ namespace Arawn.GameCreator2.Networking.Shooter
             {
                 ClientNetworkId = clientNetworkId,
                 Request = request,
-                ReceivedTime = Time.time
+                ReceivedTime = Time.time,
+                TrustedServerOrigin = false
             });
 
             LogDiagnostics(
                 $"queued shot request client={clientNetworkId} actor={request.ActorNetworkId} " +
                 $"req={request.RequestId} queue={m_ServerShotQueue.Count}");
+        }
+
+        /// <summary>
+        /// [Server] Queue a shot that the authoritative GC2 simulation has already fired. The
+        /// trusted path broadcasts presentation and establishes manager-side hit bookkeeping
+        /// without replaying the shot or consuming ammunition a second time.
+        /// </summary>
+        public bool TryServerQueueTrustedShot(NetworkShotRequest request)
+        {
+            if (!m_IsServer ||
+                request.ActorNetworkId == 0 ||
+                request.ActorNetworkId != request.ShooterNetworkId)
+            {
+                return false;
+            }
+
+            int queueLimit = Mathf.Max(1, m_MaxShotQueueLength);
+            if (m_ServerShotQueue.Count >= queueLimit)
+            {
+                LogDiagnosticsWarning(
+                    $"trusted server shot dropped because queue is full actor={request.ActorNetworkId} " +
+                    $"req={request.RequestId} queue={m_ServerShotQueue.Count}/{queueLimit}");
+                return false;
+            }
+
+            m_ServerShotQueue.Enqueue(new QueuedShotRequest
+            {
+                ClientNetworkId = 0,
+                Request = request,
+                ReceivedTime = Time.time,
+                TrustedServerOrigin = true
+            });
+            m_Stats.ShotRequestsReceived++;
+            return true;
         }
         
         /// <summary>
@@ -605,12 +687,52 @@ namespace Arawn.GameCreator2.Networking.Shooter
             {
                 ClientNetworkId = clientNetworkId,
                 Request = request,
-                ReceivedTime = Time.time
+                ReceivedTime = Time.time,
+                TrustedServerOrigin = false,
+                NativeDamageWillApply = false
             });
 
             LogDiagnostics(
                 $"queued hit request client={clientNetworkId} actor={request.ActorNetworkId} " +
                 $"req={request.RequestId} queue={m_ServerHitQueue.Count}");
+        }
+
+        /// <summary>
+        /// [Server] Queue a hit observed by a server-owned shooter. Client ownership, replay, and
+        /// source-shot binding checks are intentionally skipped because the collision was produced
+        /// by the authoritative simulation itself. All ordinary target validation and broadcast
+        /// processing still occurs.
+        /// </summary>
+        public bool TryServerQueueTrustedHit(
+            NetworkShooterHitRequest request,
+            bool nativeDamageWillApply = false)
+        {
+            if (!m_IsServer ||
+                request.ActorNetworkId == 0 ||
+                request.ActorNetworkId != request.ShooterNetworkId)
+            {
+                return false;
+            }
+
+            int queueLimit = Mathf.Max(1, m_MaxHitQueueLength);
+            if (m_ServerHitQueue.Count >= queueLimit)
+            {
+                LogDiagnosticsWarning(
+                    $"trusted server hit dropped because queue is full actor={request.ActorNetworkId} " +
+                    $"req={request.RequestId} queue={m_ServerHitQueue.Count}/{queueLimit}");
+                return false;
+            }
+
+            m_ServerHitQueue.Enqueue(new QueuedHitRequest
+            {
+                ClientNetworkId = 0,
+                Request = request,
+                ReceivedTime = Time.time,
+                TrustedServerOrigin = true,
+                NativeDamageWillApply = nativeDamageWillApply
+            });
+            m_Stats.HitRequestsReceived++;
+            return true;
         }
         
         private void ProcessServerShotQueue()
@@ -670,15 +792,22 @@ namespace Arawn.GameCreator2.Networking.Shooter
                     Validated = false,
                     RejectionReason = ShotRejectionReason.CheatSuspected
                 };
-                SendShotResponseToClient?.Invoke(queued.ClientNetworkId, response);
+                if (!queued.TrustedServerOrigin)
+                {
+                    SendShotResponseToClient?.Invoke(queued.ClientNetworkId, response);
+                }
                 return;
             }
-            
-            if (!TryGetActorController(
+
+            NetworkShooterController controller;
+            bool hasController = queued.TrustedServerOrigin
+                ? m_Controllers.TryGetValue(request.ActorNetworkId, out controller) && controller != null
+                : TryGetActorController(
                     queued.ClientNetworkId,
                     request.ActorNetworkId,
                     nameof(NetworkShotRequest),
-                    out var controller))
+                    out controller);
+            if (!hasController)
             {
                 LogDiagnosticsWarning(
                     $"shot rejected before controller lookup req={request.RequestId}: actor controller not found " +
@@ -692,18 +821,26 @@ namespace Arawn.GameCreator2.Networking.Shooter
                     RejectionReason = ShotRejectionReason.ShooterNotFound
                 };
 
-                SendShotResponseToClient?.Invoke(queued.ClientNetworkId, response);
+                if (!queued.TrustedServerOrigin)
+                {
+                    SendShotResponseToClient?.Invoke(queued.ClientNetworkId, response);
+                }
                 return;
             }
 
-            response = controller.ProcessShotRequest(request, queued.ClientNetworkId);
+            response = queued.TrustedServerOrigin
+                ? ValidateShotRequest(request)
+                : controller.ProcessShotRequest(request, queued.ClientNetworkId);
             response.ActorNetworkId = request.ActorNetworkId;
             response.CorrelationId = request.CorrelationId;
             
-            SendShotResponseToClient?.Invoke(queued.ClientNetworkId, response);
-            LogDiagnostics(
-                $"shot response sent client={queued.ClientNetworkId} actor={request.ActorNetworkId} " +
-                $"req={request.RequestId} validated={response.Validated} reason={response.RejectionReason}");
+            if (!queued.TrustedServerOrigin)
+            {
+                SendShotResponseToClient?.Invoke(queued.ClientNetworkId, response);
+                LogDiagnostics(
+                    $"shot response sent client={queued.ClientNetworkId} actor={request.ActorNetworkId} " +
+                    $"req={request.RequestId} validated={response.Validated} reason={response.RejectionReason}");
+            }
             
             if (response.Validated)
             {
@@ -771,11 +908,35 @@ namespace Arawn.GameCreator2.Networking.Shooter
                     Validated = false,
                     RejectionReason = HitRejectionReason.CheatSuspected
                 };
-                SendHitResponseToClient?.Invoke(queued.ClientNetworkId, response);
+                if (!queued.TrustedServerOrigin)
+                {
+                    SendHitResponseToClient?.Invoke(queued.ClientNetworkId, response);
+                }
                 return;
             }
 
-            if (!ValidateHitSourceShot(request, out sourceShotKey, out HitRejectionReason shotBindingRejection))
+            if (queued.TrustedServerOrigin)
+            {
+                if (!m_Controllers.TryGetValue(request.ActorNetworkId, out var trustedController) ||
+                    trustedController == null)
+                {
+                    response = new NetworkShooterHitResponse
+                    {
+                        RequestId = request.RequestId,
+                        ActorNetworkId = request.ActorNetworkId,
+                        CorrelationId = request.CorrelationId,
+                        Validated = false,
+                        RejectionReason = HitRejectionReason.ShooterNotFound
+                    };
+                }
+                else
+                {
+                    // The server generated this collision, so current authoritative target state
+                    // is sufficient and no client shot-claim binding is required.
+                    response = ValidateHitRequest(request);
+                }
+            }
+            else if (!ValidateHitSourceShot(request, out sourceShotKey, out HitRejectionReason shotBindingRejection))
             {
                 LogDiagnosticsWarning(
                     $"hit rejected before controller lookup req={request.RequestId}: source shot invalid " +
@@ -815,10 +976,13 @@ namespace Arawn.GameCreator2.Networking.Shooter
             response.ActorNetworkId = request.ActorNetworkId;
             response.CorrelationId = request.CorrelationId;
             
-            SendHitResponseToClient?.Invoke(queued.ClientNetworkId, response);
-            LogDiagnostics(
-                $"hit response sent client={queued.ClientNetworkId} actor={request.ActorNetworkId} " +
-                $"req={request.RequestId} validated={response.Validated} reason={response.RejectionReason} damage={response.Damage:F2}");
+            if (!queued.TrustedServerOrigin)
+            {
+                SendHitResponseToClient?.Invoke(queued.ClientNetworkId, response);
+                LogDiagnostics(
+                    $"hit response sent client={queued.ClientNetworkId} actor={request.ActorNetworkId} " +
+                    $"req={request.RequestId} validated={response.Validated} reason={response.RejectionReason} damage={response.Damage:F2}");
+            }
             
             if (response.Validated)
             {
@@ -828,7 +992,10 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 RecordValidatedHitClaim(sourceShotKey, request);
                 
                 // Apply damage on server
-                ApplyDamageOnServer(request, response.Damage);
+                if (!queued.NativeDamageWillApply)
+                {
+                    ApplyDamageOnServer(request, response.Damage);
+                }
                 
                 bool hasImpactMotion = TryBuildImpactMotion(request, out NetworkShooterImpactMotion impactMotion);
 
@@ -1253,8 +1420,9 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 return;
             }
 
-            LogDiagnosticsWarning(
-                $"dropped shot broadcast because shooter controller was not found shooter={broadcast.ShooterNetworkId} " +
+            EnqueuePendingShotBroadcast(broadcast);
+            LogDiagnostics(
+                $"queued shot broadcast while shooter controller spawns shooter={broadcast.ShooterNetworkId} " +
                 $"weaponHash={broadcast.WeaponHash}");
         }
         
@@ -1271,33 +1439,203 @@ namespace Arawn.GameCreator2.Networking.Shooter
             if (broadcast.HasImpactMotion &&
                 !NetworkShooterImpactProp.TryApplyImpactMotion(broadcast.ImpactMotion))
             {
-                LogDiagnosticsWarning(
-                    $"hit broadcast impact prop missing prop={broadcast.ImpactMotion.PropNetworkId} " +
+                TrimPendingTransientCapacity();
+                m_PendingImpactMotions.Add(new PendingImpactMotion
+                {
+                    Motion = broadcast.ImpactMotion,
+                    ReceivedTime = Time.unscaledTime
+                });
+                LogDiagnostics(
+                    $"queued impact motion while prop registers prop={broadcast.ImpactMotion.PropNetworkId} " +
                     $"shooter={broadcast.ShooterNetworkId} target={broadcast.TargetNetworkId}");
             }
             
-            if (m_Controllers.TryGetValue(broadcast.ShooterNetworkId, out var shooterCtrl))
+            RouteHitBroadcast(broadcast, out bool needsShooter, out bool needsTarget);
+            if (needsShooter || needsTarget)
             {
-                LogDiagnostics(
-                    $"routing hit broadcast to shooter={broadcast.ShooterNetworkId} target={broadcast.TargetNetworkId}");
-                shooterCtrl.ReceiveHitBroadcast(broadcast);
+                EnqueuePendingHitBroadcast(broadcast, needsShooter, needsTarget);
+            }
+        }
+
+        private void RouteHitBroadcast(
+            NetworkShooterHitBroadcast broadcast,
+            out bool needsShooter,
+            out bool needsTarget)
+        {
+            needsShooter = false;
+            needsTarget = false;
+
+            if (broadcast.ShooterNetworkId != 0 &&
+                broadcast.ShooterNetworkId == broadcast.TargetNetworkId)
+            {
+                if (m_Controllers.TryGetValue(broadcast.ShooterNetworkId, out var selfController) &&
+                    selfController != null)
+                {
+                    selfController.ReceiveSelfHitBroadcast(broadcast);
+                }
+                else
+                {
+                    needsShooter = true;
+                }
+
+                return;
+            }
+
+            if (m_Controllers.TryGetValue(broadcast.ShooterNetworkId, out var shooterController) &&
+                shooterController != null)
+            {
+                // The attacker owns shared impact VFX and optimistic reconciliation.
+                shooterController.ReceiveHitBroadcast(broadcast);
             }
             else
             {
-                LogDiagnosticsWarning(
-                    $"hit broadcast shooter controller missing shooter={broadcast.ShooterNetworkId} target={broadcast.TargetNetworkId}");
+                needsShooter = broadcast.ShooterNetworkId != 0;
             }
-            
-            if (m_Controllers.TryGetValue(broadcast.TargetNetworkId, out var targetCtrl))
+
+            if (broadcast.TargetNetworkId == 0) return;
+
+            if (m_Controllers.TryGetValue(broadcast.TargetNetworkId, out var targetController) &&
+                targetController != null)
             {
-                LogDiagnostics(
-                    $"routing hit broadcast to target={broadcast.TargetNetworkId} shooter={broadcast.ShooterNetworkId}");
-                targetCtrl.ReceiveHitBroadcast(broadcast);
+                // The target path only owns hit reaction/state notification.
+                targetController.ReceiveTargetHitBroadcast(broadcast);
             }
-            else if (broadcast.TargetNetworkId != 0)
+            else
             {
-                LogDiagnosticsWarning(
-                    $"hit broadcast target controller missing target={broadcast.TargetNetworkId} shooter={broadcast.ShooterNetworkId}");
+                needsTarget = true;
+            }
+        }
+
+        private void EnqueuePendingShotBroadcast(NetworkShotBroadcast broadcast)
+        {
+            TrimPendingTransientCapacity();
+            m_PendingShotBroadcasts.Add(new PendingShotBroadcast
+            {
+                Broadcast = broadcast,
+                ReceivedTime = Time.unscaledTime
+            });
+        }
+
+        private void EnqueuePendingHitBroadcast(
+            NetworkShooterHitBroadcast broadcast,
+            bool needsShooter,
+            bool needsTarget)
+        {
+            TrimPendingTransientCapacity();
+            m_PendingHitBroadcasts.Add(new PendingHitBroadcast
+            {
+                Broadcast = broadcast,
+                ReceivedTime = Time.unscaledTime,
+                NeedsShooter = needsShooter,
+                NeedsTarget = needsTarget
+            });
+        }
+
+        private void TrimPendingTransientCapacity()
+        {
+            int maximum = Mathf.Max(8, m_MaxPendingTransientBroadcasts);
+            while (m_PendingShotBroadcasts.Count + m_PendingHitBroadcasts.Count +
+                   m_PendingImpactMotions.Count >= maximum)
+            {
+                float oldestShot = m_PendingShotBroadcasts.Count > 0
+                    ? m_PendingShotBroadcasts[0].ReceivedTime
+                    : float.MaxValue;
+                float oldestHit = m_PendingHitBroadcasts.Count > 0
+                    ? m_PendingHitBroadcasts[0].ReceivedTime
+                    : float.MaxValue;
+                float oldestImpact = m_PendingImpactMotions.Count > 0
+                    ? m_PendingImpactMotions[0].ReceivedTime
+                    : float.MaxValue;
+
+                if (oldestShot <= oldestHit && oldestShot <= oldestImpact)
+                {
+                    m_PendingShotBroadcasts.RemoveAt(0);
+                }
+                else if (oldestHit <= oldestImpact)
+                {
+                    m_PendingHitBroadcasts.RemoveAt(0);
+                }
+                else
+                {
+                    m_PendingImpactMotions.RemoveAt(0);
+                }
+            }
+        }
+
+        private void FlushPendingTransientBroadcasts()
+        {
+            float now = Time.unscaledTime;
+            float lifetime = Mathf.Max(0.05f, m_TransientBroadcastLifetime);
+
+            for (int i = m_PendingShotBroadcasts.Count - 1; i >= 0; i--)
+            {
+                PendingShotBroadcast pending = m_PendingShotBroadcasts[i];
+                if (now - pending.ReceivedTime > lifetime)
+                {
+                    m_PendingShotBroadcasts.RemoveAt(i);
+                    continue;
+                }
+
+                if (!m_Controllers.TryGetValue(pending.Broadcast.ShooterNetworkId, out var controller) ||
+                    controller == null) continue;
+
+                controller.ReceiveShotBroadcast(pending.Broadcast);
+                m_PendingShotBroadcasts.RemoveAt(i);
+            }
+
+            for (int i = m_PendingHitBroadcasts.Count - 1; i >= 0; i--)
+            {
+                PendingHitBroadcast pending = m_PendingHitBroadcasts[i];
+                if (now - pending.ReceivedTime > lifetime)
+                {
+                    m_PendingHitBroadcasts.RemoveAt(i);
+                    continue;
+                }
+
+                if (pending.Broadcast.ShooterNetworkId == pending.Broadcast.TargetNetworkId)
+                {
+                    if (!m_Controllers.TryGetValue(pending.Broadcast.ShooterNetworkId, out var selfController) ||
+                        selfController == null) continue;
+
+                    selfController.ReceiveSelfHitBroadcast(pending.Broadcast);
+                    m_PendingHitBroadcasts.RemoveAt(i);
+                    continue;
+                }
+
+                if (pending.NeedsShooter &&
+                    m_Controllers.TryGetValue(pending.Broadcast.ShooterNetworkId, out var shooterController) &&
+                    shooterController != null)
+                {
+                    shooterController.ReceiveHitBroadcast(pending.Broadcast);
+                    pending.NeedsShooter = false;
+                }
+
+                if (pending.NeedsTarget &&
+                    m_Controllers.TryGetValue(pending.Broadcast.TargetNetworkId, out var targetController) &&
+                    targetController != null)
+                {
+                    targetController.ReceiveTargetHitBroadcast(pending.Broadcast);
+                    pending.NeedsTarget = false;
+                }
+
+                if (!pending.NeedsShooter && !pending.NeedsTarget)
+                {
+                    m_PendingHitBroadcasts.RemoveAt(i);
+                }
+                else
+                {
+                    m_PendingHitBroadcasts[i] = pending;
+                }
+            }
+
+            for (int i = m_PendingImpactMotions.Count - 1; i >= 0; i--)
+            {
+                PendingImpactMotion pending = m_PendingImpactMotions[i];
+                if (now - pending.ReceivedTime > lifetime ||
+                    NetworkShooterImpactProp.TryApplyImpactMotion(pending.Motion))
+                {
+                    m_PendingImpactMotions.RemoveAt(i);
+                }
             }
         }
     }

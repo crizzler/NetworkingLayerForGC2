@@ -35,17 +35,8 @@ namespace Arawn.GameCreator2.Networking.Melee
             if (m_ProcessedHits.Contains(targetId)) return false;
             m_ProcessedHits.Add(targetId);
             
-            // Server processes hits directly
-            if (m_IsServer)
-            {
-                LogMeleeSync(
-                    $"InterceptHit server-local target={target.name} skill={(skill != null ? skill.name : "null")} " +
-                    $"phase={m_MeleeStance?.CurrentPhase.ToString() ?? "NoStance"}");
-                return true;
-            }
-            
             // Remote clients don't process hits - they receive broadcasts
-            if (m_IsRemoteClient)
+            if (m_IsRemoteClient && !m_IsServer)
             {
                 LogMeleeSync(
                     $"InterceptHit ignored on remote target={target.name} skill={(skill != null ? skill.name : "null")}");
@@ -53,7 +44,7 @@ namespace Arawn.GameCreator2.Networking.Melee
             }
             
             // Local client - send to server
-            var targetNetworkChar = target.GetComponent<NetworkCharacter>();
+            var targetNetworkChar = target.GetComponentInParent<NetworkCharacter>();
             uint targetNetworkId = targetNetworkChar != null ? targetNetworkChar.NetworkId : 0;
             uint attackerNetworkId = m_NetworkCharacter != null ? m_NetworkCharacter.NetworkId : 0;
             
@@ -72,6 +63,27 @@ namespace Arawn.GameCreator2.Networking.Melee
                 ComboNodeId = m_LastAttackState.ComboNodeId,
                 AttackPhase = m_LastAttackState.Phase
             };
+
+            // A dedicated-server actor has no owning client from which to receive this request.
+            // Queue it as a trusted server observation and suppress GC2's native hit so damage,
+            // block evaluation, reactions, and presentation all come from the same authoritative
+            // path. Host-owned actors continue through the ordinary loopback request below.
+            if (m_IsServer && !m_IsLocalClient)
+            {
+                NetworkMeleeManager manager = NetworkMeleeManager.Instance;
+                if (manager != null && manager.TryServerQueueTrustedHit(request))
+                {
+                    LogMeleeSync(
+                        $"queued trusted server hit req={request.RequestId} target={request.TargetNetworkId} " +
+                        $"skillHash={request.SkillHash}");
+                    return false;
+                }
+
+                LogMeleeSyncWarning(
+                    $"trusted server hit could not be queued req={request.RequestId}; " +
+                    "falling back to native GC2 processing");
+                return true;
+            }
 
             LogReactionDiagnostics(
                 $"hit request built req={request.RequestId} target={targetNetworkId} " +
@@ -97,11 +109,14 @@ namespace Arawn.GameCreator2.Networking.Melee
                 return false;
             }
 
+            bool playOptimistically = m_OptimisticEffects && !m_IsServer;
             m_PendingHits[pendingKey] = new PendingHit
             {
                 Request = request,
                 SentTime = Time.time,
-                OptimisticPlayed = false
+                // Returning true below allows GC2's native Skill.OnHit presentation path to
+                // continue. Track that native presentation so confirmation does not duplicate it.
+                OptimisticPlayed = playOptimistically
             };
             
             // Raise event for network layer to send
@@ -116,8 +131,9 @@ namespace Arawn.GameCreator2.Networking.Melee
                 Debug.Log($"[NetworkMeleeController] Hit request sent: {target.name} at {hitPoint}");
             }
             
-            // Return optimistic setting
-            return m_OptimisticEffects;
+            // Host-owned actors wait for their server loopback result; client-only owners may
+            // continue through GC2's native optimistic presentation path.
+            return playOptimistically;
         }
 
         /// <summary>
@@ -367,6 +383,15 @@ namespace Arawn.GameCreator2.Networking.Melee
             
             if (response.Validated)
             {
+                if (pending.OptimisticPlayed)
+                {
+                    m_RecentOptimisticHitPresentations.Add(new RecentOptimisticHitPresentation
+                    {
+                        Request = pending.Request,
+                        ExpiresAt = Time.time + 2f
+                    });
+                }
+
                 // Hit was confirmed - if we didn't play optimistic effects, play now
                 if (!pending.OptimisticPlayed && !m_OptimisticEffects)
                 {
@@ -386,44 +411,127 @@ namespace Arawn.GameCreator2.Networking.Melee
         }
         
         /// <summary>
-        /// [All] Called when server broadcasts a confirmed hit.
+        /// Compatibility entry point for transports that do not perform role-specific routing.
+        /// New integrations should route the attacker and target roles separately through the
+        /// manager so presentation is emitted exactly once.
         /// </summary>
         public void ReceiveHitBroadcast(NetworkMeleeHitBroadcast broadcast)
+        {
+            bool isAttacker = broadcast.AttackerNetworkId == NetworkId;
+            bool isTarget = broadcast.TargetNetworkId == NetworkId;
+
+            if (isAttacker)
+            {
+                ReceiveHitBroadcastAsAttacker(broadcast, isTarget);
+            }
+            else if (isTarget)
+            {
+                ReceiveHitBroadcastAsTarget(broadcast);
+            }
+            else
+            {
+                NotifyHitConfirmed(broadcast);
+            }
+        }
+
+        /// <summary>
+        /// Receive the attacker side of a confirmed hit. This side alone owns shared impact
+        /// presentation and optimistic-effect reconciliation.
+        /// </summary>
+        internal void ReceiveHitBroadcastAsAttacker(
+            NetworkMeleeHitBroadcast broadcast,
+            bool alsoTarget)
+        {
+            NotifyHitConfirmed(broadcast);
+
+            if (alsoTarget)
+            {
+                ApplyTargetHitReconciliation(broadcast);
+            }
+
+            bool shouldPlayConfirmedPresentation =
+                NetworkMeleeManager.Instance?.IsClient == true &&
+                !HasMatchingOptimisticPresentation(broadcast);
+
+            if (shouldPlayConfirmedPresentation)
+            {
+                NetworkMeleeManager.Instance.RequestHitPresentation(broadcast);
+            }
+        }
+
+        private bool HasMatchingOptimisticPresentation(NetworkMeleeHitBroadcast broadcast)
+        {
+            ulong matchedPendingKey = 0;
+            foreach (KeyValuePair<ulong, PendingHit> pair in m_PendingHits)
+            {
+                PendingHit pending = pair.Value;
+                if (!pending.OptimisticPlayed) continue;
+                if (!MatchesConfirmedBroadcast(pending.Request, broadcast)) continue;
+                matchedPendingKey = pair.Key;
+                break;
+            }
+
+            if (matchedPendingKey != 0 && m_PendingHits.TryGetValue(matchedPendingKey, out PendingHit matchedPending))
+            {
+                // Mark consumed so a later response cannot add the same optimistic presentation
+                // to the short response-before-broadcast cache.
+                matchedPending.OptimisticPlayed = false;
+                m_PendingHits[matchedPendingKey] = matchedPending;
+                return true;
+            }
+
+            float now = Time.time;
+            for (int i = m_RecentOptimisticHitPresentations.Count - 1; i >= 0; i--)
+            {
+                RecentOptimisticHitPresentation recent = m_RecentOptimisticHitPresentations[i];
+                if (recent.ExpiresAt < now)
+                {
+                    m_RecentOptimisticHitPresentations.RemoveAt(i);
+                    continue;
+                }
+
+                if (!MatchesConfirmedBroadcast(recent.Request, broadcast)) continue;
+                m_RecentOptimisticHitPresentations.RemoveAt(i);
+                return true;
+            }
+
+            return false;
+        }
+
+        private static bool MatchesConfirmedBroadcast(
+            NetworkMeleeHitRequest request,
+            NetworkMeleeHitBroadcast broadcast)
+        {
+            return request.AttackerNetworkId == broadcast.AttackerNetworkId &&
+                   request.TargetNetworkId == broadcast.TargetNetworkId &&
+                   request.SkillHash == broadcast.SkillHash &&
+                   (request.HitPoint - broadcast.HitPoint).sqrMagnitude <= 0.25f;
+        }
+
+        /// <summary>
+        /// Receive the target side of a confirmed hit. Target routing intentionally does not
+        /// instantiate the shared impact effect.
+        /// </summary>
+        internal void ReceiveHitBroadcastAsTarget(NetworkMeleeHitBroadcast broadcast)
+        {
+            NotifyHitConfirmed(broadcast);
+            ApplyTargetHitReconciliation(broadcast);
+        }
+
+        private void NotifyHitConfirmed(NetworkMeleeHitBroadcast broadcast)
         {
             OnHitConfirmed?.Invoke(broadcast);
             LogMeleeSync(
                 $"received hit broadcast attacker={broadcast.AttackerNetworkId} target={broadcast.TargetNetworkId} " +
                 $"skillHash={broadcast.SkillHash} block={broadcast.BlockResult} poiseBroken={broadcast.PoiseBroken}");
+        }
 
+        private void ApplyTargetHitReconciliation(NetworkMeleeHitBroadcast broadcast)
+        {
             if (broadcast.TargetNetworkId == NetworkId)
             {
                 SuppressLocalOwnerReconciliation(OwnerHitPreReactionReconciliationSuppression);
             }
-            
-            // Play effects if this is a remote client or non-optimistic local
-            bool shouldPlayEffects = m_IsRemoteClient || 
-                (m_IsLocalClient && !m_OptimisticEffects);
-            
-            if (shouldPlayEffects)
-            {
-                PlayHitEffects(broadcast);
-            }
-        }
-        
-        // ════════════════════════════════════════════════════════════════════════════════════════
-        // EFFECTS
-        // ════════════════════════════════════════════════════════════════════════════════════════
-        
-        private void PlayHitEffects(NetworkMeleeHitBroadcast broadcast)
-        {
-            // Resolve skill from broadcast hash to play effects (particles, sounds, hit pause)
-            Skill skill = NetworkMeleeManager.GetSkillByHash(broadcast.SkillHash);
-            if (skill == null) return;
-            
-            // GC2 melee hit effects are driven by the Skill's internal OnHit pipeline.
-            // The local MeleeStance already handles effect playback for the owning client's
-            // hits via its normal AttackSkill flow. For remote hit confirmation, we invoke
-            // the reaction system which handles impact VFX through the broadcast direction/power.
         }
         
     }

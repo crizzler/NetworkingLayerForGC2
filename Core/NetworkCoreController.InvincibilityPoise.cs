@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Reflection;
 using UnityEngine;
 using GameCreator.Runtime.Characters;
 using GameCreator.Runtime.Common;
@@ -8,6 +9,50 @@ namespace Arawn.GameCreator2.Networking
 {
     public partial class NetworkCoreController
     {
+        // GC2 2.x exposes Invincibility.Set(), which only extends an active window and cannot
+        // cancel it. Keep this version-specific compatibility shim isolated here until GC2
+        // exposes a public Clear method.
+        private static readonly FieldInfo s_InvincibilityStartField =
+            typeof(Invincibility).GetField("m_InvincibleStartTime",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+        private static readonly FieldInfo s_InvincibilityUntilField =
+            typeof(Invincibility).GetField("m_InvincibleUntil",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+        private static bool s_LoggedInvincibilityClearFailure;
+
+        private static void ApplyNetworkInvincibility(Character character, bool isInvincible,
+            float duration)
+        {
+            if (character == null) return;
+            Invincibility invincibility = character.Combat.Invincibility;
+            if (s_InvincibilityStartField != null && s_InvincibilityUntilField != null)
+            {
+                float startTime = character.Time.Time;
+                float untilTime = isInvincible && duration > 0f
+                    ? startTime + duration
+                    : startTime - 1f;
+                s_InvincibilityStartField.SetValue(invincibility, startTime);
+                s_InvincibilityUntilField.SetValue(invincibility, untilTime);
+                return;
+            }
+
+            // Setting a positive duration remains safe on future GC2 versions even if their
+            // private layout changes. Only exact shortening/cancellation needs the adapter.
+            if (isInvincible && duration > 0f)
+            {
+                character.Combat.Invincibility.Set(duration);
+                return;
+            }
+
+            if (!invincibility.IsInvincible) return;
+
+            if (s_LoggedInvincibilityClearFailure) return;
+            s_LoggedInvincibilityClearFailure = true;
+            Debug.LogError(
+                "[NetworkCore] Cannot clear GC2 invincibility because the installed GC2 " +
+                "Invincibility implementation is incompatible. Update the Core adapter.");
+        }
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // INVINCIBILITY - CLIENT METHODS
         // ════════════════════════════════════════════════════════════════════════════════════════
@@ -65,6 +110,15 @@ namespace Arawn.GameCreator2.Networking
             }
             
             float currentTime = GetServerTime?.Invoke() ?? Time.time;
+
+            if (!IsFinite(request.Duration) || !IsFinite(request.ClientTime))
+            {
+                SendInvincibilityResponse(senderNetworkId, request.RequestId, false,
+                    InvincibilityRejectReason.InvalidDuration, 0,
+                    request.ActorNetworkId, request.CorrelationId);
+                m_Stats.InvincibilityRejected++;
+                return;
+            }
             
             // Check cooldown
             if (m_InvincibilityCooldowns.TryGetValue(request.CharacterNetworkId, out float cooldownEnd) 
@@ -77,7 +131,10 @@ namespace Arawn.GameCreator2.Networking
             }
             
             // Validate duration
-            float approvedDuration = Mathf.Clamp(request.Duration, 0, m_MaxInvincibilityDuration);
+            float approvedDuration = Mathf.Clamp(
+                request.Duration,
+                0f,
+                Mathf.Max(0f, m_MaxInvincibilityDuration));
             if (approvedDuration <= 0)
             {
                 // Cancelling invincibility
@@ -91,7 +148,7 @@ namespace Arawn.GameCreator2.Networking
             }
             
             // Apply invincibility
-            character.Combat.Invincibility.Set(approvedDuration);
+            ApplyNetworkInvincibility(character, approvedDuration > 0f, approvedDuration);
             
             // Update cooldown
             m_InvincibilityCooldowns[request.CharacterNetworkId] = currentTime + approvedDuration + m_InvincibilityCooldown;
@@ -154,9 +211,19 @@ namespace Arawn.GameCreator2.Networking
             if (m_IsServer) return;
             
             var character = GetCharacterByNetworkId?.Invoke(broadcast.CharacterNetworkId);
-            if (character == null) return;
+            if (character == null)
+            {
+                CachePendingInvincibilityBroadcast(broadcast);
+                return;
+            }
             
-            character.Combat.Invincibility.Set(broadcast.Duration);
+            float now = GetServerTime?.Invoke() ?? Time.time;
+            float elapsed = Mathf.Max(0f, now - broadcast.StartTime);
+            float remaining = Mathf.Max(0f, broadcast.Duration - elapsed);
+            ApplyNetworkInvincibility(
+                character,
+                broadcast.IsInvincible && remaining > 0f,
+                remaining);
             OnInvincibilityBroadcastReceived?.Invoke(broadcast);
         }
         
@@ -250,6 +317,20 @@ namespace Arawn.GameCreator2.Networking
             
             var poise = character.Combat.Poise;
             float currentTime = GetServerTime?.Invoke() ?? Time.time;
+
+            bool knownAction = Enum.IsDefined(typeof(PoiseActionType), request.ActionType);
+            float maxValue = Mathf.Max(0f, m_MaxPoiseRequestValue);
+            bool valueRequired = request.ActionType != PoiseActionType.Reset;
+            if (!knownAction || !IsFinite(request.ClientTime) ||
+                (valueRequired &&
+                 (!IsFinite(request.Value) || Mathf.Abs(request.Value) > maxValue)))
+            {
+                SendPoiseResponse(senderNetworkId, request.RequestId, false,
+                    PoiseRejectReason.InvalidValue, poise.Current, poise.IsBroken,
+                    request.ActorNetworkId, request.CorrelationId);
+                m_Stats.PoiseRejected++;
+                return;
+            }
             
             // Apply poise action
             switch (request.ActionType)
@@ -338,10 +419,14 @@ namespace Arawn.GameCreator2.Networking
             if (m_IsServer) return;
             
             var character = GetCharacterByNetworkId?.Invoke(broadcast.CharacterNetworkId);
-            if (character == null) return;
+            if (character == null)
+            {
+                CachePendingPoiseBroadcast(broadcast);
+                return;
+            }
             
             var poise = character.Combat.Poise;
-            poise.Set(broadcast.CurrentPoise);
+            ApplyNetworkPoise(poise, broadcast.CurrentPoise, broadcast.MaximumPoise);
             
             OnPoiseBroadcastReceived?.Invoke(broadcast);
         }

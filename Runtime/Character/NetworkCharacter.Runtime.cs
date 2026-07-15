@@ -181,7 +181,7 @@ namespace Arawn.GameCreator2.Networking
                 ApplySessionProfileToDrivers();
             }
             
-            if (m_RuntimeIsServer)
+            if (m_RuntimeIsServer && m_ActivePredictionBackend == null)
             {
                 ProcessServerSimulation(deltaTime);
                 PublishHostLocalClientState();
@@ -223,6 +223,11 @@ namespace Arawn.GameCreator2.Networking
         
         private void Cleanup()
         {
+            if (m_UseCoreNetworking && NetworkId != 0)
+            {
+                NetworkCoreManager.Instance?.ForgetCharacterState(NetworkId);
+            }
+
             if (m_AnimimController != null)
             {
                 NetworkAnimationManager.Instance?.UnregisterController(m_AnimimController);
@@ -233,9 +238,11 @@ namespace Arawn.GameCreator2.Networking
                 NetworkMotionManager.Instance?.UnregisterController(m_MotionController);
             }
 
+            m_ActivePredictionBackend?.ResetBackend(this);
             UnregisterFromBridge();
             UnwireMovementEvents();
             UnsubscribeFromCharacterEvents();
+            m_ActivePredictionBackend = null;
             m_IsInitialized = false;
             m_CurrentRole = NetworkRole.None;
             m_RuntimeIsServer = false;

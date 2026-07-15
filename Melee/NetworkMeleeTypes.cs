@@ -2,6 +2,9 @@ using System;
 using UnityEngine;
 
 #if GC2_MELEE
+using Arawn.GameCreator2.Networking;
+using GameCreator.Runtime.Characters;
+using GameCreator.Runtime.Common;
 using GameCreator.Runtime.Melee;
 #endif
 
@@ -239,6 +242,67 @@ namespace Arawn.GameCreator2.Networking.Melee
         Parried = 2,
         BlockBroken = 3
     }
+
+#if GC2_MELEE
+    /// <summary>
+    /// Inspector-authored, presentation-only effects for a network-confirmed melee hit.
+    /// These effects are instantiated locally and never execute a Skill's gameplay pipeline.
+    /// </summary>
+    [Serializable]
+    public sealed class MeleeHitEffectRegistration
+    {
+        [SerializeField] private Skill m_Skill;
+        [SerializeField] private PropertyGetInstantiate m_Default = new();
+        [SerializeField] private PropertyGetInstantiate m_Blocked = new();
+        [SerializeField] private PropertyGetInstantiate m_Parried = new();
+        [SerializeField] private PropertyGetInstantiate m_BlockBroken = new();
+
+        public Skill Skill => m_Skill;
+        public PropertyGetInstantiate DefaultEffect => m_Default;
+
+        public int SkillHash => m_Skill != null
+            ? StableHashUtility.GetStableHash(m_Skill.name)
+            : 0;
+
+        public PropertyGetInstantiate GetEffect(NetworkBlockResult result)
+        {
+            PropertyGetInstantiate variant = result switch
+            {
+                NetworkBlockResult.Blocked => m_Blocked,
+                NetworkBlockResult.Parried => m_Parried,
+                NetworkBlockResult.BlockBroken => m_BlockBroken,
+                _ => m_Default
+            };
+
+            return variant ?? m_Default;
+        }
+    }
+
+    /// <summary>
+    /// Mutable context raised before the default registered hit effect is instantiated.
+    /// Set <see cref="Handled"/> to replace the built-in presentation with a custom one.
+    /// </summary>
+    public sealed class NetworkMeleeHitPresentationContext
+    {
+        public NetworkMeleeHitBroadcast Broadcast { get; }
+        public Skill Skill { get; }
+        public Character Attacker { get; }
+        public Character Target { get; }
+        public bool Handled { get; set; }
+
+        internal NetworkMeleeHitPresentationContext(
+            NetworkMeleeHitBroadcast broadcast,
+            Skill skill,
+            Character attacker,
+            Character target)
+        {
+            Broadcast = broadcast;
+            Skill = skill;
+            Attacker = attacker;
+            Target = target;
+        }
+    }
+#endif
     
     // ════════════════════════════════════════════════════════════════════════════════════════════
     // WEAPON STATE
@@ -273,6 +337,36 @@ namespace Arawn.GameCreator2.Networking.Melee
             ShieldFlags = 0,
             BlockTiming = 0
         };
+    }
+
+    /// <summary>
+    /// Latest persistent melee presentation state for one character. Sent to late joiners and
+    /// retained until the matching character controller is ready on the receiving peer.
+    /// </summary>
+    [Serializable]
+    public struct NetworkMeleeCharacterSnapshot
+    {
+        public uint CharacterNetworkId;
+        public bool HasWeaponState;
+        public NetworkMeleeWeaponState WeaponState;
+        public bool HasBlockState;
+        public NetworkBlockBroadcast BlockState;
+
+        public static NetworkMeleeCharacterSnapshot Create(uint characterNetworkId)
+        {
+            return new NetworkMeleeCharacterSnapshot
+            {
+                CharacterNetworkId = characterNetworkId,
+                HasWeaponState = false,
+                WeaponState = NetworkMeleeWeaponState.None,
+                HasBlockState = false,
+                BlockState = new NetworkBlockBroadcast
+                {
+                    CharacterNetworkId = characterNetworkId,
+                    Action = NetworkBlockAction.Lower
+                }
+            };
+        }
     }
     
     // ════════════════════════════════════════════════════════════════════════════════════════════

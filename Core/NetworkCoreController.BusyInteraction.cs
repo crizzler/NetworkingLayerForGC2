@@ -61,6 +61,14 @@ namespace Arawn.GameCreator2.Networking
                 SendBusyResponse(senderNetworkId, request.RequestId, false, BusyRejectReason.CharacterNotFound, request.ActorNetworkId, request.CorrelationId);
                 return;
             }
+
+            if ((request.Limbs & ~BusyLimbs.Every) != 0 || request.Limbs == BusyLimbs.None ||
+                !IsFinite(request.Timeout) || request.Timeout < 0f)
+            {
+                SendBusyResponse(senderNetworkId, request.RequestId, false,
+                    BusyRejectReason.InvalidValue, request.ActorNetworkId, request.CorrelationId);
+                return;
+            }
             
             var busy = character.Busy;
             
@@ -80,7 +88,12 @@ namespace Arawn.GameCreator2.Networking
             {
                 if (request.Timeout > 0)
                 {
-                    _ = busy.Timeout(gc2Limbs, request.Timeout); // Fire-and-forget async
+                    float timeout = Mathf.Min(request.Timeout, Mathf.Max(0.01f, m_MaxBusyTimeout));
+                    ApplyTimedBusyAndBroadcast(
+                        request.CharacterNetworkId,
+                        character,
+                        gc2Limbs,
+                        timeout);
                 }
                 else
                 {
@@ -95,19 +108,46 @@ namespace Arawn.GameCreator2.Networking
             // Send response
             SendBusyResponse(senderNetworkId, request.RequestId, true, BusyRejectReason.None, request.ActorNetworkId, request.CorrelationId);
             
-            // Broadcast
-            BusyLimbs currentBusy = 0;
-            if (busy.AreArmsBusy) currentBusy |= BusyLimbs.Arms;
-            if (busy.AreLegsBusy) currentBusy |= BusyLimbs.Legs;
-            
-            var broadcast = new NetworkBusyBroadcast
+            BroadcastCurrentBusyState(request.CharacterNetworkId, character);
+        }
+
+        private async void ApplyTimedBusyAndBroadcast(
+            uint characterNetworkId,
+            Character character,
+            GameCreator.Runtime.Characters.Busy.Limb limbs,
+            float timeout)
+        {
+            try
             {
-                CharacterNetworkId = request.CharacterNetworkId,
+                await character.Busy.Timeout(limbs, timeout);
+            }
+            catch (Exception exception)
+            {
+                Debug.LogException(exception, this);
+                return;
+            }
+
+            if (!m_IsServer || character == null) return;
+            Character current = GetCharacterByNetworkId?.Invoke(characterNetworkId);
+            if (current != character) return;
+            BroadcastCurrentBusyState(characterNetworkId, character);
+        }
+
+        private void BroadcastCurrentBusyState(uint characterNetworkId, Character character)
+        {
+            if (character == null) return;
+            BusyLimbs currentBusy = BusyLimbs.None;
+            if (character.Busy.IsArmLeftBusy) currentBusy |= BusyLimbs.ArmLeft;
+            if (character.Busy.IsArmRightBusy) currentBusy |= BusyLimbs.ArmRight;
+            if (character.Busy.IsLegLeftBusy) currentBusy |= BusyLimbs.LegLeft;
+            if (character.Busy.IsLegRightBusy) currentBusy |= BusyLimbs.LegRight;
+
+            BroadcastBusyToClients?.Invoke(new NetworkBusyBroadcast
+            {
+                CharacterNetworkId = characterNetworkId,
                 CurrentBusyLimbs = currentBusy,
                 ServerTime = GetServerTime?.Invoke() ?? Time.time
-            };
-            
-            BroadcastBusyToClients?.Invoke(broadcast);
+            });
         }
         
         private void SendBusyResponse(uint clientId, ushort requestId, bool approved, BusyRejectReason reason,
@@ -150,7 +190,11 @@ namespace Arawn.GameCreator2.Networking
             if (m_IsServer) return;
             
             var character = GetCharacterByNetworkId?.Invoke(broadcast.CharacterNetworkId);
-            if (character == null) return;
+            if (character == null)
+            {
+                CachePendingBusyBroadcast(broadcast);
+                return;
+            }
             
             var busy = character.Busy;
             
@@ -232,11 +276,38 @@ namespace Arawn.GameCreator2.Networking
                     InteractionRejectReason.CharacterNotFound, 0, request.ActorNetworkId, request.CorrelationId);
                 return;
             }
+
+            if (!IsFinite(request.InteractionPosition) || !IsFinite(request.ClientTime))
+            {
+                SendInteractionResponse(senderNetworkId, request.RequestId, false,
+                    InteractionRejectReason.SecurityViolation, 0,
+                    request.ActorNetworkId, request.CorrelationId);
+                m_Stats.InteractionRejected++;
+                return;
+            }
             
             float currentTime = GetServerTime?.Invoke() ?? Time.time;
+
+            if (!TryResolveServerInteractionTarget(
+                    character,
+                    request,
+                    out IInteractive target,
+                    out uint resolvedTargetNetworkId,
+                    out int resolvedTargetHash))
+            {
+                SendInteractionResponse(senderNetworkId, request.RequestId, false,
+                    InteractionRejectReason.TargetNotFound, 0,
+                    request.ActorNetworkId, request.CorrelationId);
+                m_Stats.InteractionRejected++;
+                return;
+            }
             
             // Check interaction cooldown
-            var cooldownKey = (request.CharacterNetworkId, request.TargetNetworkId);
+            uint targetCooldownId = resolvedTargetNetworkId != 0
+                ? resolvedTargetNetworkId
+                : unchecked((uint)resolvedTargetHash);
+            if (targetCooldownId == 0) targetCooldownId = 1;
+            var cooldownKey = (request.CharacterNetworkId, targetCooldownId);
             if (m_InteractionCooldowns.TryGetValue(cooldownKey, out float cooldownEnd) && currentTime < cooldownEnd)
             {
                 SendInteractionResponse(senderNetworkId, request.RequestId, false,
@@ -245,18 +316,29 @@ namespace Arawn.GameCreator2.Networking
                 return;
             }
             
-            // Validate range
-            float distance = Vector3.Distance(character.transform.position, request.InteractionPosition);
-            if (distance > m_MaxInteractionRange)
+            // Validate the server-resolved target position. The client position is only a hint
+            // used to disambiguate unkeyed scene interactions and is never authoritative.
+            float distance = Vector3.Distance(character.transform.position, target.Position);
+            if (!IsFinite(distance) || distance > Mathf.Max(0f, m_MaxInteractionRange))
             {
                 SendInteractionResponse(senderNetworkId, request.RequestId, false,
                     InteractionRejectReason.OutOfRange, 0, request.ActorNetworkId, request.CorrelationId);
                 m_Stats.InteractionRejected++;
                 return;
             }
+
+
+            if (target.IsInteracting)
+            {
+                SendInteractionResponse(senderNetworkId, request.RequestId, false,
+                    InteractionRejectReason.TargetBusy, 0,
+                    request.ActorNetworkId, request.CorrelationId);
+                m_Stats.InteractionRejected++;
+                return;
+            }
             
             // Check if character can interact
-            if (!character.Interaction.CanInteract)
+            if (character.Interaction.Target == target && !character.Interaction.CanInteract)
             {
                 SendInteractionResponse(senderNetworkId, request.RequestId, false,
                     InteractionRejectReason.CharacterBusy, 0, request.ActorNetworkId, request.CorrelationId);
@@ -264,9 +346,27 @@ namespace Arawn.GameCreator2.Networking
                 return;
             }
             
-            // Perform interaction
-            // Note: Full implementation would resolve target and call character.Interaction.Interact()
-            // This is simplified - actual interaction target resolution depends on game implementation
+            // Execute the server-resolved target exactly once. Prefer GC2's Character API when
+            // its current focus matches so Character.EventInteract subscribers are preserved.
+            bool interacted;
+            if (character.Interaction.Target == target)
+            {
+                interacted = character.Interaction.Interact();
+            }
+            else
+            {
+                target.Interact(character);
+                interacted = true;
+            }
+
+            if (!interacted)
+            {
+                SendInteractionResponse(senderNetworkId, request.RequestId, false,
+                    InteractionRejectReason.ConditionsFailed, 0,
+                    request.ActorNetworkId, request.CorrelationId);
+                m_Stats.InteractionRejected++;
+                return;
+            }
             
             // Update cooldown
             m_InteractionCooldowns[cooldownKey] = currentTime + m_InteractionCooldown;
@@ -280,13 +380,115 @@ namespace Arawn.GameCreator2.Networking
             var broadcast = new NetworkInteractionBroadcast
             {
                 CharacterNetworkId = request.CharacterNetworkId,
-                TargetNetworkId = request.TargetNetworkId,
-                TargetHash = request.TargetHash,
+                TargetNetworkId = resolvedTargetNetworkId,
+                TargetHash = resolvedTargetHash,
                 InteractionType = InteractionType.Generic,
                 ServerTime = currentTime
             };
             
             BroadcastInteractionToClients?.Invoke(broadcast);
+        }
+
+        private bool TryResolveServerInteractionTarget(
+            Character character,
+            NetworkInteractionRequest request,
+            out IInteractive target,
+            out uint targetNetworkId,
+            out int targetHash)
+        {
+            target = null;
+            targetNetworkId = 0;
+            targetHash = 0;
+            if (character == null) return false;
+
+            // GC2's authoritative focus is the first choice. Dedicated servers can have visual
+            // presentation disabled while still retaining this gameplay query.
+            IInteractive focused = character.Interaction.Target;
+            if (MatchesInteractionTarget(focused, request, out targetNetworkId, out targetHash))
+            {
+                target = focused;
+                return true;
+            }
+
+            var candidates = new List<ISpatialHash>(16);
+            SpatialHashInteractions.Find(
+                character.transform.position,
+                Mathf.Max(0f, m_MaxInteractionRange),
+                candidates);
+
+            float bestDistance = float.MaxValue;
+            uint bestNetworkId = 0;
+            int bestHash = 0;
+            for (int i = 0; i < candidates.Count; i++)
+            {
+                if (candidates[i] is not IInteractive candidate) continue;
+                if (!MatchesInteractionTarget(
+                        candidate,
+                        request,
+                        out uint candidateNetworkId,
+                        out int candidateHash))
+                {
+                    continue;
+                }
+
+                float claimedDistance =
+                    (candidate.Position - request.InteractionPosition).sqrMagnitude;
+                bool hasStableKey = request.TargetNetworkId != 0 || request.TargetHash != 0;
+                float tolerance = Mathf.Max(0.01f, m_InteractionPositionTolerance);
+                if (!hasStableKey && claimedDistance > tolerance * tolerance) continue;
+                if (claimedDistance >= bestDistance) continue;
+
+                target = candidate;
+                bestDistance = claimedDistance;
+                bestNetworkId = candidateNetworkId;
+                bestHash = candidateHash;
+            }
+
+            targetNetworkId = bestNetworkId;
+            targetHash = bestHash;
+            return target != null;
+        }
+
+        private bool MatchesInteractionTarget(
+            IInteractive target,
+            NetworkInteractionRequest request,
+            out uint targetNetworkId,
+            out int targetHash)
+        {
+            targetNetworkId = 0;
+            targetHash = 0;
+            if (target?.Instance == null) return false;
+
+            targetNetworkId = GetNetworkIdForGameObject?.Invoke(target.Instance) ?? 0;
+            targetHash = targetNetworkId == 0
+                ? GetStableInteractionTargetHash(target.Instance)
+                : 0;
+
+            if (request.TargetNetworkId != 0 &&
+                request.TargetNetworkId != targetNetworkId)
+            {
+                return false;
+            }
+
+            return request.TargetHash == 0 || request.TargetHash == targetHash;
+        }
+
+        private static int GetStableInteractionTargetHash(GameObject target)
+        {
+            if (target == null) return 0;
+
+            string path = $"{target.transform.GetSiblingIndex()}:{target.name}";
+            Transform parent = target.transform.parent;
+            while (parent != null)
+            {
+                path = $"{parent.GetSiblingIndex()}:{parent.name}/{path}";
+                parent = parent.parent;
+            }
+
+            string scene = !string.IsNullOrEmpty(target.scene.path)
+                ? target.scene.path
+                : target.scene.name;
+            return StableHashUtility.GetStableHash($"{scene}|{path}|CoreInteraction");
         }
         
         private void SendInteractionResponse(uint clientId, ushort requestId, bool approved,
@@ -331,6 +533,13 @@ namespace Arawn.GameCreator2.Networking
             
             // Interaction effects/animations can be triggered here
             OnInteractionBroadcastReceived?.Invoke(broadcast);
+        }
+
+        /// <summary>[Client] Handle an interaction focus/blur presentation broadcast.</summary>
+        public void ReceiveInteractionFocusBroadcast(NetworkInteractionFocusBroadcast broadcast)
+        {
+            if (m_IsServer) return;
+            OnInteractionFocusBroadcastReceived?.Invoke(broadcast);
         }
         
         // ════════════════════════════════════════════════════════════════════════════════════════
@@ -381,7 +590,7 @@ namespace Arawn.GameCreator2.Networking
             var character = GetCharacterByNetworkId?.Invoke(characterNetworkId);
             if (character == null) return;
             
-            character.Combat.Invincibility.Set(duration);
+            ApplyNetworkInvincibility(character, duration > 0f, duration);
             
             var broadcast = new NetworkInvincibilityBroadcast
             {

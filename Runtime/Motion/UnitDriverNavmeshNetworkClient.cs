@@ -22,7 +22,7 @@ namespace Arawn.GameCreator2.Networking
     [Category("NavMesh Agent Network (Client)")]
     [Description("Client-side NavMesh driver. Sends commands to server and follows server-provided paths.")]
     [Serializable]
-    public class UnitDriverNavmeshNetworkClient : TUnitDriver
+    public class UnitDriverNavmeshNetworkClient : TUnitDriver, INetworkNavMeshCommandSink
     {
         // EXPOSED MEMBERS: -----------------------------------------------------------------------
         

@@ -5,9 +5,9 @@ namespace Arawn.GameCreator2.Networking.Shooter
 {
     public static class NetworkShooterDebug
     {
-        // Existing demo scenes can serialize diagnostics off. Keep this forced on
-        // while chasing Shooter sync handoff failures across controller/manager/bridge.
-        public static bool ForceDiagnostics = true;
+        // Temporary global troubleshooting switch. Keep disabled in production so
+        // each manager/controller/bridge can honor its serialized diagnostics setting.
+        public static bool ForceDiagnostics = false;
     }
 
     /// <summary>
@@ -273,6 +273,34 @@ namespace Arawn.GameCreator2.Networking.Shooter
 
         /// <summary>Deterministic kinematic motion for an impacted environment prop.</summary>
         public NetworkShooterImpactMotion ImpactMotion;
+    }
+
+    /// <summary>
+    /// Persistent Shooter state sent to a player after their scene has loaded.
+    /// Transient shot and hit effects are intentionally not included.
+    /// </summary>
+    [Serializable]
+    public struct NetworkShooterCharacterSnapshot
+    {
+        public uint CharacterNetworkId;
+        public NetworkWeaponState WeaponState;
+        public NetworkAimState AimState;
+        public float ServerTime;
+    }
+
+    /// <summary>
+    /// Persistent pose for a deterministic shooter impact prop. If motion is active,
+    /// clients continue it from synchronized server time.
+    /// </summary>
+    [Serializable]
+    public struct NetworkShooterImpactPropSnapshot
+    {
+        public uint PropNetworkId;
+        public Vector3 Position;
+        public Quaternion Rotation;
+        public bool HasActiveMotion;
+        public NetworkShooterImpactMotion ActiveMotion;
+        public float ServerTime;
     }
 
     /// <summary>

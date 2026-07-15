@@ -147,19 +147,8 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 $"remote={m_IsRemoteClient} listener={(OnShotRequestSent != null)} muzzle={muzzlePosition} " +
                 $"dir={shotDirection} charge={chargeRatio:F2}");
 
-            // Dedicated/server-only instances fire immediately. Host-owned local
-            // players still send a request through the loopback transport path so
-            // every observer receives the same authoritative broadcast.
-            if (m_IsServer && !m_IsLocalClient)
-            {
-                LogDiagnostics(
-                    $"intercept shot accepted locally on server weapon={(weapon != null ? weapon.name : "null")} " +
-                    $"hash={(weapon != null ? weapon.Id.Hash : 0)} muzzle={muzzlePosition} dir={shotDirection}");
-                return true;
-            }
-            
             // Remote clients don't fire - they receive broadcasts
-            if (m_IsRemoteClient)
+            if (m_IsRemoteClient && !m_IsServer)
             {
                 LogDiagnostics(
                     $"intercept shot blocked on remote client weapon={(weapon != null ? weapon.name : "null")}");
@@ -171,14 +160,19 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 return false;
             }
             
+            // A server-owned actor must continue into GC2 so the authoritative projectile/hits
+            // exist. Client-only owners may choose whether to present/fire optimistically.
+            bool playOptimistically = m_IsServer || m_OptimisticShotEffects;
             bool requestSent = SendShotRequest(
                 muzzlePosition,
                 shotDirection,
                 weapon,
                 chargeRatio,
                 projectileIndex,
-                totalProjectiles);
-            return requestSent && m_OptimisticShotEffects;
+                totalProjectiles,
+                playOptimistically,
+                nativeNotificationObserved: false);
+            return requestSent && playOptimistically;
         }
 
         internal void NotifyShotFired(
@@ -197,12 +191,62 @@ namespace Arawn.GameCreator2.Networking.Shooter
             }
 
             ClearProcessedHits();
-            SendShotRequest(muzzlePosition, shotDirection, weapon, chargeRatio, 0, 1);
+
+            if (TryMarkMatchingPendingShotAsNative(
+                    muzzlePosition,
+                    shotDirection,
+                    weapon))
+            {
+                LogDiagnostics(
+                    $"reused pending shot for GC2 native notification weaponHash={(weapon != null ? weapon.Id.Hash : 0)} " +
+                    $"muzzle={muzzlePosition}");
+                return;
+            }
+
+            if (m_IsServer)
+            {
+                NetworkShotRequest trustedRequest = BuildShotRequest(
+                    muzzlePosition,
+                    shotDirection,
+                    weapon,
+                    chargeRatio,
+                    0,
+                    1);
+                NetworkShooterManager manager = NetworkShooterManager.Instance;
+                if (manager != null && manager.TryServerQueueTrustedShot(trustedRequest))
+                {
+                    if (m_IsLocalClient)
+                    {
+                        m_RecentOptimisticShotPresentations.Add(new RecentOptimisticShotPresentation
+                        {
+                            Request = trustedRequest,
+                            ExpiresAt = Time.time + 2f
+                        });
+                    }
+
+                    return;
+                }
+
+                LogDiagnosticsWarning(
+                    $"trusted server shot could not be queued req={trustedRequest.RequestId} " +
+                    $"weaponHash={trustedRequest.WeaponHash}");
+                return;
+            }
+
+            SendShotRequest(
+                muzzlePosition,
+                shotDirection,
+                weapon,
+                chargeRatio,
+                0,
+                1,
+                optimisticPresentationPlayed: true,
+                nativeNotificationObserved: true);
         }
 
         private bool CanSendLocalShotRequest(ShooterWeapon weapon, bool logReason)
         {
-            if (m_IsRemoteClient || (!m_IsLocalClient && !m_IsServer))
+            if ((m_IsRemoteClient && !m_IsServer) || (!m_IsLocalClient && !m_IsServer))
             {
                 if (logReason)
                 {
@@ -299,30 +343,19 @@ namespace Arawn.GameCreator2.Networking.Shooter
             ShooterWeapon weapon,
             float chargeRatio,
             byte projectileIndex,
-            byte totalProjectiles)
+            byte totalProjectiles,
+            bool optimisticPresentationPlayed,
+            bool nativeNotificationObserved)
         {
             EnsureShooterManagerRegistration();
 
-            uint shooterNetworkId = m_NetworkCharacter != null ? m_NetworkCharacter.NetworkId : 0;
-            var sightHash = m_CurrentWeaponData?.SightId.Hash ?? 0;
-            ushort requestId = GetNextRequestId();
-            m_LastSentShotRequestId = requestId;
-
-            var request = new NetworkShotRequest
-            {
-                RequestId = requestId,
-                ActorNetworkId = NetworkId,
-                CorrelationId = NetworkCorrelation.Compose(NetworkId, requestId),
-                ClientTimestamp = GetNetworkTime(),
-                ShooterNetworkId = shooterNetworkId,
-                MuzzlePosition = muzzlePosition,
-                ShotDirection = shotDirection,
-                WeaponHash = weapon?.Id.Hash ?? 0,
-                SightHash = sightHash,
-                ChargeRatio = chargeRatio,
-                ProjectileIndex = projectileIndex,
-                TotalProjectiles = totalProjectiles
-            };
+            NetworkShotRequest request = BuildShotRequest(
+                muzzlePosition,
+                shotDirection,
+                weapon,
+                chargeRatio,
+                projectileIndex,
+                totalProjectiles);
 
             ulong pendingKey = GetPendingKey(request.ActorNetworkId, request.CorrelationId);
             if (pendingKey == 0)
@@ -346,7 +379,8 @@ namespace Arawn.GameCreator2.Networking.Shooter
             {
                 Request = request,
                 SentTime = Time.time,
-                OptimisticPlayed = false
+                OptimisticPlayed = optimisticPresentationPlayed,
+                NativeNotificationObserved = nativeNotificationObserved
             };
 
             if (OnShotRequestSent == null)
@@ -369,6 +403,80 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 Debug.Log($"[NetworkShooterController] Shot request sent: {request.RequestId}");
             }
 
+            return true;
+        }
+
+        private NetworkShotRequest BuildShotRequest(
+            Vector3 muzzlePosition,
+            Vector3 shotDirection,
+            ShooterWeapon weapon,
+            float chargeRatio,
+            byte projectileIndex,
+            byte totalProjectiles)
+        {
+            uint shooterNetworkId = m_NetworkCharacter != null ? m_NetworkCharacter.NetworkId : 0;
+            int sightHash = m_CurrentWeaponData?.SightId.Hash ?? 0;
+            ushort requestId = GetNextRequestId();
+            m_LastSentShotRequestId = requestId;
+
+            return new NetworkShotRequest
+            {
+                RequestId = requestId,
+                ActorNetworkId = NetworkId,
+                CorrelationId = NetworkCorrelation.Compose(NetworkId, requestId),
+                ClientTimestamp = GetNetworkTime(),
+                ShooterNetworkId = shooterNetworkId,
+                MuzzlePosition = muzzlePosition,
+                ShotDirection = shotDirection,
+                WeaponHash = weapon?.Id.Hash ?? 0,
+                SightHash = sightHash,
+                ChargeRatio = chargeRatio,
+                ProjectileIndex = projectileIndex,
+                TotalProjectiles = totalProjectiles
+            };
+        }
+
+        private bool TryMarkMatchingPendingShotAsNative(
+            Vector3 muzzlePosition,
+            Vector3 shotDirection,
+            ShooterWeapon weapon)
+        {
+            int weaponHash = weapon?.Id.Hash ?? 0;
+            float now = Time.time;
+            ulong matchedKey = 0;
+            float latestSentTime = float.MinValue;
+
+            foreach (KeyValuePair<ulong, PendingShotRequest> pair in m_PendingShots)
+            {
+                PendingShotRequest pending = pair.Value;
+                if (pending.NativeNotificationObserved) continue;
+                if (now - pending.SentTime > 0.5f) continue;
+                if (pending.Request.WeaponHash != weaponHash) continue;
+                if ((pending.Request.MuzzlePosition - muzzlePosition).sqrMagnitude > 0.25f) continue;
+
+                Vector3 pendingDirection = pending.Request.ShotDirection.sqrMagnitude > 0.0001f
+                    ? pending.Request.ShotDirection.normalized
+                    : Vector3.zero;
+                Vector3 nativeDirection = shotDirection.sqrMagnitude > 0.0001f
+                    ? shotDirection.normalized
+                    : Vector3.zero;
+                if (Vector3.Dot(pendingDirection, nativeDirection) < 0.995f) continue;
+                if (pending.SentTime <= latestSentTime) continue;
+
+                latestSentTime = pending.SentTime;
+                matchedKey = pair.Key;
+            }
+
+            if (matchedKey == 0 ||
+                !m_PendingShots.TryGetValue(matchedKey, out PendingShotRequest matched))
+            {
+                return false;
+            }
+
+            matched.OptimisticPlayed = true;
+            matched.NativeNotificationObserved = true;
+            m_PendingShots[matchedKey] = matched;
+            m_LastSentShotRequestId = matched.Request.RequestId;
             return true;
         }
 
@@ -408,6 +516,29 @@ namespace Arawn.GameCreator2.Networking.Shooter
             ShooterWeapon weapon,
             byte pierceIndex)
         {
+            return InterceptHit(
+                target,
+                hitPoint,
+                hitNormal,
+                distance,
+                weapon,
+                pierceIndex,
+                nativeHitWillContinue: false,
+                // A host must suppress GC2's direct Condition path: the loopback server request
+                // applies authoritative damage and the confirmation owns presentation.
+                optimisticPresentationPlayed: m_OptimisticHitEffects && !m_IsServer);
+        }
+
+        private bool InterceptHit(
+            GameObject target,
+            Vector3 hitPoint,
+            Vector3 hitNormal,
+            float distance,
+            ShooterWeapon weapon,
+            byte pierceIndex,
+            bool nativeHitWillContinue,
+            bool optimisticPresentationPlayed)
+        {
             if (target == null)
             {
                 LogDiagnosticsWarning(
@@ -429,17 +560,8 @@ namespace Arawn.GameCreator2.Networking.Shooter
             if (m_ProcessedHits.Contains(targetId)) return false;
             m_ProcessedHits.Add(targetId);
             
-            // Dedicated/server-only instances process hits directly. Host-owned
-            // local players still report through the authoritative request path.
-            if (m_IsServer && !m_IsLocalClient)
-            {
-                LogDiagnostics(
-                    $"intercept hit accepted locally on server target={target.name} weapon={(weapon != null ? weapon.name : "null")}");
-                return true;
-            }
-            
             // Remote clients don't process hits
-            if (m_IsRemoteClient)
+            if (m_IsRemoteClient && !m_IsServer)
             {
                 LogDiagnostics($"intercept hit blocked on remote client target={target.name}");
                 return false;
@@ -480,6 +602,40 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 ImpactPropNetworkId = impactPropNetworkId
             };
 
+            // A dedicated-server actor has no owning client request. The patched GC2 callback on
+            // either a host or dedicated server also cannot cancel the native hit. Queue those
+            // server-observed collisions directly; the direct host Condition path instead uses
+            // the ordinary loopback request below and returns false.
+            if (m_IsServer && (nativeHitWillContinue || !m_IsLocalClient))
+            {
+                NetworkShooterManager manager = NetworkShooterManager.Instance;
+                if (manager != null &&
+                    manager.TryServerQueueTrustedHit(request, nativeHitWillContinue))
+                {
+                    if (nativeHitWillContinue && m_IsLocalClient)
+                    {
+                        // The host's patched GC2 path is about to instantiate the impact locally.
+                        // Retain that fact until the trusted server broadcast returns so it is not
+                        // presented a second time.
+                        m_RecentOptimisticHitPresentations.Add(new RecentOptimisticHitPresentation
+                        {
+                            Request = request,
+                            ExpiresAt = Time.time + 2f
+                        });
+                    }
+
+                    LogDiagnostics(
+                        $"queued trusted server hit req={request.RequestId} target={request.TargetNetworkId} " +
+                        $"weaponHash={request.WeaponHash} nativeContinues={nativeHitWillContinue}");
+                    return false;
+                }
+
+                LogDiagnosticsWarning(
+                    $"trusted server hit could not be queued req={request.RequestId}; " +
+                    "falling back to native GC2 processing");
+                return true;
+            }
+
             ulong pendingKey = GetPendingKey(request.ActorNetworkId, request.CorrelationId);
             if (pendingKey == 0)
             {
@@ -491,7 +647,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
             {
                 Request = request,
                 SentTime = Time.time,
-                OptimisticPlayed = false
+                OptimisticPlayed = optimisticPresentationPlayed
             };
 
             if (OnHitDetected == null)
@@ -514,7 +670,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 Debug.Log($"[NetworkShooterController] Hit request sent: {target.name} at {hitPoint}");
             }
             
-            return m_OptimisticHitEffects;
+            return optimisticPresentationPlayed;
         }
 
         internal void NotifyHitDetected(ShotData data)
@@ -539,7 +695,9 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 data.ShootDirection.sqrMagnitude > 0.0001f ? -data.ShootDirection.normalized : Vector3.up,
                 data.Distance,
                 data.Weapon,
-                (byte)Mathf.Clamp(data.Pierces, 0, byte.MaxValue)
+                (byte)Mathf.Clamp(data.Pierces, 0, byte.MaxValue),
+                nativeHitWillContinue: true,
+                optimisticPresentationPlayed: true
             );
         }
 
@@ -1035,7 +1193,11 @@ namespace Arawn.GameCreator2.Networking.Shooter
         /// </summary>
         public void ReceiveShotResponse(NetworkShotResponse response)
         {
-            if (!TryTakePending(m_PendingShots, response.ActorNetworkId, response.CorrelationId, out _))
+            if (!TryTakePending(
+                    m_PendingShots,
+                    response.ActorNetworkId,
+                    response.CorrelationId,
+                    out PendingShotRequest pending))
             {
                 LogDiagnosticsWarning(
                     $"shot response dropped stale/unknown req={response.RequestId} corr={response.CorrelationId} " +
@@ -1052,6 +1214,15 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 $"validated={response.Validated} reason={response.RejectionReason} ammo={response.AmmoRemaining}");
 
             ApplyShotResponseAmmo(response);
+
+            if (response.Validated && pending.OptimisticPlayed)
+            {
+                m_RecentOptimisticShotPresentations.Add(new RecentOptimisticShotPresentation
+                {
+                    Request = pending.Request,
+                    ExpiresAt = Time.time + 2f
+                });
+            }
             
             if (!response.Validated)
             {
@@ -1096,7 +1267,11 @@ namespace Arawn.GameCreator2.Networking.Shooter
         /// </summary>
         public void ReceiveHitResponse(NetworkShooterHitResponse response)
         {
-            if (!TryTakePending(m_PendingHits, response.ActorNetworkId, response.CorrelationId, out _))
+            if (!TryTakePending(
+                    m_PendingHits,
+                    response.ActorNetworkId,
+                    response.CorrelationId,
+                    out PendingHitRequest pending))
             {
                 LogDiagnosticsWarning(
                     $"hit response dropped stale/unknown req={response.RequestId} corr={response.CorrelationId} " +
@@ -1112,7 +1287,15 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 $"hit response received req={response.RequestId} corr={response.CorrelationId} " +
                 $"validated={response.Validated} reason={response.RejectionReason} damage={response.Damage:F2}");
             
-            if (!response.Validated)
+            if (response.Validated && pending.OptimisticPlayed)
+            {
+                m_RecentOptimisticHitPresentations.Add(new RecentOptimisticHitPresentation
+                {
+                    Request = pending.Request,
+                    ExpiresAt = Time.time + 2f
+                });
+            }
+            else if (!response.Validated)
             {
                 if (m_LogHits)
                 {
@@ -1126,17 +1309,76 @@ namespace Arawn.GameCreator2.Networking.Shooter
         /// </summary>
         public void ReceiveShotBroadcast(NetworkShotBroadcast broadcast)
         {
+            bool isLocalShooter = m_IsLocalClient && broadcast.ShooterNetworkId == NetworkId;
+            bool matchedOptimisticPresentation =
+                isLocalShooter && HasMatchingOptimisticShotPresentation(broadcast);
             LogDiagnostics(
                 $"shot broadcast received shooter={broadcast.ShooterNetworkId} weaponHash={broadcast.WeaponHash} " +
-                $"willPlayEffects={!m_IsLocalClient} muzzle={broadcast.MuzzlePosition} hitPoint={broadcast.HitPoint}");
+                $"willPlayEffects={!matchedOptimisticPresentation} muzzle={broadcast.MuzzlePosition} hitPoint={broadcast.HitPoint}");
             OnShotConfirmed?.Invoke(broadcast);
             
-            // Play effects on observer instances. Local owners already played
-            // the GC2 shot path optimistically.
-            if (!m_IsLocalClient)
+            // Suppress confirmation only when this exact local shot actually entered the native
+            // optimistic presentation path. A local owner with optimism disabled (or no matching
+            // request) still needs the confirmed tracer/muzzle presentation.
+            if (!matchedOptimisticPresentation)
             {
                 PlayShotEffects(broadcast);
             }
+        }
+
+        private bool HasMatchingOptimisticShotPresentation(NetworkShotBroadcast broadcast)
+        {
+            ulong matchedPendingKey = 0;
+            foreach (KeyValuePair<ulong, PendingShotRequest> pair in m_PendingShots)
+            {
+                PendingShotRequest pending = pair.Value;
+                if (!pending.OptimisticPlayed) continue;
+                if (!MatchesConfirmedShotBroadcast(pending.Request, broadcast)) continue;
+                matchedPendingKey = pair.Key;
+                break;
+            }
+
+            if (matchedPendingKey != 0 &&
+                m_PendingShots.TryGetValue(matchedPendingKey, out PendingShotRequest matchedPending))
+            {
+                matchedPending.OptimisticPlayed = false;
+                m_PendingShots[matchedPendingKey] = matchedPending;
+                return true;
+            }
+
+            float now = Time.time;
+            for (int i = m_RecentOptimisticShotPresentations.Count - 1; i >= 0; i--)
+            {
+                RecentOptimisticShotPresentation recent = m_RecentOptimisticShotPresentations[i];
+                if (recent.ExpiresAt < now)
+                {
+                    m_RecentOptimisticShotPresentations.RemoveAt(i);
+                    continue;
+                }
+
+                if (!MatchesConfirmedShotBroadcast(recent.Request, broadcast)) continue;
+                m_RecentOptimisticShotPresentations.RemoveAt(i);
+                return true;
+            }
+
+            return false;
+        }
+
+        private static bool MatchesConfirmedShotBroadcast(
+            NetworkShotRequest request,
+            NetworkShotBroadcast broadcast)
+        {
+            Vector3 requestDirection = request.ShotDirection.sqrMagnitude > 0.0001f
+                ? request.ShotDirection.normalized
+                : Vector3.zero;
+            Vector3 broadcastDirection = broadcast.ShotDirection.sqrMagnitude > 0.0001f
+                ? broadcast.ShotDirection.normalized
+                : Vector3.zero;
+
+            return request.ShooterNetworkId == broadcast.ShooterNetworkId &&
+                   request.WeaponHash == broadcast.WeaponHash &&
+                   (request.MuzzlePosition - broadcast.MuzzlePosition).sqrMagnitude <= 0.25f &&
+                   Vector3.Dot(requestDirection, broadcastDirection) >= 0.995f;
         }
         
         /// <summary>
@@ -1145,7 +1387,9 @@ namespace Arawn.GameCreator2.Networking.Shooter
         public void ReceiveHitBroadcast(NetworkShooterHitBroadcast broadcast)
         {
             bool isLocalShooter = m_IsLocalClient && broadcast.ShooterNetworkId == NetworkId;
-            bool willPlayEffects = !isLocalShooter || !m_OptimisticHitEffects;
+            bool matchedOptimisticPresentation =
+                isLocalShooter && HasMatchingOptimisticHitPresentation(broadcast);
+            bool willPlayEffects = !matchedOptimisticPresentation;
             LogDiagnostics(
                 $"hit broadcast received shooter={broadcast.ShooterNetworkId} target={broadcast.TargetNetworkId} " +
                 $"weaponHash={broadcast.WeaponHash} willPlayEffects={willPlayEffects} point={broadcast.HitPoint}");
@@ -1153,6 +1397,98 @@ namespace Arawn.GameCreator2.Networking.Shooter
             
             // Play effects on observer instances or non-optimistic locals.
             if (willPlayEffects)
+            {
+                PlayHitEffects(broadcast);
+            }
+        }
+
+        private bool HasMatchingOptimisticHitPresentation(NetworkShooterHitBroadcast broadcast)
+        {
+            ulong matchedPendingKey = 0;
+            foreach (KeyValuePair<ulong, PendingHitRequest> pair in m_PendingHits)
+            {
+                PendingHitRequest pending = pair.Value;
+                if (!pending.OptimisticPlayed) continue;
+                if (!MatchesConfirmedHitBroadcast(pending.Request, broadcast)) continue;
+                matchedPendingKey = pair.Key;
+                break;
+            }
+
+            if (matchedPendingKey != 0 &&
+                m_PendingHits.TryGetValue(matchedPendingKey, out PendingHitRequest matchedPending))
+            {
+                // Consume the marker without removing the request; its response still owns
+                // request completion and rejection notification.
+                matchedPending.OptimisticPlayed = false;
+                m_PendingHits[matchedPendingKey] = matchedPending;
+                return true;
+            }
+
+            float now = Time.time;
+            for (int i = m_RecentOptimisticHitPresentations.Count - 1; i >= 0; i--)
+            {
+                RecentOptimisticHitPresentation recent = m_RecentOptimisticHitPresentations[i];
+                if (recent.ExpiresAt < now)
+                {
+                    m_RecentOptimisticHitPresentations.RemoveAt(i);
+                    continue;
+                }
+
+                if (!MatchesConfirmedHitBroadcast(recent.Request, broadcast)) continue;
+                m_RecentOptimisticHitPresentations.RemoveAt(i);
+                return true;
+            }
+
+            return false;
+        }
+
+        private static bool MatchesConfirmedHitBroadcast(
+            NetworkShooterHitRequest request,
+            NetworkShooterHitBroadcast broadcast)
+        {
+            return request.ShooterNetworkId == broadcast.ShooterNetworkId &&
+                   request.TargetNetworkId == broadcast.TargetNetworkId &&
+                   request.WeaponHash == broadcast.WeaponHash &&
+                   (request.HitPoint - broadcast.HitPoint).sqrMagnitude <= 0.25f;
+        }
+
+        /// <summary>
+        /// [All] Target-side delivery for a confirmed hit. This deliberately does not
+        /// instantiate shared impact presentation, which is owned by the attacker path.
+        /// </summary>
+        public void ReceiveTargetHitBroadcast(NetworkShooterHitBroadcast broadcast)
+        {
+            OnHitConfirmed?.Invoke(broadcast);
+
+            ShooterWeapon weapon = NetworkShooterManager.GetShooterWeaponByHash(broadcast.WeaponHash);
+            if (weapon == null)
+            {
+                LogMissingHitAssetOnce(broadcast.WeaponHash, "target reaction");
+                return;
+            }
+
+            PlayRemoteHitReaction(broadcast, weapon);
+        }
+
+        /// <summary>
+        /// [All] Combined exact-once path for a character that hit itself.
+        /// </summary>
+        public void ReceiveSelfHitBroadcast(NetworkShooterHitBroadcast broadcast)
+        {
+            bool isLocalShooter = m_IsLocalClient && broadcast.ShooterNetworkId == NetworkId;
+            OnHitConfirmed?.Invoke(broadcast);
+
+            ShooterWeapon weapon = NetworkShooterManager.GetShooterWeaponByHash(broadcast.WeaponHash);
+            if (weapon != null)
+            {
+                PlayRemoteHitReaction(broadcast, weapon);
+            }
+            else
+            {
+                LogMissingHitAssetOnce(broadcast.WeaponHash, "self-hit reaction");
+            }
+
+            if (!isLocalShooter || !HasMatchingOptimisticHitPresentation(broadcast))
             {
                 PlayHitEffects(broadcast);
             }
@@ -1170,8 +1506,11 @@ namespace Arawn.GameCreator2.Networking.Shooter
             ShooterWeapon weapon = NetworkShooterManager.GetShooterWeaponByHash(broadcast.WeaponHash);
             if (weapon == null)
             {
-                LogDiagnosticsWarning(
-                    $"cannot play remote shot effects: weapon hash {broadcast.WeaponHash} is not registered");
+                LogMissingShotAssetOnce(broadcast.WeaponHash);
+                if (m_UseGeneratedFallbackPresentation)
+                {
+                    DrawRemoteTracer(broadcast.MuzzlePosition, broadcast.HitPoint);
+                }
                 return;
             }
 
@@ -1183,7 +1522,10 @@ namespace Arawn.GameCreator2.Networking.Shooter
             PlayRemoteFireEffects(weapon, broadcast.MuzzlePosition, broadcast.ShotDirection);
             if (!TryPlayRemoteProjectileEffects(weapon, broadcast))
             {
-                DrawRemoteTracer(broadcast.MuzzlePosition, broadcast.HitPoint);
+                if (m_UseGeneratedFallbackPresentation)
+                {
+                    DrawRemoteTracer(broadcast.MuzzlePosition, broadcast.HitPoint);
+                }
             }
         }
         
@@ -1194,8 +1536,14 @@ namespace Arawn.GameCreator2.Networking.Shooter
             ShooterWeapon weapon = NetworkShooterManager.GetShooterWeaponByHash(broadcast.WeaponHash);
             if (weapon == null)
             {
-                LogDiagnosticsWarning(
-                    $"cannot play remote hit effects: weapon hash {broadcast.WeaponHash} is not registered");
+                LogMissingHitAssetOnce(
+                    broadcast.WeaponHash,
+                    "impact presentation",
+                    broadcast.MaterialHash);
+                if (m_UseGeneratedFallbackPresentation)
+                {
+                    DrawRemoteImpact(broadcast.HitPoint, broadcast.HitNormal);
+                }
                 return;
             }
 
@@ -1203,12 +1551,43 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 $"playing remote hit effects weapon={weapon.name} target={broadcast.TargetNetworkId} " +
                 $"point={broadcast.HitPoint} materialHash={broadcast.MaterialHash}");
 
-            PlayRemoteHitReaction(broadcast, weapon);
             ApplyRemoteConfirmedEnvironmentImpact(broadcast, weapon);
-            if (!PlayConfiguredImpactEffect(weapon, null, broadcast.HitPoint, broadcast.HitNormal))
+            GameObject impactTarget = ResolveImpactPresentationTarget(broadcast);
+            if (!PlayConfiguredImpactEffect(
+                    weapon,
+                    impactTarget,
+                    broadcast.HitPoint,
+                    broadcast.HitNormal,
+                    broadcast.MaterialHash))
             {
-                DrawRemoteImpact(broadcast.HitPoint, broadcast.HitNormal);
+                if (m_UseGeneratedFallbackPresentation)
+                {
+                    DrawRemoteImpact(broadcast.HitPoint, broadcast.HitNormal);
+                }
             }
+        }
+
+        private void LogMissingShotAssetOnce(int weaponHash)
+        {
+            if (!m_MissingShotEffectWeaponHashes.Add(weaponHash)) return;
+            LogDiagnosticsWarning(
+                $"cannot resolve Shooter weapon hash {weaponHash} for remote shot presentation. " +
+                "Register the weapon and optional model/handle on PurrNetShooterTransportBridge. " +
+                (m_UseGeneratedFallbackPresentation
+                    ? "The configured generated fallback tracer will be shown."
+                    : "Non-visual event routing continues; no fallback is configured."));
+        }
+
+        private void LogMissingHitAssetOnce(int weaponHash, string purpose, int materialHash = 0)
+        {
+            if (!m_MissingHitEffectWeaponHashes.Add(weaponHash)) return;
+            LogDiagnosticsWarning(
+                $"cannot resolve Shooter weapon hash {weaponHash} for {purpose} " +
+                $"(materialHash={materialHash}). " +
+                "Register it on PurrNetShooterTransportBridge. Gameplay routing continues. " +
+                (m_UseGeneratedFallbackPresentation
+                    ? "The configured generated fallback impact will be used."
+                    : "No fallback presentation is configured."));
         }
 
         private void PlayRemoteHitReaction(NetworkShooterHitBroadcast broadcast, ShooterWeapon weapon)
@@ -1620,6 +1999,96 @@ namespace Arawn.GameCreator2.Networking.Shooter
             return false;
         }
 
+        private GameObject ResolveImpactPresentationTarget(NetworkShooterHitBroadcast broadcast)
+        {
+            GameObject fallback = null;
+
+            if (broadcast.TargetNetworkId != 0)
+            {
+                NetworkCharacter target = NetworkShooterManager.Instance != null
+                    ? NetworkShooterManager.Instance.GetCharacterByNetworkId(broadcast.TargetNetworkId)
+                    : null;
+                fallback = target != null ? target.gameObject : null;
+            }
+            else if (TryResolveImpactPresentationCollider(
+                         broadcast.HitPoint,
+                         broadcast.HitNormal.sqrMagnitude > 0.0001f
+                             ? -broadcast.HitNormal.normalized
+                             : Vector3.forward,
+                         out Collider collider))
+            {
+                fallback = collider.gameObject;
+            }
+
+            var manager = NetworkShooterManager.Instance;
+            if (manager?.ResolveMaterialTargetFunc != null)
+            {
+                try
+                {
+                    fallback = manager.ResolveMaterialTargetFunc.Invoke(broadcast.MaterialHash, fallback) ?? fallback;
+                }
+                catch (Exception exception)
+                {
+                    LogDiagnosticsWarning(
+                        $"material target resolver failed materialHash={broadcast.MaterialHash}: " +
+                        $"{exception.GetType().Name}: {exception.Message}");
+                }
+            }
+
+            if (broadcast.MaterialHash != 0 && fallback == null)
+            {
+                LogDiagnosticsWarning(
+                    $"impact material hash {broadcast.MaterialHash} had no local collider/target at {broadcast.HitPoint}");
+            }
+
+            return fallback;
+        }
+
+        private static bool TryResolveImpactPresentationCollider(
+            Vector3 point,
+            Vector3 direction,
+            out Collider collider)
+        {
+            collider = null;
+            float bestDistanceSqr = float.MaxValue;
+
+            int count = Physics.OverlapSphereNonAlloc(
+                point,
+                0.35f,
+                REMOTE_IMPACT_COLLIDERS,
+                Physics.DefaultRaycastLayers,
+                QueryTriggerInteraction.Ignore);
+
+            for (int i = 0; i < count; i++)
+            {
+                Collider candidate = REMOTE_IMPACT_COLLIDERS[i];
+                REMOTE_IMPACT_COLLIDERS[i] = null;
+                if (candidate == null || candidate.isTrigger) continue;
+                if (candidate.GetComponentInParent<Character>() != null) continue;
+
+                float distanceSqr = (candidate.ClosestPoint(point) - point).sqrMagnitude;
+                if (distanceSqr >= bestDistanceSqr) continue;
+                bestDistanceSqr = distanceSqr;
+                collider = candidate;
+            }
+
+            if (collider != null) return true;
+
+            Vector3 rayDirection = direction.sqrMagnitude > 0.0001f
+                ? direction.normalized
+                : Vector3.forward;
+            return Physics.Raycast(
+                       point - rayDirection * 0.25f,
+                       rayDirection,
+                       out RaycastHit hit,
+                       0.75f,
+                       Physics.DefaultRaycastLayers,
+                       QueryTriggerInteraction.Ignore) &&
+                   (collider = hit.collider) != null &&
+                   !collider.isTrigger &&
+                   collider.GetComponentInParent<Character>() == null;
+        }
+
         private static bool IsValidEnvironmentImpactCollider(Collider collider)
         {
             if (collider == null || collider.isTrigger) return false;
@@ -1634,7 +2103,8 @@ namespace Arawn.GameCreator2.Networking.Shooter
             ShooterWeapon weapon,
             GameObject target,
             Vector3 point,
-            Vector3 normal)
+            Vector3 normal,
+            int materialHash = 0)
         {
             if (weapon == null || m_Character == null) return false;
 
@@ -1658,6 +2128,8 @@ namespace Arawn.GameCreator2.Networking.Shooter
             {
                 MaterialSounds.Play(args, point, normal, target, impactSound, UnityEngine.Random.Range(-180f, 180f));
                 played = true;
+                LogDiagnostics(
+                    $"played configured material impact sound materialHash={materialHash} target={target.name}");
             }
 
             return played;
