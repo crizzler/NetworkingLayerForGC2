@@ -1274,12 +1274,22 @@ namespace Arawn.GameCreator2.Networking.Melee
                 return BlockEvaluationResult.NoBlock;
             }
 
-            BlockType authoredResult = skill.NetworkResolveDefenseDirect(
-                attackerCharacter,
-                targetCharacter,
-                request.HitPoint,
-                request.StrikeDirection,
-                Mathf.Max(0f, attackPower));
+            if (!NetworkMeleePatchHooks.TryResolveDefenseDirect(
+                    skill,
+                    attackerCharacter,
+                    targetCharacter,
+                    request.HitPoint,
+                    request.StrikeDirection,
+                    Mathf.Max(0f, attackPower),
+                    out BlockType authoredResult,
+                    out string authoredDefenseFailure))
+            {
+                WarnHitRoutingInvariant(
+                    $"Could not run authored defense resolution for hit " +
+                    $"{request.ActorNetworkId}->{request.TargetNetworkId}. " +
+                    $"{authoredDefenseFailure} The hit continues as unblocked.");
+                return BlockEvaluationResult.NoBlock;
+            }
 
             // The real GC2 shield is authoritative. Keep the old dictionary only as a cache for
             // snapshots/compatibility; it never decides the result anymore.

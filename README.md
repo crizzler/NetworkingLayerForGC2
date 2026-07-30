@@ -56,16 +56,19 @@ When a Player Prefab is assigned and preparation is enabled, the wizard can add 
 
 ## Patch System
 
-Use `Game Creator > Networking Layer > Patches` for optional source patching.
+Use `Game Creator > Networking Layer > Patches` outside Play Mode. The PurrNet
+Scene Setup Wizard validates the required patch for every selected module.
 
-- Default recommendation: start unpatched (interception/fallback mode).
-- Move to patch mode when your game has traction and abuse/cheat pressure increases.
-- Core combat/inventory modules are usually first for competitive hardening.
-- Quests / Dialogue / Traversal patchers remain optional for most coop flows.
+- Inventory, Melee, Shooter, and Traversal networking require their current
+  server-authority patches.
+- Shooter also requires the remote-camera-safety Sight patch.
+- Updating or reinstalling a patched GC2 module can overwrite its hooks; rerun
+  the wizard and reapply any patch reported as missing or stale.
+- The Networking Layer fails closed when required hooks are unavailable.
 
 See:
 
-- [Patching Strategy](https://arawn-software-publishing.gitbook.io/networking-layer-for-gc2/misc/optional-patching-strategy)
+- [Online documentation](https://arawn-software-publishing.gitbook.io/networking-layer-for-gc2)
 
 ## Quickstart
 
@@ -73,7 +76,6 @@ Start here for transport wiring:
 
 - [Quickstart](https://arawn-software-publishing.gitbook.io/networking-layer-for-gc2/getting-started/quickstart)
 - [Public API](https://arawn-software-publishing.gitbook.io/networking-layer-for-gc2/getting-started/publish-your-docs)
-- [Patching Strategy](https://arawn-software-publishing.gitbook.io/networking-layer-for-gc2/misc/optional-patching-strategy)
 - [PurrNet Transport](https://arawn-software-publishing.gitbook.io/networking-layer-for-gc2/purrnet-overview)
 
 ## Contributing

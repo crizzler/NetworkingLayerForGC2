@@ -1,0 +1,6 @@
+<linker>
+    <!-- See the Melee linker file for why patch ABI members are preserved by type. -->
+    <assembly fullname="GameCreator.Runtime.Traversal">
+        <type fullname="GameCreator.Runtime.Traversal.TraversalStance" preserve="all" />
+    </assembly>
+</linker>

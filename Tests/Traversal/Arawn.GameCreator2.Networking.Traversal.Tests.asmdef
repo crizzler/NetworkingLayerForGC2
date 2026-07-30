@@ -23,7 +23,8 @@
     "autoReferenced": false,
     "defineConstraints": [
         "UNITY_INCLUDE_TESTS",
-        "GC2_TRAVERSAL"
+        "GC2_TRAVERSAL",
+        "GC2_NETWORK_TRAVERSAL_PATCHED"
     ],
     "versionDefines": [
         {

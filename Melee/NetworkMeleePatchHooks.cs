@@ -14,6 +14,21 @@ namespace Arawn.GameCreator2.Networking.Melee
     /// </summary>
     public class NetworkMeleePatchHooks : NetworkSingleton<NetworkMeleePatchHooks>
     {
+        private static readonly MethodInfo s_NetworkResolveDefenseDirectMethod =
+            typeof(Skill).GetMethod(
+                "NetworkResolveDefenseDirect",
+                BindingFlags.Public | BindingFlags.Instance,
+                null,
+                new[]
+                {
+                    typeof(Character),
+                    typeof(Character),
+                    typeof(Vector3),
+                    typeof(Vector3),
+                    typeof(float)
+                },
+                null);
+
         private bool m_IsServer;
         private bool m_Installed;
         private float m_NextPatchDiagnosticTime;
@@ -105,6 +120,70 @@ namespace Arawn.GameCreator2.Networking.Melee
                     typeof(Vector3),
                     typeof(float)) &&
                 HasInstanceMethod(typeof(Skill), "OnHit", typeof(Args), typeof(Vector3), typeof(Vector3));
+        }
+
+        /// <summary>
+        /// Invokes the authored-defense patch ABI without a compile-time dependency on the
+        /// injected GC2 member. This keeps the project compilable after GC2 overwrites a patch,
+        /// so the editor patcher can report and repair the stale source safely.
+        /// </summary>
+        internal static bool TryResolveDefenseDirect(
+            Skill skill,
+            Character attacker,
+            Character target,
+            Vector3 point,
+            Vector3 targetLocalDirection,
+            float power,
+            out BlockType result,
+            out string failureReason)
+        {
+            result = BlockType.None;
+            failureReason = null;
+
+            if (skill == null)
+            {
+                failureReason = "The authored Skill is null.";
+                return false;
+            }
+
+            if (s_NetworkResolveDefenseDirectMethod == null)
+            {
+                failureReason =
+                    "The required Skill.NetworkResolveDefenseDirect patch hook is missing. " +
+                    "Apply the current GC2 Melee server-authority patch.";
+                return false;
+            }
+
+            try
+            {
+                object value = s_NetworkResolveDefenseDirectMethod.Invoke(
+                    skill,
+                    new object[]
+                    {
+                        attacker,
+                        target,
+                        point,
+                        targetLocalDirection,
+                        power
+                    });
+
+                if (value is BlockType blockType)
+                {
+                    result = blockType;
+                    return true;
+                }
+
+                failureReason =
+                    "Skill.NetworkResolveDefenseDirect returned an unexpected value.";
+                return false;
+            }
+            catch (Exception exception)
+            {
+                failureReason =
+                    $"Skill.NetworkResolveDefenseDirect failed: " +
+                    $"{exception.GetBaseException().Message}";
+                return false;
+            }
         }
 
         private void InstallHooks()

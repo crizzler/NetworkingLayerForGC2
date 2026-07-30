@@ -18,9 +18,11 @@ namespace Arawn.GameCreator2.Networking.Editor
         private const string SYMBOL_STATS = "GC2_STATS";
         private const string SYMBOL_SHOOTER = "GC2_SHOOTER";
         private const string SYMBOL_MELEE = "GC2_MELEE";
+        public const string SYMBOL_MELEE_AUTHORITY_PATCH = "GC2_NETWORK_MELEE_PATCHED";
         private const string SYMBOL_QUESTS = "GC2_QUESTS";
         private const string SYMBOL_DIALOGUE = "GC2_DIALOGUE";
         private const string SYMBOL_TRAVERSAL = "GC2_TRAVERSAL";
+        public const string SYMBOL_TRAVERSAL_AUTHORITY_PATCH = "GC2_NETWORK_TRAVERSAL_PATCHED";
         private const string SYMBOL_ABILITIES = "GC2_ABILITIES";
         private const string SYMBOL_TRANSPORT_INTEGRATION = "ARAWN_GC2_TRANSPORT_INTEGRATION";
         private const string OBSOLETE_SYMBOL_PURRNET_TRANSPORT = "ARAWN_GC2_PURRNET_TRANSPORT";
@@ -101,9 +103,17 @@ namespace Arawn.GameCreator2.Networking.Editor
                 ManageSymbol(symbolList, SYMBOL_STATS, IsStatsInstalled());
                 ManageSymbol(symbolList, SYMBOL_SHOOTER, IsShooterInstalled());
                 ManageSymbol(symbolList, SYMBOL_MELEE, IsMeleeInstalled());
+                ManageSymbol(
+                    symbolList,
+                    SYMBOL_MELEE_AUTHORITY_PATCH,
+                    IsMeleeInstalled() && IsMeleeAuthorityPatchApplied());
                 ManageSymbol(symbolList, SYMBOL_QUESTS, IsQuestsInstalled());
                 ManageSymbol(symbolList, SYMBOL_DIALOGUE, IsDialogueInstalled());
                 ManageSymbol(symbolList, SYMBOL_TRAVERSAL, IsTraversalInstalled());
+                ManageSymbol(
+                    symbolList,
+                    SYMBOL_TRAVERSAL_AUTHORITY_PATCH,
+                    IsTraversalInstalled() && IsTraversalAuthorityPatchApplied());
                 ManageSymbol(symbolList, SYMBOL_ABILITIES, IsAbilitiesInstalled());
                 ManageSymbol(symbolList, SYMBOL_TRANSPORT_INTEGRATION, IsTransportIntegrationInstalled());
                 RemoveSymbol(symbolList, OBSOLETE_SYMBOL_PURRNET_TRANSPORT);
@@ -189,6 +199,24 @@ namespace Arawn.GameCreator2.Networking.Editor
             return Directory.Exists(GC2_MELEE_DIR) || IsNamespacePresentCached("GameCreator.Runtime.Melee");
         }
 
+        public static bool IsMeleeAuthorityPatchApplied()
+        {
+            try
+            {
+                var patcher =
+                    new Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches.MeleePatcher();
+                return patcher.ValidateFilesExist() && patcher.IsPatched();
+            }
+            catch (IOException)
+            {
+                return false;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return false;
+            }
+        }
+
         private static bool IsQuestsInstalled()
         {
             return Directory.Exists(GC2_QUESTS_DIR) || IsNamespacePresentCached("GameCreator.Runtime.Quests");
@@ -202,6 +230,24 @@ namespace Arawn.GameCreator2.Networking.Editor
         private static bool IsTraversalInstalled()
         {
             return Directory.Exists(GC2_TRAVERSAL_DIR) || IsNamespacePresentCached("GameCreator.Runtime.Traversal");
+        }
+
+        public static bool IsTraversalAuthorityPatchApplied()
+        {
+            try
+            {
+                var patcher =
+                    new Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches.TraversalPatcher();
+                return patcher.ValidateFilesExist() && patcher.IsPatched();
+            }
+            catch (IOException)
+            {
+                return false;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return false;
+            }
         }
 
         private static bool IsAbilitiesInstalled()

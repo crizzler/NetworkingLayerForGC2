@@ -32,7 +32,6 @@ public const int NetworkPatchRevision = 300;";
             string[] paths =
             {
                 "Arawn/NetworkingLayerForGC2/Inventory/Arawn.GameCreator2.Networking.Inventory.asmdef",
-                "Arawn/NetworkingLayerForGC2/Editor/Inventory/Arawn.GameCreator2.Networking.Inventory.Editor.asmdef",
                 "Arawn/NetworkingLayerForGC2/Runtime/Transport/PurrNet/Inventory/Arawn.GameCreator2.Networking.Inventory.Transport.PurrNet.asmdef",
                 "Arawn/NetworkingLayerForGC2/Tests/Inventory/Arawn.GameCreator2.Networking.Inventory.Tests.asmdef"
             };
@@ -45,6 +44,62 @@ public const int NetworkPatchRevision = 300;";
                     content,
                     relativePath);
             }
+        }
+
+        [Test]
+        public void MeleeAndTraversalRuntime_AvoidCompileTimePatchMethodDependencies()
+        {
+            string meleeSource = File.ReadAllText(Path.Combine(
+                Application.dataPath,
+                "Arawn/NetworkingLayerForGC2/Melee/NetworkMeleeController.GuardsSkills.cs"));
+            string traversalSource = File.ReadAllText(Path.Combine(
+                Application.dataPath,
+                "Arawn/NetworkingLayerForGC2/Traversal/NetworkTraversalController.cs"));
+
+            StringAssert.DoesNotContain(".NetworkResolveDefenseDirect(", meleeSource);
+            StringAssert.Contains("TryResolveDefenseDirect(", meleeSource);
+            StringAssert.DoesNotContain(".NetworkInvalidatePendingEnter(", traversalSource);
+            StringAssert.Contains("TryInvalidatePendingTraversalEnter(", traversalSource);
+        }
+
+        [Test]
+        public void MeleeAndTraversalTests_RequireCompletePatchAbiDefines()
+        {
+            string meleeTests = File.ReadAllText(Path.Combine(
+                Application.dataPath,
+                "Arawn/NetworkingLayerForGC2/Tests/Melee/" +
+                "Arawn.GameCreator2.Networking.Melee.Tests.asmdef"));
+            string traversalTests = File.ReadAllText(Path.Combine(
+                Application.dataPath,
+                "Arawn/NetworkingLayerForGC2/Tests/Traversal/" +
+                "Arawn.GameCreator2.Networking.Traversal.Tests.asmdef"));
+
+            StringAssert.Contains(
+                $"\"{GC2NetworkingDefineSymbols.SYMBOL_MELEE_AUTHORITY_PATCH}\"",
+                meleeTests);
+            StringAssert.Contains(
+                $"\"{GC2NetworkingDefineSymbols.SYMBOL_TRAVERSAL_AUTHORITY_PATCH}\"",
+                traversalTests);
+        }
+
+        [Test]
+        public void PurrNetInstallCompatibility_DetectsOnlyMixedLiteNetLibGenerations()
+        {
+            const string combined =
+                "namespace LiteNetLib { public class NetManager : LiteNetManager { } }";
+            const string split =
+                "namespace LiteNetLib { public partial class NetManager : LiteNetManager { } }";
+            string[] legacyFiles = { "Assets/PurrNet/Externals/LiteNetLib/NetManager.Socket.cs" };
+
+            Assert.IsTrue(PurrNetInstallCompatibility.HasMixedLiteNetLibLayout(
+                combined,
+                legacyFiles));
+            Assert.IsFalse(PurrNetInstallCompatibility.HasMixedLiteNetLibLayout(
+                split,
+                legacyFiles));
+            Assert.IsFalse(PurrNetInstallCompatibility.HasMixedLiteNetLibLayout(
+                combined,
+                System.Array.Empty<string>()));
         }
 
         private sealed class ShooterPatcherProxy : ShooterPatcher
@@ -561,6 +616,9 @@ public const int NetworkPatchRevision = 300;";
                 "{\n" +
                 "    // missing invocation on purpose\n" +
                 "}\n" +
+                "public BlockType NetworkResolveDefenseDirect(\n" +
+                "    Character attacker, Character target, Vector3 point,\n" +
+                "    Vector3 targetLocalDirection, float power) => BlockType.None;\n" +
                 "}\n" +
                 "// [GC2_NETWORK_PATCH_END]\n";
 
@@ -631,10 +689,12 @@ public const int NetworkPatchRevision = 300;";
             var patcher = new MeleePatcherProxy();
             string missingCallback =
                 $"{patcher.Marker}\n" +
+                "// [GC2_NETWORK_PATCH]\n" +
                 "public abstract class TShieldResponse {\n" +
-                "public static System.Action<TShieldResponse, Args, ShieldOutput, ReactionInput, Reaction, ReactionOutput> NetworkReactionResolved;\n" +
+                "public static Action<TShieldResponse, Args, ShieldOutput, ReactionInput, Reaction, ReactionOutput> NetworkReactionResolved;\n" +
                 "void Run() { ReactionOutput reactionOutput = this.m_Reaction.Run(character, args, reactionInput); }\n" +
-                "}\n";
+                "}\n" +
+                "// [GC2_NETWORK_PATCH_END]\n";
 
             bool valid = patcher.Verify(
                 "Plugins/GameCreator/Packages/Melee/Runtime/Classes/Shield/TShieldResponse.cs",
@@ -651,13 +711,15 @@ public const int NetworkPatchRevision = 300;";
             var patcher = new MeleePatcherProxy();
             string content =
                 $"{patcher.Marker}\n" +
+                "// [GC2_NETWORK_PATCH]\n" +
                 "public abstract class TShieldResponse {\n" +
-                "public static System.Action<TShieldResponse, Args, ShieldOutput, ReactionInput, Reaction, ReactionOutput> NetworkReactionResolved;\n" +
+                "public static Action<TShieldResponse, Args, ShieldOutput, ReactionInput, Reaction, ReactionOutput> NetworkReactionResolved;\n" +
                 "void Run() {\n" +
                 "ReactionOutput reactionOutput = this.m_Reaction.Run(character, args, reactionInput);\n" +
                 "NetworkReactionResolved?.Invoke(this, args, shieldOutput, reactionInput, this.m_Reaction, reactionOutput);\n" +
                 "}\n" +
-                "}\n";
+                "}\n" +
+                "// [GC2_NETWORK_PATCH_END]\n";
 
             bool valid = patcher.Verify(
                 "Plugins/GameCreator/Packages/Melee/Runtime/Classes/Shield/TShieldResponse.cs",
@@ -706,8 +768,8 @@ public const int NetworkPatchRevision = 300;";
                 "// [GC2_NETWORK_PATCH]\n" +
                 "public class AttackSkill {\n" +
                 "public static System.Func<MeleeStance, StrikeOutput, Skill, bool> NetworkStrikeValidator;\n" +
-                "public static System.Action<MeleeStance, Skill, int, int> NetworkStrikeProbe;\n" +
-                "public static System.Action<MeleeStance, MeleeWeapon, Skill, int> NetworkSkillStarted;\n" +
+                "public static Action<MeleeStance, Skill, int, int> NetworkStrikeProbe;\n" +
+                "public static Action<MeleeStance, MeleeWeapon, Skill, int> NetworkSkillStarted;\n" +
                 "private readonly System.Collections.Generic.HashSet<int> m_HitsBuffer = new();\n" +
                 "private void WhenEnter()\n" +
                 "{\n" +
@@ -798,8 +860,8 @@ public const int NetworkPatchRevision = 300;";
                 "// [GC2_NETWORK_PATCH]\n" +
                 "public class AttackSkill {\n" +
                 "public static System.Func<MeleeStance, StrikeOutput, Skill, bool> NetworkStrikeValidator;\n" +
-                "public static System.Action<MeleeStance, Skill, int, int> NetworkStrikeProbe;\n" +
-                "public static System.Action<MeleeStance, MeleeWeapon, Skill, int> NetworkSkillStarted;\n" +
+                "public static Action<MeleeStance, Skill, int, int> NetworkStrikeProbe;\n" +
+                "public static Action<MeleeStance, MeleeWeapon, Skill, int> NetworkSkillStarted;\n" +
                 "private readonly System.Collections.Generic.HashSet<int> m_HitsBuffer = new();\n" +
                 "private void WhenEnter()\n" +
                 "{\n" +
@@ -850,8 +912,8 @@ public const int NetworkPatchRevision = 300;";
                 "// [GC2_NETWORK_PATCH]\n" +
                 "public class AttackSkill {\n" +
                 "public static System.Func<MeleeStance, StrikeOutput, Skill, bool> NetworkStrikeValidator;\n" +
-                "public static System.Action<MeleeStance, Skill, int, int> NetworkStrikeProbe;\n" +
-                "public static System.Action<MeleeStance, MeleeWeapon, Skill, int> NetworkSkillStarted;\n" +
+                "public static Action<MeleeStance, Skill, int, int> NetworkStrikeProbe;\n" +
+                "public static Action<MeleeStance, MeleeWeapon, Skill, int> NetworkSkillStarted;\n" +
                 "private readonly System.Collections.Generic.HashSet<int> m_HitsBuffer = new();\n" +
                 "private void OnUpdatePhaseStrike()\n" +
                 "{\n" +
@@ -895,8 +957,8 @@ public const int NetworkPatchRevision = 300;";
                 "// [GC2_NETWORK_PATCH]\n" +
                 "public class AttackSkill {\n" +
                 "public static System.Func<MeleeStance, StrikeOutput, Skill, bool> NetworkStrikeValidator;\n" +
-                "public static System.Action<MeleeStance, Skill, int, int> NetworkStrikeProbe;\n" +
-                "public static System.Action<MeleeStance, MeleeWeapon, Skill, int> NetworkSkillStarted;\n" +
+                "public static Action<MeleeStance, Skill, int, int> NetworkStrikeProbe;\n" +
+                "public static Action<MeleeStance, MeleeWeapon, Skill, int> NetworkSkillStarted;\n" +
                 "private readonly System.Collections.Generic.HashSet<int> m_HitsBuffer = new();\n" +
                 "private void WhenEnter()\n" +
                 "{\n" +

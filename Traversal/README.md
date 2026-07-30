@@ -4,6 +4,8 @@ This module adds server-authoritative networking for **Game Creator 2 Traversal*
 
 Compile symbol: `GC2_TRAVERSAL` (auto-enabled when `com.gamecreator.traversal` is present).
 
+Supported source line: Game Creator 2 Traversal `2.0.x`.
+
 ## Required Authority Patch
 
 The Traversal source patch is mandatory for networked Characters. The transport
@@ -21,6 +23,10 @@ GC2 Characters and do not require a network route. Patch `2.6.0-traversal`
 also rejects superseded starts after an async GC2 yield, routes authored
 `ContinueA`/`ContinueB` edges before native transitions, and supplies the
 presentation-safe local-owner snapshot motion loop.
+
+Updating or reinstalling GC2 Traversal can overwrite these hooks. The Networking Layer remains
+compilable so the editor patcher can repair the module, while networked Traversal remains disabled
+until the complete patch passes validation.
 
 ## Components
 

@@ -2119,6 +2119,13 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
 
         private void DrawCurrentSceneConfigurationWarnings()
         {
+            if (PurrNetInstallCompatibility.TryGetMixedLiteNetLibLayout(
+                    out string compatibilityMessage,
+                    out _))
+            {
+                EditorGUILayout.HelpBox(compatibilityMessage, MessageType.Error);
+            }
+
             NetworkManager manager = FindSceneComponent<NetworkManager>();
             if (manager == null) return;
 

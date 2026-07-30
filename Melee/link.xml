@@ -1,0 +1,9 @@
+<linker>
+    <!--
+      Patched networking hooks are discovered reflectively so a GC2 module update that removes
+      them does not trap the project in a compile failure before the patcher can run.
+    -->
+    <assembly fullname="GameCreator.Runtime.Melee">
+        <type fullname="GameCreator.Runtime.Melee.Skill" preserve="all" />
+    </assembly>
+</linker>

@@ -15,7 +15,8 @@ This module provides network-aware melee combat for GC2, enabling server-authori
 - Game Creator 2 Melee Module
 - GC2 Network Integration (base module)
 - PurrNet integration or a configured custom transport adapter (NGO/FishNet/Mirror/custom)
-- The required GC2 Melee source patch (`3.3.0-melee` or newer)
+- Game Creator 2 Melee `2.2.x`
+- The required GC2 Melee source patch (`3.5.0-melee`)
 
 ## Installation
 
@@ -26,6 +27,10 @@ This module provides network-aware melee combat for GC2, enabling server-authori
 ## PurrNet Scene Setup Wizard
 
 For PurrNet projects, enable **Melee** on the PurrNet wizard Modules page. The wizard applies/verifies the required source patch, then creates/reuses `NetworkMeleeManager` and `PurrNetMeleeTransportBridge`. Setup is blocked when the patch is missing or stale.
+
+Updating or reinstalling GC2 Melee can overwrite the injected source hooks. The Networking Layer
+keeps its editor/runtime assemblies compilable in that state so the wizard can reapply the patch,
+but networked Melee fails closed until patch validation succeeds.
 
 When a Player Prefab is assigned on the Scene page and prefab preparation is enabled, selecting Melee adds `NetworkMeleeController` to that prefab. If Stats is also selected, the Core page can add the optional Melee -> Stats damage bridge.
 

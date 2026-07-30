@@ -288,6 +288,14 @@ namespace Arawn.GameCreator2.Networking.Traversal
                 Type.EmptyTypes,
                 null);
 
+        private static readonly MethodInfo s_TraversalStanceInvalidatePendingEnterMethod =
+            typeof(TraversalStance).GetMethod(
+                "NetworkInvalidatePendingEnter",
+                BindingFlags.Instance | BindingFlags.Public,
+                null,
+                Type.EmptyTypes,
+                null);
+
         public uint NetworkId => m_NetworkCharacter != null ? m_NetworkCharacter.NetworkId : 0;
 
         public bool IsServer => m_IsServer;
@@ -2870,8 +2878,37 @@ namespace Arawn.GameCreator2.Networking.Traversal
         {
             if (stance == null) return;
 
-            stance.NetworkInvalidatePendingEnter();
+            TryInvalidatePendingTraversalEnter(stance);
             m_PendingAuthoritativeMotionEnter = default;
+        }
+
+        private bool TryInvalidatePendingTraversalEnter(TraversalStance stance)
+        {
+            if (stance == null) return false;
+
+            if (s_TraversalStanceInvalidatePendingEnterMethod == null)
+            {
+                WarnRateLimited(
+                    "pending-enter-invalidate-hook-missing",
+                    "[NetworkTraversalController] Cannot invalidate a pending traversal enter " +
+                    "because the required TraversalStance.NetworkInvalidatePendingEnter patch " +
+                    "hook is missing. Apply the current GC2 Traversal server-authority patch.");
+                return false;
+            }
+
+            try
+            {
+                s_TraversalStanceInvalidatePendingEnterMethod.Invoke(stance, null);
+                return true;
+            }
+            catch (Exception exception)
+            {
+                WarnRateLimited(
+                    "pending-enter-invalidate-hook-failed",
+                    "[NetworkTraversalController] Failed to invalidate a pending traversal enter: " +
+                    $"{exception.GetBaseException().Message}");
+                return false;
+            }
         }
 
         private bool TryRestoreInteractiveSnapshot(
@@ -3599,9 +3636,8 @@ namespace Arawn.GameCreator2.Networking.Traversal
             Traverse target = acknowledgement.Target;
             // Invalidate the exact yielded GC2 enter generation. A later retry to the same
             // Traverse receives a new generation and must not be mistaken for this timeout.
-            ResolveTraversalStance()?.NetworkInvalidatePendingEnter();
-
             TraversalStance stance = ResolveTraversalStance();
+            TryInvalidatePendingTraversalEnter(stance);
             if (stance == null || !ReferenceEquals(stance.Traverse, target)) return;
 
             bool previousSuppress = m_SuppressInterception;

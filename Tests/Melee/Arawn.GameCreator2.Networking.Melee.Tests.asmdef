@@ -21,7 +21,8 @@
     "autoReferenced": false,
     "defineConstraints": [
         "UNITY_INCLUDE_TESTS",
-        "GC2_MELEE"
+        "GC2_MELEE",
+        "GC2_NETWORK_MELEE_PATCHED"
     ],
     "versionDefines": [
         {
