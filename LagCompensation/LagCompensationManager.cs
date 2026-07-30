@@ -30,7 +30,7 @@ namespace Arawn.NetworkingCore.LagCompensation
     ///     var timestamp = NetworkTimestamp.FromServerTime(serverTime);
     ///     LagCompensationManager.Instance.RecordFrame(timestamp);
     /// }
-    /// 
+    ///
     /// // When validating a hit
     /// void ValidateShot(uint shooterId, uint targetId, Vector3 hitPoint, double clientTime)
     /// {
@@ -44,9 +44,9 @@ namespace Arawn.NetworkingCore.LagCompensation
     public class LagCompensationManager : IDisposable
     {
         // SINGLETON ──────────────────────────────────────────────────────────
-        
+
         private static LagCompensationManager s_Instance;
-        
+
         /// <summary>
         /// Global instance. Create with Initialize() first.
         /// </summary>
@@ -62,7 +62,7 @@ namespace Arawn.NetworkingCore.LagCompensation
                 return s_Instance;
             }
         }
-        
+
         /// <summary>
         /// Initialize the global manager with configuration.
         /// Call this once on server startup.
@@ -73,40 +73,51 @@ namespace Arawn.NetworkingCore.LagCompensation
             s_Instance = new LagCompensationManager(config);
             return s_Instance;
         }
-        
+
+        /// <summary>
+        /// Gets the currently initialized manager without implicitly creating one.
+        /// Runtime validation must use this instead of <see cref="Instance"/> so a
+        /// missing server bootstrap is reported rather than hidden by an empty manager.
+        /// </summary>
+        public static bool TryGetInitialized(out LagCompensationManager manager)
+        {
+            manager = s_Instance;
+            return manager != null && !manager.m_Disposed;
+        }
+
         /// <summary>
         /// Check if the manager is initialized.
         /// </summary>
         public static bool IsInitialized => s_Instance != null;
-        
+
         // FIELDS ─────────────────────────────────────────────────────────────
-        
+
         private readonly Dictionary<uint, TrackedEntity> m_Entities;
         private readonly LagCompensationConfig m_Config;
         private readonly object m_Lock = new object();
-        
+
         private NetworkTimestamp m_LastRecordedTimestamp;
         private bool m_Disposed;
-        
+
         // EVENTS ─────────────────────────────────────────────────────────────
-        
+
         /// <summary>
         /// Fired when an entity is registered.
         /// </summary>
         public event Action<uint> OnEntityRegistered;
-        
+
         /// <summary>
         /// Fired when an entity is unregistered.
         /// </summary>
         public event Action<uint> OnEntityUnregistered;
-        
+
         /// <summary>
         /// Fired when a hit validation is performed (for debugging/metrics).
         /// </summary>
         public event Action<HitValidationResult> OnHitValidated;
-        
+
         // PROPERTIES ─────────────────────────────────────────────────────────
-        
+
         /// <summary>
         /// Number of entities being tracked.
         /// </summary>
@@ -117,28 +128,28 @@ namespace Arawn.NetworkingCore.LagCompensation
                 lock (m_Lock) return m_Entities.Count;
             }
         }
-        
+
         /// <summary>
         /// Configuration used by this manager.
         /// </summary>
         public LagCompensationConfig Config => m_Config;
-        
+
         /// <summary>
         /// Most recent recorded timestamp.
         /// </summary>
         public NetworkTimestamp LastTimestamp => m_LastRecordedTimestamp;
-        
+
         // STRUCTS ────────────────────────────────────────────────────────────
-        
+
         private class TrackedEntity
         {
             public ILagCompensated entity;
             public LagCompensationHistory history;
             public bool isActive;
         }
-        
+
         // CONSTRUCTOR ────────────────────────────────────────────────────────
-        
+
         /// <summary>
         /// Create a new lag compensation manager.
         /// </summary>
@@ -148,9 +159,9 @@ namespace Arawn.NetworkingCore.LagCompensation
             m_Entities = new Dictionary<uint, TrackedEntity>(64);
             m_Disposed = false;
         }
-        
+
         // REGISTRATION ───────────────────────────────────────────────────────
-        
+
         /// <summary>
         /// Register an entity for lag compensation tracking.
         /// </summary>
@@ -161,7 +172,7 @@ namespace Arawn.NetworkingCore.LagCompensation
                 Debug.LogWarning("[LagCompensation] Cannot register null entity");
                 return;
             }
-            
+
             lock (m_Lock)
             {
                 if (m_Entities.ContainsKey(entity.NetworkId))
@@ -169,9 +180,9 @@ namespace Arawn.NetworkingCore.LagCompensation
                     Debug.LogWarning($"[LagCompensation] Entity {entity.NetworkId} already registered");
                     return;
                 }
-                
+
                 int bufferSize = m_Config.CalculateRequiredBufferSize();
-                
+
                 m_Entities[entity.NetworkId] = new TrackedEntity
                 {
                     entity = entity,
@@ -179,10 +190,10 @@ namespace Arawn.NetworkingCore.LagCompensation
                     isActive = true
                 };
             }
-            
+
             OnEntityRegistered?.Invoke(entity.NetworkId);
         }
-        
+
         /// <summary>
         /// Unregister an entity from lag compensation tracking.
         /// </summary>
@@ -193,13 +204,13 @@ namespace Arawn.NetworkingCore.LagCompensation
             {
                 removed = m_Entities.Remove(networkId);
             }
-            
+
             if (removed)
             {
                 OnEntityUnregistered?.Invoke(networkId);
             }
         }
-        
+
         /// <summary>
         /// Unregister an entity from lag compensation tracking.
         /// </summary>
@@ -210,7 +221,7 @@ namespace Arawn.NetworkingCore.LagCompensation
                 Unregister(entity.NetworkId);
             }
         }
-        
+
         /// <summary>
         /// Check if an entity is registered.
         /// </summary>
@@ -221,9 +232,24 @@ namespace Arawn.NetworkingCore.LagCompensation
                 return m_Entities.ContainsKey(networkId);
             }
         }
-        
+
+        /// <summary>
+        /// Checks that this exact adapter owns its network ID registration. This is
+        /// used when a network session replaces the global manager or reassigns IDs.
+        /// </summary>
+        public bool IsRegistered(ILagCompensated entity)
+        {
+            if (entity == null) return false;
+
+            lock (m_Lock)
+            {
+                return m_Entities.TryGetValue(entity.NetworkId, out TrackedEntity tracked) &&
+                       ReferenceEquals(tracked.entity, entity);
+            }
+        }
+
         // RECORDING ──────────────────────────────────────────────────────────
-        
+
         /// <summary>
         /// Record the current state of all tracked entities.
         /// Call this every server tick.
@@ -243,7 +269,7 @@ namespace Arawn.NetworkingCore.LagCompensation
                 m_LastRecordedTimestamp = timestamp;
             }
         }
-        
+
         /// <summary>
         /// Record a single entity's state (for entities that update at different rates).
         /// </summary>
@@ -260,27 +286,27 @@ namespace Arawn.NetworkingCore.LagCompensation
                 }
             }
         }
-        
+
         // QUERYING ───────────────────────────────────────────────────────────
-        
+
         /// <summary>
         /// Try to get an entity's position at a specific timestamp.
         /// </summary>
-        public bool TryGetPositionAtTime(uint networkId, NetworkTimestamp timestamp, 
+        public bool TryGetPositionAtTime(uint networkId, NetworkTimestamp timestamp,
             out Vector3 position)
         {
             position = Vector3.zero;
-            
+
             // Clamp timestamp to max rewind time
             double maxRewind = m_Config.maxRewindTime;
             double rewindAmount = m_LastRecordedTimestamp.serverTime - timestamp.serverTime;
-            
+
             if (rewindAmount > maxRewind)
             {
                 // Too far in the past - use clamped time
                 timestamp = m_LastRecordedTimestamp.Offset(-maxRewind);
             }
-            
+
             lock (m_Lock)
             {
                 if (m_Entities.TryGetValue(networkId, out var tracked))
@@ -288,10 +314,10 @@ namespace Arawn.NetworkingCore.LagCompensation
                     return tracked.history.TryGetPositionAt(timestamp, out position);
                 }
             }
-            
+
             return false;
         }
-        
+
         /// <summary>
         /// Try to get an entity's full state at a specific timestamp.
         /// </summary>
@@ -299,16 +325,16 @@ namespace Arawn.NetworkingCore.LagCompensation
             out LagCompensationHistory.StateSnapshot snapshot)
         {
             snapshot = default;
-            
+
             // Clamp timestamp
             double maxRewind = m_Config.maxRewindTime;
             double rewindAmount = m_LastRecordedTimestamp.serverTime - timestamp.serverTime;
-            
+
             if (rewindAmount > maxRewind)
             {
                 timestamp = m_LastRecordedTimestamp.Offset(-maxRewind);
             }
-            
+
             lock (m_Lock)
             {
                 if (m_Entities.TryGetValue(networkId, out var tracked))
@@ -316,10 +342,10 @@ namespace Arawn.NetworkingCore.LagCompensation
                     return tracked.history.TryGetStateAt(timestamp, out snapshot);
                 }
             }
-            
+
             return false;
         }
-        
+
         /// <summary>
         /// Try to get an entity's bounds at a specific timestamp.
         /// </summary>
@@ -327,18 +353,18 @@ namespace Arawn.NetworkingCore.LagCompensation
             out Bounds bounds)
         {
             bounds = default;
-            
+
             if (TryGetStateAtTime(networkId, timestamp, out var snapshot))
             {
                 bounds = snapshot.bounds;
                 return true;
             }
-            
+
             return false;
         }
-        
+
         // HIT VALIDATION ─────────────────────────────────────────────────────
-        
+
         /// <summary>
         /// Validate a hit against an entity at a historical timestamp.
         /// </summary>
@@ -356,7 +382,7 @@ namespace Arawn.NetworkingCore.LagCompensation
                 clientTimestamp = clientTimestamp,
                 serverTimestamp = m_LastRecordedTimestamp
             };
-            
+
             // Check if entity exists
             if (!TryGetStateAtTime(targetNetworkId, clientTimestamp, out var historicalState))
             {
@@ -365,7 +391,7 @@ namespace Arawn.NetworkingCore.LagCompensation
                 OnHitValidated?.Invoke(result);
                 return result;
             }
-            
+
             // Check if entity was active
             if (!historicalState.isActive)
             {
@@ -375,15 +401,15 @@ namespace Arawn.NetworkingCore.LagCompensation
                 OnHitValidated?.Invoke(result);
                 return result;
             }
-            
+
             result.historicalPosition = historicalState.position;
             result.historicalBounds = historicalState.bounds;
-            
+
             // Check if hit point is within bounds (with tolerance)
             float tolerance = m_Config.hitTolerance;
             float distance = historicalState.DistanceToPoint(hitPoint);
             result.distanceFromBounds = distance;
-            
+
             if (distance <= tolerance)
             {
                 result.isValid = true;
@@ -394,15 +420,15 @@ namespace Arawn.NetworkingCore.LagCompensation
                 result.isValid = false;
                 result.reason = HitRejectReason.OutOfRange;
             }
-            
+
             OnHitValidated?.Invoke(result);
             return result;
         }
-        
+
         /// <summary>
         /// Validate a raycast hit against an entity at a historical timestamp.
         /// </summary>
-        public HitValidationResult ValidateRaycastHit(uint targetNetworkId, 
+        public HitValidationResult ValidateRaycastHit(uint targetNetworkId,
             Vector3 rayOrigin, Vector3 rayDirection, float maxDistance,
             NetworkTimestamp clientTimestamp)
         {
@@ -412,7 +438,7 @@ namespace Arawn.NetworkingCore.LagCompensation
                 clientTimestamp = clientTimestamp,
                 serverTimestamp = m_LastRecordedTimestamp
             };
-            
+
             if (!TryGetStateAtTime(targetNetworkId, clientTimestamp, out var historicalState))
             {
                 result.isValid = false;
@@ -420,7 +446,7 @@ namespace Arawn.NetworkingCore.LagCompensation
                 OnHitValidated?.Invoke(result);
                 return result;
             }
-            
+
             if (!historicalState.isActive)
             {
                 result.isValid = false;
@@ -428,14 +454,14 @@ namespace Arawn.NetworkingCore.LagCompensation
                 OnHitValidated?.Invoke(result);
                 return result;
             }
-            
+
             result.historicalPosition = historicalState.position;
             result.historicalBounds = historicalState.bounds;
-            
+
             // Expand bounds by tolerance
             Bounds expandedBounds = historicalState.bounds;
             expandedBounds.Expand(m_Config.hitTolerance * 2f);
-            
+
             // Check ray intersection
             Ray ray = new Ray(rayOrigin, rayDirection);
             if (expandedBounds.IntersectRay(ray, out float hitDistance))
@@ -459,15 +485,15 @@ namespace Arawn.NetworkingCore.LagCompensation
                 result.isValid = false;
                 result.reason = HitRejectReason.RayMissed;
                 result.distanceFromBounds = Vector3.Distance(
-                    rayOrigin, 
+                    rayOrigin,
                     expandedBounds.ClosestPoint(rayOrigin)
                 );
             }
-            
+
             OnHitValidated?.Invoke(result);
             return result;
         }
-        
+
         /// <summary>
         /// Validate a sphere overlap against an entity at a historical timestamp.
         /// </summary>
@@ -482,7 +508,7 @@ namespace Arawn.NetworkingCore.LagCompensation
                 clientTimestamp = clientTimestamp,
                 serverTimestamp = m_LastRecordedTimestamp
             };
-            
+
             if (!TryGetStateAtTime(targetNetworkId, clientTimestamp, out var historicalState))
             {
                 result.isValid = false;
@@ -490,7 +516,7 @@ namespace Arawn.NetworkingCore.LagCompensation
                 OnHitValidated?.Invoke(result);
                 return result;
             }
-            
+
             if (!historicalState.isActive)
             {
                 result.isValid = false;
@@ -498,15 +524,15 @@ namespace Arawn.NetworkingCore.LagCompensation
                 OnHitValidated?.Invoke(result);
                 return result;
             }
-            
+
             result.historicalPosition = historicalState.position;
             result.historicalBounds = historicalState.bounds;
-            
+
             // Check sphere-bounds intersection
             Vector3 closestPoint = historicalState.bounds.ClosestPoint(sphereCenter);
             float distance = Vector3.Distance(closestPoint, sphereCenter);
             result.distanceFromBounds = Mathf.Max(0, distance - sphereRadius);
-            
+
             float totalRadius = sphereRadius + m_Config.hitTolerance;
             if (distance <= totalRadius)
             {
@@ -519,13 +545,13 @@ namespace Arawn.NetworkingCore.LagCompensation
                 result.isValid = false;
                 result.reason = HitRejectReason.OutOfRange;
             }
-            
+
             OnHitValidated?.Invoke(result);
             return result;
         }
-        
+
         // UTILITIES ──────────────────────────────────────────────────────────
-        
+
         /// <summary>
         /// Get all registered entity IDs.
         /// </summary>
@@ -538,7 +564,7 @@ namespace Arawn.NetworkingCore.LagCompensation
                 return ids;
             }
         }
-        
+
         /// <summary>
         /// Get the history duration for an entity.
         /// </summary>
@@ -553,7 +579,7 @@ namespace Arawn.NetworkingCore.LagCompensation
             }
             return 0;
         }
-        
+
         /// <summary>
         /// Clear all history for all entities.
         /// </summary>
@@ -567,9 +593,9 @@ namespace Arawn.NetworkingCore.LagCompensation
                 }
             }
         }
-        
+
         // CLEANUP ────────────────────────────────────────────────────────────
-        
+
         /// <summary>
         /// Dispose of the manager and clear all data.
         /// </summary>
@@ -577,19 +603,19 @@ namespace Arawn.NetworkingCore.LagCompensation
         {
             if (m_Disposed) return;
             m_Disposed = true;
-            
+
             lock (m_Lock)
             {
                 m_Entities.Clear();
             }
-            
+
             if (s_Instance == this)
             {
                 s_Instance = null;
             }
         }
     }
-    
+
     /// <summary>
     /// Result of a hit validation check.
     /// </summary>
@@ -597,40 +623,40 @@ namespace Arawn.NetworkingCore.LagCompensation
     {
         /// <summary>Whether the hit was valid.</summary>
         public bool isValid;
-        
+
         /// <summary>Reason for rejection (if invalid).</summary>
         public HitRejectReason reason;
-        
+
         /// <summary>Target entity's network ID.</summary>
         public uint targetNetworkId;
-        
+
         /// <summary>World-space hit point.</summary>
         public Vector3 hitPoint;
-        
+
         /// <summary>Entity's position at the client timestamp.</summary>
         public Vector3 historicalPosition;
-        
+
         /// <summary>Entity's bounds at the client timestamp.</summary>
         public Bounds historicalBounds;
-        
+
         /// <summary>Distance from hit point to bounds (0 if inside).</summary>
         public float distanceFromBounds;
-        
+
         /// <summary>Timestamp the client claimed to fire at.</summary>
         public NetworkTimestamp clientTimestamp;
-        
+
         /// <summary>Current server timestamp when validation occurred.</summary>
         public NetworkTimestamp serverTimestamp;
-        
+
         /// <summary>Hit zone name (if using ILagCompensatedWithHitZones).</summary>
         public string hitZoneName;
-        
+
         /// <summary>Damage multiplier for hit zone (if applicable).</summary>
         public float damageMultiplier;
-        
+
         /// <summary>How far in the past the client's timestamp was.</summary>
         public double RewindAmount => serverTimestamp.serverTime - clientTimestamp.serverTime;
-        
+
         public override string ToString()
         {
             if (isValid)
@@ -639,7 +665,7 @@ namespace Arawn.NetworkingCore.LagCompensation
                 return $"[Hit INVALID] Target:{targetNetworkId} Reason:{reason} Distance:{distanceFromBounds:F2}m";
         }
     }
-    
+
     /// <summary>
     /// Reasons why a hit validation failed.
     /// </summary>
@@ -647,25 +673,25 @@ namespace Arawn.NetworkingCore.LagCompensation
     {
         /// <summary>Hit was valid (no rejection).</summary>
         None,
-        
+
         /// <summary>Target entity not found in history.</summary>
         EntityNotFound,
-        
+
         /// <summary>Target was inactive/dead at the time.</summary>
         EntityInactive,
-        
+
         /// <summary>Hit point was outside tolerance range.</summary>
         OutOfRange,
-        
+
         /// <summary>Raycast did not intersect target.</summary>
         RayMissed,
-        
+
         /// <summary>Client timestamp was too far in the past.</summary>
         TimestampTooOld,
-        
+
         /// <summary>Client timestamp was in the future (cheating?).</summary>
         TimestampInFuture,
-        
+
         /// <summary>Shooter was not allowed to damage target.</summary>
         NotAllowed
     }

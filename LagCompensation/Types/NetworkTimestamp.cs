@@ -14,17 +14,17 @@ namespace Arawn.NetworkingCore
         /// Server time in seconds since server start.
         /// </summary>
         public double serverTime;
-        
+
         /// <summary>
         /// Local time when this timestamp was recorded (for RTT calculation).
         /// </summary>
         public float localTime;
-        
+
         /// <summary>
         /// Tick number if using tick-based networking (0 if not applicable).
         /// </summary>
         public uint tick;
-        
+
         /// <summary>
         /// Creates a timestamp from server time.
         /// </summary>
@@ -37,7 +37,7 @@ namespace Arawn.NetworkingCore
                 tick = tick
             };
         }
-        
+
         /// <summary>
         /// Creates a timestamp from current local time (for single-player or host).
         /// </summary>
@@ -50,7 +50,7 @@ namespace Arawn.NetworkingCore
                 tick = 0
             };
         }
-        
+
         /// <summary>
         /// Creates a timestamp from tick number (for tick-based networking like Fusion).
         /// </summary>
@@ -63,7 +63,7 @@ namespace Arawn.NetworkingCore
                 tick = tick
             };
         }
-        
+
         /// <summary>
         /// Calculates the difference between this timestamp and another.
         /// </summary>
@@ -71,7 +71,7 @@ namespace Arawn.NetworkingCore
         {
             return serverTime - other.serverTime;
         }
-        
+
         /// <summary>
         /// Returns a timestamp offset by the given seconds.
         /// </summary>
@@ -84,40 +84,40 @@ namespace Arawn.NetworkingCore
                 tick = tick
             };
         }
-        
+
         // Operators
-        public static bool operator ==(NetworkTimestamp a, NetworkTimestamp b) => 
+        public static bool operator ==(NetworkTimestamp a, NetworkTimestamp b) =>
             Math.Abs(a.serverTime - b.serverTime) < 0.0001;
-        
-        public static bool operator !=(NetworkTimestamp a, NetworkTimestamp b) => 
+
+        public static bool operator !=(NetworkTimestamp a, NetworkTimestamp b) =>
             !(a == b);
-        
-        public static bool operator <(NetworkTimestamp a, NetworkTimestamp b) => 
+
+        public static bool operator <(NetworkTimestamp a, NetworkTimestamp b) =>
             a.serverTime < b.serverTime;
-        
-        public static bool operator >(NetworkTimestamp a, NetworkTimestamp b) => 
+
+        public static bool operator >(NetworkTimestamp a, NetworkTimestamp b) =>
             a.serverTime > b.serverTime;
-        
-        public static bool operator <=(NetworkTimestamp a, NetworkTimestamp b) => 
+
+        public static bool operator <=(NetworkTimestamp a, NetworkTimestamp b) =>
             a.serverTime <= b.serverTime;
-        
-        public static bool operator >=(NetworkTimestamp a, NetworkTimestamp b) => 
+
+        public static bool operator >=(NetworkTimestamp a, NetworkTimestamp b) =>
             a.serverTime >= b.serverTime;
-        
-        public static double operator -(NetworkTimestamp a, NetworkTimestamp b) => 
+
+        public static double operator -(NetworkTimestamp a, NetworkTimestamp b) =>
             a.serverTime - b.serverTime;
-        
+
         // IEquatable
         public bool Equals(NetworkTimestamp other) => this == other;
         public override bool Equals(object obj) => obj is NetworkTimestamp ts && this == ts;
         public override int GetHashCode() => serverTime.GetHashCode();
-        
+
         // IComparable
         public int CompareTo(NetworkTimestamp other) => serverTime.CompareTo(other.serverTime);
-        
+
         public override string ToString() => $"[T:{serverTime:F3}s, Tick:{tick}]";
     }
-    
+
     /// <summary>
     /// Tracks Round-Trip Time (RTT) / ping for a network connection.
     /// </summary>
@@ -126,27 +126,27 @@ namespace Arawn.NetworkingCore
         private readonly float[] m_Samples;
         private int m_SampleIndex;
         private int m_SampleCount;
-        
+
         /// <summary>
         /// Average RTT in seconds.
         /// </summary>
         public float AverageRTT { get; private set; }
-        
+
         /// <summary>
         /// Smoothed RTT (exponential moving average).
         /// </summary>
         public float SmoothedRTT { get; private set; }
-        
+
         /// <summary>
         /// RTT variance for jitter calculation.
         /// </summary>
         public float RTTVariance { get; private set; }
-        
+
         /// <summary>
         /// One-way latency estimate (RTT / 2).
         /// </summary>
         public float OneWayLatency => SmoothedRTT * 0.5f;
-        
+
         public RTTTracker(int sampleCount = 10)
         {
             m_Samples = new float[sampleCount];
@@ -156,7 +156,7 @@ namespace Arawn.NetworkingCore
             SmoothedRTT = 0.1f;
             RTTVariance = 0.01f;
         }
-        
+
         /// <summary>
         /// Add a new RTT sample.
         /// </summary>
@@ -165,23 +165,23 @@ namespace Arawn.NetworkingCore
             m_Samples[m_SampleIndex] = rtt;
             m_SampleIndex = (m_SampleIndex + 1) % m_Samples.Length;
             m_SampleCount = Mathf.Min(m_SampleCount + 1, m_Samples.Length);
-            
+
             // Calculate average
             float sum = 0f;
             for (int i = 0; i < m_SampleCount; i++)
                 sum += m_Samples[i];
             AverageRTT = sum / m_SampleCount;
-            
+
             // Smoothed RTT (exponential moving average)
             const float alpha = 0.125f; // RFC 6298 recommendation
             SmoothedRTT = (1f - alpha) * SmoothedRTT + alpha * rtt;
-            
+
             // Variance
             float diff = Mathf.Abs(rtt - SmoothedRTT);
             const float beta = 0.25f;
             RTTVariance = (1f - beta) * RTTVariance + beta * diff;
         }
-        
+
         /// <summary>
         /// Get the recommended rewind time for lag compensation.
         /// Accounts for RTT + some jitter buffer.

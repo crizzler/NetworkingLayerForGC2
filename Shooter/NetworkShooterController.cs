@@ -38,11 +38,11 @@ namespace Arawn.GameCreator2.Networking.Shooter
         // ════════════════════════════════════════════════════════════════════════════════════════
         // INSPECTOR
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         [Header("Network Settings")]
         [Tooltip("Show optimistic shot effects (tracer, muzzle flash) before server confirmation.")]
         [SerializeField] private bool m_OptimisticShotEffects = true;
-        
+
         [Tooltip("Show optimistic hit effects before server confirmation.")]
         [SerializeField] private bool m_OptimisticHitEffects = true;
 
@@ -50,24 +50,24 @@ namespace Arawn.GameCreator2.Networking.Shooter
         [Tooltip("Generate simple tracer/impact primitives when no registered Shooter asset can present a confirmed event. " +
                  "Disabled by default so missing optional visuals do not create debug geometry in production.")]
         [SerializeField] private bool m_UseGeneratedFallbackPresentation = false;
-        
+
         [Tooltip("Maximum pending shots before flush.")]
         [SerializeField] private int m_MaxPendingShots = 16;
-        
+
         [Header("Sync Settings")]
         [Tooltip("Sync weapon state (ammo, reload, jam) at this interval.")]
         [SerializeField] private float m_WeaponStateSyncInterval = 0.5f;
-        
+
         [Tooltip("Sync aim state at this interval.")]
         [SerializeField] private float m_AimStateSyncInterval = 0.1f;
 
         [Tooltip("How quickly remote shooter aim targets interpolate toward network updates.")]
         [SerializeField] private float m_RemoteAimInterpolationSpeed = 18f;
-        
+
         [Header("Lag Compensation")]
         [Tooltip("Configuration for lag compensation validation.")]
         [SerializeField] private ShooterValidationConfig m_ValidationConfig = new();
-        
+
         [Header("Debug")]
         [Tooltip("Logs Shooter controller wiring, equipped weapon changes, and missing network listeners.")]
         [SerializeField] private bool m_LogDiagnostics = true;
@@ -76,38 +76,38 @@ namespace Arawn.GameCreator2.Networking.Shooter
 #if UNITY_EDITOR
         [SerializeField] private bool m_DrawDebugRays = false;
 #endif
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // EVENTS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>Called when a shot request is sent to server.</summary>
         public event Action<NetworkShotRequest> OnShotRequestSent;
-        
+
         /// <summary>Called when a shot is confirmed by server.</summary>
         public event Action<NetworkShotBroadcast> OnShotConfirmed;
-        
+
         /// <summary>Called when a hit is detected locally.</summary>
         public event Action<NetworkShooterHitRequest> OnHitDetected;
-        
+
         /// <summary>Called when a hit is confirmed by server.</summary>
         public event Action<NetworkShooterHitBroadcast> OnHitConfirmed;
-        
+
         /// <summary>Called when weapon state changes.</summary>
         public event Action<NetworkShooterController, NetworkWeaponState> OnWeaponStateChanged;
 
         /// <summary>Called when aim point/direction changes.</summary>
         public event Action<NetworkShooterController, NetworkAimState> OnAimStateChanged;
-        
+
         /// <summary>Called when a reload request is sent to server.</summary>
         public event Action<NetworkReloadRequest> OnReloadRequestSent;
 
         /// <summary>Called when an active/quick reload attempt is sent to server.</summary>
         public event Action<NetworkQuickReloadRequest> OnQuickReloadRequestSent;
-        
+
         /// <summary>Called when a reload event is broadcast.</summary>
         public event Action<NetworkReloadBroadcast> OnReloadBroadcastReceived;
-        
+
         /// <summary>Called when a fix jam request is sent to server.</summary>
         public event Action<NetworkFixJamRequest> OnFixJamRequestSent;
 
@@ -119,37 +119,38 @@ namespace Arawn.GameCreator2.Networking.Shooter
 
         /// <summary>Called when a sight switch is requested from the server.</summary>
         public event Action<NetworkSightSwitchRequest> OnSightSwitchRequestSent;
-        
+
         /// <summary>Called when a weapon jams (broadcast received).</summary>
         public event Action<NetworkJamBroadcast> OnWeaponJammed;
-        
+
         /// <summary>Called when a jam fix completes (broadcast received).</summary>
         public event Action<NetworkFixJamBroadcast> OnJamFixed;
-        
+
         /// <summary>Called when a charge state changes.</summary>
         public event Action<NetworkChargeBroadcast> OnChargeBroadcastReceived;
-        
+
         /// <summary>Called when a sight switch is broadcast.</summary>
         public event Action<NetworkSightSwitchBroadcast> OnSightSwitchBroadcastReceived;
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // PRIVATE FIELDS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         private Character m_Character;
         private NetworkCharacter m_NetworkCharacter;
         private ShooterStance m_ShooterStance;
         private const float LEAN_SYNC_EPSILON = 0.01f;
+        private const float OWNER_REACTION_MOTION_WINDOW_SECONDS = 1f;
         private static readonly int SHOOT_TRIGGER = Animator.StringToHash("Shoot");
         private static readonly MethodInfo SHOOTING_ON_SHOOT_METHOD = typeof(Shooting).GetMethod(
             "OnShoot",
             BindingFlags.Instance | BindingFlags.NonPublic);
-        
+
         // Network role
         private bool m_IsServer;
         private bool m_IsLocalClient;
         private bool m_IsRemoteClient;
-        
+
         // Request tracking
         private ushort m_NextRequestId = 1;
         private ushort m_LastIssuedRequestId = 1;
@@ -168,23 +169,27 @@ namespace Arawn.GameCreator2.Networking.Shooter
         private readonly Dictionary<ulong, PendingHitRequest> m_PendingHits = new(32);
         private readonly List<RecentOptimisticShotPresentation> m_RecentOptimisticShotPresentations = new(8);
         private readonly List<RecentOptimisticHitPresentation> m_RecentOptimisticHitPresentations = new(16);
+        private readonly List<RecentServerNativeEnvironmentImpact> m_RecentServerNativeEnvironmentImpacts = new(8);
         private readonly HashSet<int> m_ProcessedHits = new(64);
+        private readonly HashSet<int> m_ServerNativeHitContinuations = new(16);
+        private readonly Dictionary<int, uint> m_ServerNativeHitCorrelations = new(16);
         private readonly HashSet<int> m_MissingShotEffectWeaponHashes = new();
         private readonly HashSet<int> m_MissingHitEffectWeaponHashes = new();
-        
+        private float m_NextHitInvariantWarningTime;
+
         // Validated shots (for hit validation)
         private readonly Dictionary<ushort, ValidatedShot> m_ValidatedShots = new(16);
-        
+
         // Pending reload/jam/charge requests
         private readonly Dictionary<ulong, PendingReloadRequest> m_PendingReloads = new(4);
         private readonly Dictionary<ulong, PendingFixJamRequest> m_PendingFixJams = new(4);
         private readonly Dictionary<ulong, PendingChargeRequest> m_PendingCharges = new(4);
         private readonly Dictionary<ulong, PendingSightSwitchRequest> m_PendingSightSwitches = new(4);
-        
+
         // Charge state tracking
         private bool m_IsCharging;
         private float m_ChargeStartTime;
-        
+
         // State tracking
         private NetworkWeaponState m_LastWeaponState;
         private NetworkAimState m_LastAimState;
@@ -208,12 +213,12 @@ namespace Arawn.GameCreator2.Networking.Shooter
         private ShooterWeapon m_DesiredRemoteWeapon;
         private GameObject m_DesiredRemoteWeaponModelPrefab;
         private Handle m_DesiredRemoteWeaponHandle;
-        
+
         // Current weapon tracking
         private ShooterWeapon m_CurrentWeapon;
         private WeaponData m_CurrentWeaponData;
         private float m_LastServerValidatedShotTime;
-        
+
         // Lag compensation validator (server-only)
         private ShooterLagCompensationValidator m_Validator;
 
@@ -295,11 +300,11 @@ namespace Arawn.GameCreator2.Networking.Shooter
                    $"reloading={isReloading} reloadWeapon={reloadWeapon}" +
                    (!string.IsNullOrEmpty(error) ? $" error={error}" : string.Empty);
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // STRUCTS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         private struct PendingShotRequest : ITimedPendingRequest
         {
             public NetworkShotRequest Request;
@@ -308,7 +313,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
             public bool NativeNotificationObserved;
             public float PendingSentTime => SentTime;
         }
-        
+
         private struct PendingHitRequest : ITimedPendingRequest
         {
             public NetworkShooterHitRequest Request;
@@ -328,62 +333,70 @@ namespace Arawn.GameCreator2.Networking.Shooter
             public NetworkShooterHitRequest Request;
             public float ExpiresAt;
         }
-        
+
+        private struct RecentServerNativeEnvironmentImpact
+        {
+            public int RigidbodyInstanceId;
+            public int WeaponHash;
+            public Vector3 HitPoint;
+            public float ExpiresAt;
+        }
+
         private struct ValidatedShot
         {
             public NetworkShotRequest Request;
             public float ValidatedTime;
             public int HitsProcessed;
         }
-        
+
         private struct PendingReloadRequest : ITimedPendingRequest
         {
             public NetworkReloadRequest Request;
             public float SentTime;
             public float PendingSentTime => SentTime;
         }
-        
+
         private struct PendingFixJamRequest : ITimedPendingRequest
         {
             public NetworkFixJamRequest Request;
             public float SentTime;
             public float PendingSentTime => SentTime;
         }
-        
+
         private struct PendingChargeRequest : ITimedPendingRequest
         {
             public NetworkChargeStartRequest Request;
             public float SentTime;
             public float PendingSentTime => SentTime;
         }
-        
+
         private struct PendingSightSwitchRequest : ITimedPendingRequest
         {
             public NetworkSightSwitchRequest Request;
             public float SentTime;
             public float PendingSentTime => SentTime;
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // PROPERTIES
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>The underlying GC2 Character.</summary>
         public Character Character => m_Character;
-        
+
         /// <summary>Current weapon state for network sync.</summary>
         public NetworkWeaponState WeaponState => m_LastWeaponState;
-        
+
         /// <summary>Current aim state for network sync.</summary>
         public NetworkAimState AimState => m_LastAimState;
-        
+
         /// <summary>Whether optimistic shot effects are enabled.</summary>
         public bool OptimisticShotEffects
         {
             get => m_OptimisticShotEffects;
             set => m_OptimisticShotEffects = value;
         }
-        
+
         /// <summary>Whether optimistic hit effects are enabled.</summary>
         public bool OptimisticHitEffects
         {
@@ -396,13 +409,13 @@ namespace Arawn.GameCreator2.Networking.Shooter
             get => m_UseGeneratedFallbackPresentation;
             set => m_UseGeneratedFallbackPresentation = value;
         }
-        
+
         /// <summary>Whether this is running on the server.</summary>
         public bool IsServer => m_IsServer;
-        
+
         /// <summary>Whether this is the local player's character.</summary>
         public bool IsLocalClient => m_IsLocalClient;
-        
+
         /// <summary>Shorthand for the character's network ID.</summary>
         private uint NetworkId => m_NetworkCharacter != null ? m_NetworkCharacter.NetworkId : 0;
 
@@ -675,7 +688,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
         // ════════════════════════════════════════════════════════════════════════════════════════
         // UNITY LIFECYCLE
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         private void Awake()
         {
             m_Character = GetComponent<Character>();
@@ -683,13 +696,13 @@ namespace Arawn.GameCreator2.Networking.Shooter
             LogDiagnostics(
                 $"awake character={(m_Character != null)} networkCharacter={(m_NetworkCharacter != null)}");
         }
-        
+
         private void Start()
         {
             // Subscribe to weapon equip events
             m_Character.Combat.EventEquip += OnWeaponEquipped;
             m_Character.Combat.EventUnequip += OnWeaponUnequipped;
-            
+
             // Try to get initial shooter stance
             TryGetShooterStance();
             TryAdoptEquippedShooterWeapon();
@@ -697,42 +710,50 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 $"start stance={(m_ShooterStance != null)} manager={(NetworkShooterManager.Instance != null)} " +
                 $"currentWeapon={(m_CurrentWeapon != null ? m_CurrentWeapon.name : "none")}");
         }
-        
+
         private void OnDestroy()
         {
+            ClearServerNativeEnvironmentImpactMarkers();
+
             if (m_Character != null)
             {
                 m_Character.Combat.EventEquip -= OnWeaponEquipped;
                 m_Character.Combat.EventUnequip -= OnWeaponUnequipped;
             }
         }
-        
+
+        private void OnDisable()
+        {
+            ClearServerNativeEnvironmentImpactMarkers();
+        }
+
         private void Update()
         {
             RecoverMissingEquippedPropIfNeeded();
 
             if (!m_IsLocalClient && !m_IsServer) return;
-            
+
             // Update weapon state
             UpdateWeaponState();
-            
+
             // Update aim state
             UpdateAimState();
-            
+
             // Cleanup old pending requests
             CleanupPendingRequests();
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // INITIALIZATION
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>
         /// Initialize the network shooter controller with role information.
         /// Called by NetworkCharacter when network role is determined.
         /// </summary>
         public void Initialize(bool isServer, bool isLocalClient)
         {
+            ClearServerNativeEnvironmentImpactMarkers();
             m_IsServer = isServer;
             m_IsLocalClient = isLocalClient;
             m_IsRemoteClient = !isServer && !isLocalClient;
@@ -740,11 +761,11 @@ namespace Arawn.GameCreator2.Networking.Shooter
             LogDiagnostics($"initialized server={isServer} localClient={isLocalClient}");
             TryAdoptEquippedShooterWeapon();
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // STANCE & WEAPON TRACKING
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         private void TryGetShooterStance()
         {
             m_ShooterStance = m_Character.Combat.RequestStance<ShooterStance>();
@@ -753,7 +774,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 LogDiagnosticsWarning("could not resolve ShooterStance from GC2 Combat");
             }
         }
-        
+
         private void OnWeaponEquipped(IWeapon weapon, GameObject instance)
         {
             if (weapon is not ShooterWeapon shooterWeapon)
@@ -767,7 +788,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 m_CurrentWeapon = shooterWeapon;
                 NetworkShooterManager.RegisterShooterWeapon(shooterWeapon);
                 TryGetShooterStance();
-                
+
                 if (m_ShooterStance != null)
                 {
                     m_CurrentWeaponData = m_ShooterStance.Get(shooterWeapon);
@@ -861,7 +882,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 OnWeaponStateChanged?.Invoke(this, m_LastWeaponState);
             }
         }
-        
+
         private void OnWeaponUnequipped(IWeapon weapon, GameObject instance)
         {
             if (weapon is ShooterWeapon)
@@ -877,11 +898,11 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 }
             }
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // STATE SYNC
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         public void ForceNetworkStateSync()
         {
             if (!m_IsLocalClient && !m_IsServer)
@@ -898,7 +919,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
         private void UpdateWeaponState(bool force = false)
         {
             bool intervalElapsed = force || Time.time - m_LastWeaponStateSync >= m_WeaponStateSyncInterval;
-            
+
             if (m_CurrentWeapon == null || m_CurrentWeaponData == null)
             {
                 if (!intervalElapsed) return;
@@ -955,7 +976,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
             if (!intervalElapsed && !leanChanged && !force) return;
 
             m_LastWeaponStateSync = Time.time;
-            
+
             if (changed || force)
             {
                 m_LastWeaponState = newState;
@@ -1476,12 +1497,12 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 prop
             );
         }
-        
+
         private void UpdateAimState(bool force = false)
         {
             if (!force && Time.time - m_LastAimStateSync < m_AimStateSyncInterval) return;
             m_LastAimStateSync = Time.time;
-            
+
             if (m_CurrentWeapon == null || m_CurrentWeaponData == null)
             {
                 TryAdoptEquippedShooterWeapon();
@@ -1499,7 +1520,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                     return;
                 }
             }
-            
+
             // Get aim point from sight
             var sight = m_CurrentWeapon.Sights.Get(m_CurrentWeaponData.SightId);
             if (sight?.Sight == null)
@@ -1513,7 +1534,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
 
                 return;
             }
-            
+
             var muzzle = sight.Sight.GetMuzzle(m_CurrentWeaponData.WeaponArgs, m_CurrentWeapon);
             Vector3 aimPoint = sight.Sight.Aim.GetPoint(m_CurrentWeaponData.WeaponArgs);
             Vector3 aimDirection = aimPoint - muzzle.Position;
@@ -1547,11 +1568,11 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 OnAimStateChanged?.Invoke(this, newState);
             }
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // CLEANUP
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         private void CleanupPendingRequests()
         {
             float timeout = 2f;
@@ -1573,13 +1594,15 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 }
             }
 
+            CleanupServerNativeEnvironmentImpactMarkers(currentTime);
+
             PendingRequestCleanup.RemoveTimedOut(m_PendingShots, s_SharedPendingRemovalBuffer, currentTime, timeout);
             PendingRequestCleanup.RemoveTimedOut(m_PendingHits, s_SharedPendingRemovalBuffer, currentTime, timeout);
             PendingRequestCleanup.RemoveTimedOut(m_PendingReloads, s_SharedPendingRemovalBuffer, currentTime, timeout);
             PendingRequestCleanup.RemoveTimedOut(m_PendingFixJams, s_SharedPendingRemovalBuffer, currentTime, timeout);
             PendingRequestCleanup.RemoveTimedOut(m_PendingCharges, s_SharedPendingRemovalBuffer, currentTime, timeout);
             PendingRequestCleanup.RemoveTimedOut(m_PendingSightSwitches, s_SharedPendingRemovalBuffer, currentTime, timeout);
-            
+
             // Cleanup validated shots
             List<ushort> toRemove = null;
             foreach (var kvp in m_ValidatedShots)
@@ -1590,7 +1613,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                     toRemove.Add(kvp.Key);
                 }
             }
-            
+
             if (toRemove != null)
             {
                 foreach (var key in toRemove)
@@ -1599,16 +1622,16 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 }
             }
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // DEBUG
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
 #if UNITY_EDITOR
         private void OnDrawGizmos()
         {
             if (!m_DrawDebugRays) return;
-            
+
             // Draw pending shots
             Gizmos.color = Color.yellow;
             foreach (var pending in m_PendingShots.Values)
@@ -1618,7 +1641,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                     pending.Request.MuzzlePosition + pending.Request.ShotDirection * 10f
                 );
             }
-            
+
             // Draw pending hits
             Gizmos.color = Color.red;
             foreach (var pending in m_PendingHits.Values)

@@ -76,6 +76,13 @@ physics ownership, or a lifecycle independent of its character attachment.
 
 ## Shooter setup
 
+Apply the required Shooter server-authority patch before configuring weapons.
+The current patch uses a cancellable `NetworkOnHitValidator` before GC2 hit side
+effects and reports the native shield result after `OnHit`, so Block, Parry, and
+Block Break reconstruct correctly on other peers. A project that still has only
+the older `NetworkHitDetected` callback must reapply the patch; a notification
+cannot safely cancel client damage.
+
 Populate the PurrNet Shooter bridge's Weapon Registrations. Each registration
 maps a `ShooterWeapon` to the remote model prefab and optional GC2 `Handle` used
 to equip it. The weapon hash is derived from the weapon asset.
@@ -103,6 +110,10 @@ is safe only when the same object exists at the same path on every peer. Assign
 a stable shared ID for runtime-created equivalents, or make the prop a real
 PurrNet network object.
 
+When GC2 Stats owns health, add `NetworkShooterStatsDamageBridge`. Damage and
+reaction are independent responsibilities: a Stats handler may consume the
+health change, but the Shooter manager still applies the authored reaction once.
+
 ## Melee setup
 
 Register melee weapons on `PurrNetMeleeTransportBridge` so remote clients can
@@ -115,6 +126,39 @@ Mark the supplied context as handled when the subscriber has played a custom
 effect; otherwise the manager uses the registered fallback. Presentation code
 must never call the Skill's gameplay hit callback, because damage has already
 been authorized by the server.
+
+## Traversal setup
+
+Apply the current Traversal server-authority source patch and add one
+`NetworkTraversalController` to each networked Character. PurrNet Traversal
+currently supports the built-in movement backend only: selecting Traversal
+together with PurrDiction is rejected because the PurrDiction driver does not
+implement `INetworkOwnerMotionAuthority`.
+
+Finite traversal links are transient operations. They are validated and shown
+to connected peers, but a completed link is never replayed to a late joiner.
+An active interactive traversal is persistent state: its stable traversal
+identity and relative pose are restored from a versioned snapshot without
+rerunning gameplay-bearing enter instructions.
+
+The server serializes traversal operations per Character. A requested start
+must produce the matching GC2 motion-enter event within one second; otherwise
+it is rejected and any late enter is cancelled. Short-lived events waiting for
+a controller are discarded after two seconds, while only the latest persistent
+interactive snapshot is retained. A missing Traverse does not consume its state
+version, so the same snapshot or start remains retryable when spawn order catches
+up. Superseded starts are rejected after GC2 async yields, preventing an older
+transition from overwriting the latest target.
+
+Interactive snapshots reconstruct remote presentation without replaying enter,
+exit, start, or finish instruction lists. The local owner additionally resumes
+the movement loop so climbing input does not freeze. The server accepts the
+resulting owner pose only while the correlated traversal motion window is open.
+
+If a network Character cannot resolve its manager, transport, role, ID,
+controller, current patch, motion, or supported movement backend, traversal
+fails closed and reports the missing requirement. Native traversal remains
+available only to Characters that are genuinely not networked.
 
 ## Dedicated servers
 
@@ -156,8 +200,22 @@ and Canvas creation.
 - Verify its stable ID is identical on server and clients.
 - Runtime-created interactive props should use PurrNet spawning instead.
 
+### Traversal is suppressed or an interactive pose is stale
+
+- Apply and validate the current Traversal source patch in the setup wizard.
+- Use the Built-in movement backend; PurrDiction does not yet expose the owner
+  motion-authority window required by Traversal.
+- Check the diagnostic for an unready role, network ID, controller, motion, or
+  route. Networked Characters fail closed instead of running native traversal.
+- A `StartTimeout` means GC2 did not emit the matching motion-enter event within
+  one second. Verify that the Traverse is enabled, has a usable Motion, and its
+  conditions succeed on the server.
+- Active interactive traversal is restored from snapshots. Finite links are
+  intentionally transient and are not replayed to late joiners.
+
 ## Version compatibility
 
-Core, Shooter, and Melee snapshot packet wire layouts changed with this repair.
+Core, Shooter, Melee, and Traversal packet or snapshot wire layouts changed
+with this repair.
 Every server and client in a session must use the same package version;
 mixed-version sessions are unsupported.

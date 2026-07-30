@@ -13,7 +13,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
     /// Transport-agnostic - wire up delegates to your networking solution.
     /// </summary>
     [AddComponentMenu("Game Creator/Network/Inventory/Network Inventory Manager")]
-    public class NetworkInventoryManager : NetworkSingleton<NetworkInventoryManager>
+    public partial class NetworkInventoryManager : NetworkSingleton<NetworkInventoryManager>
     {
         // ════════════════════════════════════════════════════════════════════════════════════════
         // SINGLETON (lazy-find override)
@@ -135,6 +135,18 @@ namespace Arawn.GameCreator2.Networking.Inventory
         [SerializeField] private int m_MaxPendingRequestsPerPlayer = 50;
         [SerializeField] private float m_RequestTimeout = 5f;
 
+        [Tooltip("UNSAFE compatibility mode. Allows an owning client to create registered Item types without a project validator. Leave disabled for server-authoritative games.")]
+        [SerializeField] private bool m_AllowUnvalidatedOwnedClientAdds = false;
+
+        [Tooltip("Maximum distance between the requesting character and a scene/world inventory. This also protects legacy dropped-item pickups.")]
+        [SerializeField, Min(0.1f)] private float m_MaxWorldInteractionDistance = 5f;
+
+        [Tooltip("Maximum number of bags whose persistent state may wait for a controller to register.")]
+        [SerializeField] private int m_MaxPendingPersistentBags = 128;
+
+        [Tooltip("Maximum ordered persistent messages retained per unregistered bag.")]
+        [SerializeField] private int m_MaxPendingPersistentMessagesPerBag = 64;
+
         [Header("Debug")]
         [SerializeField] private bool m_LogNetworkMessages = false;
 
@@ -144,10 +156,49 @@ namespace Arawn.GameCreator2.Networking.Inventory
 
         private readonly Dictionary<uint, NetworkInventoryController> m_Controllers = new(32);
         private readonly Dictionary<ulong, int> m_PendingRequestCounts = new(32);
+        private readonly Dictionary<uint, List<PendingPersistentState>> m_PendingPersistentState = new(16);
+        private readonly HashSet<uint> m_PendingPersistentOverflow = new();
         private NetworkInventoryPatchHooks m_PatchHooks;
+
+        private const float PENDING_TRANSIENT_USE_TTL_SECONDS = 2f;
 
         // Merchant controllers (separate from player bags)
         private readonly Dictionary<uint, NetworkMerchantController> m_MerchantControllers = new(8);
+
+        private enum PendingPersistentStateKind : byte
+        {
+            ItemAdded,
+            ItemRemoved,
+            ItemMoved,
+            ItemUsed,
+            ItemEquipped,
+            ItemUnequipped,
+            SocketChanged,
+            WealthChanged,
+            PropertyChanged,
+            Snapshot,
+            Delta
+        }
+
+        private readonly struct PendingPersistentState
+        {
+            public readonly PendingPersistentStateKind Kind;
+            public readonly object Payload;
+            public readonly uint StateVersion;
+            public readonly float QueuedRealtime;
+
+            public PendingPersistentState(
+                PendingPersistentStateKind kind,
+                object payload,
+                uint stateVersion,
+                float queuedRealtime = 0f)
+            {
+                Kind = kind;
+                Payload = payload;
+                StateVersion = stateVersion;
+                QueuedRealtime = queuedRealtime;
+            }
+        }
 
         // ════════════════════════════════════════════════════════════════════════════════════════
         // PROPERTIES
@@ -170,6 +221,22 @@ namespace Arawn.GameCreator2.Networking.Inventory
 
         public float RequestTimeoutSeconds => m_RequestTimeout;
 
+        /// <summary>Whether optional Inventory transport and reconciliation diagnostics are enabled.</summary>
+        public bool DiagnosticsEnabled => m_LogNetworkMessages;
+
+        /// <summary>
+        /// Unsafe trusted-co-op compatibility option for client-originated generic Add Item calls.
+        /// Runtime-item payloads remain server-only even when this option is enabled.
+        /// </summary>
+        public bool AllowUnvalidatedOwnedClientAdds
+        {
+            get => m_AllowUnvalidatedOwnedClientAdds;
+            set => m_AllowUnvalidatedOwnedClientAdds = value;
+        }
+
+        /// <summary>Maximum server-authorized interaction distance for world bags and legacy drops.</summary>
+        public float MaxWorldInteractionDistance => Mathf.Max(0.1f, m_MaxWorldInteractionDistance);
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // UNITY LIFECYCLE
         // ════════════════════════════════════════════════════════════════════════════════════════
@@ -183,9 +250,12 @@ namespace Arawn.GameCreator2.Networking.Inventory
         private void OnDisable()
         {
             SecurityIntegration.SetModuleServerContext("Inventory", false);
+            CancelPendingSemanticTransactions();
+            m_PendingPersistentState.Clear();
+            m_PendingPersistentOverflow.Clear();
             if (m_PatchHooks != null)
             {
-                m_PatchHooks.Initialize(false);
+                m_PatchHooks.Shutdown();
             }
         }
 
@@ -199,6 +269,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
             if (controller == null) return;
             m_Controllers[networkId] = controller;
             RegisterOwnedEntityMapping(networkId);
+            FlushPendingPersistentState(networkId, controller);
 
             if (m_LogNetworkMessages)
                 Debug.Log($"[NetworkInventoryManager] Registered inventory controller: NetworkId={networkId}");
@@ -341,8 +412,11 @@ namespace Arawn.GameCreator2.Networking.Inventory
 
         public void SendPickupRequest(NetworkPickupRequest request)
         {
-            Debug.Log(
-                $"[NetworkInventoryPickupDebug][Manager] send pickup request req={request.RequestId} actor={request.ActorNetworkId} pickerBag={request.PickerBagNetworkId} sourceBag={request.SourceBagNetworkId} runtime={request.RuntimeIdHash} destination={request.DestinationPosition}");
+            if (m_LogNetworkMessages)
+            {
+                Debug.Log(
+                    $"[NetworkInventoryPickupDebug][Manager] send pickup request req={request.RequestId} actor={request.ActorNetworkId} pickerBag={request.PickerBagNetworkId} sourceBag={request.SourceBagNetworkId} runtime={request.RuntimeIdHash} destination={request.DestinationPosition}");
+            }
             OnSendPickupRequest?.Invoke(request);
         }
 
@@ -408,7 +482,13 @@ namespace Arawn.GameCreator2.Networking.Inventory
             NetworkInventoryController targetController = GetController(targetBagNetworkId);
             if (targetController != null && targetController.IsWorldInventory)
             {
-                return true;
+                NetworkInventoryController actorController = GetController(actorNetworkId);
+                if (actorController == null || !actorController.UsesNetworkCharacterId)
+                {
+                    return false;
+                }
+
+                return IsWithinWorldInteractionRange(actorController, targetController.transform.position);
             }
 
             return SecurityIntegration.ValidateTargetEntityOwnership(
@@ -419,6 +499,16 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 requestType);
         }
 
+        internal bool IsWithinWorldInteractionRange(
+            NetworkInventoryController actorController,
+            Vector3 worldPosition)
+        {
+            if (actorController == null || !actorController.UsesNetworkCharacterId) return false;
+            float maxDistance = MaxWorldInteractionDistance;
+            return (actorController.transform.position - worldPosition).sqrMagnitude <=
+                   maxDistance * maxDistance;
+        }
+
         private static float ResolveSecurityTimeProvider()
         {
             var bridge = NetworkTransportBridge.Active;
@@ -427,12 +517,6 @@ namespace Arawn.GameCreator2.Networking.Inventory
 
         private void SyncPatchHooks()
         {
-            if (!m_IsServer)
-            {
-                if (m_PatchHooks != null) m_PatchHooks.Initialize(false);
-                return;
-            }
-
             if (m_PatchHooks == null)
             {
                 m_PatchHooks = GetComponent<NetworkInventoryPatchHooks>();
@@ -442,7 +526,9 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 }
             }
 
-            m_PatchHooks.Initialize(true);
+            // Semantic hooks must exist on every peer. The resolved bag/controller role decides
+            // whether a call executes locally, becomes a request, or is rejected as a proxy write.
+            m_PatchHooks.Initialize(m_IsServer);
         }
 
         public void ReceiveContentAddRequest(NetworkContentAddRequest request, ulong clientId)
@@ -502,6 +588,48 @@ namespace Arawn.GameCreator2.Networking.Inventory
                         CorrelationId = request.CorrelationId,
                         Authorized = false,
                         RejectionReason = InventoryRejectionReason.BagNotFound
+                    });
+                    return;
+                }
+
+                if (request.RuntimeItem.ItemHash != 0 || request.ItemHash == 0)
+                {
+                    SendContentAddResponse(senderClientId, new NetworkContentAddResponse
+                    {
+                        RequestId = request.RequestId,
+                        ActorNetworkId = request.ActorNetworkId,
+                        CorrelationId = request.CorrelationId,
+                        Authorized = false,
+                        RejectionReason = InventoryRejectionReason.SecurityViolation
+                    });
+                    return;
+                }
+
+                if (CustomAddValidator != null)
+                {
+                    var validation = CustomAddValidator(request, senderClientId);
+                    if (!validation.allowed)
+                    {
+                        SendContentAddResponse(senderClientId, new NetworkContentAddResponse
+                        {
+                            RequestId = request.RequestId,
+                            ActorNetworkId = request.ActorNetworkId,
+                            CorrelationId = request.CorrelationId,
+                            Authorized = false,
+                            RejectionReason = validation.reason
+                        });
+                        return;
+                    }
+                }
+                else if (!m_AllowUnvalidatedOwnedClientAdds)
+                {
+                    SendContentAddResponse(senderClientId, new NetworkContentAddResponse
+                    {
+                        RequestId = request.RequestId,
+                        ActorNetworkId = request.ActorNetworkId,
+                        CorrelationId = request.CorrelationId,
+                        Authorized = false,
+                        RejectionReason = InventoryRejectionReason.NotAuthorized
                     });
                     return;
                 }
@@ -576,6 +704,23 @@ namespace Arawn.GameCreator2.Networking.Inventory
                         RejectionReason = InventoryRejectionReason.BagNotFound
                     });
                     return;
+                }
+
+                if (CustomRemoveValidator != null)
+                {
+                    var validation = CustomRemoveValidator(request, senderClientId);
+                    if (!validation.allowed)
+                    {
+                        SendContentRemoveResponse(senderClientId, new NetworkContentRemoveResponse
+                        {
+                            RequestId = request.RequestId,
+                            ActorNetworkId = request.ActorNetworkId,
+                            CorrelationId = request.CorrelationId,
+                            Authorized = false,
+                            RejectionReason = validation.reason
+                        });
+                        return;
+                    }
                 }
 
                 var response = controller.ProcessContentRemoveRequest(request, senderClientId);
@@ -996,6 +1141,27 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 });
                 return;
             }
+
+            bool validAction = request.Action == WealthAction.Set ||
+                               request.Action == WealthAction.Add ||
+                               request.Action == WealthAction.Subtract;
+            bool validSource = Enum.IsDefined(typeof(InventoryModificationSource), request.Source);
+            bool validOperand = request.Action == WealthAction.Set
+                ? request.Value >= 0
+                : request.Value > 0;
+            if (!validAction || !validSource || !validOperand)
+            {
+                SendWealthResponse(senderClientId, new NetworkWealthResponse
+                {
+                    RequestId = request.RequestId,
+                    ActorNetworkId = request.ActorNetworkId,
+                    CorrelationId = request.CorrelationId,
+                    Authorized = false,
+                    RejectionReason = InventoryRejectionReason.InvalidOperation
+                });
+                return;
+            }
+
             if (!CheckRateLimit(clientId))
             {
                 SendWealthResponse(senderClientId, new NetworkWealthResponse
@@ -1011,6 +1177,39 @@ namespace Arawn.GameCreator2.Networking.Inventory
 
             try
             {
+                // A generic client wealth mutation is a grant/spend authority boundary. Native
+                // merchant/crafting operations execute inside trusted server mutation scopes and
+                // never reach this endpoint. Projects that expose other client-originated wealth
+                // operations must explicitly validate their source and amount here.
+                if (CustomWealthValidator == null)
+                {
+                    SendWealthResponse(senderClientId, new NetworkWealthResponse
+                    {
+                        RequestId = request.RequestId,
+                        ActorNetworkId = request.ActorNetworkId,
+                        CorrelationId = request.CorrelationId,
+                        Authorized = false,
+                        RejectionReason = InventoryRejectionReason.NotAuthorized
+                    });
+                    return;
+                }
+
+                var validation = CustomWealthValidator(request, senderClientId);
+                if (!validation.allowed)
+                {
+                    SendWealthResponse(senderClientId, new NetworkWealthResponse
+                    {
+                        RequestId = request.RequestId,
+                        ActorNetworkId = request.ActorNetworkId,
+                        CorrelationId = request.CorrelationId,
+                        Authorized = false,
+                        RejectionReason = validation.reason == InventoryRejectionReason.None
+                            ? InventoryRejectionReason.NotAuthorized
+                            : validation.reason
+                    });
+                    return;
+                }
+
                 var controller = GetController(request.TargetBagNetworkId);
                 if (controller == null)
                 {
@@ -1042,8 +1241,11 @@ namespace Arawn.GameCreator2.Networking.Inventory
             uint senderClientId = GetSenderClientId(clientId);
             NetworkInventoryController sourceController = GetController(request.SourceBagNetworkId);
             NetworkInventoryController destinationController = GetController(request.DestinationBagNetworkId);
-            Debug.Log(
-                $"[NetworkInventoryPickupDebug][Manager] receive transfer request req={request.RequestId} senderConnection={clientId} senderClient={senderClientId} actor={request.ActorNetworkId} sourceBag={request.SourceBagNetworkId} sourceFound={sourceController != null} sourceWorld={(sourceController != null && sourceController.IsWorldInventory)} destinationBag={request.DestinationBagNetworkId} destinationFound={destinationController != null} destinationWorld={(destinationController != null && destinationController.IsWorldInventory)} runtime={request.RuntimeIdHash} destination={request.DestinationPosition}");
+            if (m_LogNetworkMessages)
+            {
+                Debug.Log(
+                    $"[NetworkInventoryPickupDebug][Manager] receive transfer request req={request.RequestId} senderConnection={clientId} senderClient={senderClientId} actor={request.ActorNetworkId} sourceBag={request.SourceBagNetworkId} sourceFound={sourceController != null} sourceWorld={(sourceController != null && sourceController.IsWorldInventory)} destinationBag={request.DestinationBagNetworkId} destinationFound={destinationController != null} destinationWorld={(destinationController != null && destinationController.IsWorldInventory)} runtime={request.RuntimeIdHash} destination={request.DestinationPosition}");
+            }
 
             if (!SecurityIntegration.ValidateModuleRequest(
                     senderClientId,
@@ -1138,8 +1340,11 @@ namespace Arawn.GameCreator2.Networking.Inventory
         {
             if (!m_IsServer) return;
             uint senderClientId = GetSenderClientId(clientId);
-            Debug.Log(
-                $"[NetworkInventoryPickupDebug][Manager] receive pickup request req={request.RequestId} senderConnection={clientId} senderClient={senderClientId} actor={request.ActorNetworkId} pickerBag={request.PickerBagNetworkId} sourceBag={request.SourceBagNetworkId} runtime={request.RuntimeIdHash}");
+            if (m_LogNetworkMessages)
+            {
+                Debug.Log(
+                    $"[NetworkInventoryPickupDebug][Manager] receive pickup request req={request.RequestId} senderConnection={clientId} senderClient={senderClientId} actor={request.ActorNetworkId} pickerBag={request.PickerBagNetworkId} sourceBag={request.SourceBagNetworkId} runtime={request.RuntimeIdHash}");
+            }
             if (!SecurityIntegration.ValidateModuleRequest(
                     senderClientId,
                     BuildContext(request.ActorNetworkId, request.CorrelationId),
@@ -1207,11 +1412,20 @@ namespace Arawn.GameCreator2.Networking.Inventory
                     return;
                 }
 
+                if (TryProcessRegisteredPickup(request, senderClientId, out NetworkPickupResponse registeredResponse))
+                {
+                    SendPickupResponse(senderClientId, registeredResponse);
+                    return;
+                }
+
                 NetworkPickupResponse response = picker.ProcessPickupRequest(request, senderClientId);
                 response.ActorNetworkId = request.ActorNetworkId;
                 response.CorrelationId = request.CorrelationId;
-                Debug.Log(
-                    $"[NetworkInventoryPickupDebug][Manager] pickup processed req={request.RequestId} authorized={response.Authorized} reason={response.RejectionReason} senderClient={senderClientId} placed={response.PlacedPosition}");
+                if (m_LogNetworkMessages)
+                {
+                    Debug.Log(
+                        $"[NetworkInventoryPickupDebug][Manager] pickup processed req={request.RequestId} authorized={response.Authorized} reason={response.RejectionReason} senderClient={senderClientId} placed={response.PlacedPosition}");
+                }
                 SendPickupResponse(senderClientId, response);
             }
             finally
@@ -1293,8 +1507,11 @@ namespace Arawn.GameCreator2.Networking.Inventory
 
         private void SendPickupResponse(uint targetNetworkId, NetworkPickupResponse response)
         {
-            Debug.Log(
-                $"[NetworkInventoryPickupDebug][Manager] send pickup response req={response.RequestId} target={targetNetworkId} authorized={response.Authorized} reason={response.RejectionReason} placed={response.PlacedPosition}");
+            if (m_LogNetworkMessages)
+            {
+                Debug.Log(
+                    $"[NetworkInventoryPickupDebug][Manager] send pickup response req={response.RequestId} target={targetNetworkId} authorized={response.Authorized} reason={response.RejectionReason} placed={response.PlacedPosition}");
+            }
             OnSendPickupResponse?.Invoke(targetNetworkId, response);
         }
 
@@ -1333,8 +1550,11 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public void BroadcastDroppedItemRemoved(NetworkDroppedItemRemovedBroadcast broadcast)
         {
             if (!m_IsServer) return;
-            Debug.Log(
-                $"[NetworkInventoryPickupDebug][Manager] broadcast dropped item removed sourceBag={broadcast.SourceBagNetworkId} runtime={broadcast.RuntimeIdHash} position={broadcast.Position}");
+            if (m_LogNetworkMessages)
+            {
+                Debug.Log(
+                    $"[NetworkInventoryPickupDebug][Manager] broadcast dropped item removed sourceBag={broadcast.SourceBagNetworkId} runtime={broadcast.RuntimeIdHash} position={broadcast.Position}");
+            }
             OnBroadcastDroppedItemRemoved?.Invoke(broadcast);
         }
 
@@ -1429,13 +1649,15 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public void ReceiveItemAddedBroadcast(NetworkItemAddedBroadcast broadcast)
         {
             var controller = GetController(broadcast.BagNetworkId);
-            controller?.ReceiveItemAddedBroadcast(broadcast);
+            if (controller != null) controller.ReceiveItemAddedBroadcast(broadcast);
+            else QueuePendingPersistentState(broadcast.BagNetworkId, PendingPersistentStateKind.ItemAdded, broadcast);
         }
 
         public void ReceiveItemRemovedBroadcast(NetworkItemRemovedBroadcast broadcast)
         {
             var controller = GetController(broadcast.BagNetworkId);
-            controller?.ReceiveItemRemovedBroadcast(broadcast);
+            if (controller != null) controller.ReceiveItemRemovedBroadcast(broadcast);
+            else QueuePendingPersistentState(broadcast.BagNetworkId, PendingPersistentStateKind.ItemRemoved, broadcast);
         }
 
         public void ReceiveItemDroppedBroadcast(NetworkItemDroppedBroadcast broadcast)
@@ -1453,37 +1675,50 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public void ReceiveItemMovedBroadcast(NetworkItemMovedBroadcast broadcast)
         {
             var controller = GetController(broadcast.BagNetworkId);
-            controller?.ReceiveItemMovedBroadcast(broadcast);
+            if (controller != null) controller.ReceiveItemMovedBroadcast(broadcast);
+            else QueuePendingPersistentState(broadcast.BagNetworkId, PendingPersistentStateKind.ItemMoved, broadcast);
         }
 
         public void ReceiveItemUsedBroadcast(NetworkItemUsedBroadcast broadcast)
         {
             var controller = GetController(broadcast.BagNetworkId);
-            controller?.ReceiveItemUsedBroadcast(broadcast);
+            if (controller != null) controller.ReceiveItemUsedBroadcast(broadcast);
+            else QueuePendingPersistentState(broadcast.BagNetworkId, PendingPersistentStateKind.ItemUsed, broadcast);
         }
 
         public void ReceiveItemEquippedBroadcast(NetworkItemEquippedBroadcast broadcast)
         {
             var controller = GetController(broadcast.BagNetworkId);
-            controller?.ReceiveItemEquippedBroadcast(broadcast);
+            if (controller != null) controller.ReceiveItemEquippedBroadcast(broadcast);
+            else QueuePendingPersistentState(broadcast.BagNetworkId, PendingPersistentStateKind.ItemEquipped, broadcast);
         }
 
         public void ReceiveItemUnequippedBroadcast(NetworkItemUnequippedBroadcast broadcast)
         {
             var controller = GetController(broadcast.BagNetworkId);
-            controller?.ReceiveItemUnequippedBroadcast(broadcast);
+            if (controller != null) controller.ReceiveItemUnequippedBroadcast(broadcast);
+            else QueuePendingPersistentState(broadcast.BagNetworkId, PendingPersistentStateKind.ItemUnequipped, broadcast);
         }
 
         public void ReceiveSocketChangeBroadcast(NetworkSocketChangeBroadcast broadcast)
         {
             var controller = GetController(broadcast.BagNetworkId);
-            controller?.ReceiveSocketChangeBroadcast(broadcast);
+            if (controller != null) controller.ReceiveSocketChangeBroadcast(broadcast);
+            else QueuePendingPersistentState(broadcast.BagNetworkId, PendingPersistentStateKind.SocketChanged, broadcast);
         }
 
         public void ReceiveWealthChangeBroadcast(NetworkWealthChangeBroadcast broadcast)
         {
             var controller = GetController(broadcast.BagNetworkId);
-            controller?.ReceiveWealthChangeBroadcast(broadcast);
+            if (controller != null) controller.ReceiveWealthChangeBroadcast(broadcast);
+            else QueuePendingPersistentState(broadcast.BagNetworkId, PendingPersistentStateKind.WealthChanged, broadcast);
+        }
+
+        public void ReceivePropertyChangeBroadcast(NetworkPropertyChangeBroadcast broadcast)
+        {
+            var controller = GetController(broadcast.BagNetworkId);
+            if (controller != null) controller.ReceivePropertyChangeBroadcast(broadcast);
+            else QueuePendingPersistentState(broadcast.BagNetworkId, PendingPersistentStateKind.PropertyChanged, broadcast);
         }
 
         public void ReceiveFullSnapshot(NetworkInventorySnapshot snapshot)
@@ -1491,8 +1726,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
             var controller = GetController(snapshot.BagNetworkId);
             if (controller == null)
             {
-                Debug.LogWarning(
-                    $"[NetworkInventoryPickupDebug][Manager] full snapshot ignored because no controller is registered for bag={snapshot.BagNetworkId} registeredControllers={m_Controllers.Count}");
+                QueuePendingPersistentState(snapshot.BagNetworkId, PendingPersistentStateKind.Snapshot, snapshot);
                 return;
             }
 
@@ -1502,7 +1736,411 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public void ReceiveDelta(NetworkInventoryDelta delta)
         {
             var controller = GetController(delta.BagNetworkId);
-            controller?.ReceiveDelta(delta);
+            if (controller != null) controller.ReceiveDelta(delta);
+            else QueuePendingPersistentState(delta.BagNetworkId, PendingPersistentStateKind.Delta, delta);
+        }
+
+        private void QueuePendingPersistentState(
+            uint bagNetworkId,
+            PendingPersistentStateKind kind,
+            object payload)
+        {
+            if (bagNetworkId == 0 || payload == null) return;
+            if (kind == PendingPersistentStateKind.ItemUsed &&
+                payload is NetworkItemUsedBroadcast transientUse &&
+                !transientUse.WasConsumed)
+            {
+                QueuePendingTransientUse(bagNetworkId, transientUse);
+                return;
+            }
+
+            uint stateVersion = GetPendingPersistentStateVersion(kind, payload);
+
+            if (kind == PendingPersistentStateKind.Snapshot)
+            {
+                // A targeted snapshot is a replacement baseline. Never let an older snapshot
+                // erase newer ordered mutations which arrived while the controller was absent.
+                if (stateVersion != 0 &&
+                    m_PendingPersistentState.TryGetValue(bagNetworkId, out List<PendingPersistentState> existing))
+                {
+                    for (int i = 0; i < existing.Count; i++)
+                    {
+                        PendingPersistentState queued = existing[i];
+                        if (queued.Kind != PendingPersistentStateKind.Snapshot ||
+                            queued.StateVersion == 0) continue;
+                        if (!IsNewerStateVersion(stateVersion, queued.StateVersion)) return;
+                    }
+                }
+
+                m_PendingPersistentOverflow.Remove(bagNetworkId);
+                if (!m_PendingPersistentState.TryGetValue(bagNetworkId, out List<PendingPersistentState> replacement))
+                {
+                    EnsurePendingPersistentBagCapacity(bagNetworkId);
+                    replacement = new List<PendingPersistentState>(8);
+                    m_PendingPersistentState[bagNetworkId] = replacement;
+                }
+                RemoveExpiredPendingTransientUses(replacement);
+
+                if (stateVersion == 0)
+                {
+                    // Replace only persistent state. A recent non-consuming Use is a transient
+                    // event and must survive snapshot baseline replacement.
+                    for (int i = replacement.Count - 1; i >= 0; i--)
+                    {
+                        if (!IsPendingTransientUse(replacement[i])) replacement.RemoveAt(i);
+                    }
+                    replacement.Insert(0, new PendingPersistentState(kind, payload, 0));
+                    return;
+                }
+
+                for (int i = replacement.Count - 1; i >= 0; i--)
+                {
+                    uint queuedVersion = replacement[i].StateVersion;
+                    if (queuedVersion == 0)
+                    {
+                        if (!IsPendingTransientUse(replacement[i])) replacement.RemoveAt(i);
+                        continue;
+                    }
+                    if (!IsNewerStateVersion(queuedVersion, stateVersion))
+                        replacement.RemoveAt(i);
+                }
+                replacement.Insert(0, new PendingPersistentState(kind, payload, stateVersion));
+                return;
+            }
+
+            if (m_PendingPersistentOverflow.Contains(bagNetworkId)) return;
+
+            if (!m_PendingPersistentState.TryGetValue(bagNetworkId, out List<PendingPersistentState> pending))
+            {
+                EnsurePendingPersistentBagCapacity(bagNetworkId);
+                pending = new List<PendingPersistentState>(8);
+                m_PendingPersistentState[bagNetworkId] = pending;
+            }
+
+            if (stateVersion != 0)
+            {
+                int insertionIndex = pending.Count;
+                for (int i = 0; i < pending.Count; i++)
+                {
+                    PendingPersistentState queued = pending[i];
+                    if (queued.StateVersion == 0) continue;
+
+                    if (queued.StateVersion == stateVersion)
+                    {
+                        // A snapshot is already complete for this revision. A delta is the next
+                        // most complete representation and may replace a primitive mutation.
+                        if (queued.Kind == PendingPersistentStateKind.Snapshot) return;
+                        if (kind == PendingPersistentStateKind.Delta &&
+                            queued.Kind != PendingPersistentStateKind.Delta)
+                        {
+                            pending[i] = new PendingPersistentState(kind, payload, stateVersion);
+                        }
+                        return;
+                    }
+
+                    if (queued.Kind == PendingPersistentStateKind.Snapshot &&
+                        !IsNewerStateVersion(stateVersion, queued.StateVersion))
+                    {
+                        return;
+                    }
+
+                    if (IsNewerStateVersion(queued.StateVersion, stateVersion))
+                    {
+                        insertionIndex = i;
+                        break;
+                    }
+                }
+
+                int versionedMaximum = Mathf.Max(4, m_MaxPendingPersistentMessagesPerBag);
+                while (pending.Count >= versionedMaximum &&
+                       RemoveOldestPendingTransientUse(pending))
+                {
+                }
+                if (pending.Count >= versionedMaximum)
+                {
+                    pending.Clear();
+                    m_PendingPersistentOverflow.Add(bagNetworkId);
+                    Debug.LogWarning(
+                        $"[NetworkInventoryManager] Persistent state queue overflowed for bag={bagNetworkId}. " +
+                        "A targeted resync will be requested when its controller registers.");
+                    return;
+                }
+
+                pending.Insert(insertionIndex,
+                    new PendingPersistentState(kind, payload, stateVersion));
+                return;
+            }
+
+            int maximum = Mathf.Max(4, m_MaxPendingPersistentMessagesPerBag);
+            while (pending.Count >= maximum && RemoveOldestPendingTransientUse(pending))
+            {
+            }
+            if (pending.Count >= maximum)
+            {
+                pending.Clear();
+                m_PendingPersistentOverflow.Add(bagNetworkId);
+                Debug.LogWarning(
+                    $"[NetworkInventoryManager] Persistent state queue overflowed for bag={bagNetworkId}. " +
+                    "A targeted resync will be requested when its controller registers.");
+                return;
+            }
+
+            pending.Add(new PendingPersistentState(kind, payload, 0));
+        }
+
+        private void QueuePendingTransientUse(
+            uint bagNetworkId,
+            NetworkItemUsedBroadcast broadcast)
+        {
+            // A transient Use must never displace a persistent bag revision or turn a cosmetic
+            // queue overflow into a state resync. It is retained briefly only for spawn-order races.
+            if (m_PendingPersistentOverflow.Contains(bagNetworkId)) return;
+
+            if (!m_PendingPersistentState.TryGetValue(
+                    bagNetworkId,
+                    out List<PendingPersistentState> pending))
+            {
+                EnsurePendingPersistentBagCapacity(bagNetworkId);
+                pending = new List<PendingPersistentState>(8);
+                m_PendingPersistentState[bagNetworkId] = pending;
+            }
+            RemoveExpiredPendingTransientUses(pending);
+
+            int oldestTransientIndex = -1;
+            float oldestTransientTime = float.MaxValue;
+            for (int i = 0; i < pending.Count; i++)
+            {
+                PendingPersistentState queued = pending[i];
+                if (queued.Kind != PendingPersistentStateKind.ItemUsed ||
+                    queued.Payload is not NetworkItemUsedBroadcast queuedUse ||
+                    queuedUse.WasConsumed)
+                {
+                    continue;
+                }
+
+                if (queuedUse.RuntimeIdHash == broadcast.RuntimeIdHash &&
+                    queuedUse.StateVersion == broadcast.StateVersion)
+                {
+                    return;
+                }
+
+                if (queued.QueuedRealtime < oldestTransientTime)
+                {
+                    oldestTransientIndex = i;
+                    oldestTransientTime = queued.QueuedRealtime;
+                }
+            }
+
+            int maximum = Mathf.Max(4, m_MaxPendingPersistentMessagesPerBag);
+            if (pending.Count >= maximum)
+            {
+                if (oldestTransientIndex < 0) return;
+                pending.RemoveAt(oldestTransientIndex);
+            }
+
+            pending.Add(new PendingPersistentState(
+                PendingPersistentStateKind.ItemUsed,
+                broadcast,
+                0,
+                Time.realtimeSinceStartup));
+        }
+
+        private static bool IsPendingTransientUse(PendingPersistentState state)
+        {
+            return state.Kind == PendingPersistentStateKind.ItemUsed &&
+                   state.Payload is NetworkItemUsedBroadcast use &&
+                   !use.WasConsumed;
+        }
+
+        private static void RemoveExpiredPendingTransientUses(
+            List<PendingPersistentState> pending)
+        {
+            float now = Time.realtimeSinceStartup;
+            for (int i = pending.Count - 1; i >= 0; i--)
+            {
+                PendingPersistentState state = pending[i];
+                if (!IsPendingTransientUse(state) || state.QueuedRealtime <= 0f) continue;
+                if (now - state.QueuedRealtime > PENDING_TRANSIENT_USE_TTL_SECONDS)
+                {
+                    pending.RemoveAt(i);
+                }
+            }
+        }
+
+        private static bool RemoveOldestPendingTransientUse(
+            List<PendingPersistentState> pending)
+        {
+            int oldestIndex = -1;
+            float oldestTime = float.MaxValue;
+            for (int i = 0; i < pending.Count; i++)
+            {
+                PendingPersistentState state = pending[i];
+                if (!IsPendingTransientUse(state)) continue;
+                if (state.QueuedRealtime >= oldestTime) continue;
+                oldestIndex = i;
+                oldestTime = state.QueuedRealtime;
+            }
+
+            if (oldestIndex < 0) return false;
+            pending.RemoveAt(oldestIndex);
+            return true;
+        }
+
+        private static bool IsNewerStateVersion(uint candidate, uint baseline)
+        {
+            return candidate != baseline && unchecked((int)(candidate - baseline)) > 0;
+        }
+
+        private static uint GetPendingPersistentStateVersion(
+            PendingPersistentStateKind kind,
+            object payload)
+        {
+            return kind switch
+            {
+                PendingPersistentStateKind.ItemAdded => ((NetworkItemAddedBroadcast)payload).StateVersion,
+                PendingPersistentStateKind.ItemRemoved => ((NetworkItemRemovedBroadcast)payload).StateVersion,
+                PendingPersistentStateKind.ItemMoved => ((NetworkItemMovedBroadcast)payload).StateVersion,
+                PendingPersistentStateKind.ItemUsed =>
+                    ((NetworkItemUsedBroadcast)payload).WasConsumed
+                        ? ((NetworkItemUsedBroadcast)payload).StateVersion
+                        : 0u,
+                PendingPersistentStateKind.ItemEquipped => ((NetworkItemEquippedBroadcast)payload).StateVersion,
+                PendingPersistentStateKind.ItemUnequipped => ((NetworkItemUnequippedBroadcast)payload).StateVersion,
+                PendingPersistentStateKind.SocketChanged => ((NetworkSocketChangeBroadcast)payload).StateVersion,
+                PendingPersistentStateKind.WealthChanged => ((NetworkWealthChangeBroadcast)payload).StateVersion,
+                PendingPersistentStateKind.PropertyChanged => ((NetworkPropertyChangeBroadcast)payload).StateVersion,
+                PendingPersistentStateKind.Snapshot => ((NetworkInventorySnapshot)payload).StateVersion,
+                PendingPersistentStateKind.Delta => ((NetworkInventoryDelta)payload).StateVersion,
+                _ => 0
+            };
+        }
+
+        private void EnsurePendingPersistentBagCapacity(uint incomingBagNetworkId)
+        {
+            int maximum = Mathf.Max(4, m_MaxPendingPersistentBags);
+            if (m_PendingPersistentState.ContainsKey(incomingBagNetworkId) ||
+                m_PendingPersistentState.Count < maximum)
+            {
+                return;
+            }
+
+            uint evicted = 0;
+            foreach (uint networkId in m_PendingPersistentState.Keys)
+            {
+                evicted = networkId;
+                break;
+            }
+
+            if (evicted == 0) return;
+            m_PendingPersistentState.Remove(evicted);
+            m_PendingPersistentOverflow.Add(evicted);
+            Debug.LogWarning(
+                $"[NetworkInventoryManager] Evicted queued persistent state for bag={evicted} " +
+                $"while reserving capacity for bag={incomingBagNetworkId}. A resync will be " +
+                "requested if that bag registers.");
+        }
+
+        private void FlushPendingPersistentState(uint bagNetworkId, NetworkInventoryController controller)
+        {
+            if (controller == null) return;
+            bool requiresResync = m_PendingPersistentOverflow.Remove(bagNetworkId);
+            if (!m_PendingPersistentState.TryGetValue(bagNetworkId, out List<PendingPersistentState> pending))
+            {
+                if (requiresResync) RequestPendingPersistentResync(bagNetworkId);
+                return;
+            }
+
+            m_PendingPersistentState.Remove(bagNetworkId);
+            if (requiresResync)
+            {
+                RequestPendingPersistentResync(bagNetworkId);
+                return;
+            }
+            if (pending.Count == 0) return;
+
+            for (int i = 0; i < pending.Count; i++)
+            {
+                PendingPersistentState state = pending[i];
+                switch (state.Kind)
+                {
+                    case PendingPersistentStateKind.ItemAdded:
+                        controller.ReceiveItemAddedBroadcast((NetworkItemAddedBroadcast)state.Payload);
+                        break;
+                    case PendingPersistentStateKind.ItemRemoved:
+                        controller.ReceiveItemRemovedBroadcast((NetworkItemRemovedBroadcast)state.Payload);
+                        break;
+                    case PendingPersistentStateKind.ItemMoved:
+                        controller.ReceiveItemMovedBroadcast((NetworkItemMovedBroadcast)state.Payload);
+                        break;
+                    case PendingPersistentStateKind.ItemUsed:
+                        NetworkItemUsedBroadcast useBroadcast =
+                            (NetworkItemUsedBroadcast)state.Payload;
+                        if (useBroadcast.WasConsumed ||
+                            state.QueuedRealtime <= 0f ||
+                            Time.realtimeSinceStartup - state.QueuedRealtime <=
+                            PENDING_TRANSIENT_USE_TTL_SECONDS)
+                        {
+                            controller.ReceiveItemUsedBroadcast(useBroadcast);
+                        }
+                        break;
+                    case PendingPersistentStateKind.ItemEquipped:
+                        controller.ReceiveItemEquippedBroadcast((NetworkItemEquippedBroadcast)state.Payload);
+                        break;
+                    case PendingPersistentStateKind.ItemUnequipped:
+                        controller.ReceiveItemUnequippedBroadcast((NetworkItemUnequippedBroadcast)state.Payload);
+                        break;
+                    case PendingPersistentStateKind.SocketChanged:
+                        controller.ReceiveSocketChangeBroadcast((NetworkSocketChangeBroadcast)state.Payload);
+                        break;
+                    case PendingPersistentStateKind.WealthChanged:
+                        controller.ReceiveWealthChangeBroadcast((NetworkWealthChangeBroadcast)state.Payload);
+                        break;
+                    case PendingPersistentStateKind.PropertyChanged:
+                        controller.ReceivePropertyChangeBroadcast((NetworkPropertyChangeBroadcast)state.Payload);
+                        break;
+                    case PendingPersistentStateKind.Snapshot:
+                        controller.ReceiveFullSnapshot((NetworkInventorySnapshot)state.Payload);
+                        break;
+                    case PendingPersistentStateKind.Delta:
+                        controller.ReceiveDelta((NetworkInventoryDelta)state.Payload);
+                        break;
+                }
+            }
+        }
+
+        private void RequestPendingPersistentResync(uint bagNetworkId)
+        {
+            if (m_IsServer) return;
+            if (OnSendResyncRequest == null)
+            {
+                Debug.LogWarning(
+                    $"[NetworkInventoryManager] Inventory state for bag={bagNetworkId} requires " +
+                    "a resync, but no Inventory resync transport route is installed.");
+                return;
+            }
+
+            uint actorNetworkId = bagNetworkId;
+            NetworkInventoryController bagController = GetController(bagNetworkId);
+            if (bagController == null || !bagController.IsLocalClient ||
+                !bagController.UsesNetworkCharacterId)
+            {
+                foreach (NetworkInventoryController candidate in m_Controllers.Values)
+                {
+                    if (candidate == null || !candidate.IsLocalClient ||
+                        !candidate.UsesNetworkCharacterId || candidate.NetworkId == 0) continue;
+                    actorNetworkId = candidate.NetworkId;
+                    break;
+                }
+            }
+
+            ushort requestId = NextSemanticRequestId();
+            SendResyncRequest(new NetworkInventoryResyncRequest
+            {
+                ActorNetworkId = actorNetworkId,
+                CorrelationId = NetworkCorrelation.Compose(actorNetworkId, requestId),
+                BagNetworkId = bagNetworkId,
+                LastAppliedStateVersion = 0
+            });
         }
 
         #endregion
@@ -1571,6 +2209,10 @@ namespace Arawn.GameCreator2.Networking.Inventory
 
         public void ReceiveTransferResponse(NetworkTransferResponse response, uint targetNetworkId)
         {
+            uint actorId = response.ActorNetworkId != 0 ? response.ActorNetworkId : targetNetworkId;
+            GetController(actorId)?.ReceiveTransactionResponse(
+                response.Authorized, response.RejectionReason, "Transfer item",
+                response.StateVersion);
             if (!response.Authorized && m_LogNetworkMessages)
             {
                 Debug.LogWarning($"[NetworkInventoryManager] Transfer rejected: {response.RejectionReason}");
@@ -1579,8 +2221,12 @@ namespace Arawn.GameCreator2.Networking.Inventory
 
         public void ReceivePickupResponse(NetworkPickupResponse response, uint targetNetworkId)
         {
-            Debug.Log(
-                $"[NetworkInventoryPickupDebug][Manager] receive pickup response target={targetNetworkId} req={response.RequestId} authorized={response.Authorized} reason={response.RejectionReason} placed={response.PlacedPosition}");
+            CompletePickupResponse(response);
+            if (m_LogNetworkMessages)
+            {
+                Debug.Log(
+                    $"[NetworkInventoryPickupDebug][Manager] receive pickup response target={targetNetworkId} req={response.RequestId} authorized={response.Authorized} reason={response.RejectionReason} placed={response.PlacedPosition}");
+            }
 
             if (!response.Authorized)
             {
@@ -1599,6 +2245,12 @@ namespace Arawn.GameCreator2.Networking.Inventory
 
         /// <summary>Custom validator for remove operations.</summary>
         public Func<NetworkContentRemoveRequest, uint, (bool allowed, InventoryRejectionReason reason)> CustomRemoveValidator;
+
+        /// <summary>
+        /// Required validator for generic client-originated wealth changes. Merchant, crafting,
+        /// and trusted server mutations do not use this endpoint.
+        /// </summary>
+        public Func<NetworkWealthRequest, uint, (bool allowed, InventoryRejectionReason reason)> CustomWealthValidator;
 
         /// <summary>Custom validator for merchant operations.</summary>
         public Func<NetworkMerchantRequest, uint, (bool allowed, InventoryRejectionReason reason)> CustomMerchantValidator;
@@ -1643,6 +2295,8 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 var snapshot = kvp.Value.GetFullSnapshot();
                 SendSnapshotToClient(clientId, snapshot);
             }
+
+            SendPickupStateSnapshot(clientId);
         }
 
         public void ForceFullSync()
@@ -1657,8 +2311,11 @@ namespace Arawn.GameCreator2.Networking.Inventory
 
         public void ClearControllers()
         {
+            CancelPendingSemanticTransactions();
             m_Controllers.Clear();
             m_MerchantControllers.Clear();
+            m_PendingPersistentState.Clear();
+            m_PendingPersistentOverflow.Clear();
             if (m_LogNetworkMessages)
                 Debug.Log("[NetworkInventoryManager] All controllers cleared");
         }

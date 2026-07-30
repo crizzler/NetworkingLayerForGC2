@@ -14,13 +14,13 @@ namespace Arawn.GameCreator2.Networking
         // Input direction encoded as shorts (-32768 to 32767 mapped to -1 to 1)
         public short inputX;
         public short inputY;
-        
+
         // Sequence number for ordering and reconciliation
         public ushort sequenceNumber;
-        
+
         // Packed flags: Jump(1), Dash(2), Sprint(4), Crouch(8), Custom(16-128)
         public byte flags;
-        
+
         // Delta time in milliseconds (capped at 255ms)
         public byte deltaTimeMs;
 
@@ -32,7 +32,7 @@ namespace Arawn.GameCreator2.Networking
         public int authorityPositionX;
         public int authorityPositionY;
         public int authorityPositionZ;
-        
+
         // Flag constants
         public const byte FLAG_JUMP = 1;
         public const byte FLAG_DASH = 2;
@@ -44,7 +44,7 @@ namespace Arawn.GameCreator2.Networking
         public const byte FLAG_CUSTOM_4 = 128;
 
         public const byte AUTHORITY_FLAG_POSITION = 1;
-        
+
         /// <summary>
         /// Creates a compressed input state from raw input.
         /// </summary>
@@ -73,7 +73,7 @@ namespace Arawn.GameCreator2.Networking
 
             return state;
         }
-        
+
         /// <summary>
         /// Gets the decompressed input direction.
         /// </summary>
@@ -81,7 +81,7 @@ namespace Arawn.GameCreator2.Networking
         {
             return new Vector2(inputX / 32767f, inputY / 32767f);
         }
-        
+
         /// <summary>
         /// Gets the delta time in seconds.
         /// </summary>
@@ -97,7 +97,7 @@ namespace Arawn.GameCreator2.Networking
         {
             return rotationY / 65535f * 360f;
         }
-        
+
         public bool HasFlag(byte flag) => (flags & flag) != 0;
 
         public bool HasOwnerAuthorityPosition => (authorityFlags & AUTHORITY_FLAG_POSITION) != 0;
@@ -118,7 +118,7 @@ namespace Arawn.GameCreator2.Networking
                 authorityPositionZ / 100f
             );
         }
-        
+
         public bool Equals(NetworkInputState other)
         {
             return inputX == other.inputX &&
@@ -132,7 +132,7 @@ namespace Arawn.GameCreator2.Networking
                    authorityPositionY == other.authorityPositionY &&
                    authorityPositionZ == other.authorityPositionZ;
         }
-        
+
         public override int GetHashCode()
         {
             return HashCode.Combine(
@@ -146,7 +146,7 @@ namespace Arawn.GameCreator2.Networking
                 HashCode.Combine(authorityPositionX, authorityPositionY, authorityPositionZ));
         }
     }
-    
+
     /// <summary>
     /// Compressed position state for network transmission.
     /// Uses fixed-point encoding for position (supports -32768 to 32767 range with 0.01 precision).
@@ -159,10 +159,10 @@ namespace Arawn.GameCreator2.Networking
         public int positionX;
         public int positionY;
         public int positionZ;
-        
+
         // Rotation Y as short (0-360 degrees mapped to 0-65535)
         public ushort rotationY;
-        
+
         // Vertical velocity encoded (multiply by 100)
         public short verticalVelocity;
 
@@ -178,26 +178,26 @@ namespace Arawn.GameCreator2.Networking
         public int supportLocalPositionY;
         public int supportLocalPositionZ;
         public ushort supportLocalYaw;
-        
+
         // Flags: IsGrounded(1), IsJumping(2), IsDashing(4), etc.
         public byte flags;
-        
+
         // Sequence number this state responds to
         public ushort lastProcessedInput;
-        
+
         public const byte FLAG_GROUNDED = 1;
         public const byte FLAG_JUMPING = 2;
         public const byte FLAG_DASHING = 4;
         public const byte FLAG_SPRINTING = 8;
         public const byte FLAG_HAS_MOVE_VELOCITY = 16;
         public const byte FLAG_HAS_SUPPORT = 32;
-        
+
         /// <summary>
         /// Creates a compressed position state.
         /// </summary>
         public static NetworkPositionState Create(
-            Vector3 position, 
-            float rotationY, 
+            Vector3 position,
+            float rotationY,
             float verticalVel,
             ushort lastInput,
             bool isGrounded,
@@ -277,7 +277,7 @@ namespace Arawn.GameCreator2.Networking
             if (isGrounded) flags |= FLAG_GROUNDED;
             if (isJumping) flags |= FLAG_JUMPING;
             if (hasMoveVelocity) flags |= FLAG_HAS_MOVE_VELOCITY;
-            
+
             return new NetworkPositionState
             {
                 positionX = Mathf.RoundToInt(position.x * 100f),
@@ -318,7 +318,7 @@ namespace Arawn.GameCreator2.Networking
             supportLocalPositionZ = 0;
             supportLocalYaw = 0;
         }
-        
+
         /// <summary>
         /// Gets the decompressed position.
         /// </summary>
@@ -326,7 +326,7 @@ namespace Arawn.GameCreator2.Networking
         {
             return new Vector3(positionX / 100f, positionY / 100f, positionZ / 100f);
         }
-        
+
         /// <summary>
         /// Gets the rotation Y in degrees.
         /// </summary>
@@ -334,7 +334,7 @@ namespace Arawn.GameCreator2.Networking
         {
             return rotationY / 65535f * 360f;
         }
-        
+
         /// <summary>
         /// Gets the vertical velocity.
         /// </summary>
@@ -365,13 +365,13 @@ namespace Arawn.GameCreator2.Networking
         {
             return supportLocalYaw / 65535f * 360f;
         }
-        
+
         public bool IsGrounded => (flags & FLAG_GROUNDED) != 0;
         public bool IsJumping => (flags & FLAG_JUMPING) != 0;
         public bool IsDashing => (flags & FLAG_DASHING) != 0;
         public bool HasMoveVelocity => (flags & FLAG_HAS_MOVE_VELOCITY) != 0;
         public bool HasSupport => (flags & FLAG_HAS_SUPPORT) != 0 && supportId != 0;
-        
+
         public bool Equals(NetworkPositionState other)
         {
             return positionX == other.positionX &&
@@ -390,7 +390,7 @@ namespace Arawn.GameCreator2.Networking
                    flags == other.flags &&
                    lastProcessedInput == other.lastProcessedInput;
         }
-        
+
         public override int GetHashCode()
         {
             return HashCode.Combine(
@@ -404,7 +404,7 @@ namespace Arawn.GameCreator2.Networking
                 HashCode.Combine(supportLocalYaw, lastProcessedInput));
         }
     }
-    
+
     /// <summary>
     /// Configuration for network character behavior.
     /// </summary>
@@ -415,43 +415,43 @@ namespace Arawn.GameCreator2.Networking
         [Tooltip("How many inputs to send per second (server tick rate match recommended)")]
         [Range(10, 60)]
         public int inputSendRate = 30;
-        
+
         [Tooltip("How many recent inputs to include for redundancy")]
         [Range(1, 5)]
         public int inputRedundancy = 3;
-        
+
         [Header("Reconciliation")]
         [Tooltip("Position error threshold before reconciliation (in units)")]
         [Range(0.01f, 1f)]
         public float reconciliationThreshold = 0.1f;
-        
+
         [Tooltip("How fast to interpolate during reconciliation")]
         [Range(5f, 30f)]
         public float reconciliationSpeed = 15f;
-        
+
         [Tooltip("Max distance to allow smooth reconciliation (larger = teleport)")]
         [Range(1f, 10f)]
         public float maxReconciliationDistance = 3f;
-        
+
         [Header("Interpolation")]
         [Tooltip("Interpolation delay for remote characters (in seconds)")]
         [Range(0.05f, 0.3f)]
         public float interpolationDelay = 0.1f;
-        
+
         [Tooltip("How many position snapshots to buffer")]
         [Range(3, 20)]
         public int snapshotBufferSize = 10;
-        
+
         [Header("Anti-Cheat")]
         [Tooltip("Max allowed speed multiplier before flagging")]
         [Range(1.1f, 2f)]
         public float maxSpeedMultiplier = 1.2f;
-        
+
         [Tooltip("How many violations before action")]
         [Range(3, 20)]
         public int violationThreshold = 5;
     }
-    
+
     /// <summary>
     /// Snapshot for position interpolation on remote characters.
     /// </summary>
@@ -469,7 +469,7 @@ namespace Arawn.GameCreator2.Networking
         public float supportLocalYaw;
 
         public bool HasSupport => (flags & NetworkPositionState.FLAG_HAS_SUPPORT) != 0 && supportId != 0;
-        
+
         public static PositionSnapshot Create(NetworkPositionState state, double time)
         {
             return new PositionSnapshot

@@ -507,7 +507,7 @@ namespace Arawn.GameCreator2.Networking.Security
         // ════════════════════════════════════════════════════════════════════════════════════════
         // GENERIC VIOLATION RECORDING
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>
         /// Record a custom security violation.
         /// </summary>
@@ -520,7 +520,7 @@ namespace Arawn.GameCreator2.Networking.Security
         {
             var manager = NetworkSecurityManager.Instance;
             if (manager == null || !manager.IsServer) return;
-            
+
             manager.RecordViolation(clientId, characterNetworkId, type, module, details);
         }
     }

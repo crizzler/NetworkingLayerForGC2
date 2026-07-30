@@ -11,15 +11,15 @@ namespace Arawn.GameCreator2.Networking
         // ════════════════════════════════════════════════════════════════════════════════════════
         // RAGDOLL - CLIENT METHODS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>
         /// [Client] Request to start ragdoll on a character.
         /// </summary>
-        public void RequestStartRagdoll(uint characterNetworkId, Vector3 force = default, 
+        public void RequestStartRagdoll(uint characterNetworkId, Vector3 force = default,
             Vector3 forcePoint = default, Action<NetworkRagdollResponse> callback = null)
         {
             if (!m_IsClient) return;
-            
+
             var request = new NetworkRagdollRequest
             {
                 RequestId = GetNextRequestId(),
@@ -31,19 +31,19 @@ namespace Arawn.GameCreator2.Networking
                 Force = force,
                 ForcePoint = forcePoint
             };
-            
+
             m_PendingRagdollRequests[GetPendingKey(request.ActorNetworkId, request.CorrelationId, request.RequestId)] = new PendingRagdollRequest
             {
                 Request = request,
                 SentTime = Time.time,
                 Callback = callback
             };
-            
+
             m_Stats.RagdollRequestsSent++;
             SendRagdollRequestToServer?.Invoke(request);
             OnRagdollRequestSent?.Invoke(request);
         }
-        
+
         /// <summary>
         /// [Client] Request to start recovery from ragdoll.
         /// </summary>
@@ -51,7 +51,7 @@ namespace Arawn.GameCreator2.Networking
             Action<NetworkRagdollResponse> callback = null)
         {
             if (!m_IsClient) return;
-            
+
             var request = new NetworkRagdollRequest
             {
                 RequestId = GetNextRequestId(),
@@ -61,33 +61,33 @@ namespace Arawn.GameCreator2.Networking
                 ClientTime = GetServerTime?.Invoke() ?? Time.time,
                 ActionType = instant ? RagdollActionType.InstantRecover : RagdollActionType.StartRecover
             };
-            
+
             m_PendingRagdollRequests[GetPendingKey(request.ActorNetworkId, request.CorrelationId, request.RequestId)] = new PendingRagdollRequest
             {
                 Request = request,
                 SentTime = Time.time,
                 Callback = callback
             };
-            
+
             m_Stats.RagdollRequestsSent++;
             SendRagdollRequestToServer?.Invoke(request);
             OnRagdollRequestSent?.Invoke(request);
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // RAGDOLL - SERVER METHODS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>
         /// [Server] Process ragdoll request from client.
         /// </summary>
         public void ProcessRagdollRequest(uint senderNetworkId, NetworkRagdollRequest request)
         {
             if (!m_IsServer) return;
-            
+
             m_Stats.RagdollRequestsReceived++;
             OnRagdollRequestReceived?.Invoke(senderNetworkId, request);
-            
+
             var character = GetCharacterByNetworkId?.Invoke(request.CharacterNetworkId);
             if (character == null)
             {
@@ -110,7 +110,7 @@ namespace Arawn.GameCreator2.Networking
                 m_Stats.RagdollRejected++;
                 return;
             }
-            
+
             // Check cooldown
             float currentTime = GetServerTime?.Invoke() ?? Time.time;
             if (m_RagdollCooldowns.TryGetValue(request.CharacterNetworkId, out float cooldownEnd) && currentTime < cooldownEnd)
@@ -118,11 +118,11 @@ namespace Arawn.GameCreator2.Networking
                 SendRagdollResponse(senderNetworkId, request.RequestId, false, RagdollRejectReason.Cooldown, request.ActorNetworkId, request.CorrelationId);
                 return;
             }
-            
+
             // Validate based on action type
             bool canPerform = false;
             RagdollRejectReason rejectReason = RagdollRejectReason.None;
-            
+
             switch (request.ActionType)
             {
                 case RagdollActionType.StartRagdoll:
@@ -130,31 +130,31 @@ namespace Arawn.GameCreator2.Networking
                     canPerform = !character.Ragdoll.IsRagdoll;
                     rejectReason = canPerform ? RagdollRejectReason.None : RagdollRejectReason.AlreadyRagdoll;
                     break;
-                    
+
                 case RagdollActionType.StartRecover:
                 case RagdollActionType.InstantRecover:
                     canPerform = character.Ragdoll.IsRagdoll;
                     rejectReason = canPerform ? RagdollRejectReason.None : RagdollRejectReason.NotRagdoll;
                     break;
             }
-            
+
             if (!canPerform)
             {
                 SendRagdollResponse(senderNetworkId, request.RequestId, false, rejectReason, request.ActorNetworkId, request.CorrelationId);
                 m_Stats.RagdollRejected++;
                 return;
             }
-            
+
             // Apply ragdoll action
             ApplyRagdollAction(character, request);
-            
+
             // Update cooldown
             m_RagdollCooldowns[request.CharacterNetworkId] = currentTime + m_RagdollCooldown;
-            
+
             // Send response
             SendRagdollResponse(senderNetworkId, request.RequestId, true, RagdollRejectReason.None, request.ActorNetworkId, request.CorrelationId);
             m_Stats.RagdollApproved++;
-            
+
             // Broadcast to all clients
             var broadcast = new NetworkRagdollBroadcast
             {
@@ -164,10 +164,10 @@ namespace Arawn.GameCreator2.Networking
                 Force = request.Force,
                 ForcePoint = request.ForcePoint
             };
-            
+
             BroadcastRagdollToClients?.Invoke(broadcast);
         }
-        
+
         private void ApplyRagdollAction(Character character, NetworkRagdollRequest request)
         {
             switch (request.ActionType)
@@ -175,32 +175,32 @@ namespace Arawn.GameCreator2.Networking
                 case RagdollActionType.StartRagdoll:
                     _ = character.Ragdoll.StartRagdoll(); // Fire-and-forget async
                     break;
-                    
+
                 case RagdollActionType.StartRagdollWithForce:
                     _ = ApplyRagdollWithForceAsync(character, request.Force, request.ForcePoint);
                     break;
-                    
+
                 case RagdollActionType.StartRecover:
                     _ = character.Ragdoll.StartRecover(); // Fire-and-forget async
                     break;
-                    
+
                 case RagdollActionType.InstantRecover:
                     // Force immediate recovery
                     _ = character.Ragdoll.StartRecover(); // Fire-and-forget async
                     break;
             }
         }
-        
+
         private async System.Threading.Tasks.Task ApplyRagdollWithForceAsync(Character character, Vector3 force, Vector3 forcePoint)
         {
             await character.Ragdoll.StartRagdoll();
-            
+
             // Apply force after ragdoll starts
             if (force != Vector3.zero)
             {
                 // Small delay to let ragdoll physics activate
                 await System.Threading.Tasks.Task.Yield();
-                
+
                 var rigidbodies = character.GetComponentsInChildren<Rigidbody>();
                 foreach (var rb in rigidbodies)
                 {
@@ -208,7 +208,7 @@ namespace Arawn.GameCreator2.Networking
                 }
             }
         }
-        
+
         private void SendRagdollResponse(uint clientId, ushort requestId, bool approved, RagdollRejectReason reason,
             uint actorNetworkId = 0, uint correlationId = 0)
         {
@@ -220,27 +220,27 @@ namespace Arawn.GameCreator2.Networking
                 Approved = approved,
                 RejectReason = reason
             };
-            
+
             SendRagdollResponseToClient?.Invoke(clientId, response);
         }
-        
+
         /// <summary>
         /// [Client] Handle ragdoll response from server.
         /// </summary>
         public void ReceiveRagdollResponse(NetworkRagdollResponse response)
         {
             if (!m_IsClient) return;
-            
+
             ulong pendingKey = GetPendingKey(response.ActorNetworkId, response.CorrelationId, response.RequestId);
             if (m_PendingRagdollRequests.TryGetValue(pendingKey, out var pending))
             {
                 m_PendingRagdollRequests.Remove(pendingKey);
                 pending.Callback?.Invoke(response);
             }
-            
+
             OnRagdollResponseReceived?.Invoke(response);
         }
-        
+
         /// <summary>
         /// [Client] Handle ragdoll broadcast from server.
         /// </summary>
@@ -255,22 +255,22 @@ namespace Arawn.GameCreator2.Networking
                 CachePendingRagdollBroadcast(broadcast);
                 return;
             }
-            
+
             var request = new NetworkRagdollRequest
             {
                 ActionType = broadcast.ActionType,
                 Force = broadcast.Force,
                 ForcePoint = broadcast.ForcePoint
             };
-            
+
             ApplyRagdollAction(character, request);
             OnRagdollBroadcastReceived?.Invoke(broadcast);
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // PROPS - CLIENT METHODS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>
         /// [Client] Request to attach a prop prefab.
         /// </summary>
@@ -279,7 +279,7 @@ namespace Arawn.GameCreator2.Networking
             Action<NetworkPropResponse> callback = null)
         {
             if (!m_IsClient) return;
-            
+
             var request = new NetworkPropRequest
             {
                 RequestId = GetNextRequestId(),
@@ -292,19 +292,19 @@ namespace Arawn.GameCreator2.Networking
                 LocalPosition = localPosition
             };
             request.SetLocalRotation(localRotation == default ? Quaternion.identity : localRotation);
-            
+
             m_PendingPropRequests[GetPendingKey(request.ActorNetworkId, request.CorrelationId, request.RequestId)] = new PendingPropRequest
             {
                 Request = request,
                 SentTime = Time.time,
                 Callback = callback
             };
-            
+
             m_Stats.PropRequestsSent++;
             SendPropRequestToServer?.Invoke(request);
             OnPropRequestSent?.Invoke(request);
         }
-        
+
         /// <summary>
         /// [Client] Request to detach a prop.
         /// </summary>
@@ -312,7 +312,7 @@ namespace Arawn.GameCreator2.Networking
             Action<NetworkPropResponse> callback = null)
         {
             if (!m_IsClient) return;
-            
+
             var request = new NetworkPropRequest
             {
                 RequestId = GetNextRequestId(),
@@ -323,14 +323,14 @@ namespace Arawn.GameCreator2.Networking
                 PropHash = propHash,
                 PropInstanceId = 0
             };
-            
+
             m_PendingPropRequests[GetPendingKey(request.ActorNetworkId, request.CorrelationId, request.RequestId)] = new PendingPropRequest
             {
                 Request = request,
                 SentTime = Time.time,
                 Callback = callback
             };
-            
+
             m_Stats.PropRequestsSent++;
             SendPropRequestToServer?.Invoke(request);
             OnPropRequestSent?.Invoke(request);
@@ -381,28 +381,28 @@ namespace Arawn.GameCreator2.Networking
             SendPropRequestToServer?.Invoke(request);
             OnPropRequestSent?.Invoke(request);
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // PROPS - SERVER METHODS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>
         /// [Server] Process prop request from client.
         /// </summary>
         public void ProcessPropRequest(uint senderNetworkId, NetworkPropRequest request)
         {
             if (!m_IsServer) return;
-            
+
             m_Stats.PropRequestsReceived++;
             OnPropRequestReceived?.Invoke(senderNetworkId, request);
-            
+
             var character = GetCharacterByNetworkId?.Invoke(request.CharacterNetworkId);
             if (character == null)
             {
                 SendPropResponse(senderNetworkId, request.RequestId, false, PropRejectReason.CharacterNotFound, 0, request.ActorNetworkId, request.CorrelationId);
                 return;
             }
-            
+
             PropRejectReason rejectReason;
             int propInstanceId;
             NetworkPropBroadcast broadcast;
@@ -415,11 +415,11 @@ namespace Arawn.GameCreator2.Networking
                 m_Stats.PropRejected++;
                 return;
             }
-            
+
             // Send response
             SendPropResponse(senderNetworkId, request.RequestId, true, PropRejectReason.None, propInstanceId, request.ActorNetworkId, request.CorrelationId);
             m_Stats.PropApproved++;
-            
+
             BroadcastPropToClients?.Invoke(broadcast);
         }
 
@@ -722,7 +722,7 @@ namespace Arawn.GameCreator2.Networking
                 m_InteractionCooldowns.Remove(cooldownKeys[i]);
             }
         }
-        
+
         private void SendPropResponse(uint clientId, ushort requestId, bool approved, PropRejectReason reason, int instanceId,
             uint actorNetworkId = 0, uint correlationId = 0)
         {
@@ -735,34 +735,34 @@ namespace Arawn.GameCreator2.Networking
                 RejectReason = reason,
                 PropInstanceId = instanceId
             };
-            
+
             SendPropResponseToClient?.Invoke(clientId, response);
         }
-        
+
         /// <summary>
         /// [Client] Handle prop response from server.
         /// </summary>
         public void ReceivePropResponse(NetworkPropResponse response)
         {
             if (!m_IsClient) return;
-            
+
             ulong pendingKey = GetPendingKey(response.ActorNetworkId, response.CorrelationId, response.RequestId);
             if (m_PendingPropRequests.TryGetValue(pendingKey, out var pending))
             {
                 m_PendingPropRequests.Remove(pendingKey);
                 pending.Callback?.Invoke(response);
             }
-            
+
             OnPropResponseReceived?.Invoke(response);
         }
-        
+
         /// <summary>
         /// [Client] Handle prop broadcast from server.
         /// </summary>
         public void ReceivePropBroadcast(NetworkPropBroadcast broadcast)
         {
             if (m_IsServer) return;
-            
+
             var character = GetCharacterByNetworkId?.Invoke(broadcast.CharacterNetworkId);
             if (character == null)
             {
@@ -791,7 +791,7 @@ namespace Arawn.GameCreator2.Networking
                         props.Add(state);
                     }
                     break;
-                    
+
                 case PropActionType.DetachPrefab:
                 case PropActionType.DetachInstance:
                 {
@@ -814,7 +814,7 @@ namespace Arawn.GameCreator2.Networking
                     props.Clear();
                     break;
             }
-            
+
             OnPropBroadcastReceived?.Invoke(broadcast);
         }
 
@@ -902,7 +902,7 @@ namespace Arawn.GameCreator2.Networking
             if (approved) BroadcastPropToClients?.Invoke(broadcast);
             return approved;
         }
-        
+
     }
 
     internal sealed class ResolvedNetworkBone : IBone

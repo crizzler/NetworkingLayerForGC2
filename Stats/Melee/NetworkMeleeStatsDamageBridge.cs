@@ -11,6 +11,8 @@ namespace Arawn.GameCreator2.Networking.Stats.Melee
 {
     /// <summary>
     /// Transport-agnostic bridge that applies authoritative melee hit damage to GC2 Stats.
+    /// Returning handled affects damage only; NetworkMeleeManager evaluates the target's
+    /// authoritative reaction independently.
     /// </summary>
     [DisallowMultipleComponent]
     [AddComponentMenu("Game Creator/Network/Stats/Melee Damage Bridge")]

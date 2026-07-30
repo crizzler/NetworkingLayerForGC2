@@ -10,7 +10,7 @@ namespace Arawn.GameCreator2.Networking
     /// <summary>
     /// Server-authoritative NavMesh driver for networked characters.
     /// Handles pathfinding and broadcasts authoritative position/path to clients.
-    /// 
+    ///
     /// Server responsibilities:
     /// - Process client movement commands (MoveToPosition, MoveToDirection, Stop)
     /// - Calculate NavMesh paths
@@ -26,20 +26,20 @@ namespace Arawn.GameCreator2.Networking
     {
         private const ObstacleAvoidanceType DEFAULT_QUALITY =
             ObstacleAvoidanceType.HighQualityObstacleAvoidance;
-        
+
         // EXPOSED MEMBERS: -----------------------------------------------------------------------
 
         [SerializeField] private ObstacleAvoidanceType m_AvoidQuality = DEFAULT_QUALITY;
         [SerializeField] private int m_AvoidPriority = 50;
         [SerializeField] private bool m_AutoMeshLink = true;
         [SerializeField] private int m_AgentTypeID = 0;
-        
+
         [Header("Network Settings")]
         [SerializeField] private NetworkNavMeshConfig m_Config = NetworkNavMeshConfig.Default;
-        
+
         [Tooltip("Enable server-side click validation for anti-cheat")]
         [SerializeField] private bool m_EnableClickValidation = false;
-        
+
         [SerializeField] private ClickValidationConfig m_ValidationConfig;
 
         // MEMBERS: -------------------------------------------------------------------------------
@@ -49,10 +49,10 @@ namespace Arawn.GameCreator2.Networking
         [NonSerialized] protected Vector3 m_MoveDirection;
         [NonSerialized] protected Vector3 m_Velocity;
         [NonSerialized] protected Vector3 m_PreviousPosition;
-        
+
         // Click validation
         [NonSerialized] private ClickValidator m_ClickValidator;
-        
+
         // Network state
         [NonSerialized] private Queue<NetworkNavMeshCommand> m_CommandQueue;
         [NonSerialized] private ushort m_LastProcessedSequence;
@@ -61,44 +61,44 @@ namespace Arawn.GameCreator2.Networking
         [NonSerialized] private float m_LastPositionSendTime;
         [NonSerialized] private Vector3 m_LastSentPosition;
         [NonSerialized] private ulong m_OwnerClientId; // For click validation
-        
+
         // Off-mesh link handling
         [NonSerialized] protected INavMeshTraverseLink m_Link;
         [NonSerialized] private DriverAdditionalTranslation m_AddTranslation;
         [NonSerialized] private OffMeshLinkNetworkServer m_LinkController;
 
         // EVENTS: --------------------------------------------------------------------------------
-        
+
         /// <summary>
         /// Raised when path state should be sent to clients.
         /// </summary>
         public event Action<NetworkNavMeshPathState> OnPathStateReady;
-        
+
         /// <summary>
         /// Raised when position update should be sent to clients.
         /// </summary>
         public event Action<NetworkNavMeshPositionUpdate> OnPositionUpdateReady;
-        
+
         /// <summary>
         /// Raised when agent starts traversing an off-mesh link.
         /// </summary>
         public event Action<NetworkOffMeshLinkStart> OnLinkStartReady;
-        
+
         /// <summary>
         /// Raised when off-mesh link traversal progress updates.
         /// </summary>
         public event Action<NetworkOffMeshLinkProgress> OnLinkProgressReady;
-        
+
         /// <summary>
         /// Raised when agent completes off-mesh link traversal.
         /// </summary>
         public event Action<NetworkOffMeshLinkComplete> OnLinkCompleteReady;
-        
+
         /// <summary>
         /// Raised when a client should be kicked for excessive violations.
         /// </summary>
         public event Action<ulong, string> OnShouldKickClient;
-        
+
         /// <summary>
         /// Raised when off-mesh link has custom animation data.
         /// </summary>
@@ -111,19 +111,19 @@ namespace Arawn.GameCreator2.Networking
         public override float SkinWidth => 0.08f;
         public override bool IsGrounded => this.m_ForceGrounded || (this.m_Agent != null && this.m_Agent.isOnNavMesh);
         public override Vector3 FloorNormal => Vector3.up;
-        
+
         public override bool Collision
         {
             get => this.m_Capsule != null && this.m_Capsule.enabled;
             set { if (this.m_Capsule != null) this.m_Capsule.enabled = value; }
         }
-        
+
         public override Axonometry Axonometry
         {
             get => null;
             set => _ = value;
         }
-        
+
         public NetworkNavMeshConfig Config => m_Config;
         public ushort LastProcessedSequence => m_LastProcessedSequence;
         public Vector3[] CurrentPath => m_CurrentPathCorners ?? Array.Empty<Vector3>();
@@ -139,7 +139,7 @@ namespace Arawn.GameCreator2.Networking
         public override void OnStartup(Character character)
         {
             base.OnStartup(character);
-            
+
             m_CommandQueue = new Queue<NetworkNavMeshCommand>(16);
             m_LastProcessedSequence = 0;
 
@@ -163,7 +163,7 @@ namespace Arawn.GameCreator2.Networking
                 this.m_Capsule = this.Character.gameObject.AddComponent<CapsuleCollider>();
                 this.m_Capsule.hideFlags = HideFlags.HideInInspector;
             }
-            
+
             // Initialize off-mesh link controller
             m_LinkController = this.Character.GetComponent<OffMeshLinkNetworkServer>();
             if (m_LinkController == null)
@@ -171,24 +171,24 @@ namespace Arawn.GameCreator2.Networking
                 m_LinkController = this.Character.gameObject.AddComponent<OffMeshLinkNetworkServer>();
             }
             m_LinkController.Initialize(this.Character, this.m_Agent);
-            
+
             // Forward link events
             m_LinkController.OnLinkStartReady += start => OnLinkStartReady?.Invoke(start);
             m_LinkController.OnLinkProgressReady += progress => OnLinkProgressReady?.Invoke(progress);
             m_LinkController.OnLinkCompleteReady += complete => OnLinkCompleteReady?.Invoke(complete);
             m_LinkController.OnLinkAnimationReady += anim => OnLinkAnimationReady?.Invoke(anim);
-            
+
             // Initialize click validation if enabled
             if (m_EnableClickValidation)
             {
                 m_ClickValidator = new ClickValidator(m_ValidationConfig ?? ClickValidationConfig.Competitive);
                 m_ClickValidator.OnShouldKickClient += (clientId, reason) => OnShouldKickClient?.Invoke(clientId, reason);
             }
-            
+
             m_PreviousPosition = this.Transform.position;
             m_LastSentPosition = this.Transform.position;
         }
-        
+
         /// <summary>
         /// Set the owner client ID for click validation tracking.
         /// Call this when the network object is spawned.
@@ -206,7 +206,7 @@ namespace Arawn.GameCreator2.Networking
         }
 
         // PUBLIC METHODS: ------------------------------------------------------------------------
-        
+
         /// <summary>
         /// Queue a command from a client for processing.
         /// </summary>
@@ -217,10 +217,10 @@ namespace Arawn.GameCreator2.Networking
             {
                 return; // Old or duplicate command
             }
-            
+
             m_CommandQueue.Enqueue(command);
         }
-        
+
         /// <summary>
         /// Get current state for a newly connected client.
         /// </summary>
@@ -234,7 +234,7 @@ namespace Arawn.GameCreator2.Networking
                 m_CurrentPathCorners
             );
         }
-        
+
         /// <summary>
         /// Get current position update.
         /// </summary>
@@ -254,7 +254,7 @@ namespace Arawn.GameCreator2.Networking
         public override void OnUpdate()
         {
             if (this.Character.IsDead) return;
-            
+
             // Handle off-mesh links via controller (handles both standard and custom links)
             if (m_LinkController != null && m_LinkController.ProcessLinkTraversal())
             {
@@ -262,15 +262,15 @@ namespace Arawn.GameCreator2.Networking
                 Vector3 additionalTranslation = this.m_AddTranslation.HasValue
                     ? this.m_AddTranslation.Consume()
                     : this.Character.Animim.RootMotionDeltaPosition;
-                
-                if (additionalTranslation != Vector3.zero) 
+
+                if (additionalTranslation != Vector3.zero)
                     this.m_Agent.Move(additionalTranslation);
-                
+
                 return;
             }
-            
+
             // Fallback for custom INavMeshTraverseLink when no link controller is installed.
-            if (this.m_Agent.isOnOffMeshLink && 
+            if (this.m_Agent.isOnOffMeshLink &&
                 this.m_Agent.currentOffMeshLinkData.owner is INavMeshTraverseLink navMeshLink)
             {
                 if (this.m_Link == null)
@@ -280,26 +280,26 @@ namespace Arawn.GameCreator2.Networking
                     this.m_Agent.velocity = Vector3.zero;
                     navMeshLink.Traverse(this.Character, this.OnTraverseComplete);
                 }
-                
+
                 Vector3 additionalTranslation = this.m_AddTranslation.HasValue
                     ? this.m_AddTranslation.Consume()
                     : this.Character.Animim.RootMotionDeltaPosition;
-                
-                if (additionalTranslation != Vector3.zero) 
+
+                if (additionalTranslation != Vector3.zero)
                     this.m_Agent.Move(additionalTranslation);
-                
+
                 return;
             }
-            
+
             // Process queued commands
             ProcessCommands();
-            
+
             // Update NavMesh properties
             UpdateProperties(this.Character.Motion);
-            
+
             // Update movement
             UpdateTranslation(this.Character.Motion);
-            
+
             // Send position updates
             SendPositionUpdate();
         }
@@ -309,26 +309,26 @@ namespace Arawn.GameCreator2.Networking
             while (m_CommandQueue.Count > 0)
             {
                 var command = m_CommandQueue.Dequeue();
-                
+
                 if (!IsSequenceNewer(command.Sequence, m_LastProcessedSequence))
                     continue;
-                
+
                 m_LastProcessedSequence = command.Sequence;
-                
+
                 switch (command.CommandType)
                 {
                     case NetworkNavMeshCommand.CMD_MOVE_TO_POSITION:
                         HandleMoveToPosition(command);
                         break;
-                        
+
                     case NetworkNavMeshCommand.CMD_MOVE_TO_DIRECTION:
                         HandleMoveToDirection(command);
                         break;
-                        
+
                     case NetworkNavMeshCommand.CMD_STOP:
                         HandleStop(command);
                         break;
-                        
+
                     case NetworkNavMeshCommand.CMD_WARP:
                         HandleWarp(command);
                         break;
@@ -339,25 +339,25 @@ namespace Arawn.GameCreator2.Networking
         private void HandleMoveToPosition(NetworkNavMeshCommand command)
         {
             if (!m_Agent.isOnNavMesh) return;
-            
+
             Vector3 target = command.GetTargetPosition();
-            
+
             // Apply click validation if enabled
             if (m_ClickValidator != null)
             {
                 var result = m_ClickValidator.ValidateClick(m_OwnerClientId, this.Transform.position, target);
-                
+
                 if (!result.IsValid)
                 {
                     // Rejected - broadcast failure
                     BroadcastPathState(NavMeshPathStatus.PathInvalid);
                     return;
                 }
-                
+
                 // Use corrected position if snapped to NavMesh
                 target = result.CorrectedPosition;
             }
-            
+
             // Validate target is reachable (anti-cheat)
             NavMeshPath path = new NavMeshPath();
             if (m_Agent.CalculatePath(target, path))
@@ -366,11 +366,11 @@ namespace Arawn.GameCreator2.Networking
                 m_Agent.isStopped = false;
                 m_Agent.autoRepath = true;
                 m_Agent.autoBraking = true;
-                
+
                 // Cache path corners
                 m_CurrentPathCorners = path.corners;
                 m_CurrentCornerIndex = 0;
-                
+
                 // Broadcast path to clients
                 BroadcastPathState(path.status);
             }
@@ -384,24 +384,24 @@ namespace Arawn.GameCreator2.Networking
         private void HandleMoveToDirection(NetworkNavMeshCommand command)
         {
             if (!m_Agent.isOnNavMesh) return;
-            
+
             Vector3 direction = command.GetDirection();
-            
+
             // Validate direction magnitude (anti-cheat)
             if (direction.sqrMagnitude > 1.1f) // Allow small tolerance
             {
                 direction.Normalize();
             }
-            
+
             m_MoveDirection = direction * this.Character.Motion.LinearSpeed;
             m_Agent.isStopped = true;
             m_Agent.velocity = Vector3.zero;
             m_Agent.autoRepath = false;
-            
+
             // Clear path
             m_CurrentPathCorners = null;
             m_CurrentCornerIndex = 0;
-            
+
             // Broadcast no-path state
             OnPathStateReady?.Invoke(NetworkNavMeshPathState.CreateNoPath(
                 this.Transform.position,
@@ -416,10 +416,10 @@ namespace Arawn.GameCreator2.Networking
             m_Agent.velocity = Vector3.zero;
             m_Agent.autoRepath = false;
             m_MoveDirection = Vector3.zero;
-            
+
             m_CurrentPathCorners = null;
             m_CurrentCornerIndex = 0;
-            
+
             OnPathStateReady?.Invoke(NetworkNavMeshPathState.CreateNoPath(
                 this.Transform.position,
                 this.Transform.eulerAngles.y,
@@ -430,17 +430,17 @@ namespace Arawn.GameCreator2.Networking
         private void HandleWarp(NetworkNavMeshCommand command)
         {
             Vector3 target = command.GetTargetPosition();
-            
+
             // Validate warp target is on NavMesh
             if (TryResolveNavMeshRootPosition(target, 2f, out Vector3 rootPosition, out _))
             {
                 m_Agent.Warp(rootPosition);
                 m_Agent.isStopped = true;
                 m_Agent.velocity = Vector3.zero;
-                
+
                 m_CurrentPathCorners = null;
                 m_CurrentCornerIndex = 0;
-                
+
                 OnPathStateReady?.Invoke(NetworkNavMeshPathState.CreateNoPath(
                     rootPosition,
                     this.Transform.eulerAngles.y,
@@ -457,7 +457,7 @@ namespace Arawn.GameCreator2.Networking
                 NavMeshPathStatus.PathPartial => NetworkNavMeshPathState.STATUS_PARTIAL,
                 _ => NetworkNavMeshPathState.STATUS_INVALID
             };
-            
+
             var pathState = NetworkNavMeshPathState.Create(
                 this.Transform.position,
                 this.Transform.eulerAngles.y,
@@ -465,7 +465,7 @@ namespace Arawn.GameCreator2.Networking
                 networkStatus,
                 m_CurrentPathCorners
             );
-            
+
             OnPathStateReady?.Invoke(pathState);
         }
 
@@ -474,11 +474,11 @@ namespace Arawn.GameCreator2.Networking
             this.m_MoveDirection = Vector3.zero;
 
             this.m_Agent.speed = motion.LinearSpeed;
-            this.m_Agent.angularSpeed = motion.AngularSpeed >= 0f 
+            this.m_Agent.angularSpeed = motion.AngularSpeed >= 0f
                 ? motion.AngularSpeed
                 : float.MaxValue;
 
-            this.m_Agent.acceleration = motion.UseAcceleration 
+            this.m_Agent.acceleration = motion.UseAcceleration
                 ? (motion.Acceleration + motion.Deceleration) / 2f
                 : 9999f;
 
@@ -487,13 +487,13 @@ namespace Arawn.GameCreator2.Networking
 
             if (Math.Abs(this.m_Capsule.height - motion.Height) > float.Epsilon)
                 this.m_Capsule.height = motion.Height;
-            
+
             if (Math.Abs(this.m_Capsule.radius - motion.Radius) > float.Epsilon)
                 this.m_Capsule.radius = motion.Radius;
-            
+
             if (this.m_Capsule.center != Vector3.zero)
                 this.m_Capsule.center = Vector3.zero;
-            
+
             this.m_Agent.baseOffset = this.m_Agent.height / 2f;
             this.m_Agent.autoTraverseOffMeshLink = this.m_AutoMeshLink;
             this.m_Agent.obstacleAvoidanceType = this.m_AvoidQuality;
@@ -509,7 +509,7 @@ namespace Arawn.GameCreator2.Networking
             {
                 this.m_Agent.velocity = Vector3.zero;
                 this.m_Agent.isStopped = true;
-                
+
                 this.m_MoveDirection = this.Character.Animim.RootMotionDeltaPosition;
                 this.m_Agent.Move(this.m_MoveDirection);
             }
@@ -528,19 +528,19 @@ namespace Arawn.GameCreator2.Networking
                     {
                         UpdateCornerIndex();
                     }
-                    
+
                     this.m_MoveDirection = this.m_Agent.velocity;
                 }
             }
 
             // Handle additional translation
             Vector3 additionalTranslation = this.m_AddTranslation.Consume();
-            if (additionalTranslation != Vector3.zero) 
+            if (additionalTranslation != Vector3.zero)
                 this.m_Agent.Move(additionalTranslation);
 
             // Calculate velocity
             Vector3 currentPosition = this.Transform.position;
-            this.m_Velocity = 
+            this.m_Velocity =
                 Vector3.Normalize(currentPosition - this.m_PreviousPosition) *
                 this.m_MoveDirection.magnitude;
             this.m_PreviousPosition = currentPosition;
@@ -550,9 +550,9 @@ namespace Arawn.GameCreator2.Networking
         {
             if (m_CurrentPathCorners == null || m_CurrentCornerIndex >= m_CurrentPathCorners.Length)
                 return;
-            
+
             Vector3 currentPos = this.Transform.position;
-            
+
             // Check if we've reached current corner
             while (m_CurrentCornerIndex < m_CurrentPathCorners.Length)
             {
@@ -560,7 +560,7 @@ namespace Arawn.GameCreator2.Networking
                     new Vector3(currentPos.x, 0, currentPos.z),
                     new Vector3(m_CurrentPathCorners[m_CurrentCornerIndex].x, 0, m_CurrentPathCorners[m_CurrentCornerIndex].z)
                 );
-                
+
                 if (distToCorner < m_Agent.radius * 2f)
                 {
                     m_CurrentCornerIndex++;
@@ -576,16 +576,16 @@ namespace Arawn.GameCreator2.Networking
         {
             float timeSinceLastSend = Time.time - m_LastPositionSendTime;
             if (timeSinceLastSend < 1f / m_Config.PositionSendRate) return;
-            
+
             Vector3 currentPos = this.Transform.position;
             float distance = Vector3.Distance(currentPos, m_LastSentPosition);
-            
+
             // Only send if moved significantly or forced by time
             if (distance < m_Config.PositionThreshold && timeSinceLastSend < 1f) return;
-            
+
             var update = GetCurrentPositionUpdate();
             OnPositionUpdateReady?.Invoke(update);
-            
+
             m_LastPositionSendTime = Time.time;
             m_LastSentPosition = currentPos;
         }
@@ -704,7 +704,7 @@ namespace Arawn.GameCreator2.Networking
         {
             this.Transform.rotation *= amount;
         }
-        
+
         public override void AddScale(Vector3 scale)
         {
             this.Transform.localScale += scale;
@@ -732,7 +732,7 @@ namespace Arawn.GameCreator2.Networking
             {
                 Gizmos.DrawLine(corners[i - 1], corners[i]);
             }
-            
+
             // Draw current corner
             if (m_CurrentPathCorners != null && m_CurrentCornerIndex < m_CurrentPathCorners.Length)
             {

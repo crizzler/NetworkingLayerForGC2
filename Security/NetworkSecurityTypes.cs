@@ -13,54 +13,54 @@ namespace Arawn.GameCreator2.Networking.Security
         [Header("State Validation")]
         [Tooltip("Enable periodic state validation checks.")]
         public bool EnableStateValidation = true;
-        
+
         [Tooltip("Interval between state validation checks (seconds).")]
         [Range(0.5f, 10f)]
         public float StateValidationInterval = 2f;
-        
+
         [Tooltip("Maximum allowed state discrepancy before triggering warning.")]
         public float StateDiscrepancyThreshold = 0.1f;
-        
+
         [Header("Rate Limiting")]
         [Tooltip("Enable request rate limiting.")]
         public bool EnableRateLimiting = true;
-        
+
         [Tooltip("Maximum requests per second per client.")]
         [Range(1, 100)]
         public int MaxRequestsPerSecond = 30;
-        
+
         [Tooltip("Time window for rate limiting (seconds).")]
         [Range(0.5f, 5f)]
         public float RateLimitWindow = 1f;
-        
+
         [Header("Anomaly Detection")]
         [Tooltip("Enable anomaly detection and logging.")]
         public bool EnableAnomalyDetection = true;
-        
+
         [Tooltip("Number of violations before triggering action.")]
         [Range(1, 20)]
         public int ViolationThreshold = 5;
-        
+
         [Tooltip("Time window to accumulate violations (seconds).")]
         [Range(10f, 300f)]
         public float ViolationWindow = 60f;
-        
+
         [Header("Response Actions")]
         [Tooltip("Action to take when violations exceed threshold.")]
         public SecurityViolationAction ViolationAction = SecurityViolationAction.LogAndWarn;
-        
+
         [Tooltip("Duration to temporarily block a client (seconds).")]
         [Range(5f, 300f)]
         public float TempBlockDuration = 30f;
-        
+
         [Header("Value Validation")]
         [Tooltip("Maximum allowed value change per request (0 = no limit).")]
         public float MaxValueChangePerRequest = 0f;
-        
+
         [Tooltip("Maximum allowed position change per update (0 = no limit).")]
         public float MaxPositionDelta = 0f;
     }
-    
+
     /// <summary>
     /// Actions to take when security violations are detected.
     /// </summary>
@@ -68,20 +68,20 @@ namespace Arawn.GameCreator2.Networking.Security
     {
         /// <summary>Log only, no action.</summary>
         LogOnly,
-        
+
         /// <summary>Log and send warning to client.</summary>
         LogAndWarn,
-        
+
         /// <summary>Temporarily block requests from client.</summary>
         TempBlock,
-        
+
         /// <summary>Kick client from server.</summary>
         Kick,
-        
+
         /// <summary>Custom action via delegate.</summary>
         Custom
     }
-    
+
     /// <summary>
     /// Types of security violations.
     /// </summary>
@@ -98,7 +98,7 @@ namespace Arawn.GameCreator2.Networking.Security
         ReplayAttack,
         OutOfBoundsValue
     }
-    
+
     /// <summary>
     /// Security violation event data.
     /// </summary>
@@ -112,7 +112,7 @@ namespace Arawn.GameCreator2.Networking.Security
         public float ServerTime;
         public int ViolationCount;
     }
-    
+
     /// <summary>
     /// Rate limiter for tracking request frequency.
     /// </summary>
@@ -121,13 +121,13 @@ namespace Arawn.GameCreator2.Networking.Security
         private readonly int m_MaxRequests;
         private readonly float m_WindowSize;
         private readonly Dictionary<uint, Queue<float>> m_RequestTimestamps = new(64);
-        
+
         public RateLimiter(int maxRequests, float windowSize)
         {
             m_MaxRequests = maxRequests;
             m_WindowSize = windowSize;
         }
-        
+
         /// <summary>
         /// Check if a request from the given client should be allowed.
         /// </summary>
@@ -139,25 +139,25 @@ namespace Arawn.GameCreator2.Networking.Security
                 timestamps = new Queue<float>(m_MaxRequests + 1);
                 m_RequestTimestamps[clientId] = timestamps;
             }
-            
+
             // Remove old timestamps outside the window
             float windowStart = currentTime - m_WindowSize;
             while (timestamps.Count > 0 && timestamps.Peek() < windowStart)
             {
                 timestamps.Dequeue();
             }
-            
+
             // Check if under limit
             if (timestamps.Count >= m_MaxRequests)
             {
                 return false;
             }
-            
+
             // Add current timestamp
             timestamps.Enqueue(currentTime);
             return true;
         }
-        
+
         /// <summary>
         /// Get current request count for a client.
         /// </summary>
@@ -165,7 +165,7 @@ namespace Arawn.GameCreator2.Networking.Security
         {
             if (!m_RequestTimestamps.TryGetValue(clientId, out var timestamps))
                 return 0;
-            
+
             float windowStart = currentTime - m_WindowSize;
             int count = 0;
             foreach (var ts in timestamps)
@@ -174,7 +174,7 @@ namespace Arawn.GameCreator2.Networking.Security
             }
             return count;
         }
-        
+
         /// <summary>
         /// Clear data for a client (on disconnect).
         /// </summary>
@@ -182,7 +182,7 @@ namespace Arawn.GameCreator2.Networking.Security
         {
             m_RequestTimestamps.Remove(clientId);
         }
-        
+
         /// <summary>
         /// Clear all data.
         /// </summary>
@@ -191,7 +191,7 @@ namespace Arawn.GameCreator2.Networking.Security
             m_RequestTimestamps.Clear();
         }
     }
-    
+
     /// <summary>
     /// Tracks security violations per client.
     /// </summary>
@@ -202,13 +202,13 @@ namespace Arawn.GameCreator2.Networking.Security
         private readonly Dictionary<uint, List<ViolationRecord>> m_Violations = new(64);
         private readonly HashSet<uint> m_BlockedClients = new(16);
         private readonly Dictionary<uint, float> m_BlockExpiry = new(16);
-        
+
         public ViolationTracker(int threshold, float windowSize)
         {
             m_Threshold = threshold;
             m_WindowSize = windowSize;
         }
-        
+
         /// <summary>
         /// Record a violation for a client.
         /// </summary>
@@ -220,11 +220,11 @@ namespace Arawn.GameCreator2.Networking.Security
                 violations = new List<ViolationRecord>(m_Threshold + 1);
                 m_Violations[clientId] = violations;
             }
-            
+
             // Remove old violations
             float windowStart = currentTime - m_WindowSize;
             violations.RemoveAll(v => v.Time < windowStart);
-            
+
             // Add new violation
             violations.Add(new ViolationRecord
             {
@@ -232,10 +232,10 @@ namespace Arawn.GameCreator2.Networking.Security
                 Details = details,
                 Time = currentTime
             });
-            
+
             return violations.Count == m_Threshold;
         }
-        
+
         /// <summary>
         /// Get current violation count for a client.
         /// </summary>
@@ -243,7 +243,7 @@ namespace Arawn.GameCreator2.Networking.Security
         {
             if (!m_Violations.TryGetValue(clientId, out var violations))
                 return 0;
-            
+
             float windowStart = currentTime - m_WindowSize;
             int count = 0;
             foreach (var v in violations)
@@ -252,7 +252,7 @@ namespace Arawn.GameCreator2.Networking.Security
             }
             return count;
         }
-        
+
         /// <summary>
         /// Block a client temporarily.
         /// </summary>
@@ -261,7 +261,7 @@ namespace Arawn.GameCreator2.Networking.Security
             m_BlockedClients.Add(clientId);
             m_BlockExpiry[clientId] = currentTime + duration;
         }
-        
+
         /// <summary>
         /// Check if a client is blocked.
         /// </summary>
@@ -269,17 +269,17 @@ namespace Arawn.GameCreator2.Networking.Security
         {
             if (!m_BlockedClients.Contains(clientId))
                 return false;
-            
+
             if (m_BlockExpiry.TryGetValue(clientId, out float expiry) && currentTime >= expiry)
             {
                 m_BlockedClients.Remove(clientId);
                 m_BlockExpiry.Remove(clientId);
                 return false;
             }
-            
+
             return true;
         }
-        
+
         /// <summary>
         /// Clear data for a client.
         /// </summary>
@@ -289,7 +289,7 @@ namespace Arawn.GameCreator2.Networking.Security
             m_BlockedClients.Remove(clientId);
             m_BlockExpiry.Remove(clientId);
         }
-        
+
         /// <summary>
         /// Clear all data.
         /// </summary>
@@ -299,7 +299,7 @@ namespace Arawn.GameCreator2.Networking.Security
             m_BlockedClients.Clear();
             m_BlockExpiry.Clear();
         }
-        
+
         private struct ViolationRecord
         {
             public SecurityViolationType Type;
@@ -307,7 +307,7 @@ namespace Arawn.GameCreator2.Networking.Security
             public float Time;
         }
     }
-    
+
     /// <summary>
     /// Tracks server-authoritative state for validation.
     /// </summary>
@@ -315,7 +315,7 @@ namespace Arawn.GameCreator2.Networking.Security
     {
         private readonly Dictionary<TKey, TState> m_States = new(64);
         private readonly Dictionary<TKey, float> m_LastUpdate = new(64);
-        
+
         /// <summary>
         /// Set the authoritative state for a key.
         /// </summary>
@@ -324,7 +324,7 @@ namespace Arawn.GameCreator2.Networking.Security
             m_States[key] = state;
             m_LastUpdate[key] = currentTime;
         }
-        
+
         /// <summary>
         /// Get the authoritative state for a key.
         /// </summary>
@@ -332,7 +332,7 @@ namespace Arawn.GameCreator2.Networking.Security
         {
             return m_States.TryGetValue(key, out state);
         }
-        
+
         /// <summary>
         /// Check if state exists for a key.
         /// </summary>
@@ -340,7 +340,7 @@ namespace Arawn.GameCreator2.Networking.Security
         {
             return m_States.ContainsKey(key);
         }
-        
+
         /// <summary>
         /// Remove state for a key.
         /// </summary>
@@ -349,12 +349,12 @@ namespace Arawn.GameCreator2.Networking.Security
             m_States.Remove(key);
             m_LastUpdate.Remove(key);
         }
-        
+
         /// <summary>
         /// Get all keys.
         /// </summary>
         public IEnumerable<TKey> Keys => m_States.Keys;
-        
+
         /// <summary>
         /// Clear all states.
         /// </summary>
@@ -364,7 +364,7 @@ namespace Arawn.GameCreator2.Networking.Security
             m_LastUpdate.Clear();
         }
     }
-    
+
     /// <summary>
     /// Sequence number tracker for replay attack prevention.
     /// </summary>
@@ -409,7 +409,7 @@ namespace Arawn.GameCreator2.Networking.Security
                 return HashCode.Combine(ClientId, ActorNetworkId, StringComparer.Ordinal.GetHashCode(Module));
             }
         }
-        
+
         /// <summary>
         /// Validate a sequence number from a client.
         /// </summary>
@@ -527,7 +527,7 @@ namespace Arawn.GameCreator2.Networking.Security
                 recent.Remove(sequence);
             }
         }
-        
+
         /// <summary>
         /// Clear data for a client.
         /// </summary>
@@ -559,7 +559,7 @@ namespace Arawn.GameCreator2.Networking.Security
                 }
             }
         }
-        
+
         /// <summary>
         /// Clear all data.
         /// </summary>

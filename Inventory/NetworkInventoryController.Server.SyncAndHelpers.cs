@@ -1,6 +1,7 @@
 #if GC2_INVENTORY
 using System;
 using System.Collections.Generic;
+using System.Threading.Tasks;
 using UnityEngine;
 using GameCreator.Runtime.Common;
 using GameCreator.Runtime.Inventory;
@@ -10,18 +11,22 @@ namespace Arawn.GameCreator2.Networking.Inventory
     // ════════════════════════════════════════════════════════════════════════════════════════════
     // SERVER-SIDE — Sync, snapshot, and runtime-item helper methods
     // ════════════════════════════════════════════════════════════════════════════════════════════
-    
+
     public partial class NetworkInventoryController
     {
+        private const ulong FnvOffsetBasis = 14695981039346656037UL;
+        private const ulong FnvPrime = 1099511628211UL;
+
         // SERVER BROADCASTING
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         private void BroadcastFullState()
         {
             var snapshot = GetFullSnapshot();
             NetworkInventoryManager.Instance?.BroadcastFullSnapshot(snapshot);
+            CacheCurrentSyncState();
         }
-        
+
         private void BroadcastDeltaState()
         {
             bool cellsChanged = HasInventoryPositionStateChanged();
@@ -40,6 +45,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
             var delta = new NetworkInventoryDelta
             {
                 BagNetworkId = NetworkId,
+                StateVersion = GetAuthoritativeStateVersion(),
                 Timestamp = Time.time,
                 ChangeMask = (cellsChanged ? maskCells : 0u) |
                              (equipmentChanged ? maskEquipment : 0u) |
@@ -59,7 +65,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
                     $"cells={delta.ChangedCells.Length} equipment={delta.ChangedEquipment.Length} wealth={delta.ChangedWealth.Length}");
             }
         }
-        
+
         /// <summary>
         /// Get full inventory snapshot for initial sync.
         /// </summary>
@@ -68,32 +74,22 @@ namespace Arawn.GameCreator2.Networking.Inventory
             var cells = new List<NetworkCell>();
             var equipment = new List<NetworkEquipmentSlot>();
             var wealth = new List<NetworkWealthEntry>();
-            
+
             // Collect cells
             foreach (var cell in m_Bag.Content.CellList)
             {
                 if (cell == null || cell.Available) continue;
-                
-                var position = m_Bag.Content.FindPosition(cell.RootRuntimeItemID);
-                GetStackedRuntimeIdentity(cell, out long[] stackedRuntimeIds, out string[] stackedRuntimeIdStrings);
-                
-                cells.Add(new NetworkCell
-                {
-                    Position = position,
-                    ItemHash = cell.Item.ID.Hash,
-                    StackCount = cell.Count,
-                    RootItem = ConvertToNetworkItem(cell.RootRuntimeItem),
-                    StackedRuntimeIds = stackedRuntimeIds,
-                    StackedRuntimeIdStrings = stackedRuntimeIdStrings
-                });
+
+                Vector2Int position = m_Bag.Content.FindPosition(cell.RootRuntimeItemID);
+                cells.Add(CreateNetworkCell(cell, position));
             }
-            
+
             // Collect equipment
             for (int i = 0; i < m_Bag.Equipment.Count; i++)
             {
                 var slotId = m_Bag.Equipment.GetSlotRootRuntimeItemID(i);
                 var baseId = m_Bag.Equipment.GetSlotBaseID(i);
-                
+
                 equipment.Add(new NetworkEquipmentSlot
                 {
                     SlotIndex = i,
@@ -102,7 +98,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
                     EquippedRuntimeIdHash = slotId.Hash
                 });
             }
-            
+
             // Collect wealth
             foreach (var currencyId in m_Bag.Wealth.List)
             {
@@ -112,26 +108,27 @@ namespace Arawn.GameCreator2.Networking.Inventory
                     Amount = m_Bag.Wealth.Get(currencyId)
                 });
             }
-            
+
             return new NetworkInventorySnapshot
             {
                 BagNetworkId = NetworkId,
+                StateVersion = GetAuthoritativeStateVersion(),
                 Timestamp = Time.time,
                 Cells = cells.ToArray(),
                 Equipment = equipment.ToArray(),
                 Wealth = wealth.ToArray()
             };
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // HELPER METHODS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         private void CleanupPendingRequests()
         {
             float timeout = 5f;
             float currentTime = Time.time;
-            
+
             CleanupPendingBucket(m_PendingAdds, currentTime, timeout, "Add item");
             CleanupPendingBucket(m_PendingRemoves, currentTime, timeout, "Remove item");
             CleanupPendingBucket(m_PendingMoves, currentTime, timeout, "Move item");
@@ -163,8 +160,8 @@ namespace Arawn.GameCreator2.Networking.Inventory
 
         private bool HasInventoryPositionStateChanged()
         {
-            Dictionary<long, Vector2Int> current = BuildCurrentPositionState();
-            return !DictionariesEqual(m_LastSyncedPositions, current);
+            Dictionary<Vector2Int, ulong> current = BuildCurrentCellState();
+            return !DictionariesEqual(m_LastSyncedCells, current);
         }
 
         private bool HasEquipmentStateChanged()
@@ -189,18 +186,16 @@ namespace Arawn.GameCreator2.Networking.Inventory
             return !DictionariesEqual(m_LastSyncedWealth, current);
         }
 
-        private Dictionary<long, Vector2Int> BuildCurrentPositionState()
+        private Dictionary<Vector2Int, ulong> BuildCurrentCellState()
         {
-            var current = new Dictionary<long, Vector2Int>(m_RuntimeItemMap.Count);
+            var current = new Dictionary<Vector2Int, ulong>(m_Bag.Content.CellList.Count);
             foreach (Cell cell in m_Bag.Content.CellList)
             {
                 if (cell == null || cell.Available) continue;
 
                 Vector2Int position = m_Bag.Content.FindPosition(cell.RootRuntimeItemID);
-                foreach (IdString runtimeId in cell.List)
-                {
-                    current[runtimeId.Hash] = position;
-                }
+                if (position == TBagContent.INVALID) continue;
+                current[position] = ComputeCellFingerprint(CreateNetworkCell(cell, position));
             }
 
             return current;
@@ -208,23 +203,23 @@ namespace Arawn.GameCreator2.Networking.Inventory
 
         private NetworkCell[] BuildChangedCellDelta()
         {
-            Dictionary<long, Vector2Int> currentPositions = BuildCurrentPositionState();
+            Dictionary<Vector2Int, ulong> currentCells = BuildCurrentCellState();
             var changedPositions = new HashSet<Vector2Int>();
 
-            foreach (KeyValuePair<long, Vector2Int> entry in currentPositions)
+            foreach (KeyValuePair<Vector2Int, ulong> entry in currentCells)
             {
-                if (!m_LastSyncedPositions.TryGetValue(entry.Key, out Vector2Int previousPosition) ||
-                    previousPosition != entry.Value)
+                if (!m_LastSyncedCells.TryGetValue(entry.Key, out ulong previousFingerprint) ||
+                    previousFingerprint != entry.Value)
                 {
-                    changedPositions.Add(entry.Value);
+                    changedPositions.Add(entry.Key);
                 }
             }
 
-            foreach (KeyValuePair<long, Vector2Int> entry in m_LastSyncedPositions)
+            foreach (KeyValuePair<Vector2Int, ulong> entry in m_LastSyncedCells)
             {
-                if (!currentPositions.ContainsKey(entry.Key))
+                if (!currentCells.ContainsKey(entry.Key))
                 {
-                    changedPositions.Add(entry.Value);
+                    changedPositions.Add(entry.Key);
                 }
             }
 
@@ -250,21 +245,13 @@ namespace Arawn.GameCreator2.Networking.Inventory
                         StackCount = 0,
                         RootItem = default,
                         StackedRuntimeIds = Array.Empty<long>(),
-                        StackedRuntimeIdStrings = Array.Empty<string>()
+                        StackedRuntimeIdStrings = Array.Empty<string>(),
+                        StackedItems = Array.Empty<NetworkRuntimeItem>()
                     });
                     continue;
                 }
 
-                GetStackedRuntimeIdentity(cell, out long[] stackedRuntimeIds, out string[] stackedRuntimeIdStrings);
-                changedCells.Add(new NetworkCell
-                {
-                    Position = position,
-                    ItemHash = cell.Item.ID.Hash,
-                    StackCount = cell.Count,
-                    RootItem = ConvertToNetworkItem(cell.RootRuntimeItem),
-                    StackedRuntimeIds = stackedRuntimeIds,
-                    StackedRuntimeIdStrings = stackedRuntimeIdStrings
-                });
+                changedCells.Add(CreateNetworkCell(cell, position));
             }
 
             return changedCells.ToArray();
@@ -335,11 +322,11 @@ namespace Arawn.GameCreator2.Networking.Inventory
 
         private void CacheCurrentSyncState()
         {
-            Dictionary<long, Vector2Int> currentPositions = BuildCurrentPositionState();
-            m_LastSyncedPositions.Clear();
-            foreach (KeyValuePair<long, Vector2Int> entry in currentPositions)
+            Dictionary<Vector2Int, ulong> currentCells = BuildCurrentCellState();
+            m_LastSyncedCells.Clear();
+            foreach (KeyValuePair<Vector2Int, ulong> entry in currentCells)
             {
-                m_LastSyncedPositions[entry.Key] = entry.Value;
+                m_LastSyncedCells[entry.Key] = entry.Value;
             }
 
             m_LastSyncedEquipment.Clear();
@@ -353,6 +340,81 @@ namespace Arawn.GameCreator2.Networking.Inventory
             {
                 m_LastSyncedWealth[currencyId.Hash] = m_Bag.Wealth.Get(currencyId);
             }
+        }
+
+        private uint GetAuthoritativeStateVersion()
+        {
+            if (!m_IsServer)
+            {
+                return m_HasAppliedStateVersion ? m_LastAppliedStateVersion : 0u;
+            }
+
+            ulong fingerprint = ComputeInventoryFingerprint();
+            if (!m_HasVersionedStateFingerprint)
+            {
+                m_StateVersion = 1u;
+                m_LastVersionedStateFingerprint = fingerprint;
+                m_HasVersionedStateFingerprint = true;
+                return m_StateVersion;
+            }
+
+            if (m_LastVersionedStateFingerprint == fingerprint) return m_StateVersion;
+
+            m_StateVersion = m_StateVersion == uint.MaxValue ? 1u : m_StateVersion + 1u;
+            m_LastVersionedStateFingerprint = fingerprint;
+            return m_StateVersion;
+        }
+
+        private bool IsStaleStateVersion(uint incomingVersion)
+        {
+            if (incomingVersion == 0 || !m_HasAppliedStateVersion) return false;
+            return unchecked((int)(incomingVersion - m_LastAppliedStateVersion)) < 0;
+        }
+
+        private void RecordAppliedStateVersion(uint incomingVersion)
+        {
+            if (incomingVersion == 0) return;
+            if (!m_HasAppliedStateVersion ||
+                unchecked((int)(incomingVersion - m_LastAppliedStateVersion)) > 0)
+            {
+                m_LastAppliedStateVersion = incomingVersion;
+                m_HasAppliedStateVersion = true;
+            }
+            TryCompleteDeferredAsyncAdds();
+        }
+
+        private ulong ComputeInventoryFingerprint()
+        {
+            ulong hash = FnvOffsetBasis;
+            var cells = new List<KeyValuePair<Vector2Int, ulong>>(BuildCurrentCellState());
+            cells.Sort((left, right) => ComparePositions(left.Key, right.Key));
+            foreach (KeyValuePair<Vector2Int, ulong> entry in cells)
+            {
+                hash = HashInt(hash, entry.Key.x);
+                hash = HashInt(hash, entry.Key.y);
+                hash = HashULong(hash, entry.Value);
+            }
+
+            for (int i = 0; i < m_Bag.Equipment.Count; i++)
+            {
+                hash = HashInt(hash, i);
+                hash = HashLong(hash, m_Bag.Equipment.GetSlotRootRuntimeItemID(i).Hash);
+            }
+
+            var wealth = new List<KeyValuePair<int, int>>(m_Bag.Wealth.List.Count);
+            foreach (IdString currencyId in m_Bag.Wealth.List)
+            {
+                wealth.Add(new KeyValuePair<int, int>(currencyId.Hash, m_Bag.Wealth.Get(currencyId)));
+            }
+
+            wealth.Sort((left, right) => left.Key.CompareTo(right.Key));
+            foreach (KeyValuePair<int, int> entry in wealth)
+            {
+                hash = HashInt(hash, entry.Key);
+                hash = HashInt(hash, entry.Value);
+            }
+
+            return hash;
         }
 
         private static bool DictionariesEqual<TKey, TValue>(
@@ -372,7 +434,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
 
             return true;
         }
-        
+
         private bool TryResolveItem(int itemHash, string itemIdString, out Item item)
         {
             item = null;
@@ -437,11 +499,31 @@ namespace Arawn.GameCreator2.Networking.Inventory
             var sockets = Sockets.FlattenHierarchy(parentItem.Item);
             return sockets != null && sockets.ContainsKey(socketId);
         }
-        
+
+        private NetworkCell CreateNetworkCell(Cell cell, Vector2Int position)
+        {
+            GetStackedRuntimeIdentity(
+                cell,
+                out long[] stackedRuntimeIds,
+                out string[] stackedRuntimeIdStrings,
+                out NetworkRuntimeItem[] stackedItems);
+
+            return new NetworkCell
+            {
+                Position = position,
+                ItemHash = cell.Item.ID.Hash,
+                StackCount = cell.Count,
+                RootItem = ConvertToNetworkItem(cell.RootRuntimeItem),
+                StackedRuntimeIds = stackedRuntimeIds,
+                StackedRuntimeIdStrings = stackedRuntimeIdStrings,
+                StackedItems = stackedItems
+            };
+        }
+
         private NetworkRuntimeItem ConvertToNetworkItem(RuntimeItem runtimeItem)
         {
             if (runtimeItem == null) return default;
-            
+
             var properties = new List<NetworkRuntimeProperty>();
             foreach (var prop in runtimeItem.Properties)
             {
@@ -453,7 +535,15 @@ namespace Arawn.GameCreator2.Networking.Inventory
                     Text = prop.Value.Text
                 });
             }
-            
+
+            properties.Sort((left, right) =>
+            {
+                int hash = left.PropertyHash.CompareTo(right.PropertyHash);
+                return hash != 0
+                    ? hash
+                    : string.CompareOrdinal(left.PropertyIdString, right.PropertyIdString);
+            });
+
             var sockets = new List<NetworkRuntimeSocket>();
             foreach (var socket in runtimeItem.Sockets)
             {
@@ -465,7 +555,15 @@ namespace Arawn.GameCreator2.Networking.Inventory
                     Attachment = socket.Value.HasAttachment ? ConvertToNetworkItem(socket.Value.Attachment) : default
                 });
             }
-            
+
+            sockets.Sort((left, right) =>
+            {
+                int hash = left.SocketHash.CompareTo(right.SocketHash);
+                return hash != 0
+                    ? hash
+                    : string.CompareOrdinal(left.SocketIdString, right.SocketIdString);
+            });
+
             return new NetworkRuntimeItem
             {
                 ItemHash = runtimeItem.ItemID.Hash,
@@ -476,7 +574,108 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 Sockets = sockets.ToArray()
             };
         }
-        
+
+        private static int ComparePositions(Vector2Int left, Vector2Int right)
+        {
+            int x = left.x.CompareTo(right.x);
+            return x != 0 ? x : left.y.CompareTo(right.y);
+        }
+
+        private static ulong ComputeCellFingerprint(NetworkCell cell)
+        {
+            ulong hash = FnvOffsetBasis;
+            hash = HashInt(hash, cell.Position.x);
+            hash = HashInt(hash, cell.Position.y);
+            hash = HashInt(hash, cell.ItemHash);
+            hash = HashInt(hash, cell.StackCount);
+            hash = HashRuntimeItem(hash, cell.RootItem);
+
+            if (cell.StackedItems != null && cell.StackedItems.Length > 0)
+            {
+                hash = HashInt(hash, cell.StackedItems.Length);
+                for (int i = 0; i < cell.StackedItems.Length; i++)
+                {
+                    hash = HashRuntimeItem(hash, cell.StackedItems[i]);
+                }
+            }
+            else
+            {
+                int count = cell.StackedRuntimeIds?.Length ?? 0;
+                hash = HashInt(hash, count);
+                for (int i = 0; i < count; i++)
+                {
+                    hash = HashLong(hash, cell.StackedRuntimeIds[i]);
+                    hash = HashString(hash,
+                        cell.StackedRuntimeIdStrings != null && i < cell.StackedRuntimeIdStrings.Length
+                            ? cell.StackedRuntimeIdStrings[i]
+                            : null);
+                }
+            }
+
+            return hash;
+        }
+
+        private static ulong HashRuntimeItem(ulong hash, NetworkRuntimeItem item)
+        {
+            hash = HashInt(hash, item.ItemHash);
+            hash = HashString(hash, item.ItemIdString);
+            hash = HashLong(hash, item.RuntimeIdHash);
+            hash = HashString(hash, item.RuntimeIdString);
+
+            int propertyCount = item.Properties?.Length ?? 0;
+            hash = HashInt(hash, propertyCount);
+            for (int i = 0; i < propertyCount; i++)
+            {
+                NetworkRuntimeProperty property = item.Properties[i];
+                hash = HashInt(hash, property.PropertyHash);
+                hash = HashString(hash, property.PropertyIdString);
+                hash = HashInt(hash, BitConverter.SingleToInt32Bits(property.Number));
+                hash = HashString(hash, property.Text);
+            }
+
+            int socketCount = item.Sockets?.Length ?? 0;
+            hash = HashInt(hash, socketCount);
+            for (int i = 0; i < socketCount; i++)
+            {
+                NetworkRuntimeSocket socket = item.Sockets[i];
+                hash = HashInt(hash, socket.SocketHash);
+                hash = HashString(hash, socket.SocketIdString);
+                hash = HashInt(hash, socket.HasAttachment ? 1 : 0);
+                if (socket.HasAttachment) hash = HashRuntimeItem(hash, socket.Attachment);
+            }
+
+            return hash;
+        }
+
+        private static ulong HashInt(ulong hash, int value) => HashULong(hash, unchecked((uint)value));
+
+        private static ulong HashLong(ulong hash, long value) => HashULong(hash, unchecked((ulong)value));
+
+        private static ulong HashULong(ulong hash, ulong value)
+        {
+            for (int i = 0; i < sizeof(ulong); i++)
+            {
+                hash ^= (byte)(value >> (i * 8));
+                hash *= FnvPrime;
+            }
+
+            return hash;
+        }
+
+        private static ulong HashString(ulong hash, string value)
+        {
+            if (value == null) return HashInt(hash, -1);
+
+            hash = HashInt(hash, value.Length);
+            for (int i = 0; i < value.Length; i++)
+            {
+                hash ^= value[i];
+                hash *= FnvPrime;
+            }
+
+            return hash;
+        }
+
         private RuntimeItem ReconstructRuntimeItem(NetworkRuntimeItem networkItem)
         {
             if (networkItem.ItemHash == 0) return null;
@@ -537,56 +736,55 @@ namespace Arawn.GameCreator2.Networking.Inventory
 
         private void ApplyCellDelta(NetworkCell[] changedCells)
         {
-            if (changedCells == null) return;
+            if (changedCells == null || changedCells.Length == 0) return;
 
-            foreach (NetworkCell cell in changedCells)
+            var changedPositions = new HashSet<Vector2Int>();
+            for (int i = 0; i < changedCells.Length; i++)
             {
-                ClearCellAtPosition(cell.Position);
+                changedPositions.Add(changedCells[i].Position);
+            }
 
-                bool isDeleteEntry = cell.ItemHash == 0 || cell.StackCount <= 0 || cell.RootItem.ItemHash == 0;
-                if (isDeleteEntry)
+            // Preserve RuntimeItem instances for ordinary moves before applying removals. This keeps
+            // GC2's selected-item UI reference alive when a reliable operation broadcast was missed.
+            for (int i = 0; i < changedCells.Length; i++)
+            {
+                NetworkCell desired = changedCells[i];
+                if (IsDeleteCell(desired) || CellMatchesLocal(desired)) continue;
+                if (desired.RootItem.RuntimeIdHash == 0) continue;
+                if (!m_RuntimeItemMap.TryGetValue(desired.RootItem.RuntimeIdHash, out RuntimeItem existing)) continue;
+                if (existing == null || existing.Bag != m_Bag) continue;
+
+                Vector2Int source = m_Bag.Content.FindPosition(existing.RuntimeID);
+                if (source == TBagContent.INVALID || source == desired.Position) continue;
+                if (!changedPositions.Contains(source)) continue;
+
+                Cell sourceCell = m_Bag.Content.GetContent(source);
+                if (!CellIdentityMatchesNetwork(sourceCell, desired)) continue;
+                _ = m_Bag.Content.Move(source, desired.Position, true);
+            }
+
+            for (int i = 0; i < changedCells.Length; i++)
+            {
+                NetworkCell desired = changedCells[i];
+                if (IsDeleteCell(desired))
                 {
-                    continue;
-                }
-
-                RuntimeItem rootItem = ReconstructRuntimeItem(cell.RootItem);
-                if (rootItem == null)
-                {
-                    continue;
-                }
-
-                bool addedRoot = m_Bag.Content.Add(rootItem, cell.Position, true);
-                if (!addedRoot)
-                {
-                    continue;
-                }
-
-                TrackRuntimeItemRecursive(rootItem);
-
-                int stackCount = Mathf.Max(1, cell.StackCount);
-                long[] stackedRuntimeIds = cell.StackedRuntimeIds;
-                string[] stackedRuntimeIdStrings = cell.StackedRuntimeIdStrings;
-                for (int i = 1; i < stackCount; i++)
-                {
-                    RuntimeItem stackedItem = new RuntimeItem(rootItem, true);
-                    int stackedIndex = i - 1;
-                    if (stackedRuntimeIds != null && stackedIndex < stackedRuntimeIds.Length)
+                    if (m_Bag.Content.GetContent(desired.Position) is { Available: false })
                     {
-                        string runtimeIdString = stackedRuntimeIdStrings != null && stackedIndex < stackedRuntimeIdStrings.Length
-                            ? stackedRuntimeIdStrings[stackedIndex]
-                            : null;
-                        TryApplyRuntimeId(stackedItem, runtimeIdString, stackedRuntimeIds[stackedIndex]);
+                        ClearCellAtPosition(desired.Position);
                     }
 
-                    if (m_Bag.Content.Add(stackedItem, cell.Position, true))
-                    {
-                        TrackRuntimeItemRecursive(stackedItem);
-                    }
+                    continue;
                 }
+
+                if (CellMatchesLocal(desired)) continue;
+                if (TryApplyCellPayloadInPlace(desired) && CellMatchesLocal(desired)) continue;
+
+                ClearCellAtPosition(desired.Position);
+                AddNetworkCell(desired);
             }
         }
 
-        private void ApplyEquipmentDelta(NetworkEquipmentSlot[] changedEquipment)
+        private async Task ApplyEquipmentDelta(NetworkEquipmentSlot[] changedEquipment)
         {
             if (changedEquipment == null) return;
 
@@ -597,7 +795,19 @@ namespace Arawn.GameCreator2.Networking.Inventory
                     continue;
                 }
 
-                _ = m_Bag.Equipment.UnequipFromIndex(slot.SlotIndex);
+                long currentRuntimeHash = m_Bag.Equipment.GetSlotRootRuntimeItemID(slot.SlotIndex).Hash;
+                long desiredRuntimeHash = slot.IsOccupied ? slot.EquippedRuntimeIdHash : 0L;
+                if (currentRuntimeHash == desiredRuntimeHash) continue;
+
+                if (currentRuntimeHash != 0)
+                {
+                    bool unequipped = await m_Bag.Equipment.UnequipFromIndex(slot.SlotIndex);
+                    if (!unequipped &&
+                        m_Bag.Equipment.GetSlotRootRuntimeItemID(slot.SlotIndex).Hash != 0)
+                    {
+                        continue;
+                    }
+                }
                 if (!slot.IsOccupied)
                 {
                     continue;
@@ -605,7 +815,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
 
                 if (m_RuntimeItemMap.TryGetValue(slot.EquippedRuntimeIdHash, out RuntimeItem runtimeItem))
                 {
-                    _ = m_Bag.Equipment.EquipToIndex(runtimeItem, slot.SlotIndex);
+                    await m_Bag.Equipment.EquipToIndex(runtimeItem, slot.SlotIndex);
                 }
             }
         }
@@ -618,6 +828,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
             {
                 if (TryResolveCurrencyIdByHash(wealthEntry.CurrencyHash, out IdString currencyId))
                 {
+                    if (m_Bag.Wealth.Get(currencyId) == wealthEntry.Amount) continue;
                     m_Bag.Wealth.Set(currencyId, wealthEntry.Amount);
                 }
             }
@@ -638,80 +849,419 @@ namespace Arawn.GameCreator2.Networking.Inventory
             }
         }
 
-        private void ApplyFullSnapshot(NetworkInventorySnapshot snapshot)
+        private async Task ApplyFullSnapshot(NetworkInventorySnapshot snapshot)
         {
-            ClearCurrentInventoryState();
-
+            var desiredPositions = new HashSet<Vector2Int>();
+            var cells = new List<NetworkCell>(snapshot.Cells?.Length ?? 0);
             if (snapshot.Cells != null)
             {
-                foreach (NetworkCell cell in snapshot.Cells)
+                for (int i = 0; i < snapshot.Cells.Length; i++)
                 {
-                    RuntimeItem rootItem = ReconstructRuntimeItem(cell.RootItem);
-                    if (rootItem == null) continue;
+                    NetworkCell cell = snapshot.Cells[i];
+                    desiredPositions.Add(cell.Position);
+                    cells.Add(cell);
+                }
+            }
 
-                    bool addedRoot = m_Bag.Content.Add(rootItem, cell.Position, true);
-                    if (!addedRoot)
+            foreach (Cell localCell in m_Bag.Content.CellList)
+            {
+                if (localCell == null || localCell.Available) continue;
+                Vector2Int position = m_Bag.Content.FindPosition(localCell.RootRuntimeItemID);
+                if (position == TBagContent.INVALID || desiredPositions.Contains(position)) continue;
+                cells.Add(CreateDeleteCell(position));
+            }
+
+            ApplyCellDelta(cells.ToArray());
+            RebuildRuntimeItemMap();
+
+            var equipment = new NetworkEquipmentSlot[m_Bag.Equipment.Count];
+            var equipmentByIndex = new Dictionary<int, NetworkEquipmentSlot>();
+            if (snapshot.Equipment != null)
+            {
+                for (int i = 0; i < snapshot.Equipment.Length; i++)
+                {
+                    equipmentByIndex[snapshot.Equipment[i].SlotIndex] = snapshot.Equipment[i];
+                }
+            }
+
+            for (int i = 0; i < equipment.Length; i++)
+            {
+                equipment[i] = equipmentByIndex.TryGetValue(i, out NetworkEquipmentSlot slot)
+                    ? slot
+                    : new NetworkEquipmentSlot { SlotIndex = i, IsOccupied = false };
+            }
+
+            await ApplyEquipmentDelta(equipment);
+
+            var desiredWealth = new Dictionary<int, int>();
+            if (snapshot.Wealth != null)
+            {
+                for (int i = 0; i < snapshot.Wealth.Length; i++)
+                {
+                    desiredWealth[snapshot.Wealth[i].CurrencyHash] = snapshot.Wealth[i].Amount;
+                }
+            }
+
+            var wealth = new List<NetworkWealthEntry>(m_Bag.Wealth.List.Count);
+            foreach (IdString currencyId in m_Bag.Wealth.List)
+            {
+                wealth.Add(new NetworkWealthEntry
+                {
+                    CurrencyHash = currencyId.Hash,
+                    Amount = desiredWealth.TryGetValue(currencyId.Hash, out int amount) ? amount : 0
+                });
+            }
+
+            ApplyWealthDelta(wealth.ToArray());
+
+            CacheCurrentSyncState();
+        }
+
+        private static NetworkCell CreateDeleteCell(Vector2Int position)
+        {
+            return new NetworkCell
+            {
+                Position = position,
+                ItemHash = 0,
+                StackCount = 0,
+                RootItem = default,
+                StackedRuntimeIds = Array.Empty<long>(),
+                StackedRuntimeIdStrings = Array.Empty<string>(),
+                StackedItems = Array.Empty<NetworkRuntimeItem>()
+            };
+        }
+
+        private static bool IsDeleteCell(NetworkCell cell)
+        {
+            return cell.ItemHash == 0 || cell.StackCount <= 0 || cell.RootItem.ItemHash == 0;
+        }
+
+        private bool CellMatchesLocal(NetworkCell desired)
+        {
+            Cell local = m_Bag.Content.GetContent(desired.Position);
+            if (IsDeleteCell(desired)) return local == null || local.Available;
+            if (local == null || local.Available) return false;
+
+            NetworkCell current = CreateNetworkCell(local, desired.Position);
+            return NetworkCellsEquivalent(current, desired);
+        }
+
+        private static bool NetworkCellsEquivalent(NetworkCell current, NetworkCell desired)
+        {
+            if (current.Position != desired.Position ||
+                current.ItemHash != desired.ItemHash ||
+                current.StackCount != desired.StackCount ||
+                !NetworkRuntimeItemsEquivalent(current.RootItem, desired.RootItem))
+            {
+                return false;
+            }
+
+            int desiredStackedCount = Mathf.Max(0, desired.StackCount - 1);
+            for (int i = 0; i < desiredStackedCount; i++)
+            {
+                long currentId = GetStackedRuntimeId(current, i);
+                long desiredId = GetStackedRuntimeId(desired, i);
+                if (currentId != desiredId) return false;
+
+                string desiredIdString = GetStackedRuntimeIdString(desired, i);
+                if (!string.IsNullOrEmpty(desiredIdString) &&
+                    !string.Equals(GetStackedRuntimeIdString(current, i), desiredIdString, StringComparison.Ordinal))
+                {
+                    return false;
+                }
+
+                if (desired.StackedItems != null && i < desired.StackedItems.Length &&
+                    desired.StackedItems[i].ItemHash != 0)
+                {
+                    if (current.StackedItems == null || i >= current.StackedItems.Length ||
+                        !NetworkRuntimeItemsEquivalent(current.StackedItems[i], desired.StackedItems[i]))
+                    {
+                        return false;
+                    }
+                }
+            }
+
+            return true;
+        }
+
+        private static bool NetworkRuntimeItemsEquivalent(NetworkRuntimeItem current, NetworkRuntimeItem desired)
+        {
+            if (current.ItemHash != desired.ItemHash || current.RuntimeIdHash != desired.RuntimeIdHash)
+            {
+                return false;
+            }
+
+            if (!string.IsNullOrEmpty(desired.ItemIdString) &&
+                !string.Equals(current.ItemIdString, desired.ItemIdString, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            if (!string.IsNullOrEmpty(desired.RuntimeIdString) &&
+                !string.Equals(current.RuntimeIdString, desired.RuntimeIdString, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            int desiredPropertyCount = desired.Properties?.Length ?? 0;
+            if ((current.Properties?.Length ?? 0) != desiredPropertyCount) return false;
+            for (int i = 0; i < desiredPropertyCount; i++)
+            {
+                NetworkRuntimeProperty desiredProperty = desired.Properties[i];
+                if (!TryFindProperty(current.Properties, desiredProperty, out NetworkRuntimeProperty currentProperty) ||
+                    !currentProperty.Number.Equals(desiredProperty.Number) ||
+                    !string.Equals(currentProperty.Text, desiredProperty.Text, StringComparison.Ordinal))
+                {
+                    return false;
+                }
+            }
+
+            int desiredSocketCount = desired.Sockets?.Length ?? 0;
+            if ((current.Sockets?.Length ?? 0) != desiredSocketCount) return false;
+            for (int i = 0; i < desiredSocketCount; i++)
+            {
+                NetworkRuntimeSocket desiredSocket = desired.Sockets[i];
+                if (!TryFindSocket(current.Sockets, desiredSocket, out NetworkRuntimeSocket currentSocket) ||
+                    currentSocket.HasAttachment != desiredSocket.HasAttachment)
+                {
+                    return false;
+                }
+
+                if (desiredSocket.HasAttachment &&
+                    !NetworkRuntimeItemsEquivalent(currentSocket.Attachment, desiredSocket.Attachment))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private static bool TryFindProperty(
+            NetworkRuntimeProperty[] properties,
+            NetworkRuntimeProperty desired,
+            out NetworkRuntimeProperty result)
+        {
+            if (properties != null)
+            {
+                for (int i = 0; i < properties.Length; i++)
+                {
+                    NetworkRuntimeProperty candidate = properties[i];
+                    if (candidate.PropertyHash != desired.PropertyHash) continue;
+                    if (!string.IsNullOrEmpty(desired.PropertyIdString) &&
+                        !string.Equals(candidate.PropertyIdString, desired.PropertyIdString, StringComparison.Ordinal))
                     {
                         continue;
                     }
 
-                    TrackRuntimeItemRecursive(rootItem);
-
-                    int stackCount = Mathf.Max(1, cell.StackCount);
-                    long[] stackedRuntimeIds = cell.StackedRuntimeIds;
-                    string[] stackedRuntimeIdStrings = cell.StackedRuntimeIdStrings;
-                    for (int i = 1; i < stackCount; i++)
-                    {
-                        RuntimeItem stackedItem = new RuntimeItem(rootItem, true);
-                        int stackedIndex = i - 1;
-                        if (stackedRuntimeIds != null && stackedIndex < stackedRuntimeIds.Length)
-                        {
-                            string runtimeIdString = stackedRuntimeIdStrings != null && stackedIndex < stackedRuntimeIdStrings.Length
-                                ? stackedRuntimeIdStrings[stackedIndex]
-                                : null;
-                            TryApplyRuntimeId(stackedItem, runtimeIdString, stackedRuntimeIds[stackedIndex]);
-                        }
-
-                        if (m_Bag.Content.Add(stackedItem, cell.Position, true))
-                        {
-                            TrackRuntimeItemRecursive(stackedItem);
-                        }
-                    }
+                    result = candidate;
+                    return true;
                 }
             }
 
-            for (int i = 0; i < m_Bag.Equipment.Count; i++)
-            {
-                _ = m_Bag.Equipment.UnequipFromIndex(i);
-            }
+            result = default;
+            return false;
+        }
 
-            if (snapshot.Equipment != null)
+        private static bool TryFindSocket(
+            NetworkRuntimeSocket[] sockets,
+            NetworkRuntimeSocket desired,
+            out NetworkRuntimeSocket result)
+        {
+            if (sockets != null)
             {
-                foreach (NetworkEquipmentSlot slot in snapshot.Equipment)
+                for (int i = 0; i < sockets.Length; i++)
                 {
-                    if (!slot.IsOccupied) continue;
-                    if (!m_RuntimeItemMap.TryGetValue(slot.EquippedRuntimeIdHash, out RuntimeItem runtimeItem)) continue;
-                    _ = m_Bag.Equipment.EquipToIndex(runtimeItem, slot.SlotIndex);
-                }
-            }
-
-            foreach (IdString currencyId in m_Bag.Wealth.List)
-            {
-                m_Bag.Wealth.Set(currencyId, 0);
-            }
-
-            if (snapshot.Wealth != null)
-            {
-                foreach (NetworkWealthEntry wealthEntry in snapshot.Wealth)
-                {
-                    if (TryResolveCurrencyIdByHash(wealthEntry.CurrencyHash, out IdString currencyId))
+                    NetworkRuntimeSocket candidate = sockets[i];
+                    if (candidate.SocketHash != desired.SocketHash) continue;
+                    if (!string.IsNullOrEmpty(desired.SocketIdString) &&
+                        !string.Equals(candidate.SocketIdString, desired.SocketIdString, StringComparison.Ordinal))
                     {
-                        m_Bag.Wealth.Set(currencyId, wealthEntry.Amount);
+                        continue;
                     }
+
+                    result = candidate;
+                    return true;
                 }
             }
 
-            CacheCurrentSyncState();
+            result = default;
+            return false;
+        }
+
+        private bool TryApplyCellPayloadInPlace(NetworkCell desired)
+        {
+            Cell local = m_Bag.Content.GetContent(desired.Position);
+            if (!CellIdentityMatchesNetwork(local, desired)) return false;
+
+            if (!ApplyNetworkRuntimeItemState(local.RootRuntimeItem, desired.RootItem)) return false;
+
+            for (int i = 0; i < desired.StackCount - 1; i++)
+            {
+                if (desired.StackedItems == null || i >= desired.StackedItems.Length ||
+                    desired.StackedItems[i].ItemHash == 0)
+                {
+                    continue;
+                }
+
+                IdString runtimeId = local.List[i + 1];
+                RuntimeItem runtimeItem = m_Bag.Content.GetRuntimeItem(runtimeId);
+                if (!ApplyNetworkRuntimeItemState(runtimeItem, desired.StackedItems[i])) return false;
+            }
+
+            return true;
+        }
+
+        private bool ApplyNetworkRuntimeItemState(RuntimeItem runtimeItem, NetworkRuntimeItem desired)
+        {
+            if (runtimeItem == null || desired.ItemHash == 0) return false;
+            if (runtimeItem.ItemID.Hash != desired.ItemHash || runtimeItem.RuntimeID.Hash != desired.RuntimeIdHash)
+            {
+                return false;
+            }
+
+            if (desired.Properties != null)
+            {
+                for (int i = 0; i < desired.Properties.Length; i++)
+                {
+                    NetworkRuntimeProperty property = desired.Properties[i];
+                    if (!TryResolveRuntimePropertyId(runtimeItem, property.PropertyHash, property.PropertyIdString, out IdString propertyId) ||
+                        !runtimeItem.Properties.TryGetValue(propertyId, out RuntimeProperty runtimeProperty))
+                    {
+                        continue;
+                    }
+
+                    if (!runtimeProperty.Number.Equals(property.Number)) runtimeProperty.Number = property.Number;
+                    if (!string.Equals(runtimeProperty.Text, property.Text, StringComparison.Ordinal)) runtimeProperty.Text = property.Text;
+                }
+            }
+
+            if (desired.Sockets == null || s_RuntimeSocketAttachmentField == null) return true;
+            for (int i = 0; i < desired.Sockets.Length; i++)
+            {
+                NetworkRuntimeSocket socket = desired.Sockets[i];
+                if (!TryResolveRuntimeSocketId(runtimeItem, socket.SocketHash, socket.SocketIdString, out IdString socketId) ||
+                    !runtimeItem.Sockets.TryGetValue(socketId, out RuntimeSocket runtimeSocket))
+                {
+                    continue;
+                }
+
+                RuntimeItem currentAttachment = runtimeSocket.Attachment;
+                if (!socket.HasAttachment)
+                {
+                    if (currentAttachment != null)
+                    {
+                        UntrackRuntimeItemRecursive(currentAttachment);
+                        s_RuntimeSocketAttachmentField.SetValue(runtimeSocket, null);
+                    }
+
+                    continue;
+                }
+
+                if (currentAttachment != null &&
+                    currentAttachment.RuntimeID.Hash == socket.Attachment.RuntimeIdHash &&
+                    ApplyNetworkRuntimeItemState(currentAttachment, socket.Attachment))
+                {
+                    continue;
+                }
+
+                if (currentAttachment != null) UntrackRuntimeItemRecursive(currentAttachment);
+                RuntimeItem replacement = ReconstructRuntimeItem(socket.Attachment);
+                s_RuntimeSocketAttachmentField.SetValue(runtimeSocket, replacement);
+                if (replacement != null) TrackRuntimeItemRecursive(replacement);
+            }
+
+            return true;
+        }
+
+        private static bool CellIdentityMatchesNetwork(Cell local, NetworkCell desired)
+        {
+            if (local == null || local.Available || local.Count != desired.StackCount) return false;
+            if (local.RootRuntimeItemID.Hash != desired.RootItem.RuntimeIdHash) return false;
+            if (local.Item.ID.Hash != desired.ItemHash) return false;
+
+            for (int i = 0; i < desired.StackCount - 1; i++)
+            {
+                if (i + 1 >= local.List.Count || local.List[i + 1].Hash != GetStackedRuntimeId(desired, i))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private static long GetStackedRuntimeId(NetworkCell cell, int index)
+        {
+            if (cell.StackedItems != null && index >= 0 && index < cell.StackedItems.Length &&
+                cell.StackedItems[index].RuntimeIdHash != 0)
+            {
+                return cell.StackedItems[index].RuntimeIdHash;
+            }
+
+            return cell.StackedRuntimeIds != null && index >= 0 && index < cell.StackedRuntimeIds.Length
+                ? cell.StackedRuntimeIds[index]
+                : 0L;
+        }
+
+        private static string GetStackedRuntimeIdString(NetworkCell cell, int index)
+        {
+            if (cell.StackedItems != null && index >= 0 && index < cell.StackedItems.Length &&
+                !string.IsNullOrEmpty(cell.StackedItems[index].RuntimeIdString))
+            {
+                return cell.StackedItems[index].RuntimeIdString;
+            }
+
+            return cell.StackedRuntimeIdStrings != null && index >= 0 && index < cell.StackedRuntimeIdStrings.Length
+                ? cell.StackedRuntimeIdStrings[index]
+                : null;
+        }
+
+        private void AddNetworkCell(NetworkCell cell)
+        {
+            RuntimeItem rootItem = ReconstructRuntimeItem(cell.RootItem);
+            if (rootItem == null || !m_Bag.Content.Add(rootItem, cell.Position, true)) return;
+            TrackRuntimeItemRecursive(rootItem);
+
+            int stackCount = Mathf.Max(1, cell.StackCount);
+            for (int i = 1; i < stackCount; i++)
+            {
+                int stackedIndex = i - 1;
+                NetworkRuntimeItem stackedPayload = cell.StackedItems != null && stackedIndex < cell.StackedItems.Length
+                    ? cell.StackedItems[stackedIndex]
+                    : default;
+
+                RuntimeItem stackedItem = stackedPayload.ItemHash != 0
+                    ? ReconstructRuntimeItem(stackedPayload)
+                    : new RuntimeItem(rootItem, true);
+                if (stackedItem == null) continue;
+
+                if (stackedPayload.ItemHash == 0)
+                {
+                    TryApplyRuntimeId(
+                        stackedItem,
+                        GetStackedRuntimeIdString(cell, stackedIndex),
+                        GetStackedRuntimeId(cell, stackedIndex));
+                }
+
+                if (m_Bag.Content.Add(stackedItem, cell.Position, true))
+                {
+                    TrackRuntimeItemRecursive(stackedItem);
+                }
+            }
+        }
+
+        private void RebuildRuntimeItemMap()
+        {
+            m_RuntimeItemMap.Clear();
+            foreach (Cell cell in m_Bag.Content.CellList)
+            {
+                if (cell == null || cell.Available) continue;
+                foreach (IdString runtimeId in cell.List)
+                {
+                    TrackRuntimeItemRecursive(m_Bag.Content.GetRuntimeItem(runtimeId));
+                }
+            }
         }
 
         private void ClearCurrentInventoryState()
@@ -853,20 +1403,27 @@ namespace Arawn.GameCreator2.Networking.Inventory
 
             return false;
         }
-        
-        private static void GetStackedRuntimeIdentity(Cell cell, out long[] runtimeIds, out string[] runtimeIdStrings)
+
+        private void GetStackedRuntimeIdentity(
+            Cell cell,
+            out long[] runtimeIds,
+            out string[] runtimeIdStrings,
+            out NetworkRuntimeItem[] stackedItems)
         {
             var ids = new List<long>();
             var idStrings = new List<string>();
+            var items = new List<NetworkRuntimeItem>();
             foreach (var id in cell.List)
             {
                 if (id.Hash == cell.RootRuntimeItemID.Hash) continue;
                 ids.Add(id.Hash);
                 idStrings.Add(id.String);
+                items.Add(ConvertToNetworkItem(m_Bag.Content.GetRuntimeItem(id)));
             }
 
             runtimeIds = ids.ToArray();
             runtimeIdStrings = idStrings.ToArray();
+            stackedItems = items.ToArray();
         }
     }
 }

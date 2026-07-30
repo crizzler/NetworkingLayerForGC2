@@ -30,32 +30,32 @@ namespace Arawn.GameCreator2.Networking
         public static int GetStableHash(UnityEngine.Object value)
         {
             if (value == null) return 0;
-            
+
             if (value is Component component)
             {
                 return GetStableHash(BuildTransformKey(component.transform, component.GetType().FullName));
             }
-            
+
             if (value is GameObject gameObject)
             {
                 return GetStableHash(BuildTransformKey(gameObject.transform, "GameObject"));
             }
-            
+
             string key = $"{value.GetType().FullName}|{value.name}";
             return GetStableHash(key);
         }
-        
+
         private static string BuildTransformKey(Transform transform, string suffix)
         {
             if (transform == null)
             {
                 return suffix ?? string.Empty;
             }
-            
+
             var builder = new StringBuilder(128);
             builder.Append(transform.gameObject.scene.path);
             builder.Append('|');
-            
+
             var chain = new Stack<string>(8);
             Transform current = transform;
             while (current != null)
@@ -63,13 +63,13 @@ namespace Arawn.GameCreator2.Networking
                 chain.Push(current.name);
                 current = current.parent;
             }
-            
+
             while (chain.Count > 0)
             {
                 if (builder[builder.Length - 1] != '|') builder.Append('/');
                 builder.Append(chain.Pop());
             }
-            
+
             builder.Append('|');
             builder.Append(suffix);
             return builder.ToString();

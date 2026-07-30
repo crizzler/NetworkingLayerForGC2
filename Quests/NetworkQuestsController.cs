@@ -57,6 +57,7 @@ namespace Arawn.GameCreator2.Networking.Quests
 
         private Journal m_Journal;
         private NetworkCharacter m_NetworkCharacter;
+        private NetworkQuestRepositoryRegistrationResult m_RepositoryRegistration;
 
         private bool m_IsServer;
         private bool m_IsLocalClient;
@@ -88,6 +89,8 @@ namespace Arawn.GameCreator2.Networking.Quests
         {
             m_Journal = GetComponent<Journal>();
             m_NetworkCharacter = GetComponent<NetworkCharacter>();
+            m_RepositoryRegistration =
+                NetworkQuestRepositoryRegistration.EnsureRegistered(m_Profile);
         }
 
         private void OnEnable()
@@ -148,9 +151,29 @@ namespace Arawn.GameCreator2.Networking.Quests
             m_IsLocalClient = isLocalClient;
             m_IsRemoteClient = !isServer && !isLocalClient;
 
+            if (!m_RepositoryRegistration.Success)
+            {
+                m_RepositoryRegistration =
+                    NetworkQuestRepositoryRegistration.EnsureRegistered(m_Profile);
+            }
+
+            if (!m_RepositoryRegistration.Success)
+            {
+                Debug.LogWarning(
+                    "[NetworkQuestsController] Failed to register the Network Quest " +
+                    "Profile with Game Creator's runtime quest repository. Quest state " +
+                    "can still synchronize, but the Quest HUD and Journal may be empty. " +
+                    $"{m_RepositoryRegistration}",
+                    this);
+            }
+
             EnsureRegisteredWithManager();
 
-            LogQuestSync($"initialized profile={DescribeProfile()} journalQuests={m_Journal?.QuestEntries?.Count ?? 0} journalTasks={m_Journal?.TaskEntries?.Count ?? 0}");
+            LogQuestSync(
+                $"initialized profile={DescribeProfile()} " +
+                $"questRepository=({m_RepositoryRegistration}) " +
+                $"journalQuests={m_Journal?.QuestEntries?.Count ?? 0} " +
+                $"journalTasks={m_Journal?.TaskEntries?.Count ?? 0}");
         }
 
         public void RequestActivateQuest(Quest quest) => RequestQuestAction(QuestActionType.ActivateQuest, quest);
@@ -1221,9 +1244,7 @@ namespace Arawn.GameCreator2.Networking.Quests
 
         private Quest ResolveQuestIdentity(string questIdString, int questHash)
         {
-            QuestsRepository repository = Settings.From<QuestsRepository>();
-            Quest[] quests = repository?.Quests?.Quests;
-            if (quests == null || quests.Length == 0)
+            if (string.IsNullOrEmpty(questIdString) && questHash == 0)
             {
                 return null;
             }
@@ -1235,9 +1256,28 @@ namespace Arawn.GameCreator2.Networking.Quests
                 {
                     return null;
                 }
+            }
 
+            Quest profiledQuest = ResolveProfileQuestIdentity(questIdString, questHash);
+            if (profiledQuest != null)
+            {
+                return profiledQuest;
+            }
+
+            QuestsRepository repository = Settings.From<QuestsRepository>();
+            Quest[] quests = repository?.Quests?.Quests;
+            if (quests == null || quests.Length == 0)
+            {
+                return null;
+            }
+
+            if (!string.IsNullOrEmpty(questIdString))
+            {
+                IdString questId = new IdString(questIdString);
                 Quest byId = repository.Quests.Get(questId);
-                if (byId != null)
+                if (byId != null &&
+                    string.Equals(byId.Id.String, questIdString, StringComparison.Ordinal) &&
+                    (questHash == 0 || byId.Id.Hash == questHash))
                 {
                     return byId;
                 }
@@ -1248,11 +1288,44 @@ namespace Arawn.GameCreator2.Networking.Quests
                 for (int i = 0; i < quests.Length; i++)
                 {
                     Quest candidate = quests[i];
-                    if (candidate != null && candidate.Id.Hash == questHash)
+                    if (candidate != null &&
+                        candidate.Id.Hash == questHash &&
+                        (string.IsNullOrEmpty(questIdString) ||
+                         string.Equals(candidate.Id.String, questIdString, StringComparison.Ordinal)))
                     {
                         return candidate;
                     }
                 }
+            }
+
+            return null;
+        }
+
+        private Quest ResolveProfileQuestIdentity(string questIdString, int questHash)
+        {
+            if (m_Profile == null)
+            {
+                return null;
+            }
+
+            NetworkQuestBinding[] bindings = m_Profile.Quests;
+            for (int i = 0; i < bindings.Length; i++)
+            {
+                Quest candidate = bindings[i].Quest;
+                if (candidate == null) continue;
+
+                if (!string.IsNullOrEmpty(questIdString) &&
+                    !string.Equals(candidate.Id.String, questIdString, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                if (questHash != 0 && candidate.Id.Hash != questHash)
+                {
+                    continue;
+                }
+
+                return candidate;
             }
 
             return null;

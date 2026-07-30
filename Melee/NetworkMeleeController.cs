@@ -39,18 +39,18 @@ namespace Arawn.GameCreator2.Networking.Melee
         // ════════════════════════════════════════════════════════════════════════════════════════
         // INSPECTOR
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         [Header("Network Settings")]
         [Tooltip("Show optimistic hit effects before server confirmation.")]
         [SerializeField] private bool m_OptimisticEffects = true;
-        
+
         [Tooltip("Maximum number of hits to buffer before flush.")]
         [SerializeField] private int m_MaxHitBuffer = 8;
-        
+
         [Header("Lag Compensation")]
         [Tooltip("Configuration for lag compensation validation.")]
         [SerializeField] private MeleeValidationConfig m_ValidationConfig = new();
-        
+
         [Header("Debug")]
         [SerializeField] private bool m_LogHits = false;
         [SerializeField] private bool m_LogMeleeSync = false;
@@ -63,41 +63,41 @@ namespace Arawn.GameCreator2.Networking.Melee
 #if UNITY_EDITOR
         [SerializeField] private bool m_DrawHitGizmos = false;
 #endif
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // EVENTS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>Called when a hit is detected locally (before server validation).</summary>
         public event Action<NetworkMeleeHitRequest> OnHitDetected;
-        
+
         /// <summary>Called when a hit is confirmed by server.</summary>
         public event Action<NetworkMeleeHitBroadcast> OnHitConfirmed;
-        
+
         /// <summary>Called when a hit is rejected by server.</summary>
         public event Action<NetworkMeleeHitResponse> OnHitRejected;
-        
+
         /// <summary>Called when attack state changes (for sync).</summary>
         public event Action<NetworkAttackState> OnAttackStateChanged;
-        
+
         /// <summary>Called when block is requested (for network layer).</summary>
         public event Action<NetworkBlockRequest> OnBlockRequested;
-        
+
         /// <summary>Called when block state changes.</summary>
         public event Action<NetworkBlockBroadcast> OnBlockStateChanged;
-        
+
         /// <summary>Called when skill execution is requested (for network layer).</summary>
         public event Action<NetworkSkillRequest> OnSkillRequested;
-        
+
         /// <summary>Called when skill is executed (broadcast received).</summary>
         public event Action<NetworkSkillBroadcast> OnSkillExecuted;
-        
+
         /// <summary>Called when charge is requested (for network layer).</summary>
         public event Action<NetworkChargeRequest> OnChargeRequested;
-        
+
         /// <summary>Called when charge state changes.</summary>
         public event Action<NetworkChargeBroadcast> OnChargeStateChanged;
-        
+
         /// <summary>Called when a reaction should be played (broadcast received).</summary>
         public event Action<NetworkReactionBroadcast> OnReactionReceived;
 
@@ -109,39 +109,69 @@ namespace Arawn.GameCreator2.Networking.Melee
         /// The original <see cref="OnWeaponStateChanged"/> event remains available for compatibility.
         /// </summary>
         public event Action<NetworkMeleeController, NetworkMeleeWeaponState> OnWeaponStateChangedWithSender;
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // PRIVATE FIELDS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         private Character m_Character;
         private NetworkCharacter m_NetworkCharacter;
         private MeleeStance m_MeleeStance;
-        
+        private MeleeStance m_SubscribedMeleeStance;
+
         // Network role
         private bool m_IsServer;
         private bool m_IsLocalClient;
         private bool m_IsRemoteClient;
-        
+
         // Hit interception state
         private static readonly List<ulong> s_SharedPendingRemovalBuffer = new(16);
+        private static int s_LastMeleePhysicsSyncFrame = -1;
         private readonly Dictionary<ulong, PendingHit> m_PendingHits = new(8);
         private readonly List<RecentOptimisticHitPresentation> m_RecentOptimisticHitPresentations = new(8);
         private readonly HashSet<int> m_ProcessedHits = new(32);
+        private ulong m_ProcessedHitsOperationId;
+        private uint m_CurrentTrustedAttackCorrelationId;
+        private uint m_NextTrustedAttackOperationCounter;
         private ushort m_NextRequestId = 1;
         private ushort m_LastIssuedRequestId = 1;
-        
+
         // Attack state tracking
         private NetworkAttackState m_LastAttackState;
         private MeleePhase m_LastPhase;
         private bool m_HasLastReactionBroadcast;
         private NetworkReactionBroadcast m_LastReactionBroadcast;
         private float m_LastReactionBroadcastTime;
+        private uint m_NextReactionSequence;
+        private bool m_HasPatchedReactionStartBroadcast;
+        private float m_NextMotionAuthorityWarningTime;
+        private float m_NextHitRoutingWarningTime;
+        private uint m_CurrentLocalAttackCorrelationId;
+        private int m_CurrentLocalAttackSkillHash;
+        private int m_CurrentLocalAttackWeaponHash;
+        private int m_CurrentLocalAttackComboNodeId = -1;
+        private uint m_LastRejectedAttackCorrelationId;
+        private int m_LastRejectedAttackSkillHash;
+        private int m_LastRejectedAttackWeaponHash;
+        private int m_LastRejectedAttackComboNodeId = -1;
+        private SkillRejectionReason m_LastRejectedAttackReason;
+        private float m_LastRejectedAttackTime = float.NegativeInfinity;
+        private readonly Dictionary<uint, ServerAttackLease> m_ServerAttackLeases = new(8);
+        private static readonly List<uint> s_SharedAttackLeaseRemovalBuffer = new(16);
+        private ulong m_NextServerAttackAcceptVersion;
+        private const int MaxServerAttackLeases = 32;
+        private const float MinimumAttackAuthorizationLifetime = 0.75f;
+        private const float MaximumAttackAuthorizationLifetime = 6f;
+        private const float AttackAuthorizationNetworkGrace = 0.75f;
+        private const float ExpiredAttackAuthorizationRetention = 1f;
+        private const float PendingAttackOwnerMotionWindow = 0.75f;
         private const float OwnerHitPreReactionReconciliationSuppression = 0.25f;
         private const float OwnerReactionInitialReconciliationSuppression = 1.00f;
         private const float OwnerReactionRefreshReconciliationSuppression = 0.35f;
         private const float OwnerReactionExitReconciliationSuppression = 0.50f;
-        
+        private const float OwnerReactionMotionWindowGrace = 0.15f;
+        private const float OwnerReactionMaximumMotionWindow = 5.00f;
+
         // Block state tracking
         private bool m_IsBlockingLocally;
         private float m_BlockStartTime;
@@ -149,18 +179,20 @@ namespace Arawn.GameCreator2.Networking.Melee
         private bool m_HasObservedGc2BlockState;
         private bool m_LastObservedGc2BlockState;
         private readonly Dictionary<ulong, PendingBlockRequest> m_PendingBlockRequests = new(4);
-        
+
         // Charge state tracking
         private NetworkChargeState m_ChargeState;
         private readonly Dictionary<ulong, PendingChargeRequest> m_PendingChargeRequests = new(4);
-        
+
         // Skill request tracking
         private readonly Dictionary<ulong, PendingSkillRequest> m_PendingSkillRequests = new(8);
-        private float m_LastValidatedSkillRequestTime;
+        private float m_LastValidatedSkillRequestTime = float.NegativeInfinity;
         private bool m_HasQueuedSkillInput;
         private MeleeKey m_QueuedSkillKey;
         private bool m_QueuedSkillIsChargeRelease;
         private float m_QueuedSkillChargeDuration;
+        private float m_QueuedSkillClientTimestamp;
+        private int m_QueuedSkillPreviousComboNodeId = ComboTree.NODE_INVALID;
         private float m_QueuedSkillTime;
         private int m_QueuedSkillFrame;
         private bool m_LoggedQueuedSkillWaitForWeapon;
@@ -196,6 +228,7 @@ namespace Arawn.GameCreator2.Networking.Melee
         private int m_LastConsumedExecuteFrame = -1;
         private MeleeKey m_LastConsumedExecuteKey;
         private float m_LastSkillRequestSentTime = -100f;
+        private int m_LastSkillRequestSentFrame = -1;
         private ushort m_LastSkillRequestSentId;
         private int m_LastSkillRequestSentSkillHash;
         private float m_NextInputLockProbeTime;
@@ -207,27 +240,29 @@ namespace Arawn.GameCreator2.Networking.Melee
         private uint m_RemoteWeaponApplyVersion;
         private uint m_AppliedRemoteWeaponVersion;
         private bool m_RemoteWeaponApplyRunning;
-        
+
         // Lag compensation validator (server-only)
         private MeleeLagCompensationValidator m_Validator;
-        
+
         // Server-side block tracking (for all characters)
         private readonly Dictionary<uint, ServerBlockState> m_ServerBlockStates = new(32);
-        
+
         // Reflection cache for hooking into GC2
         private static readonly FieldInfo s_AttacksField;
         private static readonly MethodInfo s_PlaySkillDirectMethod;
         private static readonly MethodInfo s_PlayReactionDirectMethod;
-        
+        private static readonly MethodInfo s_HitDirectMethod;
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // STRUCTS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         private struct PendingHit : ITimedPendingRequest
         {
             public NetworkMeleeHitRequest Request;
             public float SentTime;
             public bool OptimisticPlayed;
+            public bool OptimisticCustomHandled;
             public float PendingSentTime => SentTime;
         }
 
@@ -235,49 +270,63 @@ namespace Arawn.GameCreator2.Networking.Melee
         {
             public NetworkMeleeHitRequest Request;
             public float ExpiresAt;
+            public bool CustomHandled;
         }
-        
+
+        private sealed class ServerAttackLease
+        {
+            public uint ActorNetworkId;
+            public uint CorrelationId;
+            public int SkillHash;
+            public int WeaponHash;
+            public int ComboNodeId;
+            public float AcceptedAt;
+            public ulong AcceptVersion;
+            public float ComboActiveUntil;
+            public float ExpiresAt;
+            public HashSet<uint> ConsumedTargetIds;
+        }
+
         private struct PendingBlockRequest : ITimedPendingRequest
         {
             public NetworkBlockRequest Request;
             public float SentTime;
             public float PendingSentTime => SentTime;
         }
-        
+
         private struct PendingChargeRequest : ITimedPendingRequest
         {
             public NetworkChargeRequest Request;
             public float SentTime;
             public float PendingSentTime => SentTime;
         }
-        
+
         private struct PendingSkillRequest : ITimedPendingRequest
         {
             public NetworkSkillRequest Request;
             public float SentTime;
             public float PendingSentTime => SentTime;
         }
-        
+
         /// <summary>Server-side block state for a character.</summary>
         private struct ServerBlockState
         {
             public bool IsBlocking;
             public float BlockStartTime;
             public int ShieldHash;
-            public float ParryWindowEnd;
             public float CurrentDefense;
             public float MaxDefense;
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // STATIC CONSTRUCTOR
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         static NetworkMeleeController()
         {
             // Cache reflection for accessing internal GC2 fields
             // This allows us to hook without modifying GC2 source
-            s_AttacksField = typeof(MeleeStance).GetField("m_Attacks", 
+            s_AttacksField = typeof(MeleeStance).GetField("m_Attacks",
                 BindingFlags.NonPublic | BindingFlags.Instance);
             s_PlaySkillDirectMethod = typeof(MeleeStance).GetMethod(
                 "PlaySkillDirect",
@@ -291,6 +340,12 @@ namespace Arawn.GameCreator2.Networking.Melee
                 null,
                 new[] { typeof(GameObject), typeof(ReactionInput), typeof(IReaction), typeof(bool) },
                 null);
+            s_HitDirectMethod = typeof(MeleeStance).GetMethod(
+                "HitDirect",
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance,
+                null,
+                new[] { typeof(Character), typeof(ReactionInput), typeof(Skill) },
+                null);
 
             if (s_AttacksField == null)
             {
@@ -299,33 +354,54 @@ namespace Arawn.GameCreator2.Networking.Melee
                     "Melee sync will degrade until patch signatures are updated.");
             }
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // PROPERTIES
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>The underlying GC2 Character.</summary>
         public Character Character => m_Character;
-        
+
         /// <summary>Current attack state for network sync.</summary>
         public NetworkAttackState AttackState => m_LastAttackState;
 
         /// <summary>Latest local or remotely applied persistent weapon state.</summary>
         public NetworkMeleeWeaponState CurrentWeaponState => m_LastWeaponState;
-        
+
         /// <summary>Whether optimistic effects are enabled.</summary>
         public bool OptimisticEffects
         {
             get => m_OptimisticEffects;
             set => m_OptimisticEffects = value;
         }
-        
+
         /// <summary>Whether this is running on the server.</summary>
         public bool IsServer => m_IsServer;
-        
+
         /// <summary>Whether this is the local player's character.</summary>
         public bool IsLocalClient => m_IsLocalClient;
-        
+
+        /// <summary>Current live GC2 phase used by same-assembly authoritative diagnostics.</summary>
+        internal MeleePhase LivePhase => m_MeleeStance?.CurrentPhase ?? MeleePhase.None;
+
+        /// <summary>
+        /// Whether a live combat broadcast can be delivered to this controller now. Transport
+        /// registration establishes the network role; reaction playback additionally waits for
+        /// GC2's MeleeStance so a spawn-order race does not discard the event.
+        /// </summary>
+        internal bool IsReadyForTransientDelivery(bool requireReactionStance)
+        {
+            if (!isActiveAndEnabled || m_Character == null) return false;
+            if (m_NetworkCharacter != null && m_NetworkCharacter.NetworkId == 0) return false;
+
+            if (requireReactionStance && m_MeleeStance == null)
+            {
+                TryGetMeleeStance();
+            }
+
+            return !requireReactionStance || m_MeleeStance != null;
+        }
+
         /// <summary>Shorthand for the character's network ID.</summary>
         private uint NetworkId => m_NetworkCharacter != null ? m_NetworkCharacter.NetworkId : 0;
 
@@ -430,7 +506,7 @@ namespace Arawn.GameCreator2.Networking.Melee
         {
             if (m_Character == null) return "character=null";
 
-            var args = new Args(fromObject, m_Character.gameObject);
+            var args = new Args(m_Character.gameObject, fromObject);
             var sb = new StringBuilder(256);
 
             if (explicitReaction != null)
@@ -786,25 +862,103 @@ namespace Arawn.GameCreator2.Networking.Melee
             return sb.ToString();
         }
 
-        private void SuppressLocalOwnerReconciliation(float duration, bool syncOwnerPose = false)
+        private void SuppressLocalOwnerReconciliation(float duration)
         {
             if (!m_IsLocalClient || m_IsServer) return;
 
-            UnitDriverNetworkClient clientDriver = m_NetworkCharacter != null ? m_NetworkCharacter.ClientDriver : null;
-            clientDriver ??= m_Character?.Driver as UnitDriverNetworkClient;
-            if (clientDriver == null) return;
-
-            clientDriver.SuppressReconciliation(duration);
-            if (syncOwnerPose)
+            INetworkOwnerMotionAuthority motionAuthority = m_NetworkCharacter?.OwnerMotionAuthority;
+            if (motionAuthority != null)
             {
-                clientDriver.EnableOwnerAuthorityPoseSync(duration);
+                motionAuthority.OpenOwnerMotionWindow(duration);
+                return;
             }
+
+            const float WarningInterval = 10f;
+            if (Time.unscaledTime < m_NextMotionAuthorityWarningTime) return;
+            m_NextMotionAuthorityWarningTime = Time.unscaledTime + WarningInterval;
+            Debug.LogWarning(
+                $"[NetworkMeleeController] '{name}' cannot synchronize gameplay root motion because " +
+                "its active movement driver does not implement INetworkOwnerMotionAuthority. " +
+                "Use the built-in network movement backend for Melee attacks and reactions.",
+                this);
+        }
+
+        private static bool RequiresAttackOwnerMotionAuthority(Skill skill)
+        {
+            return skill != null && skill.Motion != MeleeMotion.None;
+        }
+
+        private float CalculateAttackOwnerMotionWindow(Skill skill, uint targetNetworkId)
+        {
+            return CalculateAttackAuthorizationLifetime(
+                skill,
+                targetNetworkId,
+                out _);
+        }
+
+        private void OpenLocalAttackOwnerMotionWindow(
+            Skill skill,
+            uint targetNetworkId,
+            bool pendingValidation)
+        {
+            if (!m_IsLocalClient || m_IsServer || !RequiresAttackOwnerMotionAuthority(skill)) return;
+
+            float duration = CalculateAttackOwnerMotionWindow(skill, targetNetworkId);
+            if (pendingValidation)
+            {
+                duration = Mathf.Min(duration, PendingAttackOwnerMotionWindow);
+            }
+
+            SuppressLocalOwnerReconciliation(duration);
+            LogMeleeSync(
+                $"opened {(pendingValidation ? "pending" : "validated")} owner attack motion window " +
+                $"skill={skill.name} duration={duration:F3}s target={targetNetworkId}");
+        }
+
+        private void OpenServerAttackOwnerMotionWindow(
+            Skill skill,
+            uint targetNetworkId,
+            uint correlationId)
+        {
+            if (!m_IsServer || m_IsLocalClient || !RequiresAttackOwnerMotionAuthority(skill)) return;
+
+            float duration = CalculateAttackOwnerMotionWindow(skill, targetNetworkId);
+            (m_Character?.Driver as INetworkServerOwnerMotionAuthority)
+                ?.OpenServerOwnerMotionWindow(duration, correlationId);
+            LogMeleeSync(
+                $"opened server owner attack motion window skill={skill.name} " +
+                $"duration={duration:F3}s corr={correlationId} target={targetNetworkId}");
+        }
+
+        private void WarnHitRoutingInvariant(string message)
+        {
+            const float WarningInterval = 5f;
+            if (Time.unscaledTime < m_NextHitRoutingWarningTime) return;
+            m_NextHitRoutingWarningTime = Time.unscaledTime + WarningInterval;
+            Debug.LogWarning($"[NetworkMeleeController] {message}", this);
         }
 
         private void RefreshLocalReactionReconciliationSuppression()
         {
             if (m_MeleeStance == null || m_MeleeStance.CurrentPhase != MeleePhase.Reaction) return;
-            SuppressLocalOwnerReconciliation(OwnerReactionRefreshReconciliationSuppression, true);
+            SuppressLocalOwnerReconciliation(OwnerReactionRefreshReconciliationSuppression);
+        }
+
+        private void RefreshServerReactionMotionAuthority()
+        {
+            if (!m_IsServer || m_MeleeStance == null || m_MeleeStance.CurrentPhase != MeleePhase.Reaction)
+            {
+                return;
+            }
+
+            (m_Character?.Driver as INetworkServerOwnerMotionAuthority)
+                ?.OpenServerOwnerMotionWindow(OwnerReactionRefreshReconciliationSuppression);
+        }
+
+        private void RefreshReactionMotionAuthority()
+        {
+            RefreshLocalReactionReconciliationSuppression();
+            RefreshServerReactionMotionAuthority();
         }
 
         private ushort GetNextRequestId()
@@ -852,7 +1006,7 @@ namespace Arawn.GameCreator2.Networking.Melee
         // ════════════════════════════════════════════════════════════════════════════════════════
         // UNITY LIFECYCLE
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         private void Awake()
         {
             m_Character = GetComponent<Character>();
@@ -866,16 +1020,22 @@ namespace Arawn.GameCreator2.Networking.Melee
                 m_Character.Dash.EventDashFinish += OnDashFinish;
             }
         }
-        
+
         private void Start()
         {
             // Try to get initial melee stance
             TryGetMeleeStance();
         }
-        
+
         private void OnDestroy()
         {
             m_RemoteWeaponApplyVersion++;
+            m_ServerAttackLeases.Clear();
+            m_NextServerAttackAcceptVersion = 0;
+            m_CurrentLocalAttackCorrelationId = 0;
+            m_CurrentTrustedAttackCorrelationId = 0;
+            m_ProcessedHitsOperationId = 0;
+            m_ProcessedHits.Clear();
             UnsubscribeFromMeleeStance();
 
             if (m_Character != null)
@@ -927,9 +1087,20 @@ namespace Arawn.GameCreator2.Networking.Melee
                 "dash finished during melee input context " +
                 BuildSkillInputDebugContext(resolvedState: m_LastAttackState, hasResolvedState: true));
         }
-        
+
         private void Update()
         {
+            // GC2 evaluates Striker overlap volumes later in Character.LateUpdate. Network
+            // movement and Facing both finish in Update, and projects commonly disable Unity's
+            // automatic transform synchronization. Flush once for the whole process after the
+            // Character update order has completed so every melee query sees the final native
+            // collider poses for this frame.
+            if (s_LastMeleePhysicsSyncFrame != Time.frameCount)
+            {
+                Physics.SyncTransforms();
+                s_LastMeleePhysicsSyncFrame = Time.frameCount;
+            }
+
             if (!m_IsLocalClient && !m_IsServer) return;
 
             if (m_MeleeStance == null)
@@ -938,23 +1109,23 @@ namespace Arawn.GameCreator2.Networking.Melee
             }
 
             ObserveWindowInputContext();
-            
+
             // Track attack state changes
             UpdateAttackState();
-            RefreshLocalReactionReconciliationSuppression();
+            RefreshReactionMotionAuthority();
             UpdateWeaponState();
             FlushQueuedSkillInput();
             ProbePotentialSkillInputLock();
             ObserveGc2BlockState();
-            
+
             // Clean up old pending hits
             CleanupPendingHits();
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // INITIALIZATION
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>
         /// Initialize the network melee controller with role information.
         /// Called by NetworkCharacter when network role is determined.
@@ -963,7 +1134,30 @@ namespace Arawn.GameCreator2.Networking.Melee
         {
             m_IsServer = isServer;
             m_IsLocalClient = isLocalClient;
-            m_IsRemoteClient = !isLocalClient;
+            // A server replica is authoritative, not a presentation-only remote client. Treating
+            // it as both caused host loopback broadcasts to replay skills and block transitions
+            // that Process*Request had already applied.
+            m_IsRemoteClient = !isServer && !isLocalClient;
+            m_ServerAttackLeases.Clear();
+            m_NextServerAttackAcceptVersion = 0;
+            m_CurrentLocalAttackCorrelationId = 0;
+            m_CurrentLocalAttackSkillHash = 0;
+            m_CurrentLocalAttackWeaponHash = 0;
+            m_CurrentLocalAttackComboNodeId = -1;
+            m_LastRejectedAttackCorrelationId = 0;
+            m_LastRejectedAttackSkillHash = 0;
+            m_LastRejectedAttackWeaponHash = 0;
+            m_LastRejectedAttackComboNodeId = ComboTree.NODE_INVALID;
+            m_LastRejectedAttackReason = SkillRejectionReason.None;
+            m_LastRejectedAttackTime = float.NegativeInfinity;
+            m_QueuedSkillClientTimestamp = 0f;
+            m_QueuedSkillPreviousComboNodeId = ComboTree.NODE_INVALID;
+            m_LastSkillRequestSentFrame = -1;
+            m_LastValidatedSkillRequestTime = float.NegativeInfinity;
+            m_CurrentTrustedAttackCorrelationId = 0;
+            m_NextTrustedAttackOperationCounter = 0;
+            m_ProcessedHitsOperationId = 0;
+            m_ProcessedHits.Clear();
 
             if (m_IsLocalClient)
             {
@@ -971,7 +1165,7 @@ namespace Arawn.GameCreator2.Networking.Melee
                 m_RemoteWeaponApplyVersion++;
                 m_DesiredRemoteWeapon = null;
             }
-            
+
             if (m_LogHits)
             {
                 string role = m_IsServer ? "Server" : (m_IsLocalClient ? "LocalClient" : "RemoteClient");
@@ -1041,11 +1235,11 @@ namespace Arawn.GameCreator2.Networking.Melee
         {
             PublishWeaponStateIfChanged(force: true);
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // STANCE TRACKING
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         private void OnStanceChanged(int stanceId)
         {
             if (stanceId == MeleeStance.ID)
@@ -1057,35 +1251,54 @@ namespace Arawn.GameCreator2.Networking.Melee
                 UnsubscribeFromMeleeStance();
             }
         }
-        
+
         private void TryGetMeleeStance()
         {
-            m_MeleeStance = m_Character.Combat.RequestStance<MeleeStance>();
-            
-            if (m_MeleeStance != null)
+            MeleeStance resolved = m_Character.Combat.RequestStance<MeleeStance>();
+            if (ReferenceEquals(resolved, m_SubscribedMeleeStance))
             {
-                SubscribeToMeleeStance();
+                m_MeleeStance = resolved;
+                SubscribeToRawMeleeInput();
+                return;
             }
+
+            UnsubscribeFromMeleeStance();
+            m_MeleeStance = resolved;
+            SubscribeToMeleeStance();
         }
-        
+
         private void SubscribeToMeleeStance()
         {
             if (m_MeleeStance == null) return;
-            
+            if (ReferenceEquals(m_SubscribedMeleeStance, m_MeleeStance))
+            {
+                SubscribeToRawMeleeInput();
+                return;
+            }
+
+            if (m_SubscribedMeleeStance != null)
+            {
+                m_SubscribedMeleeStance.EventInputCharge -= OnInputCharge;
+                m_SubscribedMeleeStance.EventInputExecute -= OnInputExecute;
+            }
+
             // Subscribe to input events to track attacks
             m_MeleeStance.EventInputCharge += OnInputCharge;
             m_MeleeStance.EventInputExecute += OnInputExecute;
+            m_SubscribedMeleeStance = m_MeleeStance;
             SubscribeToRawMeleeInput();
         }
-        
+
         private void UnsubscribeFromMeleeStance()
         {
-            if (m_MeleeStance == null) return;
-            
-            m_MeleeStance.EventInputCharge -= OnInputCharge;
-            m_MeleeStance.EventInputExecute -= OnInputExecute;
+            if (m_SubscribedMeleeStance != null)
+            {
+                m_SubscribedMeleeStance.EventInputCharge -= OnInputCharge;
+                m_SubscribedMeleeStance.EventInputExecute -= OnInputExecute;
+            }
+
             UnsubscribeFromRawMeleeInput();
-            
+            m_SubscribedMeleeStance = null;
             m_MeleeStance = null;
         }
 
@@ -1157,7 +1370,7 @@ namespace Arawn.GameCreator2.Networking.Melee
 
             PublishWeaponStateIfChanged(force: true);
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // INPUT TRACKING
         // ════════════════════════════════════════════════════════════════════════════════════════
@@ -1185,16 +1398,16 @@ namespace Arawn.GameCreator2.Networking.Melee
                 $"GC2 raw execute input queued key={key} " +
                 BuildSkillInputDebugContext(resolvedState: m_LastAttackState, hasResolvedState: true));
         }
-        
+
         private void OnInputCharge(MeleeKey key)
         {
             if (!m_IsLocalClient) return;
-            
+
             // Get current weapon to determine charge skill
             var weapon = GetCurrentMeleeWeapon();
             if (weapon == null) return;
             RegisterWeaponAndSkills(weapon);
-            
+
             // Send charge request to server
             var request = new NetworkChargeRequest
             {
@@ -1209,7 +1422,8 @@ namespace Arawn.GameCreator2.Networking.Melee
             ulong pendingKey = GetPendingKey(request.ActorNetworkId, request.CorrelationId);
             if (pendingKey == 0)
             {
-                Debug.LogWarning("[NetworkMeleeController] Ignoring charge request with invalid actor/correlation context.");
+                WarnHitRoutingInvariant(
+                    "Ignored a charge request with an invalid actor/correlation context.");
                 return;
             }
 
@@ -1218,15 +1432,15 @@ namespace Arawn.GameCreator2.Networking.Melee
                 Request = request,
                 SentTime = Time.time
             };
-            
+
             OnChargeRequested?.Invoke(request);
-            
+
             if (m_LogHits)
             {
                 Debug.Log($"[NetworkMeleeController] Charge request sent: Key={key}, Weapon={weapon.name}");
             }
         }
-        
+
         private void OnInputExecute(MeleeKey key)
         {
             if (!m_IsLocalClient)
@@ -1255,6 +1469,14 @@ namespace Arawn.GameCreator2.Networking.Melee
             m_LastConsumedExecuteFrame = Time.frameCount;
             m_LastConsumedExecuteKey = key;
 
+            // EventInputExecute is raised from Input.ConsumeExecute before Attacks.ToSkill
+            // replaces ComboId. Capture that predecessor now; reading it later would collapse a
+            // fresh root and a child transition into the same post-transition state.
+            m_QueuedSkillPreviousComboNodeId = GetLiveComboNodeId();
+            NetworkMeleeManager manager = NetworkMeleeManager.Instance;
+            m_QueuedSkillClientTimestamp =
+                manager?.GetNetworkTimeFunc?.Invoke() ?? Time.time;
+
             // Check if this is a charge release
             bool isChargeRelease = m_ChargeState.IsCharging && m_ChargeState.InputKey == (byte)key;
             float chargeDuration = isChargeRelease ? (Time.time - m_ChargeState.ChargeStartTime) : 0f;
@@ -1278,13 +1500,13 @@ namespace Arawn.GameCreator2.Networking.Melee
                 m_QueuedSkillOriginalTime = Time.time;
                 m_QueuedSkillOriginalFrame = Time.frameCount;
             }
-            
+
             // Clear charge state if this was a charge release
             if (isChargeRelease)
             {
                 m_ChargeState = NetworkChargeState.None;
             }
-            
+
             if (m_LogHits)
             {
                 Debug.Log($"[NetworkMeleeController] Skill request sent: Key={key}, ChargeRelease={isChargeRelease}");
@@ -1301,7 +1523,94 @@ namespace Arawn.GameCreator2.Networking.Melee
                 $"lastCombo={m_LastAttackState.ComboNodeId} pending={m_PendingSkillRequests.Count} " +
                 BuildSkillInputDebugContext(resolvedState: m_LastAttackState, hasResolvedState: true));
         }
-        
+
+        /// <summary>
+        /// Called by the persistent GC2 source hook at the exact AttackSkill transition. The
+        /// ordinary consumed-input event remains the primary path because it preserves the
+        /// predecessor combo identity. This hook flushes that queued operation immediately and
+        /// recovers a request if an upgraded scene lost the stance-event subscription.
+        /// </summary>
+        internal void OnPatchedAttackSkillStarted(
+            MeleeStance stance,
+            MeleeWeapon weapon,
+            Skill skill,
+            int comboNodeId)
+        {
+            if (!m_IsLocalClient || weapon == null || skill == null) return;
+
+            // The source hook carries the exact stance that entered. Rebind if GC2 replaced its
+            // runtime stance instance (for example after an equip/reaction lifecycle) so future
+            // consumed-input events cannot remain attached to a stale instance.
+            if (!ReferenceEquals(m_SubscribedMeleeStance, stance))
+            {
+                UnsubscribeFromMeleeStance();
+                m_MeleeStance = stance;
+                SubscribeToMeleeStance();
+            }
+
+            int skillHash = StableHashUtility.GetStableHash(skill.name);
+            int weaponHash = weapon.Id.Hash;
+            NetworkAttackState previousState = m_LastAttackState;
+            m_LastAttackState = new NetworkAttackState
+            {
+                SkillHash = skillHash,
+                WeaponHash = weaponHash,
+                ComboNodeId = comboNodeId,
+                Phase = (byte)(m_MeleeStance?.CurrentPhase ?? MeleePhase.Anticipation)
+            };
+
+            // ConsumeExecute normally queued the request immediately before Attacks.ToSkill.
+            // Flushing here removes MonoBehaviour Update ordering from the authorization path.
+            if (m_HasQueuedSkillInput)
+            {
+                FlushQueuedSkillInput();
+            }
+
+            bool emittedForThisTransition =
+                m_LastSkillRequestSentFrame == Time.frameCount &&
+                ResolveLocalAttackCorrelationId(skillHash, weaponHash, comboNodeId) != 0;
+            if (emittedForThisTransition)
+            {
+                return;
+            }
+
+            ComboItem comboItem = comboNodeId != ComboTree.NODE_INVALID
+                ? weapon.Combo?.Get(comboNodeId)
+                : null;
+            MeleeKey inputKey = comboItem?.Key ?? m_LastConsumedExecuteKey;
+            int previousComboNodeId =
+                (MeleePhase)previousState.Phase != MeleePhase.None &&
+                previousState.ComboNodeId != comboNodeId
+                    ? previousState.ComboNodeId
+                    : ComboTree.NODE_INVALID;
+
+            NetworkMeleeManager manager = NetworkMeleeManager.Instance;
+            m_HasQueuedSkillInput = true;
+            m_QueuedSkillKey = inputKey;
+            m_QueuedSkillIsChargeRelease = false;
+            m_QueuedSkillChargeDuration = 0f;
+            m_QueuedSkillClientTimestamp = manager?.GetNetworkTimeFunc?.Invoke() ?? Time.time;
+            m_QueuedSkillPreviousComboNodeId = previousComboNodeId;
+            m_QueuedSkillTime = Time.time;
+            m_QueuedSkillFrame = Time.frameCount;
+            m_QueuedSkillOriginalTime = Time.time;
+            m_QueuedSkillOriginalFrame = Time.frameCount;
+            m_QueuedSkillReplayCount = 0;
+            m_QueuedSkillRetryQueued = false;
+            m_ReplayedSkillInputPending = false;
+            m_LoggedQueuedSkillWaitForWeapon = false;
+            m_LoggedQueuedSkillWaitForSkill = false;
+            m_LoggedQueuedSkillWaitForDash = false;
+            m_LoggedQueuedSkillWaitForReplayConsume = false;
+
+            WarnHitRoutingInvariant(
+                $"Recovered the network request for active Skill '{skill.name}' because its " +
+                $"consumed-input callback did not produce an authorization " +
+                $"(skillHash={skillHash}, weaponHash={weaponHash}, combo={comboNodeId}). " +
+                "Reapply the current Melee source patch and check for legacy stance-event setup.");
+            FlushQueuedSkillInput();
+        }
+
         /// <summary>
         /// Get the currently equipped melee weapon.
         /// </summary>
@@ -1497,17 +1806,17 @@ namespace Arawn.GameCreator2.Networking.Melee
 
             return true;
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // ATTACK STATE SYNC
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         private void UpdateAttackState()
         {
             if (m_MeleeStance == null) return;
-            
+
             MeleePhase currentPhase = m_MeleeStance.CurrentPhase;
-            
+
             if (currentPhase != m_LastPhase)
             {
                 MeleePhase previousPhase = m_LastPhase;
@@ -1517,10 +1826,10 @@ namespace Arawn.GameCreator2.Networking.Melee
                     m_LastAttackPhaseExitTime = Time.time;
                     m_LastAttackPhaseExitFrame = Time.frameCount;
                 }
-                
+
                 // Build new attack state
                 m_LastAttackState = NetworkAttackState.FromPhase(currentPhase);
-                
+
                 // Get skill/weapon info if in active phase
                 if (currentPhase != MeleePhase.None)
                 {
@@ -1537,7 +1846,9 @@ namespace Arawn.GameCreator2.Networking.Melee
 
                 if (currentPhase == MeleePhase.Reaction)
                 {
-                    SuppressLocalOwnerReconciliation(OwnerReactionInitialReconciliationSuppression, true);
+                    SuppressLocalOwnerReconciliation(OwnerReactionInitialReconciliationSuppression);
+                    (m_Character?.Driver as INetworkServerOwnerMotionAuthority)
+                        ?.OpenServerOwnerMotionWindow(OwnerReactionInitialReconciliationSuppression);
                     Vector3 reactionDirection = Vector3.zero;
                     float reactionPower = 0f;
                     IReaction reactionAsset = null;
@@ -1560,30 +1871,36 @@ namespace Arawn.GameCreator2.Networking.Melee
                 }
                 else if (previousPhase == MeleePhase.Reaction)
                 {
-                    SuppressLocalOwnerReconciliation(OwnerReactionExitReconciliationSuppression, true);
+                    SuppressLocalOwnerReconciliation(OwnerReactionExitReconciliationSuppression);
+                    (m_Character?.Driver as INetworkServerOwnerMotionAuthority)
+                        ?.CloseServerOwnerMotionWindow(OwnerReactionExitReconciliationSuppression);
                     LogReactionDiagnostics(
                         $"reaction phase exited current={currentPhase} grace={OwnerReactionExitReconciliationSuppression:F2}s " +
                         $"position={FormatVector(transform.position)} rootMotion={(m_Character != null ? m_Character.RootMotionPosition : 0f):F3} " +
                         $"gravityInfluence={(m_Character != null ? m_Character.Driver.GravityInfluence : 1f):F3}");
                 }
-                
+
                 OnAttackStateChanged?.Invoke(m_LastAttackState);
-                
-                // Clear processed hits when entering new strike phase
-                if (currentPhase == MeleePhase.Strike)
+
+                // GC2 can enter and evaluate Strike in Character.LateUpdate before this Update
+                // observes it. Retire the old operation while outside Strike; the first strike
+                // callback establishes the new token and target set itself.
+                if (currentPhase != MeleePhase.Strike)
                 {
                     m_ProcessedHits.Clear();
+                    m_ProcessedHitsOperationId = 0;
+                    m_CurrentTrustedAttackCorrelationId = 0;
                 }
 
                 BroadcastServerReactionIfNeeded(currentPhase);
             }
         }
-        
+
         private void TryGetCurrentSkillInfo(ref NetworkAttackState state)
         {
             // Use reflection to get current skill from Attacks state machine
             if (s_AttacksField == null || m_MeleeStance == null) return;
-            
+
             try
             {
                 var attacks = s_AttacksField.GetValue(m_MeleeStance) as Attacks;
@@ -1593,31 +1910,34 @@ namespace Arawn.GameCreator2.Networking.Melee
                     {
                         state.SkillHash = StableHashUtility.GetStableHash(attacks.ComboSkill.name);
                     }
-                    
+
                     if (attacks.Weapon != null)
                     {
                         state.WeaponHash = attacks.Weapon.Id.Hash;
                     }
-                    
-                    state.ComboNodeId = (short)attacks.ComboId;
+
+                    state.ComboNodeId = attacks.ComboId;
                 }
             }
             catch (Exception e)
             {
-                Debug.LogWarning($"[NetworkMeleeController] Failed to get skill info: {e.Message}");
+                WarnHitRoutingInvariant($"Failed to resolve current Skill information: {e.Message}");
             }
         }
 
         private void BroadcastServerReactionIfNeeded(MeleePhase currentPhase)
         {
             if (!m_IsServer || currentPhase != MeleePhase.Reaction) return;
-            if (NetworkMeleeManager.Instance == null)
+
+            // Current patches emit synchronously from MeleeStance.ToReact. Keep the phase poll as
+            // a migration safeguard, but never duplicate a callback-backed broadcast.
+            if (m_HasPatchedReactionStartBroadcast)
             {
-                LogMeleeSyncWarning("cannot broadcast reaction: no NetworkMeleeManager instance");
+                m_HasPatchedReactionStartBroadcast = false;
+                LogMeleeSync("skipped reaction phase poll because the patched transition callback already broadcast it");
                 return;
             }
 
-            uint fromNetworkId = 0;
             Vector3 direction = -transform.forward;
             float power = 1f;
             IReaction reaction = null;
@@ -1634,21 +1954,117 @@ namespace Arawn.GameCreator2.Networking.Melee
                 }
 
                 fromObject = m_MeleeStance.Args?.Target;
-                var fromNetworkCharacter = fromObject != null
-                    ? fromObject.GetComponentInParent<NetworkCharacter>()
-                    : null;
-                if (fromNetworkCharacter != null)
-                {
-                    fromNetworkId = fromNetworkCharacter.NetworkId;
-                }
             }
             catch (Exception e)
             {
                 LogMeleeSyncWarning($"failed to build reaction broadcast: {e.Message}");
             }
 
+            BroadcastServerReaction(
+                fromObject,
+                direction,
+                power,
+                reaction,
+                "phase-poll migration fallback");
+        }
+
+        /// <summary>
+        /// Called synchronously by the current GC2 Melee source patch after ToReact has entered
+        /// an actual Reaction phase. This cannot miss short reactions between controller updates.
+        /// </summary>
+        internal void OnAuthoritativeReactionStarted(
+            GameObject fromObject,
+            ReactionInput input,
+            IReaction reaction)
+        {
+            if (!m_IsServer) return;
+
+            (m_Character?.Driver as INetworkServerOwnerMotionAuthority)
+                ?.OpenServerOwnerMotionWindow(
+                    OwnerReactionInitialReconciliationSuppression,
+                    m_NextReactionSequence + 1u);
+
+            if (BroadcastServerReaction(
+                    fromObject,
+                    input.Direction,
+                    input.Power,
+                    reaction,
+                    "patched phase transition"))
+            {
+                m_HasPatchedReactionStartBroadcast = true;
+            }
+        }
+
+        /// <summary>
+        /// Called by the patched shield response after GC2 directly runs its authored Reaction.
+        /// Shield reactions do not enter MeleeStance.Reaction on the server, so their returned
+        /// duration is also the bounded owner-motion authority window.
+        /// </summary>
+        internal void OnAuthoritativeShieldReactionResolved(
+            GameObject fromObject,
+            ReactionInput input,
+            IReaction reaction,
+            ReactionOutput output)
+        {
+            if (!m_IsServer || reaction == null) return;
+
+            float motionWindow = CalculateReactionMotionWindow(output);
+            (m_Character?.Driver as INetworkServerOwnerMotionAuthority)
+                ?.OpenServerOwnerMotionWindow(motionWindow, m_NextReactionSequence + 1u);
+
+            BroadcastServerReaction(
+                fromObject,
+                input.Direction,
+                input.Power,
+                reaction,
+                "patched shield response",
+                NetworkReactionPlaybackKind.DirectShield);
+        }
+
+        private static float CalculateReactionMotionWindow(ReactionOutput output)
+        {
+            if (output.Length <= 0f ||
+                float.IsNaN(output.Length) ||
+                float.IsInfinity(output.Length) ||
+                Mathf.Abs(output.Speed) <= 0.01f ||
+                float.IsNaN(output.Speed) ||
+                float.IsInfinity(output.Speed))
+            {
+                return OwnerReactionInitialReconciliationSuppression;
+            }
+
+            return Mathf.Clamp(
+                output.Length / Mathf.Abs(output.Speed) + OwnerReactionMotionWindowGrace,
+                OwnerReactionRefreshReconciliationSuppression,
+                OwnerReactionMaximumMotionWindow);
+        }
+
+        private bool BroadcastServerReaction(
+            GameObject fromObject,
+            Vector3 direction,
+            float power,
+            IReaction reaction,
+            string source,
+            NetworkReactionPlaybackKind playbackKind = NetworkReactionPlaybackKind.Stance)
+        {
+            NetworkMeleeManager manager = NetworkMeleeManager.Instance;
+            if (manager == null)
+            {
+                LogMeleeSyncWarning($"cannot broadcast reaction from {source}: no NetworkMeleeManager instance");
+                return false;
+            }
+
+            uint fromNetworkId = 0;
+            NetworkCharacter fromNetworkCharacter = fromObject != null
+                ? fromObject.GetComponentInParent<NetworkCharacter>()
+                : null;
+            if (fromNetworkCharacter != null)
+            {
+                fromNetworkId = fromNetworkCharacter.NetworkId;
+            }
+
             LogReactionDiagnostics(
-                $"server observed reaction phase target={NetworkId} from={fromNetworkId} " +
+                $"server observed reaction phase source={source} target={NetworkId} from={fromNetworkId} " +
                 $"fromObject={(fromObject != null ? fromObject.name : "null")} direction={FormatVector(direction)} " +
                 $"power={power:F3} candidate={BuildReactionCandidateDebug(fromObject, new ReactionInput(direction, power), reaction)} " +
                 $"position={FormatVector(transform.position)} rootMotion={(m_Character != null ? m_Character.RootMotionPosition : 0f):F3} " +
@@ -1656,8 +2072,15 @@ namespace Arawn.GameCreator2.Networking.Melee
             LogMeleeSync(
                 $"broadcasting reaction target={NetworkId} from={fromNetworkId} " +
                 $"direction={direction} power={power:F3} reaction={(reaction != null ? reaction.GetType().Name : "null")}");
-            NetworkMeleeManager.Instance.BroadcastReaction(
-                CreateReactionBroadcast(NetworkId, fromNetworkId, direction, power, reaction));
+            manager.BroadcastReaction(
+                CreateReactionBroadcast(
+                    NetworkId,
+                    fromNetworkId,
+                    direction,
+                    power,
+                    reaction,
+                    playbackKind));
+            return true;
         }
 
         private bool TryRecoverQueuedSkillInputAfterDashOrCancel(
@@ -1750,6 +2173,8 @@ namespace Arawn.GameCreator2.Networking.Melee
             m_QueuedSkillReplayCount = 0;
             m_QueuedSkillOriginalTime = 0f;
             m_QueuedSkillOriginalFrame = 0;
+            m_QueuedSkillClientTimestamp = 0f;
+            m_QueuedSkillPreviousComboNodeId = ComboTree.NODE_INVALID;
             m_LoggedQueuedSkillWaitForDash = false;
             m_LoggedQueuedSkillWaitForSkill = false;
             m_LoggedQueuedSkillWaitForWeapon = false;
@@ -1860,10 +2285,14 @@ namespace Arawn.GameCreator2.Networking.Melee
                 RequestId = requestId,
                 ActorNetworkId = NetworkId,
                 CorrelationId = NetworkCorrelation.Compose(NetworkId, requestId),
+                ClientTimestamp = m_QueuedSkillClientTimestamp > 0f
+                    ? m_QueuedSkillClientTimestamp
+                    : NetworkMeleeManager.Instance?.GetNetworkTimeFunc?.Invoke() ?? Time.time,
                 TargetNetworkId = targetNetworkId,
                 SkillHash = attackState.SkillHash,
                 WeaponHash = attackState.WeaponHash,
                 ComboNodeId = attackState.ComboNodeId,
+                PreviousComboNodeId = m_QueuedSkillPreviousComboNodeId,
                 InputKey = (byte)m_QueuedSkillKey,
                 IsChargeRelease = m_QueuedSkillIsChargeRelease,
                 ChargeDuration = m_QueuedSkillChargeDuration
@@ -1872,7 +2301,8 @@ namespace Arawn.GameCreator2.Networking.Melee
             ulong pendingKey = GetPendingKey(request.ActorNetworkId, request.CorrelationId);
             if (pendingKey == 0)
             {
-                Debug.LogWarning("[NetworkMeleeController] Ignoring skill request with invalid actor/correlation context.");
+                WarnHitRoutingInvariant(
+                    "Ignored a Skill request with an invalid actor/correlation context.");
                 ClearQueuedSkillInputState();
                 return;
             }
@@ -1884,8 +2314,21 @@ namespace Arawn.GameCreator2.Networking.Melee
             };
 
             m_LastSkillRequestSentTime = Time.time;
+            m_LastSkillRequestSentFrame = Time.frameCount;
             m_LastSkillRequestSentId = request.RequestId;
             m_LastSkillRequestSentSkillHash = request.SkillHash;
+            m_CurrentLocalAttackCorrelationId = request.CorrelationId;
+            m_CurrentLocalAttackSkillHash = request.SkillHash;
+            m_CurrentLocalAttackWeaponHash = request.WeaponHash;
+            m_CurrentLocalAttackComboNodeId = request.ComboNodeId;
+            m_LastRejectedAttackCorrelationId = 0;
+            m_LastRejectedAttackTime = float.NegativeInfinity;
+
+            Skill requestedSkill = NetworkMeleeManager.GetSkillByHash(request.SkillHash);
+            OpenLocalAttackOwnerMotionWindow(
+                requestedSkill,
+                request.TargetNetworkId,
+                pendingValidation: true);
 
             m_LastAttackState = attackState;
             ClearQueuedSkillInputState();
@@ -1901,6 +2344,27 @@ namespace Arawn.GameCreator2.Networking.Melee
                 $"busy={m_Character?.Busy.IsBusy} pending={m_PendingSkillRequests.Count} " +
                 BuildSkillInputDebugContext(weapon, attackState, true));
             OnSkillRequested?.Invoke(request);
+        }
+
+        private int GetLiveComboNodeId()
+        {
+            if (s_AttacksField == null || m_MeleeStance == null)
+            {
+                return ComboTree.NODE_INVALID;
+            }
+
+            try
+            {
+                return (s_AttacksField.GetValue(m_MeleeStance) as Attacks)?.ComboId
+                       ?? ComboTree.NODE_INVALID;
+            }
+            catch (Exception exception)
+            {
+                LogSkillDiagnosticsWarning(
+                    $"could not capture pre-transition combo identity: " +
+                    exception.GetBaseException().Message);
+                return ComboTree.NODE_INVALID;
+            }
         }
 
         private void ProbePotentialSkillInputLock()
@@ -1950,11 +2414,11 @@ namespace Arawn.GameCreator2.Networking.Melee
                 $"dash={dashActive} legsBusy={legsBusy} dashStartAge={AgeLabel(m_LastDashStartTime)} dashFinishAge={AgeLabel(m_LastDashFinishTime)} " +
                 BuildSkillInputDebugContext(resolvedState: m_LastAttackState, hasResolvedState: true));
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // VALIDATION HELPERS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>
         /// Maps CombatValidationRejectionReason to MeleeHitRejectionReason.
         /// </summary>
@@ -1984,11 +2448,11 @@ namespace Arawn.GameCreator2.Networking.Melee
                 _ => MeleeHitRejectionReason.CheatSuspected
             };
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // CLEANUP
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         private void CleanupPendingHits()
         {
             float timeout = 2f; // 2 second timeout
@@ -2009,6 +2473,12 @@ namespace Arawn.GameCreator2.Networking.Melee
                 timeout,
                 timedOut =>
                 {
+                    WarnHitRoutingInvariant(
+                        $"Hit request {timedOut.Request.RequestId} timed out after " +
+                        $"{currentTime - timedOut.SentTime:F3}s (corr={timedOut.Request.CorrelationId}, " +
+                        $"attackCorr={timedOut.Request.AttackCorrelationId}, " +
+                        $"target={timedOut.Request.TargetNetworkId}, " +
+                        $"skillHash={timedOut.Request.SkillHash}).");
                     if (m_LogHits)
                     {
                         Debug.LogWarning($"[NetworkMeleeController] Hit request timed out: {timedOut.Request.RequestId}");
@@ -2029,18 +2499,27 @@ namespace Arawn.GameCreator2.Networking.Melee
                 m_PendingSkillRequests,
                 s_SharedPendingRemovalBuffer,
                 currentTime,
-                timeout);
+                timeout,
+                timedOut =>
+                {
+                    WarnHitRoutingInvariant(
+                        $"Skill request {timedOut.Request.RequestId} timed out after " +
+                        $"{currentTime - timedOut.SentTime:F3}s (corr={timedOut.Request.CorrelationId}, " +
+                        $"skillHash={timedOut.Request.SkillHash}, " +
+                        $"weaponHash={timedOut.Request.WeaponHash}, " +
+                        $"combo={timedOut.Request.ComboNodeId}).");
+                });
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // DEBUG
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
 #if UNITY_EDITOR
         private void OnDrawGizmos()
         {
             if (!m_DrawHitGizmos) return;
-            
+
             // Draw pending hits
             Gizmos.color = Color.yellow;
             foreach (var pending in m_PendingHits.Values)

@@ -118,7 +118,7 @@ void OnNetworkStart()
         getServerTime: () => NetworkTime.ServerTime,
         getLocalPlayerNetworkId: () => NetworkManager.LocalClient.Id
     );
-    
+
     // Register abilities that can be used
     NetworkAbilitiesManager.RegisterAbility(fireballAbility);
     NetworkAbilitiesManager.RegisterAbility(healAbility);
@@ -167,10 +167,10 @@ else
 NetworkAbilitiesManager.WireUpController(controller);
 
 // Wire up network delegates
-controller.SendCastRequestToServer = (request) => 
+controller.SendCastRequestToServer = (request) =>
     SendToServer(NetworkAbilitiesManager.MessageTypes.AbilityCastRequest, request);
 
-controller.BroadcastCastToClients = (broadcast) => 
+controller.BroadcastCastToClients = (broadcast) =>
     BroadcastToClients(NetworkAbilitiesManager.MessageTypes.AbilityCastBroadcast, broadcast);
 
 // ... wire up other delegates
@@ -289,12 +289,12 @@ For projectile and impact effects in networked games, use the server spawn metho
 public class NetworkedProjectileEffect : AbilityEffect
 {
     [SerializeField] private Projectile m_Projectile;
-    
+
     protected override void Apply_Internal(ExtendedArgs args)
     {
         // Get cast ID from args (server sets this)
         uint castId = args.Get<CastContext>()?.CastInstanceId ?? 0;
-        
+
         // Use network spawn instead of direct Projectile.Get()
         NetworkAbilitiesManager.ServerSpawnProjectile(
             castId,

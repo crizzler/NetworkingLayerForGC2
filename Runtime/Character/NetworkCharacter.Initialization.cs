@@ -12,7 +12,7 @@ namespace Arawn.GameCreator2.Networking
         // ════════════════════════════════════════════════════════════════════════════════════════
         // INITIALIZATION
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         private void Awake()
         {
             m_Character = GetComponent<Character>();
@@ -22,17 +22,17 @@ namespace Arawn.GameCreator2.Networking
                 enabled = false;
                 return;
             }
-            
+
             m_RuntimeIsServer = false;
             m_RuntimeIsOwner = false;
             m_RuntimeIsHost = false;
             m_RuntimeNetworkId = ResolveNetworkId();
-            
+
             // Cache initial state
             m_LastIsDead = m_Character.IsDead;
             m_LastIsPlayer = m_Character.IsPlayer;
         }
-        
+
         /// <summary>
         /// Manual initialization for non-provider networking solutions.
         /// Call this from your network spawn handler.
@@ -43,58 +43,58 @@ namespace Arawn.GameCreator2.Networking
         public void InitializeNetworkRole(bool isServer, bool isOwner, bool isHost = false)
         {
             if (m_IsInitialized) return;
-            
+
             m_RuntimeIsServer = isServer;
             m_RuntimeIsOwner = isOwner;
             m_RuntimeIsHost = isHost;
-            
+
             m_CurrentRole = ResolveRole(isServer, isOwner, isHost);
             RefreshNetworkId();
 
             InitializeForRole();
         }
-        
+
         private void InitializeForRole()
         {
             if (m_IsInitialized) return;
             m_IsInitialized = true;
             m_ActivePredictionBackend = null;
-            
+
             ResolveSessionProfile();
-            
+
             // Assign appropriate driver
             AssignDriverForRole();
             ApplySessionProfileToDrivers();
-            
+
             // Configure systems based on role
             ConfigureSystemsForRole();
-            
+
             // Setup optional components
             SetupOptionalComponents();
             WireMovementEvents();
             RegisterWithBridge();
-            
+
             // Server optimizations
             if (m_RuntimeIsServer && !m_RuntimeIsOwner && !m_RuntimeIsHost)
             {
                 ApplyServerOptimizations();
             }
-            
+
             // Subscribe to character events
             SubscribeToCharacterEvents();
-            
+
             // Register local player with GC2's ShortcutPlayer system
             // so "Get Player" property getters work across the framework
             if (m_RuntimeIsOwner || m_CurrentRole == NetworkRole.LocalClient)
             {
                 GameCreator.Runtime.Common.ShortcutPlayer.Change(gameObject);
             }
-            
+
             ApplyCurrentRelevanceTier(force: true);
-            
+
             OnRoleAssigned?.Invoke(m_CurrentRole);
         }
-        
+
         private void AssignDriverForRole()
         {
             // Create the appropriate driver at runtime based on role
@@ -109,7 +109,7 @@ namespace Arawn.GameCreator2.Networking
                     _ => null
                 };
             }
-            
+
             if (driver != null)
             {
                 // Use GC2's public driver API.
@@ -119,7 +119,7 @@ namespace Arawn.GameCreator2.Networking
                     SetCharacterDriver(driver);
                     EnsurePlayerUnitForRole();
                 }
-                
+
                 OnDriverAssigned?.Invoke(driver);
             }
 
@@ -173,7 +173,7 @@ namespace Arawn.GameCreator2.Networking
 
             return null;
         }
-        
+
         private UnitDriverNetworkServer CreateServerDriver()
         {
             if (m_Character?.Driver is UnitDriverNetworkServer currentDriver)
@@ -185,7 +185,7 @@ namespace Arawn.GameCreator2.Networking
             m_ServerDriver = new UnitDriverNetworkServer();
             return m_ServerDriver;
         }
-        
+
         private UnitDriverNetworkClient CreateClientDriver()
         {
             if (m_Character?.Driver is UnitDriverNetworkClient currentDriver)
@@ -197,7 +197,7 @@ namespace Arawn.GameCreator2.Networking
             m_ClientDriver = new UnitDriverNetworkClient();
             return m_ClientDriver;
         }
-        
+
         private UnitDriverNetworkRemote CreateRemoteDriver()
         {
             if (m_Character?.Driver is UnitDriverNetworkRemote currentDriver)
@@ -209,7 +209,7 @@ namespace Arawn.GameCreator2.Networking
             m_RemoteDriver = new UnitDriverNetworkRemote();
             return m_RemoteDriver;
         }
-        
+
         private void SetCharacterDriver(IUnitDriver driver)
         {
             var kernel = m_Character.Kernel;
@@ -226,24 +226,24 @@ namespace Arawn.GameCreator2.Networking
                 $"[NetworkCharacter] Cannot assign driver {driver?.GetType().Name ?? "<null>"} " +
                 $"because it is not a {nameof(TUnitDriver)}.");
         }
-        
+
         private void EnsurePlayerUnitForRole()
         {
             if (m_Character?.Kernel == null) return;
 
             bool isLocalOwner = m_RuntimeIsOwner || m_CurrentRole == NetworkRole.LocalClient;
             SetCharacterPlayerFlag(isLocalOwner);
-            
+
             // Remote and dedicated server instances should not process local player input.
             if (m_CurrentRole == NetworkRole.RemoteClient || (m_CurrentRole == NetworkRole.Server && !m_RuntimeIsOwner))
             {
                 m_Character.Kernel.ChangePlayer(m_Character, null);
                 return;
             }
-            
+
             // Auto-upgrade common GC2 player units to their network-aware counterparts.
             if (m_CurrentRole != NetworkRole.LocalClient) return;
-            
+
             var currentPlayer = m_Character.Player;
             if (currentPlayer is UnitPlayerDirectionalNetwork ||
                 currentPlayer is UnitPlayerPointClickNetwork ||
@@ -252,7 +252,7 @@ namespace Arawn.GameCreator2.Networking
             {
                 return;
             }
-            
+
             TUnitPlayer networkPlayer = currentPlayer switch
             {
                 UnitPlayerTank => new UnitPlayerTankNetwork(),
@@ -261,7 +261,7 @@ namespace Arawn.GameCreator2.Networking
                 UnitPlayerDirectional => new UnitPlayerDirectionalNetwork(),
                 _ => null
             };
-            
+
             if (networkPlayer != null)
             {
                 m_Character.Kernel.ChangePlayer(m_Character, networkPlayer);
@@ -280,7 +280,7 @@ namespace Arawn.GameCreator2.Networking
                 ShortcutPlayer.Change(previousShortcut);
             }
         }
-        
+
         private void ConfigureSystemsForRole()
         {
             switch (m_CurrentRole)
@@ -292,7 +292,7 @@ namespace Arawn.GameCreator2.Networking
                         ConfigureSystemMode(SystemType.Combat, m_CombatMode);
                         break;
                     }
-                    
+
                     // Server doesn't need visual IK, footsteps, etc.
                     ConfigureSystemMode(SystemType.IK, RemoteSystemMode.Disabled);
                     ConfigureSystemMode(SystemType.Footsteps, RemoteSystemMode.Disabled);
@@ -300,12 +300,12 @@ namespace Arawn.GameCreator2.Networking
                     // Combat might be needed for hit detection
                     ConfigureSystemMode(SystemType.Combat, m_CombatMode);
                     break;
-                    
+
                 case NetworkRole.LocalClient:
                     // Local client runs everything
                     // No configuration needed - all systems run normally
                     break;
-                    
+
                 case NetworkRole.RemoteClient:
                     // Remote client uses configured modes
                     ConfigureSystemMode(SystemType.IK, m_IKMode);
@@ -315,9 +315,9 @@ namespace Arawn.GameCreator2.Networking
                     break;
             }
         }
-        
+
         private enum SystemType { IK, Footsteps, Interaction, Combat }
-        
+
         private void ConfigureSystemMode(SystemType system, RemoteSystemMode mode)
         {
             switch (system)
@@ -336,7 +336,7 @@ namespace Arawn.GameCreator2.Networking
                     break;
             }
         }
-        
+
         private void ConfigureIK(RemoteSystemMode mode)
         {
             // IK configuration is handled by UnitIKNetworkController if synchronized
@@ -349,7 +349,7 @@ namespace Arawn.GameCreator2.Networking
             }
             // LocalOnly and Synchronized are handled by UnitIKNetworkController
         }
-        
+
         private void ConfigureFootsteps(RemoteSystemMode mode)
         {
             if (m_Character == null || m_Character.Footsteps == null) return;
@@ -365,7 +365,7 @@ namespace Arawn.GameCreator2.Networking
                 case RemoteSystemMode.Disabled:
                     m_Character.Footsteps.IsActive = false;
                     break;
-                
+
                 case RemoteSystemMode.LocalOnly:
                 case RemoteSystemMode.Synchronized:
                 default:
@@ -373,7 +373,7 @@ namespace Arawn.GameCreator2.Networking
                     break;
             }
         }
-        
+
         private void ConfigureInteraction(RemoteSystemMode mode)
         {
             if (m_Character?.Motion == null) return;
@@ -389,7 +389,7 @@ namespace Arawn.GameCreator2.Networking
                 case RemoteSystemMode.Disabled:
                     m_Character.Motion.InteractionRadius = 0f;
                     break;
-                
+
                 case RemoteSystemMode.LocalOnly:
                 case RemoteSystemMode.Synchronized:
                 default:
@@ -397,12 +397,12 @@ namespace Arawn.GameCreator2.Networking
                     break;
             }
         }
-        
+
         private void ConfigureCombat(RemoteSystemMode mode)
         {
             // Get or create combat interceptor
             m_CombatInterceptor = GetComponent<NetworkCombatInterceptor>();
-            
+
             switch (mode)
             {
                 case RemoteSystemMode.Disabled:
@@ -417,7 +417,7 @@ namespace Arawn.GameCreator2.Networking
                         );
                     }
                     break;
-                    
+
                 case RemoteSystemMode.LocalOnly:
                     // Local player: Intercept hits and send to server
                     if (m_CombatInterceptor == null && m_RuntimeIsOwner)
@@ -432,7 +432,7 @@ namespace Arawn.GameCreator2.Networking
                         );
                     }
                     break;
-                    
+
                 case RemoteSystemMode.Synchronized:
                     // Server: Process all hits authoritatively
                     if (m_CombatInterceptor == null && m_RuntimeIsServer)
@@ -446,7 +446,7 @@ namespace Arawn.GameCreator2.Networking
                             isLocalPlayer: m_RuntimeIsOwner
                         );
                     }
-                    
+
                     // Also setup lag compensation for hit validation
                     if (m_RuntimeIsServer || m_UseLagCompensation)
                     {
@@ -455,20 +455,24 @@ namespace Arawn.GameCreator2.Networking
                     break;
             }
         }
-        
+
         private void SetupLagCompensation()
         {
-            if (m_LagCompensation != null) return;
-            
-            m_LagCompensation = GetComponent<CharacterLagCompensation>();
             if (m_LagCompensation == null)
+            {
+                m_LagCompensation = GetComponent<CharacterLagCompensation>();
+            }
+
+            // Historical samples are authoritative server state. Avoid adding an idle adapter
+            // to client-only replicas, but explicitly deconfigure a prefab-authored adapter.
+            if (m_LagCompensation == null && m_RuntimeIsServer)
             {
                 m_LagCompensation = gameObject.AddComponent<CharacterLagCompensation>();
             }
-            
-            m_LagCompensation.NetworkId = NetworkId;
+
+            m_LagCompensation?.Configure(NetworkId, m_RuntimeIsServer);
         }
-        
+
         private void SetupOptionalComponents()
         {
             // Setup IK network controller if enabled and in sync mode
@@ -481,7 +485,7 @@ namespace Arawn.GameCreator2.Networking
                 }
                 m_IKController.Initialize(m_Character, m_RuntimeIsOwner);
             }
-            
+
             // Setup motion network controller if enabled (for dash/teleport validation)
             if (m_UseNetworkMotion)
             {
@@ -494,18 +498,18 @@ namespace Arawn.GameCreator2.Networking
                     NetworkMotionManager.Instance?.RegisterController(m_MotionController);
                 }
             }
-            
+
             // Setup lag compensation if enabled (server-side only typically)
             if (m_UseLagCompensation && m_RuntimeIsServer)
             {
-                m_LagCompensation = GetComponent<CharacterLagCompensation>();
-                if (m_LagCompensation == null)
-                {
-                    m_LagCompensation = gameObject.AddComponent<CharacterLagCompensation>();
-                }
-                // LagCompensation auto-registers on Start
+                SetupLagCompensation();
             }
-            
+            else if (m_LagCompensation != null || GetComponent<CharacterLagCompensation>() != null)
+            {
+                // A prefab may contain the adapter even when this peer is not authoritative.
+                SetupLagCompensation();
+            }
+
             // Setup animation sync controller if enabled
             if (m_UseAnimationSync)
             {
@@ -526,7 +530,7 @@ namespace Arawn.GameCreator2.Networking
 
                 NetworkAnimationManager.Instance?.RegisterController(m_AnimimController);
             }
-            
+
             // Core networking is routed by the single controller owned by
             // NetworkCoreManager. Older prefabs may still contain the previously
             // auto-added per-character controller; keep it from competing with the
@@ -551,7 +555,7 @@ namespace Arawn.GameCreator2.Networking
                 }
             }
         }
-        
+
         private void ApplyServerOptimizations()
         {
             if (m_DisableVisualsOnServer)
@@ -561,7 +565,7 @@ namespace Arawn.GameCreator2.Networking
                 {
                     renderer.enabled = false;
                 }
-                
+
                 // Disable particle systems
                 foreach (var particles in GetComponentsInChildren<ParticleSystem>())
                 {
@@ -570,7 +574,7 @@ namespace Arawn.GameCreator2.Networking
                     emission.enabled = false;
                 }
             }
-            
+
             if (m_DisableAudioOnServer)
             {
                 // Disable audio sources
@@ -580,43 +584,43 @@ namespace Arawn.GameCreator2.Networking
                 }
             }
         }
-        
+
         private NetworkRole ResolveRole(bool isServer, bool isOwner, bool isHost)
         {
             if (isHost && isOwner && m_HostOwnerUsesClientPrediction)
             {
                 return NetworkRole.LocalClient;
             }
-            
+
             if (isServer && isOwner)
             {
                 return NetworkRole.Server;
             }
-            
+
             if (isServer) return NetworkRole.Server;
             if (isOwner) return NetworkRole.LocalClient;
             return NetworkRole.RemoteClient;
         }
-        
+
         private uint ResolveNetworkId()
         {
             if (!m_UseAutomaticNetworkId)
             {
                 return m_ManualNetworkId == 0 ? 1u : m_ManualNetworkId;
             }
-            
+
             string scenePath = gameObject.scene.path;
             string hierarchyPath = BuildHierarchyPath(transform);
             string key = $"{scenePath}|{hierarchyPath}|{m_NetworkIdSalt}";
             uint stableHash = unchecked((uint)StableHashUtility.GetStableHash(key));
-            
+
             return stableHash == 0 ? (uint)(Mathf.Abs(transform.GetInstanceID()) + 1) : stableHash;
         }
-        
+
         private static string BuildHierarchyPath(Transform current)
         {
             if (current == null) return string.Empty;
-            
+
             string path = current.name;
             Transform parent = current.parent;
             while (parent != null)
@@ -624,35 +628,35 @@ namespace Arawn.GameCreator2.Networking
                 path = $"{parent.name}/{path}";
                 parent = parent.parent;
             }
-            
+
             return path;
         }
-        
+
         public void RefreshNetworkId()
         {
             uint previousId = m_RuntimeNetworkId;
             uint resolvedId = ResolveNetworkId();
             if (resolvedId == 0) resolvedId = 1;
-            
+
             bool changed = previousId != resolvedId;
             if (changed && m_RegisteredBridge != null && previousId != 0)
             {
                 m_RegisteredBridge.UnregisterCharacter(this);
             }
-            
+
             m_RuntimeNetworkId = resolvedId;
-            
+
             if (m_LagCompensation != null)
             {
-                m_LagCompensation.NetworkId = m_RuntimeNetworkId;
+                m_LagCompensation.Configure(m_RuntimeNetworkId, m_RuntimeIsServer);
             }
-            
+
             if (changed && m_RegisteredBridge != null)
             {
                 m_RegisteredBridge.RegisterCharacter(this);
             }
         }
-        
+
         public void SetManualNetworkId(uint networkId)
         {
             uint resolvedId = networkId == 0 ? 1u : networkId;
@@ -672,7 +676,7 @@ namespace Arawn.GameCreator2.Networking
 
             if (m_LagCompensation != null)
             {
-                m_LagCompensation.NetworkId = m_RuntimeNetworkId;
+                m_LagCompensation.Configure(m_RuntimeNetworkId, m_RuntimeIsServer);
             }
 
             if (shouldReregister)
@@ -690,10 +694,10 @@ namespace Arawn.GameCreator2.Networking
 
             if (m_LagCompensation != null)
             {
-                m_LagCompensation.NetworkId = m_RuntimeNetworkId;
+                m_LagCompensation.Configure(m_RuntimeNetworkId, m_RuntimeIsServer);
             }
         }
-        
+
         private void ResolveSessionProfile()
         {
             m_ResolvedSessionProfile = m_SessionProfileOverride;
@@ -702,22 +706,22 @@ namespace Arawn.GameCreator2.Networking
                 m_ResolvedSessionProfile = NetworkTransportBridge.Active.GlobalSessionProfile;
             }
         }
-        
+
         private void ApplySessionProfileToDrivers()
         {
             if (m_ResolvedSessionProfile == null) return;
-            
+
             m_ClientDriver?.ApplySessionProfile(m_ResolvedSessionProfile);
             m_ServerDriver?.ApplySessionProfile(m_ResolvedSessionProfile);
             m_ActivePredictionBackend?.ApplySessionProfile(m_ResolvedSessionProfile);
-            
+
             if (m_RemoteDriver != null)
             {
                 var nearSettings = m_ResolvedSessionProfile.GetTierSettings(NetworkRelevanceTier.Near);
                 m_RemoteDriver.ApplyTierSettings(nearSettings);
             }
         }
-        
+
         private void WireMovementEvents()
         {
             if (m_ActivePredictionBackend != null) return;
@@ -727,34 +731,34 @@ namespace Arawn.GameCreator2.Networking
                 m_ClientDriver.OnSendInput -= OnClientInputReady;
                 m_ClientDriver.OnSendInput += OnClientInputReady;
             }
-            
+
             if (m_ServerDriver != null)
             {
                 m_ServerDriver.OnStateProduced -= OnServerStateProduced;
                 m_ServerDriver.OnStateProduced += OnServerStateProduced;
             }
         }
-        
+
         private void UnwireMovementEvents()
         {
             if (m_ClientDriver != null)
             {
                 m_ClientDriver.OnSendInput -= OnClientInputReady;
             }
-            
+
             if (m_ServerDriver != null)
             {
                 m_ServerDriver.OnStateProduced -= OnServerStateProduced;
             }
         }
-        
+
         private void RegisterWithBridge()
         {
             UnregisterFromBridge();
-            
+
             NetworkTransportBridge bridge = NetworkTransportBridge.Active;
             if (bridge == null) return;
-            
+
             m_RegisteredBridge = bridge;
             m_RegisteredBridge.RegisterCharacter(this);
 
@@ -764,60 +768,60 @@ namespace Arawn.GameCreator2.Networking
                 m_RegisteredBridge.OnStateReceivedClient += OnBridgeStateReceivedClient;
                 m_TransportCallbacksWired = true;
             }
-            
+
             if (m_ResolvedSessionProfile == null && m_RegisteredBridge.GlobalSessionProfile != null)
             {
                 m_ResolvedSessionProfile = m_RegisteredBridge.GlobalSessionProfile;
                 ApplySessionProfileToDrivers();
             }
         }
-        
+
         private void UnregisterFromBridge()
         {
             if (m_RegisteredBridge == null) return;
-            
+
             if (m_TransportCallbacksWired)
             {
                 m_RegisteredBridge.OnInputReceivedServer -= OnBridgeInputReceivedServer;
                 m_RegisteredBridge.OnStateReceivedClient -= OnBridgeStateReceivedClient;
                 m_TransportCallbacksWired = false;
             }
-            
+
             m_RegisteredBridge.UnregisterCharacter(this);
             m_RegisteredBridge = null;
         }
-        
+
         private void OnClientInputReady(NetworkInputState[] inputs)
         {
             if (inputs == null || inputs.Length == 0) return;
 
             OnInputPayloadReady?.Invoke(NetworkId, inputs);
-            
+
             if (NetworkTransportBridge.HasActive)
             {
                 NetworkTransportBridge.Active.SendToServer(NetworkId, inputs);
                 return;
             }
         }
-        
+
         private void OnServerStateProduced(NetworkPositionState state)
         {
             if (!m_RuntimeIsServer) return;
-            
+
             float broadcastRate = m_ResolvedSessionProfile != null
                 ? Mathf.Max(1f, m_ResolvedSessionProfile.serverStateBroadcastRate)
                 : 20f;
-            
+
             float minInterval = 1f / broadcastRate;
             if (Time.time - m_LastStateBroadcastTime < minInterval)
             {
                 return;
             }
-            
+
             float serverTime = NetworkTransportBridge.HasActive
                 ? NetworkTransportBridge.Active.ServerTime
                 : Time.time;
-            
+
             OnStatePayloadReady?.Invoke(NetworkId, state, serverTime);
 
             if (NetworkTransportBridge.HasActive)
@@ -829,7 +833,7 @@ namespace Arawn.GameCreator2.Networking
                     relevanceFilter: ShouldBroadcastStateToClient
                 );
             }
-            
+
             m_LastStateBroadcastTime = Time.time;
         }
 
@@ -841,7 +845,7 @@ namespace Arawn.GameCreator2.Networking
 
             OnServerStateProduced(m_ClientDriver.GetCurrentState());
         }
-        
+
         private void OnBridgeInputReceivedServer(uint senderClientId, uint characterNetworkId, NetworkInputState[] inputs)
         {
             if (m_ActivePredictionBackend != null) return;
@@ -856,12 +860,12 @@ namespace Arawn.GameCreator2.Networking
                 Debug.LogWarning($"[NetworkCharacter] Rejected input for {name} ({characterNetworkId}) from sender {senderClientId}; owner is {ownerClientId}.");
                 return;
             }
-            
+
             if (m_ServerDriver == null)
             {
                 return;
             }
-            
+
             for (int i = 0; i < inputs.Length; i++)
             {
                 m_ServerDriver.QueueInput(inputs[i]);
@@ -937,7 +941,7 @@ namespace Arawn.GameCreator2.Networking
             m_LastStateBroadcastPerClient[targetClientId] = Time.time;
             return true;
         }
-        
+
         private void OnBridgeStateReceivedClient(uint characterNetworkId, NetworkPositionState state, float serverTime)
         {
             if (m_ActivePredictionBackend != null) return;
@@ -968,28 +972,28 @@ namespace Arawn.GameCreator2.Networking
                 m_ClientDriver.ApplyServerState(state);
                 return;
             }
-            
+
             if (m_RemoteDriver != null)
             {
                 m_RemoteDriver.AddSnapshot(state, serverTime);
                 m_RemoteDriver.SetServerTime(serverTime);
                 return;
             }
-            
+
         }
-        
+
         private void ProcessServerSimulation(float deltaTime)
         {
             if (m_ActivePredictionBackend != null) return;
             if (m_ServerDriver == null) return;
-            
+
             float simulationRate = m_ResolvedSessionProfile != null
                 ? Mathf.Max(1f, m_ResolvedSessionProfile.serverSimulationRate)
                 : 30f;
-            
+
             float tickInterval = 1f / simulationRate;
             m_ServerSimulationAccumulator += deltaTime;
-            
+
             int tickCount = 0;
             while (m_ServerSimulationAccumulator >= tickInterval && tickCount < 4)
             {
@@ -998,50 +1002,50 @@ namespace Arawn.GameCreator2.Networking
                 tickCount++;
             }
         }
-        
+
         private void ApplyCurrentRelevanceTier(bool force = false)
         {
             if (!m_UseRelevanceTiers || m_ResolvedSessionProfile == null) return;
             if (m_CurrentRole != NetworkRole.RemoteClient) return;
-            
+
             if (!force && Time.time < m_NextRelevanceUpdateTime) return;
-            
+
             float relevanceRate = Mathf.Max(0.5f, m_ResolvedSessionProfile.relevanceUpdateRate);
             m_NextRelevanceUpdateTime = Time.time + (1f / relevanceRate);
-            
+
             Transform observer = GetRelevanceObserver();
             if (observer == null) return;
-            
+
             float distance = Vector3.Distance(observer.position, transform.position);
             NetworkRelevanceTier tier = m_ResolvedSessionProfile.GetTier(distance);
             if (!force && tier == m_CurrentRelevanceTier) return;
-            
+
             m_CurrentRelevanceTier = tier;
             NetworkRelevanceSettings settings = m_ResolvedSessionProfile.GetTierSettings(tier);
-            
+
             m_RemoteDriver?.ApplyTierSettings(settings);
-            
+
             if (m_IKController != null)
             {
                 m_IKController.enabled = m_UseNetworkIK && settings.syncIK && m_IKMode == RemoteSystemMode.Synchronized;
             }
-            
+
             if (m_AnimimController != null)
             {
                 m_AnimimController.SetSyncEnabled(settings.syncAnimation);
                 m_AnimimController.SetRateLimits(settings.animationStateRate, settings.animationGestureRate);
             }
-            
+
             // The Core controller is shared by all characters and must never be
             // toggled by an individual character's relevance tier. Feature-level
             // relevance is evaluated by the Core manager for the target character.
-            
+
             if (m_CombatInterceptor != null)
             {
                 m_CombatInterceptor.enabled = settings.syncCombat;
             }
         }
-        
+
         private Transform GetRelevanceObserver()
         {
             if (m_RelevanceObserver != null) return m_RelevanceObserver;
@@ -1049,6 +1053,6 @@ namespace Arawn.GameCreator2.Networking
             if (Camera.main != null) return Camera.main.transform;
             return null;
         }
-        
+
     }
 }

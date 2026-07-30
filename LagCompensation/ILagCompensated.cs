@@ -42,39 +42,39 @@ namespace Arawn.NetworkingCore.LagCompensation
         /// Must be consistent across all clients and server.
         /// </summary>
         uint NetworkId { get; }
-        
+
         /// <summary>
         /// Current world-space position of the entity.
         /// </summary>
         Vector3 Position { get; }
-        
+
         /// <summary>
         /// Current world-space rotation of the entity.
         /// </summary>
         Quaternion Rotation { get; }
-        
+
         /// <summary>
         /// Axis-aligned bounding box for broad-phase hit detection.
         /// </summary>
         Bounds Bounds { get; }
-        
+
         /// <summary>
         /// Whether this entity is currently active and can be hit.
         /// Return false for dead, despawned, or inactive entities.
         /// </summary>
         bool IsActive { get; }
-        
+
         /// <summary>
         /// Collision radius for cylindrical/spherical hit detection.
         /// </summary>
         float Radius { get; }
-        
+
         /// <summary>
         /// Height for cylindrical hit detection (from position upward).
         /// </summary>
         float Height { get; }
     }
-    
+
     /// <summary>
     /// Extended interface for entities with hit zones (head, torso, legs, etc.)
     /// </summary>
@@ -84,13 +84,13 @@ namespace Arawn.NetworkingCore.LagCompensation
         /// Get all hit zones for this entity.
         /// </summary>
         LagCompensatedHitZone[] GetHitZones();
-        
+
         /// <summary>
         /// Get a specific hit zone by name.
         /// </summary>
         bool TryGetHitZone(string zoneName, out LagCompensatedHitZone hitZone);
     }
-    
+
     /// <summary>
     /// Represents a hit zone on an entity (head, torso, etc.)
     /// </summary>
@@ -99,31 +99,31 @@ namespace Arawn.NetworkingCore.LagCompensation
     {
         /// <summary>Zone identifier (e.g., "head", "torso", "legs")</summary>
         public string name;
-        
+
         /// <summary>Local offset from entity position</summary>
         public Vector3 localOffset;
-        
+
         /// <summary>Collision radius for this zone</summary>
         public float radius;
-        
+
         /// <summary>Min height (local Y) of this zone</summary>
         public float minHeight;
-        
+
         /// <summary>Max height (local Y) of this zone</summary>
         public float maxHeight;
-        
+
         /// <summary>Damage multiplier when this zone is hit</summary>
         public float damageMultiplier;
-        
+
         /// <summary>Whether this zone is a critical hit zone</summary>
         public bool isCritical;
-        
+
         /// <summary>
         /// Get the world-space center of this hit zone.
         /// </summary>
         public Vector3 GetWorldCenter(Vector3 entityPosition, Quaternion entityRotation)
         {
-            return entityPosition + entityRotation * localOffset + 
+            return entityPosition + entityRotation * localOffset +
                    Vector3.up * ((minHeight + maxHeight) * 0.5f);
         }
     }

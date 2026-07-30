@@ -24,11 +24,11 @@ namespace Arawn.GameCreator2.Networking
     /// </remarks>
     [Title("Network Pivot (Server-Authoritative)")]
     [Image(typeof(IconRotationYaw), ColorTheme.Type.Blue)]
-    
+
     [Category("Network/Network Pivot")]
     [Description("Server-authoritative facing that syncs across the network. " +
                  "Use for characters where facing direction affects gameplay (backstabs, cone attacks, etc.)")]
-    
+
     [Serializable]
     public class UnitFacingNetworkPivot : TUnitFacing, INetworkFacingUnit
     {
@@ -37,72 +37,72 @@ namespace Arawn.GameCreator2.Networking
             MotionDirection,
             DriverDirection
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // EXPOSED MEMBERS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         [SerializeField] private DirectionFrom m_DirectionFrom = DirectionFrom.MotionDirection;
         [SerializeField] private Axonometry m_Axonometry = new Axonometry();
-        
+
         [Header("Network Settings")]
         [Tooltip("How quickly clients interpolate to the server's facing direction")]
         [SerializeField] private float m_InterpolationSpeed = 15f;
-        
+
         [Tooltip("Minimum angle change (degrees) before sending an update")]
         [SerializeField] private float m_MinAngleChange = 1f;
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // PRIVATE MEMBERS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         [NonSerialized] private NetworkCharacter m_NetworkCharacter;
         [NonSerialized] private float m_ServerYaw;
         [NonSerialized] private float m_ClientYaw;
         [NonSerialized] private float m_LastSentYaw;
         [NonSerialized] private bool m_IsNetworkInitialized;
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // PROPERTIES
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         public override Axonometry Axonometry
         {
             get => m_Axonometry;
             set => m_Axonometry = value;
         }
-        
+
         /// <summary>
         /// The server-authoritative yaw angle in degrees.
         /// </summary>
         public float ServerYaw => m_ServerYaw;
-        
+
         /// <summary>
         /// The current interpolated yaw angle on this client.
         /// </summary>
         public float ClientYaw => m_ClientYaw;
-        
+
         /// <summary>
         /// Whether this facing unit is network-initialized and ready.
         /// </summary>
         public bool IsNetworkInitialized => m_IsNetworkInitialized;
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // INITIALIZATION
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         public override void OnStartup(Character character)
         {
             base.OnStartup(character);
-            
+
             // Initialize yaw from current rotation
             m_ServerYaw = character.transform.eulerAngles.y;
             m_ClientYaw = m_ServerYaw;
             m_LastSentYaw = m_ServerYaw;
-            
+
             // Try to find NetworkCharacter
             m_NetworkCharacter = character.GetComponent<NetworkCharacter>();
-            
+
             if (m_NetworkCharacter != null)
             {
                 m_NetworkCharacter.OnFacingUnitRegistered(this);
@@ -114,21 +114,21 @@ namespace Arawn.GameCreator2.Networking
                                  "Falling back to local-only facing.");
             }
         }
-        
+
         public override void OnDispose(Character character)
         {
             if (m_NetworkCharacter != null)
             {
                 m_NetworkCharacter.OnFacingUnitUnregistered();
             }
-            
+
             base.OnDispose(character);
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // UPDATE
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         public override void OnUpdate()
         {
             if (Character.IsDead) return;
@@ -138,7 +138,7 @@ namespace Arawn.GameCreator2.Networking
                 SyncNetworkYawToCurrentRotation();
                 return;
             }
-            
+
             if (m_IsNetworkInitialized && m_NetworkCharacter != null)
             {
                 UpdateNetworked();
@@ -148,52 +148,52 @@ namespace Arawn.GameCreator2.Networking
                 UpdateLocal();
             }
         }
-        
+
         private void UpdateLocal()
         {
             // Fallback: behave like regular UnitFacingPivot
             Vector3 direction = GetLocalDirection();
             m_ServerYaw = Mathf.Atan2(direction.x, direction.z) * Mathf.Rad2Deg;
             m_ClientYaw = m_ServerYaw;
-            
+
             base.OnUpdate();
         }
-        
+
         private void UpdateNetworked()
         {
             var role = m_NetworkCharacter.CurrentRole;
-            
+
             switch (role)
             {
                 case NetworkCharacter.NetworkRole.Server:
                     UpdateAsServer();
                     break;
-                    
+
                 case NetworkCharacter.NetworkRole.LocalClient:
                     UpdateAsLocalClient();
                     break;
-                    
+
                 case NetworkCharacter.NetworkRole.RemoteClient:
                     UpdateAsRemoteClient();
                     break;
-                    
+
                 default:
                     UpdateLocal();
                     break;
             }
         }
-        
+
         private void UpdateAsServer()
         {
             // Server calculates authoritative facing direction
             Vector3 direction = GetLocalDirection();
             float targetYaw = Mathf.Atan2(direction.x, direction.z) * Mathf.Rad2Deg;
-            
+
             // Smooth server-side rotation
-            m_ServerYaw = Mathf.LerpAngle(m_ServerYaw, targetYaw, 
+            m_ServerYaw = Mathf.LerpAngle(m_ServerYaw, targetYaw,
                 Character.Motion.AngularSpeed * Character.Time.DeltaTime / 360f);
             m_ClientYaw = m_ServerYaw;
-            
+
             // Check if we need to broadcast update
             float angleDelta = Mathf.Abs(Mathf.DeltaAngle(m_LastSentYaw, m_ServerYaw));
             if (angleDelta >= m_MinAngleChange)
@@ -201,17 +201,17 @@ namespace Arawn.GameCreator2.Networking
                 m_LastSentYaw = m_ServerYaw;
                 // NetworkCharacter transport integration handles the broadcast path.
             }
-            
+
             // Apply rotation
             ApplyRotation(m_ServerYaw);
         }
-        
+
         private void UpdateAsLocalClient()
         {
             // Local client: calculate desired direction and send to server
             Vector3 direction = GetLocalDirection();
             float desiredYaw = Mathf.Atan2(direction.x, direction.z) * Mathf.Rad2Deg;
-            
+
             // Send a new target when input changes, then keep requesting while the
             // validated server yaw is still catching up to that target.
             float requestedDelta = Mathf.Abs(Mathf.DeltaAngle(m_LastSentYaw, desiredYaw));
@@ -221,29 +221,29 @@ namespace Arawn.GameCreator2.Networking
                 m_LastSentYaw = desiredYaw;
                 m_NetworkCharacter.RequestFacingUpdate(desiredYaw);
             }
-            
+
             // Interpolate toward server yaw for smooth visuals
-            m_ClientYaw = Mathf.LerpAngle(m_ClientYaw, m_ServerYaw, 
+            m_ClientYaw = Mathf.LerpAngle(m_ClientYaw, m_ServerYaw,
                 m_InterpolationSpeed * Character.Time.DeltaTime);
-            
+
             // Apply rotation
             ApplyRotation(m_ClientYaw);
         }
-        
+
         private void UpdateAsRemoteClient()
         {
             // Remote client: interpolate toward received server yaw
-            m_ClientYaw = Mathf.LerpAngle(m_ClientYaw, m_ServerYaw, 
+            m_ClientYaw = Mathf.LerpAngle(m_ClientYaw, m_ServerYaw,
                 m_InterpolationSpeed * Character.Time.DeltaTime);
-            
+
             // Apply rotation
             ApplyRotation(m_ClientYaw);
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // NETWORK CALLBACKS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>
         /// Called by NetworkCharacter when receiving a facing update from the server.
         /// </summary>
@@ -252,7 +252,7 @@ namespace Arawn.GameCreator2.Networking
         {
             m_ServerYaw = yaw;
         }
-        
+
         /// <summary>
         /// Called by NetworkCharacter on the server when a client requests a facing change.
         /// </summary>
@@ -262,20 +262,20 @@ namespace Arawn.GameCreator2.Networking
         {
             // Server can validate/modify the requested yaw here
             // For example: clamp rotation speed, check for cheating, etc.
-            
+
             // Calculate max rotation delta based on angular speed
             float maxDelta = Character.Motion.AngularSpeed * Character.Time.DeltaTime;
             float currentYaw = m_ServerYaw;
             float delta = Mathf.DeltaAngle(currentYaw, requestedYaw);
-            
+
             // Clamp to max rotation speed
             delta = Mathf.Clamp(delta, -maxDelta, maxDelta);
-            
+
             // Apply validated rotation
             m_ServerYaw = currentYaw + delta;
             return m_ServerYaw;
         }
-        
+
         /// <summary>
         /// Forces the facing to a specific yaw angle. Server-only.
         /// </summary>
@@ -286,21 +286,21 @@ namespace Arawn.GameCreator2.Networking
             m_ClientYaw = yaw;
             m_LastSentYaw = yaw;
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // PROTECTED METHODS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         protected override Vector3 GetDefaultDirection()
         {
             // Return direction based on current client yaw
             return Quaternion.Euler(0f, m_ClientYaw, 0f) * Vector3.forward;
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // PRIVATE METHODS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         private Vector3 GetLocalDirection()
         {
             Vector3 driverDirection = Vector3.Scale(
@@ -312,21 +312,26 @@ namespace Arawn.GameCreator2.Networking
                 },
                 Vector3Plane.NormalUp
             );
-            
+
             Vector3 direction = DecideDirection(driverDirection);
             return m_Axonometry?.ProcessRotation(this, direction) ?? direction;
         }
-        
+
         private void ApplyRotation(float yaw)
         {
             Quaternion targetRotation = Quaternion.Euler(0f, yaw, 0f);
-            
-            // Apply with root motion blending
-            Transform.rotation = Quaternion.Lerp(
+
+            // Route root rotation through the active driver. Network CharacterControllers can
+            // be left dirty in PhysX when auto-sync transforms is disabled and Facing writes the
+            // Transform directly after Driver.OnUpdate. The server driver flushes this write
+            // before GC2 performs its LateUpdate melee overlap queries.
+            Quaternion rotation = Quaternion.Lerp(
                 targetRotation,
                 Transform.rotation * Character.Animim.RootMotionDeltaRotation,
                 Character.RootMotionRotation
             );
+
+            Character.Driver.SetRotation(rotation);
         }
 
         private bool IsExternalMotionOwningFacing()
@@ -342,11 +347,11 @@ namespace Arawn.GameCreator2.Networking
             m_ClientYaw = currentYaw;
             m_LastSentYaw = currentYaw;
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // STRING
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         public override string ToString() => "Network Pivot";
     }
 }

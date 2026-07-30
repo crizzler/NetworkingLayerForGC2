@@ -31,9 +31,9 @@ namespace Arawn.GameCreator2.Networking
         // ════════════════════════════════════════════════════════════════════════════════════════
         // CONFIGURATION
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         protected override DuplicatePolicy OnDuplicatePolicy => DuplicatePolicy.WarnOnly;
-        
+
         /// <summary>
         /// Message type identifiers for network routing.
         /// Reserve range 200-229 for Core features.
@@ -44,94 +44,94 @@ namespace Arawn.GameCreator2.Networking
             public const byte RagdollRequest = 200;
             public const byte RagdollResponse = 201;
             public const byte RagdollBroadcast = 202;
-            
+
             // Props (205-209)
             public const byte PropRequest = 205;
             public const byte PropResponse = 206;
             public const byte PropBroadcast = 207;
-            
+
             // Invincibility (210-214)
             public const byte InvincibilityRequest = 210;
             public const byte InvincibilityResponse = 211;
             public const byte InvincibilityBroadcast = 212;
-            
+
             // Poise (215-219)
             public const byte PoiseRequest = 215;
             public const byte PoiseResponse = 216;
             public const byte PoiseBroadcast = 217;
-            
+
             // Busy (220-224)
             public const byte BusyRequest = 220;
             public const byte BusyResponse = 221;
             public const byte BusyBroadcast = 222;
-            
+
             // Interaction (225-229)
             public const byte InteractionRequest = 225;
             public const byte InteractionResponse = 226;
             public const byte InteractionBroadcast = 227;
             public const byte InteractionFocusBroadcast = 228;
-            
+
             // Core State Sync
             public const byte CoreStateSync = 229;
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // INSPECTOR
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         [Header("References")]
         [SerializeField] private NetworkCoreController m_CoreController;
-        
+
         [Header("Prop Registry")]
         [Tooltip("Prop prefabs that can be attached over the network")]
         [SerializeField] private PropRegistryEntry[] m_PropRegistry;
-        
+
         [Header("Debug")]
         [SerializeField] private bool m_DebugLog = false;
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // PROP REGISTRY
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         [Serializable]
         public class PropRegistryEntry
         {
             public string PropId;
             public GameObject Prefab;
-            
+
             [HideInInspector]
             public int Hash;
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // SEND DELEGATES (Assign these in your network implementation)
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         // Ragdoll
         public Action<NetworkRagdollRequest> SendRagdollRequestToServer;
         public Action<uint, NetworkRagdollResponse> SendRagdollResponseToClient;
         public Action<NetworkRagdollBroadcast> BroadcastRagdoll;
-        
+
         // Props
         public Action<NetworkPropRequest> SendPropRequestToServer;
         public Action<uint, NetworkPropResponse> SendPropResponseToClient;
         public Action<NetworkPropBroadcast> BroadcastProp;
-        
+
         // Invincibility
         public Action<NetworkInvincibilityRequest> SendInvincibilityRequestToServer;
         public Action<uint, NetworkInvincibilityResponse> SendInvincibilityResponseToClient;
         public Action<NetworkInvincibilityBroadcast> BroadcastInvincibility;
-        
+
         // Poise
         public Action<NetworkPoiseRequest> SendPoiseRequestToServer;
         public Action<uint, NetworkPoiseResponse> SendPoiseResponseToClient;
         public Action<NetworkPoiseBroadcast> BroadcastPoise;
-        
+
         // Busy
         public Action<NetworkBusyRequest> SendBusyRequestToServer;
         public Action<uint, NetworkBusyResponse> SendBusyResponseToClient;
         public Action<NetworkBusyBroadcast> BroadcastBusy;
-        
+
         // Interaction
         public Action<NetworkInteractionRequest> SendInteractionRequestToServer;
         public Action<uint, NetworkInteractionResponse> SendInteractionResponseToClient;
@@ -140,17 +140,17 @@ namespace Arawn.GameCreator2.Networking
 
         // Persistent state snapshots (server -> one client)
         public Action<uint, NetworkCoreSnapshot> SendCoreSnapshotToClient;
-        
+
         // Utility delegates
         public Func<float> GetServerTime;
         public Func<uint, Character> GetCharacterByNetworkId;
         public Func<uint> GetLocalPlayerNetworkId;
         public Func<GameObject, uint> GetNetworkIdForGameObject;
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // PRIVATE FIELDS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         private Dictionary<int, GameObject> m_PropHashToPrefab;
         private Dictionary<(int CharacterInstanceId, int BoneHash), Transform> m_BoneHashCache;
         private readonly HashSet<int> m_LegacyControllerWarnings = new();
@@ -162,19 +162,19 @@ namespace Arawn.GameCreator2.Networking
         // ════════════════════════════════════════════════════════════════════════════════════════
         // PROPERTIES
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         public NetworkCoreController CoreController => m_CoreController;
         public bool IsInitialized => m_IsInitialized;
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // UNITY LIFECYCLE
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         protected override void OnSingletonAwake()
         {
             InitializePropRegistry();
         }
-        
+
         protected override void OnDestroy()
         {
             if (m_PatchHooks != null)
@@ -184,7 +184,7 @@ namespace Arawn.GameCreator2.Networking
             base.OnDestroy();
             UnwireController();
         }
-        
+
         private void OnEnable()
         {
             if (m_CoreController != null)
@@ -194,7 +194,7 @@ namespace Arawn.GameCreator2.Networking
 
             SyncPatchHooks();
         }
-        
+
         private void OnDisable()
         {
             SecurityIntegration.SetModuleServerContext("Core", false);
@@ -204,11 +204,11 @@ namespace Arawn.GameCreator2.Networking
             }
             UnwireController();
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // INITIALIZATION
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         public void Initialize(bool isServer, bool isClient)
         {
             m_IsServer = isServer;
@@ -234,25 +234,25 @@ namespace Arawn.GameCreator2.Networking
 
             DisableLegacyCoreControllers();
             NetworkCoreController.ClaimManagerOwnedSingleton(m_CoreController);
-            
+
             m_CoreController.Initialize(isServer, isClient);
             SecurityIntegration.SetModuleServerContext("Core", isServer);
             SecurityIntegration.EnsureSecurityManagerInitialized(isServer, () => GetServerTime?.Invoke() ?? Time.time);
             WireController();
             SyncPatchHooks();
-            
+
             m_IsInitialized = true;
-            
+
             if (m_DebugLog)
             {
                 Debug.Log($"[NetworkCoreManager] Initialized - Server: {isServer}, Client: {isClient}");
             }
         }
-        
+
         private void InitializePropRegistry()
         {
             m_PropHashToPrefab = new Dictionary<int, GameObject>();
-            
+
             if (m_PropRegistry != null)
             {
                 foreach (var entry in m_PropRegistry)
@@ -264,40 +264,40 @@ namespace Arawn.GameCreator2.Networking
                     }
                 }
             }
-            
+
             m_BoneHashCache = new Dictionary<(int, int), Transform>();
         }
-        
+
         private void WireController()
         {
             if (m_CoreController == null) return;
-            
+
             // Wire send delegates
             m_CoreController.SendRagdollRequestToServer = req => SendRagdollRequestToServer?.Invoke(req);
             m_CoreController.SendRagdollResponseToClient = (id, resp) => SendRagdollResponseToClient?.Invoke(id, resp);
             m_CoreController.BroadcastRagdollToClients = bc => BroadcastRagdoll?.Invoke(bc);
-            
+
             m_CoreController.SendPropRequestToServer = req => SendPropRequestToServer?.Invoke(req);
             m_CoreController.SendPropResponseToClient = (id, resp) => SendPropResponseToClient?.Invoke(id, resp);
             m_CoreController.BroadcastPropToClients = bc => BroadcastProp?.Invoke(bc);
-            
+
             m_CoreController.SendInvincibilityRequestToServer = req => SendInvincibilityRequestToServer?.Invoke(req);
             m_CoreController.SendInvincibilityResponseToClient = (id, resp) => SendInvincibilityResponseToClient?.Invoke(id, resp);
             m_CoreController.BroadcastInvincibilityToClients = bc => BroadcastInvincibility?.Invoke(bc);
-            
+
             m_CoreController.SendPoiseRequestToServer = req => SendPoiseRequestToServer?.Invoke(req);
             m_CoreController.SendPoiseResponseToClient = (id, resp) => SendPoiseResponseToClient?.Invoke(id, resp);
             m_CoreController.BroadcastPoiseToClients = bc => BroadcastPoise?.Invoke(bc);
-            
+
             m_CoreController.SendBusyRequestToServer = req => SendBusyRequestToServer?.Invoke(req);
             m_CoreController.SendBusyResponseToClient = (id, resp) => SendBusyResponseToClient?.Invoke(id, resp);
             m_CoreController.BroadcastBusyToClients = bc => BroadcastBusy?.Invoke(bc);
-            
+
             m_CoreController.SendInteractionRequestToServer = req => SendInteractionRequestToServer?.Invoke(req);
             m_CoreController.SendInteractionResponseToClient = (id, resp) => SendInteractionResponseToClient?.Invoke(id, resp);
             m_CoreController.BroadcastInteractionToClients = bc => BroadcastInteraction?.Invoke(bc);
             m_CoreController.BroadcastInteractionFocusToClients = bc => BroadcastInteractionFocus?.Invoke(bc);
-            
+
             // Wire utility delegates
             m_CoreController.GetServerTime = () => GetServerTime?.Invoke() ?? Time.time;
             m_CoreController.GetCharacterByNetworkId = id => GetCharacterByNetworkId?.Invoke(id);
@@ -307,36 +307,36 @@ namespace Arawn.GameCreator2.Networking
             m_CoreController.GetPropPrefabByHash = GetPropPrefabByHash;
             m_CoreController.GetBoneByHashForCharacter = GetBoneByHash;
         }
-        
+
         private void UnwireController()
         {
             if (m_CoreController == null) return;
-            
+
             m_CoreController.SendRagdollRequestToServer = null;
             m_CoreController.SendRagdollResponseToClient = null;
             m_CoreController.BroadcastRagdollToClients = null;
-            
+
             m_CoreController.SendPropRequestToServer = null;
             m_CoreController.SendPropResponseToClient = null;
             m_CoreController.BroadcastPropToClients = null;
-            
+
             m_CoreController.SendInvincibilityRequestToServer = null;
             m_CoreController.SendInvincibilityResponseToClient = null;
             m_CoreController.BroadcastInvincibilityToClients = null;
-            
+
             m_CoreController.SendPoiseRequestToServer = null;
             m_CoreController.SendPoiseResponseToClient = null;
             m_CoreController.BroadcastPoiseToClients = null;
-            
+
             m_CoreController.SendBusyRequestToServer = null;
             m_CoreController.SendBusyResponseToClient = null;
             m_CoreController.BroadcastBusyToClients = null;
-            
+
             m_CoreController.SendInteractionRequestToServer = null;
             m_CoreController.SendInteractionResponseToClient = null;
             m_CoreController.BroadcastInteractionToClients = null;
             m_CoreController.BroadcastInteractionFocusToClients = null;
-            
+
             m_CoreController.GetServerTime = null;
             m_CoreController.GetCharacterByNetworkId = null;
             m_CoreController.GetLocalPlayerNetworkId = null;
@@ -367,16 +367,16 @@ namespace Arawn.GameCreator2.Networking
 
             m_PatchHooks.Initialize(m_IsServer, m_IsClient);
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // PROP REGISTRY HELPERS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         private GameObject GetPropPrefabByHash(int hash)
         {
             return m_PropHashToPrefab.TryGetValue(hash, out var prefab) ? prefab : null;
         }
-        
+
         private Transform GetBoneByHash(Character character, int hash)
         {
             if (character == null) return null;
@@ -419,18 +419,18 @@ namespace Arawn.GameCreator2.Networking
                 }
             }
         }
-        
+
         /// <summary>
         /// Register a prop prefab at runtime.
         /// </summary>
         public void RegisterPropPrefab(string propId, GameObject prefab)
         {
             if (prefab == null || string.IsNullOrEmpty(propId)) return;
-            
+
             int hash = StableHashUtility.GetStableHash(propId);
             m_PropHashToPrefab[hash] = prefab;
         }
-        
+
         /// <summary>
         /// Get hash for a prop ID.
         /// </summary>
@@ -438,7 +438,7 @@ namespace Arawn.GameCreator2.Networking
         {
             return StableHashUtility.GetStableHash(propId);
         }
-        
+
         /// <summary>
         /// Get hash for a bone name.
         /// </summary>
@@ -446,15 +446,15 @@ namespace Arawn.GameCreator2.Networking
         {
             return StableHashUtility.GetStableHash(boneName);
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // RECEIVE METHODS (Call these from your network implementation)
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         // ─────────────────────────────────────────────────────────────────────────────────────────
         // RAGDOLL
         // ─────────────────────────────────────────────────────────────────────────────────────────
-        
+
         /// <summary>
         /// [Server] Called when ragdoll request is received from client.
         /// </summary>
@@ -506,7 +506,7 @@ namespace Arawn.GameCreator2.Networking
             }
             m_CoreController.ProcessRagdollRequest(senderNetworkId, request);
         }
-        
+
         /// <summary>
         /// [Client] Called when ragdoll response is received from server.
         /// </summary>
@@ -515,7 +515,7 @@ namespace Arawn.GameCreator2.Networking
             if (m_CoreController == null) return;
             m_CoreController.ReceiveRagdollResponse(response);
         }
-        
+
         /// <summary>
         /// [Client] Called when ragdoll broadcast is received from server.
         /// </summary>
@@ -524,11 +524,11 @@ namespace Arawn.GameCreator2.Networking
             if (m_CoreController == null) return;
             m_CoreController.ReceiveRagdollBroadcast(broadcast);
         }
-        
+
         // ─────────────────────────────────────────────────────────────────────────────────────────
         // PROPS
         // ─────────────────────────────────────────────────────────────────────────────────────────
-        
+
         /// <summary>
         /// [Server] Called when prop request is received from client.
         /// </summary>
@@ -582,7 +582,7 @@ namespace Arawn.GameCreator2.Networking
             }
             m_CoreController.ProcessPropRequest(senderNetworkId, request);
         }
-        
+
         /// <summary>
         /// [Client] Called when prop response is received from server.
         /// </summary>
@@ -591,7 +591,7 @@ namespace Arawn.GameCreator2.Networking
             if (m_CoreController == null) return;
             m_CoreController.ReceivePropResponse(response);
         }
-        
+
         /// <summary>
         /// [Client] Called when prop broadcast is received from server.
         /// </summary>
@@ -600,11 +600,11 @@ namespace Arawn.GameCreator2.Networking
             if (m_CoreController == null) return;
             m_CoreController.ReceivePropBroadcast(broadcast);
         }
-        
+
         // ─────────────────────────────────────────────────────────────────────────────────────────
         // INVINCIBILITY
         // ─────────────────────────────────────────────────────────────────────────────────────────
-        
+
         /// <summary>
         /// [Server] Called when invincibility request is received from client.
         /// </summary>
@@ -658,7 +658,7 @@ namespace Arawn.GameCreator2.Networking
             }
             m_CoreController.ProcessInvincibilityRequest(senderNetworkId, request);
         }
-        
+
         /// <summary>
         /// [Client] Called when invincibility response is received from server.
         /// </summary>
@@ -667,7 +667,7 @@ namespace Arawn.GameCreator2.Networking
             if (m_CoreController == null) return;
             m_CoreController.ReceiveInvincibilityResponse(response);
         }
-        
+
         /// <summary>
         /// [Client] Called when invincibility broadcast is received from server.
         /// </summary>
@@ -676,11 +676,11 @@ namespace Arawn.GameCreator2.Networking
             if (m_CoreController == null) return;
             m_CoreController.ReceiveInvincibilityBroadcast(broadcast);
         }
-        
+
         // ─────────────────────────────────────────────────────────────────────────────────────────
         // POISE
         // ─────────────────────────────────────────────────────────────────────────────────────────
-        
+
         /// <summary>
         /// [Server] Called when poise request is received from client.
         /// </summary>
@@ -736,7 +736,7 @@ namespace Arawn.GameCreator2.Networking
             }
             m_CoreController.ProcessPoiseRequest(senderNetworkId, request);
         }
-        
+
         /// <summary>
         /// [Client] Called when poise response is received from server.
         /// </summary>
@@ -745,7 +745,7 @@ namespace Arawn.GameCreator2.Networking
             if (m_CoreController == null) return;
             m_CoreController.ReceivePoiseResponse(response);
         }
-        
+
         /// <summary>
         /// [Client] Called when poise broadcast is received from server.
         /// </summary>
@@ -754,11 +754,11 @@ namespace Arawn.GameCreator2.Networking
             if (m_CoreController == null) return;
             m_CoreController.ReceivePoiseBroadcast(broadcast);
         }
-        
+
         // ─────────────────────────────────────────────────────────────────────────────────────────
         // BUSY
         // ─────────────────────────────────────────────────────────────────────────────────────────
-        
+
         /// <summary>
         /// [Server] Called when busy request is received from client.
         /// </summary>
@@ -810,7 +810,7 @@ namespace Arawn.GameCreator2.Networking
             }
             m_CoreController.ProcessBusyRequest(senderNetworkId, request);
         }
-        
+
         /// <summary>
         /// [Client] Called when busy response is received from server.
         /// </summary>
@@ -819,7 +819,7 @@ namespace Arawn.GameCreator2.Networking
             if (m_CoreController == null) return;
             m_CoreController.ReceiveBusyResponse(response);
         }
-        
+
         /// <summary>
         /// [Client] Called when busy broadcast is received from server.
         /// </summary>
@@ -828,11 +828,11 @@ namespace Arawn.GameCreator2.Networking
             if (m_CoreController == null) return;
             m_CoreController.ReceiveBusyBroadcast(broadcast);
         }
-        
+
         // ─────────────────────────────────────────────────────────────────────────────────────────
         // INTERACTION
         // ─────────────────────────────────────────────────────────────────────────────────────────
-        
+
         /// <summary>
         /// [Server] Called when interaction request is received from client.
         /// </summary>
@@ -886,7 +886,7 @@ namespace Arawn.GameCreator2.Networking
             }
             m_CoreController.ProcessInteractionRequest(senderNetworkId, request);
         }
-        
+
         /// <summary>
         /// [Client] Called when interaction response is received from server.
         /// </summary>
@@ -895,7 +895,7 @@ namespace Arawn.GameCreator2.Networking
             if (m_CoreController == null) return;
             m_CoreController.ReceiveInteractionResponse(response);
         }
-        
+
         /// <summary>
         /// [Client] Called when interaction broadcast is received from server.
         /// </summary>
@@ -936,20 +936,20 @@ namespace Arawn.GameCreator2.Networking
             SendCoreSnapshotToClient.Invoke(clientNetworkId, snapshot);
             return true;
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // CONVENIENCE CLIENT METHODS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>
         /// [Client] Request to start ragdoll on a character.
         /// </summary>
-        public void RequestStartRagdoll(uint characterNetworkId, Vector3 force = default, 
+        public void RequestStartRagdoll(uint characterNetworkId, Vector3 force = default,
             Vector3 forcePoint = default, Action<NetworkRagdollResponse> callback = null)
         {
             m_CoreController?.RequestStartRagdoll(characterNetworkId, force, forcePoint, callback);
         }
-        
+
         /// <summary>
         /// [Client] Request to recover from ragdoll.
         /// </summary>
@@ -958,7 +958,7 @@ namespace Arawn.GameCreator2.Networking
         {
             m_CoreController?.RequestStartRecover(characterNetworkId, instant, callback);
         }
-        
+
         /// <summary>
         /// [Client] Request to attach a prop.
         /// </summary>
@@ -968,10 +968,10 @@ namespace Arawn.GameCreator2.Networking
         {
             int propHash = GetPropHash(propId);
             int boneHash = string.IsNullOrEmpty(boneName) ? 0 : GetBoneHash(boneName);
-            m_CoreController?.RequestAttachProp(characterNetworkId, propHash, boneHash, 
+            m_CoreController?.RequestAttachProp(characterNetworkId, propHash, boneHash,
                 localPosition, localRotation, callback);
         }
-        
+
         /// <summary>
         /// [Client] Request to detach a prop.
         /// </summary>
@@ -995,7 +995,7 @@ namespace Arawn.GameCreator2.Networking
         {
             m_CoreController?.RequestDetachAllProps(characterNetworkId, callback);
         }
-        
+
         /// <summary>
         /// [Client] Request to set invincibility.
         /// </summary>
@@ -1004,7 +1004,7 @@ namespace Arawn.GameCreator2.Networking
         {
             m_CoreController?.RequestSetInvincibility(characterNetworkId, duration, callback);
         }
-        
+
         /// <summary>
         /// [Client] Request to damage poise.
         /// </summary>
@@ -1013,7 +1013,7 @@ namespace Arawn.GameCreator2.Networking
         {
             m_CoreController?.RequestPoiseDamage(characterNetworkId, damage, callback);
         }
-        
+
         /// <summary>
         /// [Client] Request to reset poise.
         /// </summary>
@@ -1022,7 +1022,7 @@ namespace Arawn.GameCreator2.Networking
         {
             m_CoreController?.RequestPoiseReset(characterNetworkId, -1, callback);
         }
-        
+
         /// <summary>
         /// [Client] Request to set busy limbs.
         /// </summary>
@@ -1031,30 +1031,30 @@ namespace Arawn.GameCreator2.Networking
         {
             m_CoreController?.RequestSetBusy(characterNetworkId, limbs, setBusy, timeout, callback);
         }
-        
+
         /// <summary>
         /// [Client] Request interaction with target.
         /// </summary>
         public void RequestInteraction(uint characterNetworkId, uint targetNetworkId,
             Vector3 interactionPosition, Action<NetworkInteractionResponse> callback = null)
         {
-            m_CoreController?.RequestInteraction(characterNetworkId, targetNetworkId, 0, 
+            m_CoreController?.RequestInteraction(characterNetworkId, targetNetworkId, 0,
                 interactionPosition, callback);
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // CONVENIENCE SERVER METHODS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>
         /// [Server] Directly start ragdoll and broadcast.
         /// </summary>
-        public void ServerStartRagdoll(uint characterNetworkId, Vector3 force = default, 
+        public void ServerStartRagdoll(uint characterNetworkId, Vector3 force = default,
             Vector3 forcePoint = default)
         {
             m_CoreController?.ServerStartRagdoll(characterNetworkId, force, forcePoint);
         }
-        
+
         /// <summary>
         /// [Server] Directly set invincibility and broadcast.
         /// </summary>
@@ -1062,7 +1062,7 @@ namespace Arawn.GameCreator2.Networking
         {
             m_CoreController?.ServerSetInvincibility(characterNetworkId, duration);
         }
-        
+
         /// <summary>
         /// [Server] Directly damage poise and broadcast.
         /// </summary>
@@ -1070,7 +1070,7 @@ namespace Arawn.GameCreator2.Networking
         {
             m_CoreController?.ServerDamagePoise(characterNetworkId, damage);
         }
-        
+
         /// <summary>
         /// [Server] Directly reset poise and broadcast.
         /// </summary>

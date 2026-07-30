@@ -24,13 +24,13 @@ namespace Arawn.GameCreator2.Networking
         // ════════════════════════════════════════════════════════════════════════════════════════
         // CONFIGURATION
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         protected override DuplicatePolicy OnDuplicatePolicy => DuplicatePolicy.WarnOnly;
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // INSPECTOR
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         [Header("Ragdoll Settings")]
         [Tooltip("Minimum time between ragdoll state changes.")]
         [SerializeField] private float m_RagdollCooldown = 0.5f;
@@ -40,21 +40,21 @@ namespace Arawn.GameCreator2.Networking
 
         [Tooltip("Maximum distance from the character for a client-requested force point.")]
         [SerializeField] private float m_MaxRagdollForcePointDistance = 10f;
-        
+
         [Header("Props Settings")]
         [Tooltip("Maximum props per character.")]
         [SerializeField] private int m_MaxPropsPerCharacter = 10;
 
         [Tooltip("Maximum magnitude of a locally attached prop offset.")]
         [SerializeField] private float m_MaxPropLocalOffset = 10f;
-        
+
         [Header("Invincibility Settings")]
         [Tooltip("Maximum invincibility duration allowed.")]
         [SerializeField] private float m_MaxInvincibilityDuration = 30f;
-        
+
         [Tooltip("Minimum time between invincibility activations.")]
         [SerializeField] private float m_InvincibilityCooldown = 5f;
-        
+
         [Header("Poise Settings")]
         [Tooltip("Enable poise damage validation.")]
         [SerializeField] private bool m_ValidatePoiseDamage = true;
@@ -65,17 +65,17 @@ namespace Arawn.GameCreator2.Networking
         [Header("Busy Settings")]
         [Tooltip("Maximum server-approved duration for a timed busy state.")]
         [SerializeField] private float m_MaxBusyTimeout = 30f;
-        
+
         [Header("Interaction Settings")]
         [Tooltip("Maximum interaction range for validation.")]
         [SerializeField] private float m_MaxInteractionRange = 5f;
 
         [Tooltip("Maximum distance between an unkeyed client's claimed point and the resolved server target.")]
         [SerializeField] private float m_InteractionPositionTolerance = 3f;
-        
+
         [Tooltip("Enable interaction cooldown per target.")]
         [SerializeField] private float m_InteractionCooldown = 0.5f;
-        
+
         [Header("Debug")]
         [SerializeField] private bool m_DebugLog = false;
 
@@ -85,41 +85,41 @@ namespace Arawn.GameCreator2.Networking
 
         [Tooltip("How often pending client requests are scanned for timeouts.")]
         [SerializeField] private float m_PendingCleanupIntervalSeconds = 1f;
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // EVENTS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         // Ragdoll Events
         public event Action<NetworkRagdollRequest> OnRagdollRequestSent;
         public event Action<NetworkRagdollResponse> OnRagdollResponseReceived;
         public event Action<uint, NetworkRagdollRequest> OnRagdollRequestReceived;
         public event Action<NetworkRagdollBroadcast> OnRagdollBroadcastReceived;
-        
+
         // Props Events
         public event Action<NetworkPropRequest> OnPropRequestSent;
         public event Action<NetworkPropResponse> OnPropResponseReceived;
         public event Action<uint, NetworkPropRequest> OnPropRequestReceived;
         public event Action<NetworkPropBroadcast> OnPropBroadcastReceived;
-        
+
         // Invincibility Events
         public event Action<NetworkInvincibilityRequest> OnInvincibilityRequestSent;
         public event Action<NetworkInvincibilityResponse> OnInvincibilityResponseReceived;
         public event Action<uint, NetworkInvincibilityRequest> OnInvincibilityRequestReceived;
         public event Action<NetworkInvincibilityBroadcast> OnInvincibilityBroadcastReceived;
-        
+
         // Poise Events
         public event Action<NetworkPoiseRequest> OnPoiseRequestSent;
         public event Action<NetworkPoiseResponse> OnPoiseResponseReceived;
         public event Action<uint, NetworkPoiseRequest> OnPoiseRequestReceived;
         public event Action<NetworkPoiseBroadcast> OnPoiseBroadcastReceived;
-        
+
         // Busy Events
         public event Action<NetworkBusyRequest> OnBusyRequestSent;
         public event Action<NetworkBusyResponse> OnBusyResponseReceived;
         public event Action<uint, NetworkBusyRequest> OnBusyRequestReceived;
         public event Action<NetworkBusyBroadcast> OnBusyBroadcastReceived;
-        
+
         // Interaction Events
         public event Action<NetworkInteractionRequest> OnInteractionRequestSent;
         public event Action<NetworkInteractionResponse> OnInteractionResponseReceived;
@@ -127,42 +127,42 @@ namespace Arawn.GameCreator2.Networking
         public event Action<NetworkInteractionBroadcast> OnInteractionBroadcastReceived;
         public event Action<NetworkInteractionFocusBroadcast> OnInteractionFocusBroadcastReceived;
         public event Action<NetworkCoreSnapshot> OnCoreSnapshotReceived;
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // DELEGATES (Network Integration Points)
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         // Ragdoll
         public Action<NetworkRagdollRequest> SendRagdollRequestToServer;
         public Action<uint, NetworkRagdollResponse> SendRagdollResponseToClient;
         public Action<NetworkRagdollBroadcast> BroadcastRagdollToClients;
-        
+
         // Props
         public Action<NetworkPropRequest> SendPropRequestToServer;
         public Action<uint, NetworkPropResponse> SendPropResponseToClient;
         public Action<NetworkPropBroadcast> BroadcastPropToClients;
-        
+
         // Invincibility
         public Action<NetworkInvincibilityRequest> SendInvincibilityRequestToServer;
         public Action<uint, NetworkInvincibilityResponse> SendInvincibilityResponseToClient;
         public Action<NetworkInvincibilityBroadcast> BroadcastInvincibilityToClients;
-        
+
         // Poise
         public Action<NetworkPoiseRequest> SendPoiseRequestToServer;
         public Action<uint, NetworkPoiseResponse> SendPoiseResponseToClient;
         public Action<NetworkPoiseBroadcast> BroadcastPoiseToClients;
-        
+
         // Busy
         public Action<NetworkBusyRequest> SendBusyRequestToServer;
         public Action<uint, NetworkBusyResponse> SendBusyResponseToClient;
         public Action<NetworkBusyBroadcast> BroadcastBusyToClients;
-        
+
         // Interaction
         public Action<NetworkInteractionRequest> SendInteractionRequestToServer;
         public Action<uint, NetworkInteractionResponse> SendInteractionResponseToClient;
         public Action<NetworkInteractionBroadcast> BroadcastInteractionToClients;
         public Action<NetworkInteractionFocusBroadcast> BroadcastInteractionFocusToClients;
-        
+
         // Utility
         public Func<float> GetServerTime;
         public Func<uint, Character> GetCharacterByNetworkId;
@@ -172,17 +172,17 @@ namespace Arawn.GameCreator2.Networking
         [Obsolete("Use GetBoneByHashForCharacter so bone hashes are resolved against the correct character.")]
         public Func<int, Transform> GetBoneByHash;
         public Func<Character, int, Transform> GetBoneByHashForCharacter;
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // PRIVATE FIELDS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         private bool m_IsServer;
         private bool m_IsClient;
         private float m_LastPendingCleanupTime;
 
         private static readonly List<ulong> s_SharedPendingRemovalBuffer = new(16);
-        
+
         // Request tracking
         private ushort m_NextRequestId = 1;
         private ushort m_LastIssuedRequestId = 1;
@@ -216,7 +216,7 @@ namespace Arawn.GameCreator2.Networking
 
         private static bool IsFinite(Vector3 value) =>
             IsFinite(value.x) && IsFinite(value.y) && IsFinite(value.z);
-        
+
         // Pending requests (client-side)
         private readonly Dictionary<ulong, PendingRagdollRequest> m_PendingRagdollRequests = new(16);
         private readonly Dictionary<ulong, PendingPropRequest> m_PendingPropRequests = new(16);
@@ -224,24 +224,24 @@ namespace Arawn.GameCreator2.Networking
         private readonly Dictionary<ulong, PendingPoiseRequest> m_PendingPoiseRequests = new(16);
         private readonly Dictionary<ulong, PendingBusyRequest> m_PendingBusyRequests = new(16);
         private readonly Dictionary<ulong, PendingInteractionRequest> m_PendingInteractionRequests = new(16);
-        
+
         // Cooldown tracking (server-side)
         private readonly Dictionary<uint, float> m_RagdollCooldowns = new(64);
         private readonly Dictionary<uint, float> m_InvincibilityCooldowns = new(64);
         private readonly Dictionary<(uint, uint), float> m_InteractionCooldowns = new(128);
-        
+
         // Authoritative prop descriptors. Clients mirror these records so broadcasts and
         // late-join snapshots can be applied idempotently.
         private readonly Dictionary<uint, List<NetworkPropAttachmentState>> m_CharacterProps = new(64);
         private int m_NextPropInstanceId = 1;
-        
+
         // Statistics
         private NetworkCoreStats m_Stats;
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // PENDING REQUEST STRUCTS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         private struct PendingRagdollRequest : ITimeoutAwarePendingRequest
         {
             public NetworkRagdollRequest Request;
@@ -264,7 +264,7 @@ namespace Arawn.GameCreator2.Networking
                 return true;
             }
         }
-        
+
         private struct PendingPropRequest : ITimeoutAwarePendingRequest
         {
             public NetworkPropRequest Request;
@@ -288,7 +288,7 @@ namespace Arawn.GameCreator2.Networking
                 return true;
             }
         }
-        
+
         private struct PendingInvincibilityRequest : ITimeoutAwarePendingRequest
         {
             public NetworkInvincibilityRequest Request;
@@ -312,7 +312,7 @@ namespace Arawn.GameCreator2.Networking
                 return true;
             }
         }
-        
+
         private struct PendingPoiseRequest : ITimeoutAwarePendingRequest
         {
             public NetworkPoiseRequest Request;
@@ -337,7 +337,7 @@ namespace Arawn.GameCreator2.Networking
                 return true;
             }
         }
-        
+
         private struct PendingBusyRequest : ITimeoutAwarePendingRequest
         {
             public NetworkBusyRequest Request;
@@ -360,7 +360,7 @@ namespace Arawn.GameCreator2.Networking
                 return true;
             }
         }
-        
+
         private struct PendingInteractionRequest : ITimeoutAwarePendingRequest
         {
             public NetworkInteractionRequest Request;
@@ -384,11 +384,11 @@ namespace Arawn.GameCreator2.Networking
                 return true;
             }
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // PROPERTIES
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         public bool IsServer => m_IsServer;
         public bool IsClient => m_IsClient;
         public NetworkCoreStats Stats => m_Stats;
@@ -401,7 +401,7 @@ namespace Arawn.GameCreator2.Networking
         {
             if (controller != null) s_Instance = controller;
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // UNITY LIFECYCLE
         // ════════════════════════════════════════════════════════════════════════════════════════
@@ -426,12 +426,12 @@ namespace Arawn.GameCreator2.Networking
         // ════════════════════════════════════════════════════════════════════════════════════════
         // INITIALIZATION
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         public void Initialize(bool isServer, bool isClient)
         {
             m_IsServer = isServer;
             m_IsClient = isClient;
-            
+
             ClearPendingRequests();
             ClearCooldowns();
             m_Stats.Reset();
@@ -449,13 +449,13 @@ namespace Arawn.GameCreator2.Networking
             {
                 ClearAllTrackedPropState();
             }
-            
+
             if (m_DebugLog)
             {
                 Debug.Log($"[NetworkCore] Initialized - Server: {isServer}, Client: {isClient}");
             }
         }
-        
+
         private void ClearPendingRequests()
         {
             m_PendingRagdollRequests.Clear();
@@ -466,7 +466,7 @@ namespace Arawn.GameCreator2.Networking
             m_PendingInteractionRequests.Clear();
             m_LastPendingCleanupTime = Time.time;
         }
-        
+
         private void ClearCooldowns()
         {
             m_RagdollCooldowns.Clear();
@@ -509,13 +509,13 @@ namespace Arawn.GameCreator2.Networking
                 }
             }
         }
-        
+
     }
-    
+
     // ════════════════════════════════════════════════════════════════════════════════════════════
     // HELPER COMPONENT
     // ════════════════════════════════════════════════════════════════════════════════════════════
-    
+
     /// <summary>
     /// Tracks network prop instances for removal.
     /// </summary>

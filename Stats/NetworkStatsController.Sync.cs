@@ -12,7 +12,7 @@ namespace Arawn.GameCreator2.Networking.Stats
         // ════════════════════════════════════════════════════════════════════════════════════════
         // CLIENT-SIDE: RECEIVE RESPONSES
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>
         /// [Client] Receive stat modification response from server.
         /// </summary>
@@ -21,16 +21,16 @@ namespace Arawn.GameCreator2.Networking.Stats
             ulong key = GetPendingKey(response.ActorNetworkId, response.CorrelationId, response.RequestId);
             if (!m_PendingStatMods.TryGetValue(key, out var pending))
                 return;
-            
+
             m_PendingStatMods.Remove(key);
-            
+
             if (!response.Authorized)
             {
                 if (m_LogRejections)
                 {
                     Debug.LogWarning($"[NetworkStatsController] Stat modify rejected: {response.RejectionReason}");
                 }
-                
+
                 // Rollback optimistic update
                 if (m_RollbackOnReject && m_OptimisticStatValues.TryGetValue(pending.Request.StatHash, out float original))
                 {
@@ -41,7 +41,7 @@ namespace Arawn.GameCreator2.Networking.Stats
                     }
                     m_OptimisticStatValues.Remove(pending.Request.StatHash);
                 }
-                
+
                 OnModificationRejected?.Invoke(response.RejectionReason, "Stat modification");
             }
             else
@@ -49,7 +49,7 @@ namespace Arawn.GameCreator2.Networking.Stats
                 m_OptimisticStatValues.Remove(pending.Request.StatHash);
             }
         }
-        
+
         /// <summary>
         /// [Client] Receive attribute modification response from server.
         /// </summary>
@@ -58,16 +58,16 @@ namespace Arawn.GameCreator2.Networking.Stats
             ulong key = GetPendingKey(response.ActorNetworkId, response.CorrelationId, response.RequestId);
             if (!m_PendingAttrMods.TryGetValue(key, out var pending))
                 return;
-            
+
             m_PendingAttrMods.Remove(key);
-            
+
             if (!response.Authorized)
             {
                 if (m_LogRejections)
                 {
                     Debug.LogWarning($"[NetworkStatsController] Attribute modify rejected: {response.RejectionReason}");
                 }
-                
+
                 // Rollback optimistic update
                 if (m_RollbackOnReject && m_OptimisticAttrValues.TryGetValue(pending.Request.AttributeHash, out float original))
                 {
@@ -78,7 +78,7 @@ namespace Arawn.GameCreator2.Networking.Stats
                     }
                     m_OptimisticAttrValues.Remove(pending.Request.AttributeHash);
                 }
-                
+
                 OnModificationRejected?.Invoke(response.RejectionReason, "Attribute modification");
             }
             else
@@ -86,137 +86,137 @@ namespace Arawn.GameCreator2.Networking.Stats
                 m_OptimisticAttrValues.Remove(pending.Request.AttributeHash);
             }
         }
-        
+
         /// <summary>
         /// [Client] Receive status effect response from server.
         /// </summary>
         public void ReceiveStatusEffectResponse(NetworkStatusEffectResponse response)
         {
             m_PendingStatusEffects.Remove(GetPendingKey(response.ActorNetworkId, response.CorrelationId, response.RequestId));
-            
+
             if (!response.Authorized && m_LogRejections)
             {
                 Debug.LogWarning($"[NetworkStatsController] Status effect action rejected: {response.RejectionReason}");
                 OnModificationRejected?.Invoke(response.RejectionReason, "Status effect action");
             }
         }
-        
+
         /// <summary>
         /// [Client] Receive stat modifier response from server.
         /// </summary>
         public void ReceiveStatModifierResponse(NetworkStatModifierResponse response)
         {
             m_PendingModifierRequests.Remove(GetPendingKey(response.ActorNetworkId, response.CorrelationId, response.RequestId));
-            
+
             if (!response.Authorized && m_LogRejections)
             {
                 Debug.LogWarning($"[NetworkStatsController] Stat modifier action rejected: {response.RejectionReason}");
                 OnModificationRejected?.Invoke(response.RejectionReason, "Stat modifier action");
             }
         }
-        
+
         /// <summary>
         /// [Client] Receive clear status effects response from server.
         /// </summary>
         public void ReceiveClearStatusEffectsResponse(NetworkClearStatusEffectsResponse response)
         {
             m_PendingClearStatusEffects.Remove(GetPendingKey(response.ActorNetworkId, response.CorrelationId, response.RequestId));
-            
+
             if (!response.Authorized && m_LogRejections)
             {
                 Debug.LogWarning($"[NetworkStatsController] Clear status effects rejected: {response.RejectionReason}");
                 OnModificationRejected?.Invoke(response.RejectionReason, "Clear status effects");
             }
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // ALL CLIENTS: RECEIVE BROADCASTS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>
         /// [All] Receive stat change broadcast from server.
         /// </summary>
         public void ReceiveStatChangeBroadcast(NetworkStatChangeBroadcast broadcast)
         {
             if (m_IsServer) return; // Server already has authoritative state
-            
+
             var stat = GetRuntimeStatByHash(broadcast.StatHash);
             if (stat == null) return;
-            
+
             // Apply server state
             SetStatBaseSilently(stat, broadcast.NewBaseValue);
-            
+
             OnStatChanged?.Invoke(broadcast);
         }
-        
+
         /// <summary>
         /// [All] Receive attribute change broadcast from server.
         /// </summary>
         public void ReceiveAttributeChangeBroadcast(NetworkAttributeChangeBroadcast broadcast)
         {
             if (m_IsServer) return;
-            
+
             var attr = GetRuntimeAttributeByHash(broadcast.AttributeHash);
             if (attr == null) return;
-            
+
             // Apply server state
             SetAttributeValueSilently(attr, broadcast.NewValue);
-            
+
             OnAttributeChanged?.Invoke(broadcast);
         }
-        
+
         /// <summary>
         /// [All] Receive status effect change broadcast from server.
         /// </summary>
         public void ReceiveStatusEffectBroadcast(NetworkStatusEffectBroadcast broadcast)
         {
             if (m_IsServer) return;
-            
+
             // Sync status effect state
             OnStatusEffectChanged?.Invoke(broadcast);
         }
-        
+
         /// <summary>
         /// [All] Receive stat modifier change broadcast from server.
         /// </summary>
         public void ReceiveStatModifierBroadcast(NetworkStatModifierBroadcast broadcast)
         {
             if (m_IsServer) return;
-            
+
             var stat = GetRuntimeStatByHash(broadcast.StatHash);
             if (stat == null) return;
-            
+
             // Convert network modifier type to GC2 type
             var gc2ModType = broadcast.ModifierType == NetworkModifierType.Constant
                 ? ModifierType.Constant
                 : ModifierType.Percent;
-            
+
             // Apply modifier action
             switch (broadcast.Action)
             {
                 case ModifierAction.Add:
                     stat.AddModifier(gc2ModType, broadcast.Value);
                     break;
-                    
+
                 case ModifierAction.Remove:
                     stat.RemoveModifier(gc2ModType, broadcast.Value);
                     break;
-                    
+
                 case ModifierAction.Clear:
                     stat.ClearModifiers();
                     break;
             }
-            
+
             OnStatModifierChanged?.Invoke(broadcast);
         }
-        
+
         /// <summary>
         /// [All] Receive full state snapshot (initial sync or reconnect).
         /// </summary>
         public void ReceiveFullSnapshot(NetworkStatsSnapshot snapshot)
         {
             if (m_IsServer) return;
-            
+
             // Apply all stats
             if (snapshot.Stats != null)
             {
@@ -226,7 +226,7 @@ namespace Arawn.GameCreator2.Networking.Stats
                     SetStatBaseSilently(stat, statValue.BaseValue);
                 }
             }
-            
+
             // Apply all attributes
             if (snapshot.Attributes != null)
             {
@@ -236,17 +236,17 @@ namespace Arawn.GameCreator2.Networking.Stats
                     SetAttributeValueSilently(attr, attrValue.CurrentValue);
                 }
             }
-            
+
             if (m_LogAllChanges)
             {
                 Debug.Log($"[NetworkStatsController] Received full snapshot: {snapshot.Stats?.Length ?? 0} stats, {snapshot.Attributes?.Length ?? 0} attributes");
             }
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // SERVER-SIDE: BROADCASTING
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>
         /// [Server] Get full stats snapshot for initial sync.
         /// </summary>
@@ -255,7 +255,7 @@ namespace Arawn.GameCreator2.Networking.Stats
             var statValues = new List<NetworkStatValue>();
             var attrValues = new List<NetworkAttributeValue>();
             var statusValues = new List<NetworkStatusEffectValue>();
-            
+
             // Collect stats
             foreach (var statHash in EnumerateRuntimeStatHashes())
             {
@@ -270,7 +270,7 @@ namespace Arawn.GameCreator2.Networking.Stats
                     });
                 }
             }
-            
+
             // Collect attributes
             foreach (var attrHash in EnumerateRuntimeAttributeHashes())
             {
@@ -285,7 +285,7 @@ namespace Arawn.GameCreator2.Networking.Stats
                     });
                 }
             }
-            
+
             // Collect status effects
             foreach (var statusId in m_Traits.RuntimeStatusEffects.GetActiveList())
             {
@@ -300,7 +300,7 @@ namespace Arawn.GameCreator2.Networking.Stats
                     });
                 }
             }
-            
+
             return new NetworkStatsSnapshot
             {
                 NetworkId = NetworkId,
@@ -310,13 +310,13 @@ namespace Arawn.GameCreator2.Networking.Stats
                 StatusEffects = statusValues.ToArray()
             };
         }
-        
+
         private void BroadcastFullState()
         {
             var snapshot = GetFullSnapshot();
             NetworkStatsManager.Instance?.BroadcastFullSnapshot(snapshot);
         }
-        
+
         private void BroadcastDeltaState()
         {
             var changedStats = new List<NetworkStatValue>();
@@ -325,13 +325,13 @@ namespace Arawn.GameCreator2.Networking.Stats
             uint attrMask = 0;
             int statIndex = 0;
             int attrIndex = 0;
-            
+
             // Check for changed stats
             foreach (var statHash in EnumerateRuntimeStatHashes())
             {
                 var stat = GetRuntimeStatByHash(statHash);
                 if (stat == null) continue;
-                
+
                 float currentValue = (float)stat.Value;
                 if (!m_LastSyncedStatValues.TryGetValue(statHash, out float lastValue) ||
                     Math.Abs(currentValue - lastValue) > 0.001f)
@@ -342,19 +342,19 @@ namespace Arawn.GameCreator2.Networking.Stats
                         BaseValue = (float)stat.Base,
                         ComputedValue = currentValue
                     });
-                    
+
                     if (statIndex < 32) statMask |= (1u << statIndex);
                     m_LastSyncedStatValues[statHash] = currentValue;
                 }
                 statIndex++;
             }
-            
+
             // Check for changed attributes
             foreach (var attrHash in EnumerateRuntimeAttributeHashes())
             {
                 var attr = GetRuntimeAttributeByHash(attrHash);
                 if (attr == null) continue;
-                
+
                 float currentValue = (float)attr.Value;
                 bool hasChanged = !m_LastSyncedAttrValues.TryGetValue(attrHash, out float lastValue) ||
                     Math.Abs(currentValue - lastValue) > 0.001f;
@@ -367,14 +367,14 @@ namespace Arawn.GameCreator2.Networking.Stats
                         CurrentValue = currentValue,
                         MaxValue = (float)attr.MaxValue
                     });
-                    
+
                     if (attrIndex < 32) attrMask |= (1u << attrIndex);
                 }
 
                 m_LastSyncedAttrValues[attrHash] = currentValue;
                 attrIndex++;
             }
-            
+
             // Only broadcast if something changed
             if (changedStats.Count > 0 || changedAttrs.Count > 0)
             {
@@ -387,11 +387,11 @@ namespace Arawn.GameCreator2.Networking.Stats
                     ChangedStats = changedStats.ToArray(),
                     ChangedAttributes = changedAttrs.ToArray()
                 };
-                
+
                 NetworkStatsManager.Instance?.BroadcastDelta(delta);
             }
         }
-        
+
     }
 }
 #endif

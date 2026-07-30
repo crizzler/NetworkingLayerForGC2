@@ -15,7 +15,7 @@ This module provides:
 
 For PurrNet projects, enable **Stats** on the PurrNet wizard Modules page. The wizard creates/reuses `NetworkStatsManager` and `PurrNetStatsTransportBridge`.
 
-When a Player Prefab is assigned on the Scene page and prefab preparation is enabled, selecting Stats adds `NetworkStatsController` to that prefab. If Melee is also selected, the Core page can add the optional Melee -> Stats damage bridge so validated melee hits apply authoritative stat damage.
+When a Player Prefab is assigned on the Scene page and prefab preparation is enabled, selecting Stats adds `NetworkStatsController` to that prefab. If Melee or Shooter is also selected, the Core page can add the corresponding transport-agnostic damage bridge so validated combat hits modify authoritative health. These bridges handle damage only; the combat managers still apply target reactions independently.
 
 ## Architecture
 
@@ -89,21 +89,21 @@ Connect the manager's delegates to your networking solution:
 void SetupNetworkDelegates()
 {
     var manager = NetworkStatsManager.Instance;
-    
+
     // Client → Server
-    manager.OnSendStatModifyRequest = (request) => 
+    manager.OnSendStatModifyRequest = (request) =>
         SendStatModifyRequestToServer(request);
-    
+
     manager.OnSendAttributeModifyRequest = (request) =>
         SendAttributeModifyRequestToServer(request);
-    
+
     // Server → All Clients
     manager.OnBroadcastStatChange = (broadcast) =>
         BroadcastStatChangeToClients(broadcast);
-    
+
     manager.OnBroadcastAttributeChange = (broadcast) =>
         BroadcastAttributeChangeToClients(broadcast);
-    
+
     // Server → Single Client
     manager.OnSendStatModifyResponse = (networkId, response) =>
         SendStatModifyResponseToClient(networkId, response);
@@ -241,7 +241,7 @@ NetworkStatsManager.Instance.CustomStatValidator = (request, clientId) =>
     // Example: Prevent modifying "level" stat directly
     if (request.StatHash == new IdString("level").Hash)
         return (false, StatRejectionReason.NotAuthorized);
-    
+
     return (true, StatRejectionReason.None);
 };
 ```

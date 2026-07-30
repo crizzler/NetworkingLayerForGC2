@@ -11,15 +11,15 @@ namespace Arawn.GameCreator2.Networking.Inventory
     // ════════════════════════════════════════════════════════════════════════════════════════════
     // CLIENT-SIDE — Requests, response handlers, and local change detection
     // ════════════════════════════════════════════════════════════════════════════════════════════
-    
+
     public partial class NetworkInventoryController
     {
         // ════════════════════════════════════════════════════════════════════════════════════════
         // CLIENT-SIDE: REQUEST OPERATIONS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         #region Content Requests
-        
+
         /// <summary>
         /// Request to add an item type to the bag.
         /// </summary>
@@ -31,7 +31,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 Debug.LogWarning("[NetworkInventoryController] Cannot modify inventory on remote client");
                 return;
             }
-            
+
             var request = new NetworkContentAddRequest
             {
                 RequestId = GetNextRequestId(),
@@ -45,15 +45,15 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 Source = source,
                 SourceHash = sourceHash
             };
-            
+
             m_PendingAdds[GetPendingKey(request.ActorNetworkId, request.CorrelationId, request.RequestId)] = new PendingContentAdd
             {
                 Request = request,
                 SentTime = Time.time
             };
-            
+
             OnContentAddRequested?.Invoke(request);
-            
+
             if (m_IsServer)
             {
                 var response = ProcessContentAddRequest(request, NetworkId);
@@ -66,7 +66,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 NetworkInventoryManager.Instance?.SendContentAddRequest(request);
             }
         }
-        
+
         /// <summary>
         /// Request to add an existing RuntimeItem to the bag.
         /// </summary>
@@ -111,15 +111,15 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 Source = source,
                 SourceHash = sourceHash
             };
-            
+
             m_PendingAdds[GetPendingKey(request.ActorNetworkId, request.CorrelationId, request.RequestId)] = new PendingContentAdd
             {
                 Request = request,
                 SentTime = Time.time
             };
-            
+
             OnContentAddRequested?.Invoke(request);
-            
+
             if (m_IsServer)
             {
                 var response = ProcessContentAddRequest(request, NetworkId);
@@ -128,7 +128,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 ReceiveContentAddResponse(response);
             }
         }
-        
+
         /// <summary>
         /// Request to remove an item from the bag.
         /// </summary>
@@ -137,7 +137,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
         {
             if (m_IsRemoteClient) return;
             if (runtimeItem == null) return;
-            
+
             var request = new NetworkContentRemoveRequest
             {
                 RequestId = GetNextRequestId(),
@@ -148,16 +148,16 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 UsePosition = false,
                 Source = source
             };
-            
+
             m_PendingRemoves[GetPendingKey(request.ActorNetworkId, request.CorrelationId, request.RequestId)] = new PendingContentRemove
             {
                 Request = request,
                 RemovedItem = runtimeItem,
                 SentTime = Time.time
             };
-            
+
             OnContentRemoveRequested?.Invoke(request);
-            
+
             if (m_IsServer)
             {
                 var response = ProcessContentRemoveRequest(request, NetworkId);
@@ -170,7 +170,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 NetworkInventoryManager.Instance?.SendContentRemoveRequest(request);
             }
         }
-        
+
         /// <summary>
         /// Request to remove item at position.
         /// </summary>
@@ -178,7 +178,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
             InventoryModificationSource source = InventoryModificationSource.Direct)
         {
             if (m_IsRemoteClient) return;
-            
+
             var request = new NetworkContentRemoveRequest
             {
                 RequestId = GetNextRequestId(),
@@ -189,15 +189,15 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 UsePosition = true,
                 Source = source
             };
-            
+
             m_PendingRemoves[GetPendingKey(request.ActorNetworkId, request.CorrelationId, request.RequestId)] = new PendingContentRemove
             {
                 Request = request,
                 SentTime = Time.time
             };
-            
+
             OnContentRemoveRequested?.Invoke(request);
-            
+
             if (m_IsServer)
             {
                 var response = ProcessContentRemoveRequest(request, NetworkId);
@@ -210,14 +210,14 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 NetworkInventoryManager.Instance?.SendContentRemoveRequest(request);
             }
         }
-        
+
         /// <summary>
         /// Request to move item within bag.
         /// </summary>
         public void RequestMoveItem(Vector2Int fromPosition, Vector2Int toPosition, bool allowStack)
         {
             if (m_IsRemoteClient) return;
-            
+
             var request = new NetworkContentMoveRequest
             {
                 RequestId = GetNextRequestId(),
@@ -228,15 +228,15 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 ToPosition = toPosition,
                 AllowStack = allowStack
             };
-            
+
             m_PendingMoves[GetPendingKey(request.ActorNetworkId, request.CorrelationId, request.RequestId)] = new PendingContentMove
             {
                 Request = request,
                 SentTime = Time.time
             };
-            
+
             OnContentMoveRequested?.Invoke(request);
-            
+
             if (m_IsServer)
             {
                 var response = ProcessContentMoveRequest(request, NetworkId);
@@ -249,7 +249,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 NetworkInventoryManager.Instance?.SendContentMoveRequest(request);
             }
         }
-        
+
         /// <summary>
         /// Request to use an item.
         /// </summary>
@@ -257,7 +257,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
         {
             if (m_IsRemoteClient) return;
             if (runtimeItem == null) return;
-            
+
             var request = new NetworkContentUseRequest
             {
                 RequestId = GetNextRequestId(),
@@ -267,9 +267,9 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 RuntimeIdHash = runtimeItem.RuntimeID.Hash,
                 UsePosition = false
             };
-            
+
             OnContentUseRequested?.Invoke(request);
-            
+
             if (m_IsServer)
             {
                 var response = ProcessContentUseRequest(request, NetworkId);
@@ -282,7 +282,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 NetworkInventoryManager.Instance?.SendContentUseRequest(request);
             }
         }
-        
+
         /// <summary>
         /// Request to drop an item.
         /// </summary>
@@ -312,7 +312,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
             LogPickupDebug(
                 $"{name}: sending drop request req={request.RequestId} actor={actorNetworkId} targetBag={targetBagNetworkId} item={DescribeRuntimeItem(runtimeItem)} position={dropPosition} server={m_IsServer} local={m_IsLocalClient}",
                 this);
-            
+
             if (m_IsServer)
             {
                 var response = ProcessContentDropRequest(request, NetworkId);
@@ -325,11 +325,11 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 NetworkInventoryManager.Instance?.SendContentDropRequest(request);
             }
         }
-        
+
         #endregion
-        
+
         #region Equipment Requests
-        
+
         /// <summary>
         /// Request to equip an item.
         /// </summary>
@@ -337,7 +337,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
         {
             if (m_IsRemoteClient) return;
             if (runtimeItem == null) return;
-            
+
             var request = new NetworkEquipmentRequest
             {
                 RequestId = GetNextRequestId(),
@@ -348,15 +348,15 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 Action = slot >= 0 ? EquipmentAction.EquipToSlot : EquipmentAction.Equip,
                 SlotOrIndex = slot
             };
-            
+
             m_PendingEquipment[GetPendingKey(request.ActorNetworkId, request.CorrelationId, request.RequestId)] = new PendingEquipment
             {
                 Request = request,
                 SentTime = Time.time
             };
-            
+
             OnEquipmentRequested?.Invoke(request);
-            
+
             if (m_IsServer)
             {
                 _ = ProcessLocalEquipmentRequestAsync(request);
@@ -366,7 +366,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 NetworkInventoryManager.Instance?.SendEquipmentRequest(request);
             }
         }
-        
+
         /// <summary>
         /// Request to unequip an item.
         /// </summary>
@@ -374,7 +374,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
         {
             if (m_IsRemoteClient) return;
             if (runtimeItem == null) return;
-            
+
             var request = new NetworkEquipmentRequest
             {
                 RequestId = GetNextRequestId(),
@@ -385,15 +385,15 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 Action = EquipmentAction.Unequip,
                 SlotOrIndex = -1
             };
-            
+
             m_PendingEquipment[GetPendingKey(request.ActorNetworkId, request.CorrelationId, request.RequestId)] = new PendingEquipment
             {
                 Request = request,
                 SentTime = Time.time
             };
-            
+
             OnEquipmentRequested?.Invoke(request);
-            
+
             if (m_IsServer)
             {
                 _ = ProcessLocalEquipmentRequestAsync(request);
@@ -403,14 +403,14 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 NetworkInventoryManager.Instance?.SendEquipmentRequest(request);
             }
         }
-        
+
         /// <summary>
         /// Request to unequip from specific index.
         /// </summary>
         public void RequestUnequipFromIndex(int index)
         {
             if (m_IsRemoteClient) return;
-            
+
             var request = new NetworkEquipmentRequest
             {
                 RequestId = GetNextRequestId(),
@@ -421,15 +421,15 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 Action = EquipmentAction.UnequipFromIndex,
                 SlotOrIndex = index
             };
-            
+
             m_PendingEquipment[GetPendingKey(request.ActorNetworkId, request.CorrelationId, request.RequestId)] = new PendingEquipment
             {
                 Request = request,
                 SentTime = Time.time
             };
-            
+
             OnEquipmentRequested?.Invoke(request);
-            
+
             if (m_IsServer)
             {
                 _ = ProcessLocalEquipmentRequestAsync(request);
@@ -439,11 +439,11 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 NetworkInventoryManager.Instance?.SendEquipmentRequest(request);
             }
         }
-        
+
         #endregion
-        
+
         #region Socket Requests
-        
+
         /// <summary>
         /// Request to attach item to socket.
         /// </summary>
@@ -451,7 +451,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
         {
             if (m_IsRemoteClient) return;
             if (parent == null || attachment == null) return;
-            
+
             var request = new NetworkSocketRequest
             {
                 RequestId = GetNextRequestId(),
@@ -464,9 +464,9 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 SocketIdString = socketId.String,
                 Action = socketId.Hash != 0 ? SocketAction.AttachToSocket : SocketAction.Attach
             };
-            
+
             OnSocketRequested?.Invoke(request);
-            
+
             if (m_IsServer)
             {
                 var response = ProcessSocketRequest(request, NetworkId);
@@ -479,7 +479,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 NetworkInventoryManager.Instance?.SendSocketRequest(request);
             }
         }
-        
+
         /// <summary>
         /// Request to detach from socket.
         /// </summary>
@@ -487,7 +487,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
         {
             if (m_IsRemoteClient) return;
             if (parent == null) return;
-            
+
             var request = new NetworkSocketRequest
             {
                 RequestId = GetNextRequestId(),
@@ -499,9 +499,9 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 SocketIdString = socketId.String,
                 Action = SocketAction.DetachFromSocket
             };
-            
+
             OnSocketRequested?.Invoke(request);
-            
+
             if (m_IsServer)
             {
                 var response = ProcessSocketRequest(request, NetworkId);
@@ -548,11 +548,11 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 NetworkInventoryManager.Instance?.SendSocketRequest(request);
             }
         }
-        
+
         #endregion
-        
+
         #region Wealth Requests
-        
+
         /// <summary>
         /// Request to modify wealth.
         /// </summary>
@@ -561,7 +561,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
         {
             if (m_IsRemoteClient) return;
             if (currency == null) return;
-            
+
             var request = new NetworkWealthRequest
             {
                 RequestId = GetNextRequestId(),
@@ -575,18 +575,18 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 Source = source,
                 SourceHash = sourceHash
             };
-            
+
             int originalValue = m_Bag.Wealth.Get(currency);
-            
+
             m_PendingWealth[GetPendingKey(request.ActorNetworkId, request.CorrelationId, request.RequestId)] = new PendingWealth
             {
                 Request = request,
                 OriginalValue = originalValue,
                 SentTime = Time.time
             };
-            
+
             OnWealthRequested?.Invoke(request);
-            
+
             if (m_IsServer)
             {
                 var response = ProcessWealthRequest(request, NetworkId);
@@ -599,23 +599,24 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 NetworkInventoryManager.Instance?.SendWealthRequest(request);
             }
         }
-        
+
         #endregion
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // CLIENT-SIDE: RECEIVE RESPONSES
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         #region Client Response Handlers
-        
+
         public void ReceiveContentAddResponse(NetworkContentAddResponse response)
         {
             ulong key = GetPendingKey(response.ActorNetworkId, response.CorrelationId, response.RequestId);
+            CompleteAsyncAdd(response);
             if (!m_PendingAdds.TryGetValue(key, out var pending))
                 return;
-            
+
             m_PendingAdds.Remove(key);
-            
+
             if (!response.Authorized)
             {
                 if (m_LogRejections)
@@ -623,15 +624,15 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 OnOperationRejected?.Invoke(response.RejectionReason, "Add item");
             }
         }
-        
+
         public void ReceiveContentRemoveResponse(NetworkContentRemoveResponse response)
         {
             ulong key = GetPendingKey(response.ActorNetworkId, response.CorrelationId, response.RequestId);
             if (!m_PendingRemoves.TryGetValue(key, out var pending))
                 return;
-            
+
             m_PendingRemoves.Remove(key);
-            
+
             if (!response.Authorized)
             {
                 if (m_LogRejections)
@@ -639,15 +640,15 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 OnOperationRejected?.Invoke(response.RejectionReason, "Remove item");
             }
         }
-        
+
         public void ReceiveContentMoveResponse(NetworkContentMoveResponse response)
         {
             ulong key = GetPendingKey(response.ActorNetworkId, response.CorrelationId, response.RequestId);
             if (!m_PendingMoves.TryGetValue(key, out var pending))
                 return;
-            
+
             m_PendingMoves.Remove(key);
-            
+
             if (!response.Authorized)
             {
                 if (m_LogRejections)
@@ -655,7 +656,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 OnOperationRejected?.Invoke(response.RejectionReason, "Move item");
             }
         }
-        
+
         public void ReceiveContentUseResponse(NetworkContentUseResponse response)
         {
             if (!response.Authorized)
@@ -665,7 +666,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 OnOperationRejected?.Invoke(response.RejectionReason, "Use item");
             }
         }
-        
+
         public void ReceiveContentDropResponse(NetworkContentDropResponse response)
         {
             if (!response.Authorized)
@@ -675,15 +676,15 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 OnOperationRejected?.Invoke(response.RejectionReason, "Drop item");
             }
         }
-        
+
         public void ReceiveEquipmentResponse(NetworkEquipmentResponse response)
         {
             ulong key = GetPendingKey(response.ActorNetworkId, response.CorrelationId, response.RequestId);
             if (!m_PendingEquipment.TryGetValue(key, out var pending))
                 return;
-            
+
             m_PendingEquipment.Remove(key);
-            
+
             if (!response.Authorized)
             {
                 if (m_LogRejections)
@@ -691,7 +692,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 OnOperationRejected?.Invoke(response.RejectionReason, "Equipment operation");
             }
         }
-        
+
         public void ReceiveSocketResponse(NetworkSocketResponse response)
         {
             if (!response.Authorized)
@@ -701,15 +702,15 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 OnOperationRejected?.Invoke(response.RejectionReason, "Socket operation");
             }
         }
-        
+
         public void ReceiveWealthResponse(NetworkWealthResponse response)
         {
             ulong key = GetPendingKey(response.ActorNetworkId, response.CorrelationId, response.RequestId);
             if (!m_PendingWealth.TryGetValue(key, out var pending))
                 return;
-            
+
             m_PendingWealth.Remove(key);
-            
+
             if (!response.Authorized)
             {
                 if (m_LogRejections)
@@ -717,13 +718,13 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 OnOperationRejected?.Invoke(response.RejectionReason, "Wealth operation");
             }
         }
-        
+
         #endregion
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // LOCAL CHANGE DETECTION
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         private void OnLocalItemAdded(RuntimeItem item)
         {
             if (item != null)
@@ -738,7 +739,10 @@ namespace Arawn.GameCreator2.Networking.Inventory
 
             if (m_IsServer && !m_IsApplyingNetworkState && item != null)
             {
-                BroadcastServerPickupFromDroppedItemIfNeeded(item);
+                if (!BroadcastServerPickupFromDroppedItemIfNeeded(item))
+                {
+                    BroadcastServerDirectAdd(item);
+                }
             }
             else if (!m_IsServer && !m_IsApplyingNetworkState)
             {
@@ -751,9 +755,17 @@ namespace Arawn.GameCreator2.Networking.Inventory
             if (m_LogAllChanges && !m_IsServer)
                 Debug.Log($"[NetworkInventoryController] Local item added: {item?.ItemID.String}");
         }
-        
+
         private void OnLocalItemRemoved(RuntimeItem item)
         {
+            bool suppressServerSocketRemove = item != null &&
+                m_ServerSocketDirectRemoveSuppression.Remove(item.RuntimeID.Hash);
+            PendingServerSocketAttach pendingSocketAttach = default;
+            bool hasPendingSocketAttach = suppressServerSocketRemove &&
+                m_PendingServerSocketAttachBroadcasts.Remove(
+                    item.RuntimeID.Hash,
+                    out pendingSocketAttach);
+
             if (item != null)
             {
                 if (ContainsRuntimeItemRecursive(item.RuntimeID.Hash))
@@ -766,15 +778,30 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 }
             }
 
-            if (!m_IsApplyingNetworkState)
+            if (!m_IsApplyingNetworkState && !suppressServerSocketRemove)
             {
                 RememberLocalRemoval(this, item);
+                if (m_IsServer && item != null)
+                {
+                    BroadcastServerDirectRemove(item);
+                }
+            }
+
+            if (hasPendingSocketAttach)
+            {
+                // BagEquipment raises its socket event before removing the attachment from the
+                // bag. Publish only now, after the composite operation reached its final state,
+                // so the revision fingerprint cannot describe an intermediate state.
+                BroadcastServerSocketAttach(
+                    pendingSocketAttach.Parent,
+                    item,
+                    pendingSocketAttach.SocketId);
             }
 
             if (m_LogAllChanges && !m_IsServer)
                 Debug.Log($"[NetworkInventoryController] Local item removed: {item?.ItemID.String}");
         }
-        
+
         private void OnLocalItemUsed(RuntimeItem item)
         {
             if (!m_IsServer && !m_IsApplyingNetworkState && item != null && m_IsLocalClient)
@@ -785,7 +812,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
             if (m_LogAllChanges && !m_IsServer)
                 Debug.Log($"[NetworkInventoryController] Local item used: {item?.ItemID.String}");
         }
-        
+
         private void OnLocalItemEquipped(RuntimeItem item, int index)
         {
             if (!m_IsServer && !m_IsApplyingNetworkState && item != null && m_IsLocalClient)
@@ -796,7 +823,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
             if (m_LogAllChanges && !m_IsServer)
                 Debug.Log($"[NetworkInventoryController] Local item equipped: {item?.ItemID.String} at {index}");
         }
-        
+
         private void OnLocalItemUnequipped(RuntimeItem item, int index)
         {
             if (!m_IsServer && !m_IsApplyingNetworkState && m_IsLocalClient)
@@ -807,7 +834,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
             if (m_LogAllChanges && !m_IsServer)
                 Debug.Log($"[NetworkInventoryController] Local item unequipped: {item?.ItemID.String} from {index}");
         }
-        
+
         private void OnLocalWealthChanged(IdString currencyId, int oldValue, int newValue)
         {
             if (m_LogAllChanges && !m_IsServer)
@@ -1301,11 +1328,16 @@ namespace Arawn.GameCreator2.Networking.Inventory
 
             if (controller.m_IsServer)
             {
-                controller.BroadcastServerSocketAttach(parent, attachment, socketId);
+                // BagEquipment removes the attachment immediately after raising this event. The
+                // matching remove callback publishes one final-state socket broadcast.
+                controller.m_ServerSocketDirectRemoveSuppression.Add(attachment.RuntimeID.Hash);
+                controller.m_PendingServerSocketAttachBroadcasts[attachment.RuntimeID.Hash] =
+                    new PendingServerSocketAttach(parent, socketId);
                 return;
             }
 
             if (!controller.m_IsLocalClient) return;
+            controller.m_SocketAttachPrimitiveRemovePassthrough.Add(attachment.RuntimeID.Hash);
             controller.RequestAttachToSocket(parent, attachment, socketId);
         }
 

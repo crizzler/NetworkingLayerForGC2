@@ -1,0 +1,35 @@
+{
+    "name": "Arawn.GameCreator2.Networking.Stats.Shooter",
+    "rootNamespace": "Arawn.GameCreator2.Networking.Stats.Shooter",
+    "references": [
+        "Arawn.GameCreator2.Networking",
+        "Arawn.GameCreator2.Networking.Stats",
+        "Arawn.GameCreator2.Networking.Shooter",
+        "GameCreator.Runtime.Core",
+        "GameCreator.Runtime.Stats",
+        "GameCreator.Runtime.Shooter"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [
+        "GC2_STATS",
+        "GC2_SHOOTER"
+    ],
+    "versionDefines": [
+        {
+            "name": "com.gamecreator.stats",
+            "expression": "",
+            "define": "GC2_STATS"
+        },
+        {
+            "name": "com.gamecreator.shooter",
+            "expression": "",
+            "define": "GC2_SHOOTER"
+        }
+    ],
+    "noEngineReferences": false
+}

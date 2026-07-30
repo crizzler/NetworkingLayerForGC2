@@ -11,7 +11,7 @@ namespace Arawn.NetworkingCore.LagCompensation
     public static class HitValidationUtility
     {
         // RAYCAST VALIDATION ─────────────────────────────────────────────────
-        
+
         /// <summary>
         /// Perform a lag-compensated raycast against all tracked entities.
         /// </summary>
@@ -33,39 +33,39 @@ namespace Arawn.NetworkingCore.LagCompensation
             var manager = LagCompensationManager.Instance;
             var entityIds = manager.GetAllEntityIds();
             var validHits = new List<HitValidationResult>();
-            
+
             HashSet<uint> excludeSet = null;
             if (excludeNetworkIds != null && excludeNetworkIds.Length > 0)
             {
                 excludeSet = new HashSet<uint>(excludeNetworkIds);
             }
-            
+
             Ray ray = new Ray(origin, direction);
-            
+
             foreach (var entityId in entityIds)
             {
                 if (excludeSet != null && excludeSet.Contains(entityId))
                     continue;
-                
+
                 var result = manager.ValidateRaycastHit(
                     entityId, origin, direction, maxDistance, clientTimestamp
                 );
-                
+
                 if (result.isValid)
                 {
                     validHits.Add(result);
                 }
             }
-            
+
             // Sort by distance
-            validHits.Sort((a, b) => 
+            validHits.Sort((a, b) =>
                 Vector3.Distance(origin, a.hitPoint).CompareTo(
                 Vector3.Distance(origin, b.hitPoint)));
-            
+
             hits = validHits.ToArray();
             return hits.Length;
         }
-        
+
         /// <summary>
         /// Perform a lag-compensated raycast and return the closest hit.
         /// </summary>
@@ -77,21 +77,21 @@ namespace Arawn.NetworkingCore.LagCompensation
             out HitValidationResult hit,
             uint[] excludeNetworkIds = null)
         {
-            int count = RaycastAll(origin, direction, maxDistance, clientTimestamp, 
+            int count = RaycastAll(origin, direction, maxDistance, clientTimestamp,
                 out var hits, excludeNetworkIds);
-            
+
             if (count > 0)
             {
                 hit = hits[0];
                 return true;
             }
-            
+
             hit = default;
             return false;
         }
-        
+
         // SPHERE OVERLAP VALIDATION ──────────────────────────────────────────
-        
+
         /// <summary>
         /// Perform a lag-compensated sphere overlap against all tracked entities.
         /// </summary>
@@ -105,32 +105,32 @@ namespace Arawn.NetworkingCore.LagCompensation
             var manager = LagCompensationManager.Instance;
             var entityIds = manager.GetAllEntityIds();
             var validHits = new List<HitValidationResult>();
-            
+
             HashSet<uint> excludeSet = null;
             if (excludeNetworkIds != null && excludeNetworkIds.Length > 0)
             {
                 excludeSet = new HashSet<uint>(excludeNetworkIds);
             }
-            
+
             foreach (var entityId in entityIds)
             {
                 if (excludeSet != null && excludeSet.Contains(entityId))
                     continue;
-                
+
                 var result = manager.ValidateSphereHit(
                     entityId, center, radius, clientTimestamp
                 );
-                
+
                 if (result.isValid)
                 {
                     validHits.Add(result);
                 }
             }
-            
+
             hits = validHits.ToArray();
             return hits.Length;
         }
-        
+
         /// <summary>
         /// Check if any entity is within a sphere at a historical timestamp.
         /// </summary>
@@ -143,19 +143,19 @@ namespace Arawn.NetworkingCore.LagCompensation
         {
             int count = OverlapSphereAll(center, radius, clientTimestamp,
                 out var hits, excludeNetworkIds);
-            
+
             if (count > 0)
             {
                 hit = hits[0];
                 return true;
             }
-            
+
             hit = default;
             return false;
         }
-        
+
         // BOX OVERLAP VALIDATION ─────────────────────────────────────────────
-        
+
         /// <summary>
         /// Perform a lag-compensated box overlap against all tracked entities.
         /// </summary>
@@ -170,31 +170,31 @@ namespace Arawn.NetworkingCore.LagCompensation
             var manager = LagCompensationManager.Instance;
             var entityIds = manager.GetAllEntityIds();
             var validHits = new List<HitValidationResult>();
-            
+
             HashSet<uint> excludeSet = null;
             if (excludeNetworkIds != null && excludeNetworkIds.Length > 0)
             {
                 excludeSet = new HashSet<uint>(excludeNetworkIds);
             }
-            
+
             Bounds queryBounds = new Bounds(center, halfExtents * 2f);
             float tolerance = manager.Config.hitTolerance;
-            
+
             foreach (var entityId in entityIds)
             {
                 if (excludeSet != null && excludeSet.Contains(entityId))
                     continue;
-                
+
                 if (!manager.TryGetStateAtTime(entityId, clientTimestamp, out var snapshot))
                     continue;
-                
+
                 if (!snapshot.isActive)
                     continue;
-                
+
                 // Expand entity bounds by tolerance
                 Bounds expandedEntityBounds = snapshot.bounds;
                 expandedEntityBounds.Expand(tolerance * 2f);
-                
+
                 // Check intersection
                 if (queryBounds.Intersects(expandedEntityBounds))
                 {
@@ -212,13 +212,13 @@ namespace Arawn.NetworkingCore.LagCompensation
                     });
                 }
             }
-            
+
             hits = validHits.ToArray();
             return hits.Length;
         }
-        
+
         // CONE VALIDATION (for shotgun spread, etc.) ─────────────────────────
-        
+
         /// <summary>
         /// Perform a lag-compensated cone overlap against all tracked entities.
         /// </summary>
@@ -241,43 +241,43 @@ namespace Arawn.NetworkingCore.LagCompensation
             var manager = LagCompensationManager.Instance;
             var entityIds = manager.GetAllEntityIds();
             var validHits = new List<HitValidationResult>();
-            
+
             HashSet<uint> excludeSet = null;
             if (excludeNetworkIds != null && excludeNetworkIds.Length > 0)
             {
                 excludeSet = new HashSet<uint>(excludeNetworkIds);
             }
-            
+
             direction = direction.normalized;
             float cosHalfAngle = Mathf.Cos(halfAngle * Mathf.Deg2Rad);
             float tolerance = manager.Config.hitTolerance;
-            
+
             foreach (var entityId in entityIds)
             {
                 if (excludeSet != null && excludeSet.Contains(entityId))
                     continue;
-                
+
                 if (!manager.TryGetStateAtTime(entityId, clientTimestamp, out var snapshot))
                     continue;
-                
+
                 if (!snapshot.isActive)
                     continue;
-                
+
                 // Check if any corner of bounds is within cone
                 Vector3 toTarget = snapshot.bounds.center - origin;
                 float distanceToTarget = toTarget.magnitude;
-                
+
                 if (distanceToTarget > maxDistance + tolerance)
                     continue;
-                
+
                 // Check angle to bounds center
                 float cosAngle = Vector3.Dot(toTarget.normalized, direction);
-                
+
                 // Account for bounds size when checking angle
                 float boundsRadius = snapshot.bounds.extents.magnitude;
                 float angleMargin = Mathf.Atan2(boundsRadius + tolerance, distanceToTarget);
                 float adjustedCosHalfAngle = Mathf.Cos(halfAngle * Mathf.Deg2Rad + angleMargin);
-                
+
                 if (cosAngle >= adjustedCosHalfAngle)
                 {
                     validHits.Add(new HitValidationResult
@@ -294,16 +294,16 @@ namespace Arawn.NetworkingCore.LagCompensation
                     });
                 }
             }
-            
+
             // Sort by distance
             validHits.Sort((a, b) => a.distanceFromBounds.CompareTo(b.distanceFromBounds));
-            
+
             hits = validHits.ToArray();
             return hits.Length;
         }
-        
+
         // HITSCAN VALIDATION (instant hit) ───────────────────────────────────
-        
+
         /// <summary>
         /// Validate a hitscan weapon hit (instant, like a bullet).
         /// Combines raycast with position validation.
@@ -317,32 +317,32 @@ namespace Arawn.NetworkingCore.LagCompensation
             float maxRange = 1000f)
         {
             var manager = LagCompensationManager.Instance;
-            
+
             // First validate that target was where client claims
             var pointResult = manager.ValidateHit(
                 targetNetworkId, reportedHitPoint, clientTimestamp
             );
-            
+
             if (!pointResult.isValid)
                 return pointResult;
-            
+
             // Then validate that a ray from shooter could hit that point
             var rayResult = manager.ValidateRaycastHit(
                 targetNetworkId, shooterPosition, aimDirection, maxRange, clientTimestamp
             );
-            
+
             // Combine results
             if (rayResult.isValid)
             {
                 // Use the more accurate of the two hit points
                 pointResult.hitPoint = rayResult.hitPoint;
             }
-            
+
             return pointResult;
         }
-        
+
         // PROJECTILE VALIDATION ──────────────────────────────────────────────
-        
+
         /// <summary>
         /// Validate a projectile hit (accounts for travel time).
         /// </summary>
@@ -361,18 +361,18 @@ namespace Arawn.NetworkingCore.LagCompensation
             // Calculate when projectile would have arrived
             float distance = Vector3.Distance(projectileOrigin, hitPoint);
             float travelTime = distance / projectileSpeed;
-            
+
             // Adjust timestamp to impact time
             NetworkTimestamp impactTimestamp = fireTimestamp.Offset(travelTime);
-            
+
             // Validate against position at impact time
             return LagCompensationManager.Instance.ValidateHit(
                 targetNetworkId, hitPoint, impactTimestamp
             );
         }
-        
+
         // MELEE VALIDATION ───────────────────────────────────────────────────
-        
+
         /// <summary>
         /// Validate a melee hit (short range, often arc-based).
         /// </summary>
@@ -396,23 +396,23 @@ namespace Arawn.NetworkingCore.LagCompensation
                 excludeNetworkIds
             );
         }
-        
+
         // UTILITY METHODS ────────────────────────────────────────────────────
-        
+
         /// <summary>
         /// Calculate the client timestamp from RTT and local time.
         /// </summary>
         public static NetworkTimestamp CalculateClientTimestamp(
-            float localTime, 
+            float localTime,
             RTTTracker rttTracker,
             double serverTime)
         {
             // Client's perceived time = server time - one-way latency
             double clientPerceivedTime = serverTime - rttTracker.OneWayLatency;
-            
+
             return NetworkTimestamp.FromServerTime(clientPerceivedTime);
         }
-        
+
         /// <summary>
         /// Get the maximum allowed rewind time based on client's RTT.
         /// </summary>

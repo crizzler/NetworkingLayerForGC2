@@ -16,34 +16,34 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
         // ════════════════════════════════════════════════════════════════════════════════════════
         // CONSTANTS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         protected const string PATCH_MARKER_PREFIX = "// [GC2_NETWORK_PATCH_";
         protected const string BACKUP_BASE_FOLDER = "../Library/GameCreator2NetworkingLayer/Patches/Backups";
         protected const string LEGACY_BACKUP_BASE_FOLDER = "Plugins/EnemyMasses/Editor/GameCreator2/Patches/Backups";
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // ABSTRACT MEMBERS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>Module name (e.g., "Core", "Stats", "Inventory").</summary>
         public abstract string ModuleName { get; }
-        
+
         /// <summary>Patch version string.</summary>
         public abstract string PatchVersion { get; }
-        
+
         /// <summary>Relative path from Assets folder to the main file to patch.</summary>
         protected abstract string[] FilesToPatch { get; }
-        
+
         /// <summary>Display name for menu and dialogs.</summary>
         public abstract string DisplayName { get; }
-        
+
         /// <summary>Description of what the patch does.</summary>
         public abstract string PatchDescription { get; }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // PROPERTIES
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         private string PatchVersionToken => BuildPatchVersionToken(PatchVersion);
         protected string PatchMarker => $"{PATCH_MARKER_PREFIX}{ModuleName}_{PatchVersionToken}]";
         protected string LegacyPatchMarker => $"{PATCH_MARKER_PREFIX}{ModuleName}_v1]";
@@ -201,29 +201,29 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
 
             Debug.LogWarning(
                 $"[GC2 Networking] {relativePath} contains stale/legacy patch markers. " +
-                "Attempting in-place migration cleanup before patching.");
+                "Restoring its pristine backup before applying the current patch.");
 
-            if (!TryStripLegacyPatchArtifacts(ref content, out string failureReason))
+            if (!TryReadPristineBackup(relativePath, out string pristineContent, out string backupPath))
             {
                 Debug.LogError(
-                    $"[GC2 Networking] Could not migrate stale patch content in {relativePath}: {failureReason}");
+                    $"[GC2 Networking] Cannot safely migrate stale patch content in {relativePath}: " +
+                    "no pristine pre-patch backup is available. Restore the original GC2 optional-package " +
+                    "source (or reinstall/update that package), then apply the Networking Layer patch again. " +
+                    "The patched source was left unchanged.");
                 return ExistingPatchState.Failed;
             }
 
-            if (ContainsPatchMarker(content))
-            {
-                Debug.LogError(
-                    $"[GC2 Networking] Migration cleanup for {relativePath} left patch markers behind.");
-                return ExistingPatchState.Failed;
-            }
+            content = pristineContent;
+            Debug.Log(
+                $"[GC2 Networking] Migrating {relativePath} from pristine backup '{backupPath}'.");
 
             return ExistingPatchState.Continue;
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // PUBLIC API
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>
         /// Check if the module files exist.
         /// </summary>
@@ -284,7 +284,7 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
 
             return true;
         }
-        
+
         /// <summary>
         /// Check if the module is already patched.
         /// </summary>
@@ -316,7 +316,7 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
 
             return hasRequiredPatchedFile;
         }
-        
+
         /// <summary>
         /// Check if backups exist.
         /// </summary>
@@ -332,7 +332,7 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
 
             return false;
         }
-        
+
         /// <summary>
         /// Apply the patch.
         /// </summary>
@@ -354,8 +354,11 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                     0f);
 
                 // Create backups first
-                CreateBackups();
-                
+                if (!CreateBackups())
+                {
+                    return false;
+                }
+
                 // Apply patches to each file
                 for (int i = 0; i < FilesToPatch.Length; i++)
                 {
@@ -386,20 +389,20 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                         return false;
                     }
                 }
-                
+
                 // Save patch info
                 SavePatchInfo();
-                
+
                 Debug.Log($"[GC2 Networking] {ModuleName} patch applied successfully.");
                 return true;
             }
             catch (Exception e)
             {
                 Debug.LogError($"[GC2 Networking] Failed to patch {ModuleName}: {e}");
-                
+
                 // Try to rollback
                 try { RestoreFromBackups(); } catch { }
-                
+
                 return false;
             }
             finally
@@ -408,6 +411,12 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                 {
                     AssetDatabase.StopAssetEditing();
                 }
+
+                // Patch-dependent assemblies must see their matching source ABI and scripting
+                // define in the same reload. In particular, restoring pristine Inventory source
+                // removes types injected by InventoryPatcher, so its assemblies must be excluded
+                // before Unity recompiles.
+                Arawn.GameCreator2.Networking.Editor.GC2NetworkingDefineSymbols.RefreshNow(false);
 
                 if (reloadAssembliesLocked)
                 {
@@ -418,7 +427,7 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                 AssetDatabase.Refresh();
             }
         }
-        
+
         /// <summary>
         /// Remove the patch and restore original files.
         /// </summary>
@@ -453,6 +462,8 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                     AssetDatabase.StopAssetEditing();
                 }
 
+                Arawn.GameCreator2.Networking.Editor.GC2NetworkingDefineSymbols.RefreshNow(false);
+
                 if (reloadAssembliesLocked)
                 {
                     EditorApplication.UnlockReloadAssemblies();
@@ -462,7 +473,7 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                 AssetDatabase.Refresh();
             }
         }
-        
+
         /// <summary>
         /// Get patch status information.
         /// </summary>
@@ -478,11 +489,11 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                 PatchVersion = PatchVersion
             };
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // ABSTRACT PATCH IMPLEMENTATION
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>
         /// Apply patch to a specific file. Override to implement patching logic.
         /// </summary>
@@ -666,8 +677,22 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
 
             var pattern = new System.Text.StringBuilder(snippet.Length * 2);
             bool previousWasWhitespace = false;
+            int index = 0;
 
-            for (int i = 0; i < snippet.Length; i++)
+            // Most patch anchors begin with source indentation. Treat that indentation as
+            // horizontal whitespace only; using \s+ here is allowed to consume the newline
+            // before the anchor and can concatenate a replacement onto the preceding comment.
+            while (index < snippet.Length && (snippet[index] == ' ' || snippet[index] == '\t'))
+            {
+                index++;
+            }
+
+            if (index > 0)
+            {
+                pattern.Append(@"[ \t]+");
+            }
+
+            for (int i = index; i < snippet.Length; i++)
             {
                 char character = snippet[i];
                 if (char.IsWhiteSpace(character))
@@ -1309,23 +1334,68 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
 
             return false;
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // BACKUP MANAGEMENT
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
-        protected void CreateBackups()
+
+        protected bool CreateBackups()
         {
             string backupFolder = Path.Combine(Application.dataPath, BackupFolder);
             Directory.CreateDirectory(backupFolder);
-            
+
+            // Validate every patched input before writing anything. A previous patch version may
+            // have replacement-style sections that cannot be reconstructed by deleting markers.
+            // Never overwrite the only pristine source with an already patched file.
+            foreach (string relativePath in FilesToPatch)
+            {
+                string fullPath = Path.Combine(Application.dataPath, relativePath);
+                if (!File.Exists(fullPath)) continue;
+
+                string source = NormalizeLineEndings(File.ReadAllText(fullPath));
+                if (!ContainsAnyPatchMarker(source)) continue;
+                if (TryReadPristineBackup(relativePath, out _, out _)) continue;
+
+                Debug.LogError(
+                    $"[GC2 Networking] Cannot safely patch {relativePath}: it already contains a " +
+                    "Networking Layer patch, but no pristine backup exists. Restore or reinstall the " +
+                    "original GC2 source first. Existing source and backups were not modified.");
+                return false;
+            }
+
             foreach (var relativePath in FilesToPatch)
             {
                 string fullPath = Path.Combine(Application.dataPath, relativePath);
                 string backupPath = GetNestedBackupPath(backupFolder, relativePath);
-                
+
                 if (File.Exists(fullPath))
                 {
+                    string source = NormalizeLineEndings(File.ReadAllText(fullPath));
+                    if (ContainsAnyPatchMarker(source))
+                    {
+                        TryReadPristineBackup(
+                            relativePath,
+                            out _,
+                            out string pristineBackupPath);
+                        if (!string.Equals(
+                                pristineBackupPath,
+                                backupPath,
+                                StringComparison.OrdinalIgnoreCase))
+                        {
+                            string pristineDirectory = Path.GetDirectoryName(backupPath);
+                            if (!string.IsNullOrEmpty(pristineDirectory))
+                            {
+                                Directory.CreateDirectory(pristineDirectory);
+                            }
+
+                            File.Copy(pristineBackupPath, backupPath, overwrite: true);
+                        }
+
+                        Debug.Log(
+                            $"[GC2 Networking] Preserved pristine backup for already patched {relativePath}");
+                        continue;
+                    }
+
                     string directory = Path.GetDirectoryName(backupPath);
                     if (!string.IsNullOrEmpty(directory))
                     {
@@ -1336,15 +1406,48 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                     Debug.Log($"[GC2 Networking] Backed up {relativePath}");
                 }
             }
+
+            return true;
         }
-        
+
+        private bool TryReadPristineBackup(
+            string relativePath,
+            out string pristineContent,
+            out string resolvedPath)
+        {
+            foreach (string backupFolder in EnumerateBackupFoldersForRestore())
+            {
+                foreach (string candidatePath in EnumerateBackupPathCandidates(backupFolder, relativePath))
+                {
+                    if (!File.Exists(candidatePath)) continue;
+
+                    string candidate = NormalizeLineEndings(File.ReadAllText(candidatePath));
+                    if (ContainsAnyPatchMarker(candidate)) continue;
+
+                    pristineContent = candidate;
+                    resolvedPath = candidatePath;
+                    return true;
+                }
+            }
+
+            pristineContent = null;
+            resolvedPath = null;
+            return false;
+        }
+
+        private static bool ContainsAnyPatchMarker(string content)
+        {
+            return !string.IsNullOrEmpty(content) &&
+                   content.Contains(PATCH_MARKER_PREFIX, StringComparison.Ordinal);
+        }
+
         protected bool RestoreFromBackups()
         {
             string backupFolder = ResolveRestoreBackupFolder();
             if (string.IsNullOrEmpty(backupFolder)) return false;
-            
+
             bool anyRestored = false;
-            
+
             string primaryBackupFolder = Path.Combine(Application.dataPath, BackupFolder);
             if (!string.Equals(backupFolder, primaryBackupFolder, StringComparison.OrdinalIgnoreCase))
             {
@@ -1369,7 +1472,7 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                     anyRestored = true;
                 }
             }
-            
+
             return anyRestored;
         }
 
@@ -1446,12 +1549,12 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
 
             return null;
         }
-        
+
         protected void SavePatchInfo()
         {
             string backupFolder = Path.Combine(Application.dataPath, BackupFolder);
             Directory.CreateDirectory(backupFolder);
-            
+
             string patchInfoPath = Path.Combine(backupFolder, "patch_info.txt");
             File.WriteAllText(patchInfoPath,
                 $"Module: {ModuleName}\n" +
@@ -1461,7 +1564,7 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                 $"Patch Date: {DateTime.Now:yyyy-MM-dd HH:mm:ss}\n" +
                 $"Unity Version: {Application.unityVersion}\n");
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // HELPER METHODS
         // ════════════════════════════════════════════════════════════════════════════════════════
@@ -1914,13 +2017,13 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
             string content = NormalizeLineEndings(File.ReadAllText(fullPath));
             return VerifyPatchedFile(relativePath, content, out failureReason);
         }
-        
+
         protected void WriteFile(string relativePath, string content)
         {
             string fullPath = Path.Combine(Application.dataPath, relativePath);
             File.WriteAllText(fullPath, content);
         }
-        
+
         /// <summary>
         /// Normalizes line endings to Unix style (LF) and removes BOM.
         /// This ensures pattern matching works regardless of file encoding.
@@ -1932,11 +2035,11 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
             {
                 content = content.Substring(1);
             }
-            
+
             // Normalize CRLF to LF
             return content.Replace("\r\n", "\n").Replace("\r", "\n");
         }
-        
+
         /// <summary>
         /// Add the patch marker comment to content.
         /// </summary>
@@ -1944,11 +2047,11 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
         {
             int insertIndex = content.IndexOf(insertAfterPattern);
             if (insertIndex < 0) return content;
-            
+
             insertIndex += insertAfterPattern.Length;
-            
+
             string markerComment = $"\n\n{PatchMarker}\n// This file has been patched for GC2 Networking server authority.\n// Do not modify the patched sections manually.\n// Use Game Creator > Networking Layer > Patches > {ModuleName} > Unpatch to restore.\n";
-            
+
             return content.Insert(insertIndex, markerComment);
         }
 
@@ -1988,7 +2091,7 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
             return token.ToString();
         }
     }
-    
+
     /// <summary>
     /// Patch status information.
     /// </summary>

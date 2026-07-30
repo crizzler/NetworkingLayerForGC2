@@ -1,0 +1,35 @@
+{
+    "name": "Arawn.GameCreator2.Networking.Shooter.Tests",
+    "rootNamespace": "Arawn.GameCreator2.Networking.Shooter.Tests",
+    "references": [
+        "Arawn.GameCreator2.Networking",
+        "Arawn.GameCreator2.Networking.Shooter",
+        "Arawn.GameCreator2.Networking.Shooter.Transport.PurrNet",
+        "Arawn.GameCreator2.Networking.Transport.PurrNet",
+        "PurrNet.Runtime",
+        "GameCreator.Runtime.Core",
+        "GameCreator.Runtime.Shooter"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": true,
+    "precompiledReferences": [
+        "nunit.framework.dll"
+    ],
+    "autoReferenced": false,
+    "defineConstraints": [
+        "UNITY_INCLUDE_TESTS",
+        "GC2_SHOOTER"
+    ],
+    "versionDefines": [
+        {
+            "name": "com.gamecreator.shooter",
+            "expression": "",
+            "define": "GC2_SHOOTER"
+        }
+    ],
+    "noEngineReferences": false
+}

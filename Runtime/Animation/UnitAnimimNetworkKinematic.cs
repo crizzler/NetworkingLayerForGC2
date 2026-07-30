@@ -15,23 +15,23 @@ namespace Arawn.GameCreator2.Networking
     {
         // Speed packed as bytes (-1 to 1 range, 0.01 precision)
         public sbyte speedX;      // 1 byte
-        public sbyte speedY;      // 1 byte  
+        public sbyte speedY;      // 1 byte
         public sbyte speedZ;      // 1 byte
-        
+
         // Pivot speed packed (-180 to 180 degrees/sec, 1.5 deg precision)
         public sbyte pivotSpeed;  // 1 byte
-        
+
         // Grounded + Stand packed (4 bits each)
         public byte groundedStand; // 1 byte
-        
+
         // Flags
         public byte flags;        // 1 byte
-        
+
         public const byte FLAG_GROUNDED = 1;
         public const byte FLAG_STANDING = 2;
-        
+
         // Total: 6 bytes
-        
+
         /// <summary>
         /// Pack animation state for network transmission.
         /// </summary>
@@ -44,12 +44,12 @@ namespace Arawn.GameCreator2.Networking
             byte flags = 0;
             if (isGrounded) flags |= FLAG_GROUNDED;
             if (standLevel > 0.5f) flags |= FLAG_STANDING;
-            
+
             // Pack grounded (0-1) and stand (0-1) into single byte
             byte groundedPacked = (byte)(Mathf.Clamp01(isGrounded ? 1f : 0f) * 15f);
             byte standPacked = (byte)(Mathf.Clamp01(standLevel) * 15f);
             byte groundedStand = (byte)((groundedPacked << 4) | standPacked);
-            
+
             return new NetworkAnimimState
             {
                 speedX = (sbyte)Mathf.Clamp(localSpeed.x * 127f, -127f, 127f),
@@ -60,7 +60,7 @@ namespace Arawn.GameCreator2.Networking
                 flags = flags
             };
         }
-        
+
         public Vector3 GetLocalSpeed()
         {
             return new Vector3(
@@ -69,14 +69,14 @@ namespace Arawn.GameCreator2.Networking
                 speedZ / 127f
             );
         }
-        
+
         public float GetPivotSpeed() => pivotSpeed * 1.5f;
-        
+
         public float GetGrounded() => ((groundedStand >> 4) & 0x0F) / 15f;
         public float GetStandLevel() => (groundedStand & 0x0F) / 15f;
-        
+
         public bool IsGrounded => (flags & FLAG_GROUNDED) != 0;
-        
+
         public bool Equals(NetworkAnimimState other)
         {
             return speedX == other.speedX &&
@@ -85,12 +85,12 @@ namespace Arawn.GameCreator2.Networking
                    pivotSpeed == other.pivotSpeed &&
                    groundedStand == other.groundedStand;
         }
-        
+
         public override int GetHashCode()
         {
             return HashCode.Combine(speedX, speedY, speedZ, pivotSpeed, groundedStand);
         }
-        
+
         /// <summary>
         /// Check if values changed enough to warrant a network update.
         /// </summary>
@@ -102,9 +102,9 @@ namespace Arawn.GameCreator2.Networking
                    Math.Abs(pivotSpeed - other.pivotSpeed) > threshold ||
                    groundedStand != other.groundedStand;
         }
-        
+
     }
-    
+
     /// <summary>
     /// Server-authoritative animation unit that syncs animator parameters across the network.
     /// Use this instead of UnitAnimimKinematic when you need server-controlled animation state.
@@ -128,11 +128,11 @@ namespace Arawn.GameCreator2.Networking
     /// </remarks>
     [Title("Network Kinematic (Server-Authoritative)")]
     [Image(typeof(IconCharacterRun), ColorTheme.Type.Blue)]
-    
+
     [Category("Network/Network Kinematic")]
     [Description("Server-authoritative animation parameters that sync across the network. " +
                  "Use when animation state affects gameplay or for competitive anti-cheat.")]
-    
+
     [Serializable]
     public class UnitAnimimNetworkKinematic : TUnitAnimim
     {
@@ -145,22 +145,22 @@ namespace Arawn.GameCreator2.Networking
         private const float DECAY_PIVOT = 5f;
         private const float DECAY_GROUNDED = 10f;
         private const float DECAY_STAND = 5f;
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // STATIC PROPERTIES
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         private static readonly int K_SPEED_X = Animator.StringToHash("Speed-X");
         private static readonly int K_SPEED_Y = Animator.StringToHash("Speed-Y");
         private static readonly int K_SPEED_Z = Animator.StringToHash("Speed-Z");
         private static readonly int K_SPEED_XZ = Animator.StringToHash("Speed-XZ");
         private static readonly int K_SPEED_YZ = Animator.StringToHash("Speed-YZ");
         private static readonly int K_SPEED_XY = Animator.StringToHash("Speed-XY");
-        
+
         private static readonly int K_INTENT_X = Animator.StringToHash("Intent-X");
         private static readonly int K_INTENT_Y = Animator.StringToHash("Intent-Y");
         private static readonly int K_INTENT_Z = Animator.StringToHash("Intent-Z");
-        
+
         private static readonly int K_SPEED = Animator.StringToHash("Speed");
         private static readonly int K_PIVOT_SPEED = Animator.StringToHash("Pivot");
 
@@ -168,98 +168,98 @@ namespace Arawn.GameCreator2.Networking
         private static readonly int K_STAND = Animator.StringToHash("Stand");
 
         public static AnimationInputOverride TraversalAnimationInputOverride;
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // EXPOSED MEMBERS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         [Header("Network Settings")]
         [Tooltip("Minimum change threshold before sending update (0-127 scale)")]
         [SerializeField] private int m_ChangeThreshold = 3;
-        
+
         [Tooltip("Maximum updates per second")]
         [SerializeField] private float m_MaxUpdateRate = 20f;
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // PRIVATE MEMBERS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         [NonSerialized] private NetworkCharacter m_NetworkCharacter;
         [NonSerialized] private bool m_IsNetworkInitialized;
-        
+
         // Current animation state (smoothed values)
         [NonSerialized] private Vector3 m_LocalSpeed;
         [NonSerialized] private Vector3 m_Intent;
         [NonSerialized] private float m_PivotSpeed;
         [NonSerialized] private float m_Grounded;
         [NonSerialized] private float m_Stand;
-        
+
         // Network sync state
         [NonSerialized] private NetworkAnimimState m_LastSentState;
         [NonSerialized] private float m_LastSendTime;
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // PROPERTIES
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>Current local speed (normalized).</summary>
         public Vector3 LocalSpeed => m_LocalSpeed;
-        
+
         /// <summary>Current pivot speed in degrees/second.</summary>
         public float PivotSpeed => m_PivotSpeed;
-        
+
         /// <summary>Whether network sync is active.</summary>
         public bool IsNetworkInitialized => m_IsNetworkInitialized;
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // INITIALIZATION
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         public override void OnStartup(Character character)
         {
             base.OnStartup(character);
-            
+
             m_LocalSpeed = Vector3.zero;
             m_Intent = Vector3.zero;
             m_PivotSpeed = 0f;
             m_Grounded = 1f;
             m_Stand = 1f;
-            
+
             // Try to find NetworkCharacter
             m_NetworkCharacter = character.GetComponent<NetworkCharacter>();
-            
+
             if (m_NetworkCharacter != null)
             {
                 m_NetworkCharacter.OnAnimimUnitRegistered(this);
                 m_IsNetworkInitialized = true;
             }
         }
-        
+
         public override void OnDispose(Character character)
         {
             if (m_NetworkCharacter != null)
             {
                 m_NetworkCharacter.OnAnimimUnitUnregistered();
             }
-            
+
             base.OnDispose(character);
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // UPDATE
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         public override void OnUpdate()
         {
             base.OnUpdate();
-            
+
             if (m_Animator == null) return;
             if (!m_Animator.gameObject.activeInHierarchy) return;
-            
+
             m_Animator.updateMode = Character.Time.UpdateTime == TimeMode.UpdateMode.GameTime
                 ? AnimatorUpdateMode.Normal
                 : AnimatorUpdateMode.UnscaledTime;
-            
+
             if (m_IsNetworkInitialized && m_NetworkCharacter != null)
             {
                 UpdateNetworked();
@@ -269,82 +269,82 @@ namespace Arawn.GameCreator2.Networking
                 UpdateLocal();
             }
         }
-        
+
         private void UpdateLocal()
         {
             // Standard local calculation (same as UnitAnimimKinematic)
             CalculateAnimationValues();
             ApplyToAnimator();
         }
-        
+
         private void UpdateNetworked()
         {
             var role = m_NetworkCharacter.CurrentRole;
-            
+
             switch (role)
             {
                 case NetworkCharacter.NetworkRole.Server:
                     UpdateAsServer();
                     break;
-                    
+
                 case NetworkCharacter.NetworkRole.LocalClient:
                     UpdateAsLocalClient();
                     break;
-                    
+
                 case NetworkCharacter.NetworkRole.RemoteClient:
                     UpdateAsRemoteClient();
                     break;
-                    
+
                 default:
                     UpdateLocal();
                     break;
             }
         }
-        
+
         private void UpdateAsServer()
         {
             // Server calculates authoritative values
             CalculateAnimationValues();
-            
+
             // Check if we should broadcast
             var currentState = NetworkAnimimState.Create(m_LocalSpeed, m_PivotSpeed, m_Grounded > 0.5f, m_Stand);
-            
+
             float timeSinceLastSend = Time.time - m_LastSendTime;
             float minSendInterval = 1f / m_MaxUpdateRate;
-            
-            if (timeSinceLastSend >= minSendInterval && 
+
+            if (timeSinceLastSend >= minSendInterval &&
                 currentState.HasSignificantChange(m_LastSentState, m_ChangeThreshold))
             {
                 m_LastSentState = currentState;
                 m_LastSendTime = Time.time;
                 // NetworkCharacter will handle broadcasting
             }
-            
+
             ApplyToAnimator();
         }
-        
+
         private void UpdateAsLocalClient()
         {
             // Local client calculates locally for responsiveness
             CalculateAnimationValues();
-            
+
             // Send to server if changed significantly
             var currentState = NetworkAnimimState.Create(m_LocalSpeed, m_PivotSpeed, m_Grounded > 0.5f, m_Stand);
-            
+
             float timeSinceLastSend = Time.time - m_LastSendTime;
             float minSendInterval = 1f / m_MaxUpdateRate;
-            
-            if (timeSinceLastSend >= minSendInterval && 
+
+            if (timeSinceLastSend >= minSendInterval &&
                 currentState.HasSignificantChange(m_LastSentState, m_ChangeThreshold))
             {
                 m_LastSentState = currentState;
                 m_LastSendTime = Time.time;
                 m_NetworkCharacter.RequestAnimimUpdate(currentState);
             }
-            
+
             ApplyToAnimator();
         }
-        
+
         private void UpdateAsRemoteClient()
         {
             // Locomotion is cosmetic and can be derived from the already-interpolated
@@ -353,18 +353,18 @@ namespace Arawn.GameCreator2.Networking
             CalculateAnimationValues();
             ApplyToAnimator();
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // NETWORK CALLBACKS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>
         /// Called when receiving animation state from the server.
         /// </summary>
         public void OnServerStateReceived(NetworkAnimimState state)
         {
         }
-        
+
         /// <summary>
         /// Gets the current state for network transmission.
         /// </summary>
@@ -372,35 +372,38 @@ namespace Arawn.GameCreator2.Networking
         {
             return NetworkAnimimState.Create(m_LocalSpeed, m_PivotSpeed, m_Grounded > 0.5f, m_Stand);
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // PRIVATE METHODS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         private void CalculateAnimationValues()
         {
             IUnitMotion motion = Character.Motion;
             IUnitDriver driver = Character.Driver;
             IUnitFacing facing = Character.Facing;
-            
+
             float deltaTime = Character.Time.DeltaTime;
             float decay = Mathf.Lerp(1f, 25f, m_SmoothTime);
-            
+
             // Calculate target values
             Vector3 targetIntent = motion.LinearSpeed > float.Epsilon
                 ? Vector3.ClampMagnitude(Transform.InverseTransformDirection(motion.MoveDirection) / motion.LinearSpeed, 1f)
                 : Vector3.zero;
-            
+
             Vector3 targetSpeed = motion.LinearSpeed > float.Epsilon
                 ? driver.LocalMoveDirection / motion.LinearSpeed
                 : Vector3.zero;
 
-            TraversalAnimationInputOverride?.Invoke(
+            Vector3 targetIntentBeforeTraversal = targetIntent;
+            Vector3 targetSpeedBeforeTraversal = targetSpeed;
+
+            bool traversalOverrideApplied = TraversalAnimationInputOverride?.Invoke(
                 Character,
                 ref targetIntent,
                 ref targetSpeed,
-                m_LocalSpeed);
-            
+                m_LocalSpeed) ?? false;
+
             float targetPivot = facing.PivotSpeed;
             float targetGrounded = driver.IsGrounded ? 1f : 0f;
             float targetStand = motion.StandLevel.Current;
@@ -409,16 +412,80 @@ namespace Arawn.GameCreator2.Networking
             m_LocalSpeed.x = MathUtils.ExponentialDecay(m_LocalSpeed.x, targetSpeed.x, decay, deltaTime);
             m_LocalSpeed.y = MathUtils.ExponentialDecay(m_LocalSpeed.y, targetSpeed.y, decay, deltaTime);
             m_LocalSpeed.z = MathUtils.ExponentialDecay(m_LocalSpeed.z, targetSpeed.z, decay, deltaTime);
-            
+
             m_Intent.x = MathUtils.ExponentialDecay(m_Intent.x, targetIntent.x, decay, deltaTime);
             m_Intent.y = MathUtils.ExponentialDecay(m_Intent.y, targetIntent.y, decay, deltaTime);
             m_Intent.z = MathUtils.ExponentialDecay(m_Intent.z, targetIntent.z, decay, deltaTime);
-            
+
+            LogFocusedTraversalAnimation(
+                targetIntentBeforeTraversal,
+                targetSpeedBeforeTraversal,
+                targetIntent,
+                targetSpeed,
+                traversalOverrideApplied,
+                motion,
+                driver);
+
             m_PivotSpeed = MathUtils.ExponentialDecay(m_PivotSpeed, targetPivot, DECAY_PIVOT, deltaTime);
             m_Grounded = MathUtils.ExponentialDecay(m_Grounded, targetGrounded, DECAY_GROUNDED, deltaTime);
             m_Stand = MathUtils.ExponentialDecay(m_Stand, targetStand, DECAY_STAND, deltaTime);
         }
-        
+
+        private void LogFocusedTraversalAnimation(
+            Vector3 intentBefore,
+            Vector3 speedBefore,
+            Vector3 intentAfter,
+            Vector3 speedAfter,
+            bool overrideApplied,
+            IUnitMotion motion,
+            IUnitDriver driver)
+        {
+            if (Character == null ||
+                !NetworkTraversalClimbDiagnostics.IsFocused(Character.gameObject))
+            {
+                return;
+            }
+
+            uint networkId = m_NetworkCharacter != null ? m_NetworkCharacter.NetworkId : 0;
+            string role = m_NetworkCharacter != null
+                ? m_NetworkCharacter.CurrentRole.ToString()
+                : "Local";
+            string signs =
+                $"{AxisSign(speedBefore)}:{AxisSign(speedAfter)}:{AxisSign(m_LocalSpeed)}:" +
+                $"{AxisSign(intentBefore)}:{AxisSign(intentAfter)}:{AxisSign(m_Intent)}:{overrideApplied}";
+            bool changed = NetworkTraversalClimbDiagnostics.HasChanged(
+                $"animim-axis:{Character.GetInstanceID()}",
+                signs);
+
+            NetworkTraversalClimbDiagnostics.Log(
+                changed ? "AnimimChange" : "Animim",
+                $"actor={networkId} role={role} " +
+                $"motionMove={NetworkTraversalClimbDiagnostics.Vector(motion.MoveDirection)} " +
+                $"driverWorld={NetworkTraversalClimbDiagnostics.Vector(driver.WorldMoveDirection)} " +
+                $"driverLocal={NetworkTraversalClimbDiagnostics.Vector(driver.LocalMoveDirection)} " +
+                $"driverType={driver.GetType().Name} updateKinematics={driver.UpdateKinematics} " +
+                $"linearSpeed={motion.LinearSpeed:F3} dt={Character.Time.DeltaTime:F4} smoothTime={m_SmoothTime:F3} " +
+                $"intentPre={NetworkTraversalClimbDiagnostics.Vector(intentBefore)} " +
+                $"intentPost={NetworkTraversalClimbDiagnostics.Vector(intentAfter)} " +
+                $"speedPre={NetworkTraversalClimbDiagnostics.Vector(speedBefore)} " +
+                $"speedPost={NetworkTraversalClimbDiagnostics.Vector(speedAfter)} " +
+                $"smoothIntent={NetworkTraversalClimbDiagnostics.Vector(m_Intent)} " +
+                $"smoothSpeed={NetworkTraversalClimbDiagnostics.Vector(m_LocalSpeed)} " +
+                $"override={overrideApplied}",
+                Character,
+                changed ? null : $"animim:{Character.GetInstanceID()}");
+        }
+
+        private static string AxisSign(Vector3 value)
+        {
+            return $"{AxisSign(value.x)},{AxisSign(value.y)},{AxisSign(value.z)}";
+        }
+
+        private static int AxisSign(float value)
+        {
+            return value > 0.05f ? 1 : value < -0.05f ? -1 : 0;
+        }
+
         private void ApplyToAnimator()
         {
             m_Animator.SetFloat(K_SPEED_X, m_LocalSpeed.x);
@@ -428,11 +495,11 @@ namespace Arawn.GameCreator2.Networking
             m_Animator.SetFloat(K_SPEED_XZ, new Vector2(m_LocalSpeed.x, m_LocalSpeed.z).magnitude);
             m_Animator.SetFloat(K_SPEED_XY, new Vector2(m_LocalSpeed.x, m_LocalSpeed.y).magnitude);
             m_Animator.SetFloat(K_SPEED_YZ, new Vector2(m_LocalSpeed.y, m_LocalSpeed.z).magnitude);
-            
+
             m_Animator.SetFloat(K_INTENT_X, m_Intent.x);
             m_Animator.SetFloat(K_INTENT_Y, m_Intent.y);
             m_Animator.SetFloat(K_INTENT_Z, m_Intent.z);
-            
+
             m_Animator.SetFloat(K_PIVOT_SPEED, m_PivotSpeed);
             m_Animator.SetFloat(K_GROUNDED, m_Grounded);
             m_Animator.SetFloat(K_STAND, m_Stand);

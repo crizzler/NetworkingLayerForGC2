@@ -42,31 +42,31 @@ namespace Arawn.GameCreator2.Networking
         // ════════════════════════════════════════════════════════════════════════════════════════
         // CONFIGURATION
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         protected override DuplicatePolicy OnDuplicatePolicy => DuplicatePolicy.DestroyComponent;
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // INSPECTOR
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         [Header("Cast Settings")]
         [Tooltip("Allow clients to predict cast start before server response (recommended for responsiveness).")]
         [SerializeField] private bool m_AllowClientPrediction = true;
-        
+
         [Tooltip("Maximum cast queue size per character.")]
         [SerializeField] private int m_MaxCastQueueSize = 2;
-        
+
         [Tooltip("Grace period for range validation (accounts for latency).")]
         [SerializeField] private float m_RangeValidationGrace = 0.5f;
-        
+
         [Header("Cooldown Settings")]
         [Tooltip("Add server-side buffer to cooldowns (anti-cheat).")]
         [SerializeField] private float m_CooldownBuffer = 0.05f;
-        
+
         [Header("Projectile Settings")]
         [Tooltip("Maximum active projectiles per character.")]
         [SerializeField] private int m_MaxProjectilesPerCharacter = 20;
-        
+
         [Tooltip("Projectile cleanup interval in seconds.")]
         [SerializeField] private float m_ProjectileCleanupInterval = 5f;
 
@@ -76,86 +76,86 @@ namespace Arawn.GameCreator2.Networking
 
         [Tooltip("How often pending client requests are scanned for timeout.")]
         [SerializeField] private float m_ClientPendingCleanupIntervalSeconds = 1f;
-        
+
         [Header("Impact Settings")]
         [Tooltip("Maximum concurrent impacts.")]
         [SerializeField] private int m_MaxConcurrentImpacts = 50;
-        
+
         [Header("Debug")]
         [SerializeField] private bool m_DebugLog = false;
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // EVENTS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         // Cast Events
         public event Action<NetworkAbilityCastRequest> OnCastRequestSent;
         public event Action<NetworkAbilityCastResponse> OnCastResponseReceived;
         public event Action<uint, NetworkAbilityCastRequest> OnCastRequestReceived;
         public event Action<NetworkAbilityCastBroadcast> OnCastBroadcastReceived;
-        
+
         // Effect Events
         public event Action<NetworkAbilityEffectBroadcast> OnEffectBroadcastReceived;
-        
+
         // Projectile Events
         public event Action<NetworkProjectileSpawnBroadcast> OnProjectileSpawnReceived;
         public event Action<NetworkProjectileEventBroadcast> OnProjectileEventReceived;
-        
+
         // Impact Events
         public event Action<NetworkImpactSpawnBroadcast> OnImpactSpawnReceived;
         public event Action<NetworkImpactHitBroadcast> OnImpactHitReceived;
-        
+
         // Cooldown Events
         public event Action<NetworkCooldownResponse> OnCooldownResponseReceived;
         public event Action<NetworkCooldownBroadcast> OnCooldownBroadcastReceived;
-        
+
         // Learn Events
         public event Action<NetworkAbilityLearnRequest> OnLearnRequestSent;
         public event Action<NetworkAbilityLearnResponse> OnLearnResponseReceived;
         public event Action<uint, NetworkAbilityLearnRequest> OnLearnRequestReceived;
         public event Action<NetworkAbilityLearnBroadcast> OnLearnBroadcastReceived;
-        
+
         // Cancel Events
         public event Action<NetworkCastCancelRequest> OnCancelRequestSent;
         public event Action<NetworkCastCancelResponse> OnCancelResponseReceived;
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // DELEGATES (Network Integration Points)
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         // Cast
         public Action<NetworkAbilityCastRequest> SendCastRequestToServer;
         public Action<uint, NetworkAbilityCastResponse> SendCastResponseToClient;
         public Action<NetworkAbilityCastBroadcast> BroadcastCastToClients;
-        
+
         // Effects
         public Action<NetworkAbilityEffectBroadcast> BroadcastEffectToClients;
-        
+
         // Projectiles
         public Action<NetworkProjectileSpawnBroadcast> BroadcastProjectileSpawnToClients;
         public Action<NetworkProjectileEventBroadcast> BroadcastProjectileEventToClients;
-        
+
         // Impacts
         public Action<NetworkImpactSpawnBroadcast> BroadcastImpactSpawnToClients;
         public Action<NetworkImpactHitBroadcast> BroadcastImpactHitToClients;
-        
+
         // Cooldowns
         public Action<NetworkCooldownRequest> SendCooldownRequestToServer;
         public Action<NetworkCooldownBroadcast> BroadcastCooldownToClients;
         public Action<uint, NetworkCooldownResponse> SendCooldownResponseToClient;
-        
+
         // Learning
         public Action<NetworkAbilityLearnRequest> SendLearnRequestToServer;
         public Action<uint, NetworkAbilityLearnResponse> SendLearnResponseToClient;
         public Action<NetworkAbilityLearnBroadcast> BroadcastLearnToClients;
-        
+
         // Cancel
         public Action<NetworkCastCancelRequest> SendCancelRequestToServer;
         public Action<uint, NetworkCastCancelResponse> SendCancelResponseToClient;
-        
+
         // State Sync
         public Action<uint, NetworkAbilityStateResponse, NetworkAbilitySlotEntry[], NetworkCooldownEntry[]> SendStateToClient;
-        
+
         // Utility
         public Func<float> GetServerTime;
         public Func<uint, Pawn> GetPawnByNetworkId;
@@ -165,14 +165,14 @@ namespace Arawn.GameCreator2.Networking
         public Func<int, Projectile> GetProjectileByHash;
         public Func<int, Impact> GetImpactByHash;
         public Func<Pawn, uint> GetNetworkIdForPawn;
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // PRIVATE FIELDS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         private bool m_IsServer;
         private bool m_IsClient;
-        
+
         // Request tracking
         private ushort m_NextRequestId = 1;
         private uint m_NextCastInstanceId = 1;
@@ -201,36 +201,36 @@ namespace Arawn.GameCreator2.Networking
             uint pendingCorrelation = correlationId != 0 ? correlationId : requestId;
             return ((ulong)actorNetworkId << 32) | pendingCorrelation;
         }
-        
+
         // Pending requests (client-side)
         private readonly Dictionary<ulong, PendingCastRequest> m_PendingCastRequests = new(16);
         private readonly Dictionary<ulong, PendingLearnRequest> m_PendingLearnRequests = new(16);
         private readonly Dictionary<ulong, PendingCooldownRequest> m_PendingCooldownRequests = new(16);
         private readonly Dictionary<ulong, PendingCancelRequest> m_PendingCancelRequests = new(16);
         private readonly HashSet<uint> m_ClientVisualReplayCastIds = new();
-        
+
         // Server-side tracking
         private readonly Dictionary<uint, CasterState> m_CasterStates = new(64);
         private readonly Dictionary<uint, ActiveCast> m_ActiveCasts = new(32);
         private readonly Dictionary<uint, ActiveProjectile> m_ActiveProjectiles = new(128);
         private readonly Dictionary<uint, ActiveImpact> m_ActiveImpacts = new(64);
-        
+
         // Cooldown tracking (server-authoritative)
         private readonly Dictionary<(uint, int), CooldownData> m_Cooldowns = new(256);
-        
+
         // Statistics
         private NetworkAbilitiesStats m_Stats;
-        
+
         // Cleanup timer
         private float m_LastCleanupTime;
         private float m_LastClientPendingCleanupTime;
         private NetworkAbilitiesPatchHooks m_PatchHooks;
         private static readonly List<ulong> s_SharedPendingCleanupKeys = new(16);
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // TRACKING STRUCTS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         private struct PendingCastRequest : ITimeoutAwarePendingRequest
         {
             public NetworkAbilityCastRequest Request;
@@ -256,7 +256,7 @@ namespace Arawn.GameCreator2.Networking
                 return true;
             }
         }
-        
+
         private struct PendingLearnRequest : ITimeoutAwarePendingRequest
         {
             public NetworkAbilityLearnRequest Request;
@@ -279,7 +279,7 @@ namespace Arawn.GameCreator2.Networking
                 return true;
             }
         }
-        
+
         private struct PendingCooldownRequest : ITimeoutAwarePendingRequest
         {
             public NetworkCooldownRequest Request;
@@ -304,7 +304,7 @@ namespace Arawn.GameCreator2.Networking
                 return true;
             }
         }
-        
+
         private struct PendingCancelRequest : ITimeoutAwarePendingRequest
         {
             public NetworkCastCancelRequest Request;
@@ -328,7 +328,7 @@ namespace Arawn.GameCreator2.Networking
                 return true;
             }
         }
-        
+
         private class CasterState
         {
             public uint NetworkId;
@@ -338,7 +338,7 @@ namespace Arawn.GameCreator2.Networking
             public List<uint> ActiveProjectileIds = new(20);
             public int CastQueueCount;
         }
-        
+
         private class ActiveCast
         {
             public uint CastInstanceId;
@@ -352,7 +352,7 @@ namespace Arawn.GameCreator2.Networking
             public Vector3 TargetPosition;
             public uint TargetNetworkId;
         }
-        
+
         private class ActiveProjectile
         {
             public uint ProjectileId;
@@ -363,7 +363,7 @@ namespace Arawn.GameCreator2.Networking
             public float SpawnTime;
             public int PierceCount;
         }
-        
+
         private class ActiveImpact
         {
             public uint ImpactId;
@@ -372,7 +372,7 @@ namespace Arawn.GameCreator2.Networking
             public RuntimeImpact Instance;
             public float SpawnTime;
         }
-        
+
         private struct CooldownData
         {
             public float EndTime;
@@ -382,7 +382,7 @@ namespace Arawn.GameCreator2.Networking
         // ════════════════════════════════════════════════════════════════════════════════════════
         // LIFECYCLE
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         private void Update()
         {
             if (m_IsServer)
@@ -417,11 +417,11 @@ namespace Arawn.GameCreator2.Networking
                 m_PatchHooks.Initialize(false, false);
             }
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // INITIALIZATION
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>
         /// Initialize the controller for server mode.
         /// </summary>
@@ -431,16 +431,16 @@ namespace Arawn.GameCreator2.Networking
             m_IsClient = false;
             SecurityIntegration.SetModuleServerContext("Abilities", true);
             SecurityIntegration.EnsureSecurityManagerInitialized(true, () => GetServerTime?.Invoke() ?? Time.time);
-            
+
             ClearAllState();
             SyncPatchHooks();
-            
+
             if (m_DebugLog)
             {
                 Debug.Log("[NetworkAbilitiesController] Initialized as Server");
             }
         }
-        
+
         /// <summary>
         /// Initialize the controller for client mode.
         /// </summary>
@@ -450,16 +450,16 @@ namespace Arawn.GameCreator2.Networking
             m_IsClient = true;
             SecurityIntegration.SetModuleServerContext("Abilities", false);
             SecurityIntegration.EnsureSecurityManagerInitialized(false, () => GetServerTime?.Invoke() ?? Time.time);
-            
+
             ClearAllState();
             SyncPatchHooks();
-            
+
             if (m_DebugLog)
             {
                 Debug.Log("[NetworkAbilitiesController] Initialized as Client");
             }
         }
-        
+
         /// <summary>
         /// Initialize the controller for host mode (server + client).
         /// </summary>
@@ -469,10 +469,10 @@ namespace Arawn.GameCreator2.Networking
             m_IsClient = true;
             SecurityIntegration.SetModuleServerContext("Abilities", true);
             SecurityIntegration.EnsureSecurityManagerInitialized(true, () => GetServerTime?.Invoke() ?? Time.time);
-            
+
             ClearAllState();
             SyncPatchHooks();
-            
+
             if (m_DebugLog)
             {
                 Debug.Log("[NetworkAbilitiesController] Initialized as Host");
@@ -618,7 +618,7 @@ namespace Arawn.GameCreator2.Networking
             var networkCharacter = pawn.GetComponent<NetworkCharacter>();
             return networkCharacter != null ? networkCharacter.NetworkId : 0;
         }
-        
+
         private void ClearAllState()
         {
             m_PendingCastRequests.Clear();
@@ -665,16 +665,16 @@ namespace Arawn.GameCreator2.Networking
                     $"[NetworkAbilitiesController] Timed out {removedCount} pending {requestType} request(s) after {timeout:F1}s.");
             }
         }
-        
-        
+
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // PUBLIC ACCESSORS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         public bool IsServer => m_IsServer;
         public bool IsClient => m_IsClient;
         public NetworkAbilitiesStats Stats => m_Stats;
-        
+
         /// <summary>
         /// Check if an ability is on cooldown (server-authoritative).
         /// </summary>
@@ -688,7 +688,7 @@ namespace Arawn.GameCreator2.Networking
             }
             return false;
         }
-        
+
         /// <summary>
         /// Get cooldown remaining time.
         /// </summary>
@@ -702,7 +702,7 @@ namespace Arawn.GameCreator2.Networking
             }
             return 0f;
         }
-        
+
         /// <summary>
         /// Get current state snapshot.
         /// </summary>
@@ -722,17 +722,17 @@ namespace Arawn.GameCreator2.Networking
             };
         }
     }
-    
+
     /// <summary>
     /// Marker class for auto-confirm input (server/AI casts).
     /// </summary>
     public class AutoConfirmInput { }
-    
+
     /// <summary>
     /// Marker for client-only visual replays of server-approved ability casts.
     /// </summary>
     public class NetworkAbilityVisualReplayInput { }
-    
+
     /// <summary>
     /// Marker class for tracking ability source.
     /// </summary>

@@ -18,6 +18,26 @@ namespace Arawn.GameCreator2.Networking.Shooter
             Debug.LogWarning($"[NetworkShooterManager] {message}", this);
         }
 
+        private void LogDamageInvariantWarning(string message)
+        {
+            const float WarningInterval = 5f;
+            float now = Time.unscaledTime;
+            if (now < m_NextDamageInvariantWarningTime) return;
+
+            m_NextDamageInvariantWarningTime = now + WarningInterval;
+            Debug.LogWarning($"[NetworkShooterManager] {message}", this);
+        }
+
+        private void LogNativeOutcomeInvariantWarning(string message)
+        {
+            const float WarningInterval = 5f;
+            float now = Time.unscaledTime;
+            if (now < m_NextNativeOutcomeInvariantWarningTime) return;
+
+            m_NextNativeOutcomeInvariantWarningTime = now + WarningInterval;
+            Debug.LogWarning($"[NetworkShooterManager] {message}", this);
+        }
+
         private void Start()
         {
             LogDiagnostics(
@@ -42,6 +62,9 @@ namespace Arawn.GameCreator2.Networking.Shooter
             m_PendingShotBroadcasts.Clear();
             m_PendingHitBroadcasts.Clear();
             m_PendingImpactMotions.Clear();
+            m_TrustedNativeHitOutcomes.Clear();
+            m_TrustedNativeReactionPowers.Clear();
+            m_MissingReactionWeaponDiagnostics.Clear();
 
             if (m_PatchHooks != null)
             {

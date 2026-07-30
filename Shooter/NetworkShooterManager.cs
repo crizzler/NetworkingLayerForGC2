@@ -1,11 +1,13 @@
 #if GC2_SHOOTER
 using System;
 using System.Collections.Generic;
+using System.Reflection;
 using UnityEngine;
 using UnityEngine.AI;
 using GameCreator.Runtime.Characters;
 using GameCreator.Runtime.Common;
 using GameCreator.Runtime.Shooter;
+using GameCreator.Runtime.VisualScripting;
 
 using Arawn.GameCreator2.Networking;
 using Arawn.GameCreator2.Networking.Security;
@@ -33,17 +35,17 @@ namespace Arawn.GameCreator2.Networking.Shooter
         // ════════════════════════════════════════════════════════════════════════════════════════
         // CONFIGURATION
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         protected override DuplicatePolicy OnDuplicatePolicy => DuplicatePolicy.DestroyComponent;
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // INSPECTOR
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         [Header("Processing Settings")]
         [Tooltip("Maximum shot requests to process per frame on server.")]
         [SerializeField] private int m_MaxShotsPerFrame = 20;
-        
+
         [Tooltip("Maximum hit requests to process per frame on server.")]
         [SerializeField] private int m_MaxHitsPerFrame = 40;
 
@@ -83,13 +85,13 @@ namespace Arawn.GameCreator2.Networking.Shooter
         [Tooltip("Maximum accepted hit confirmations per projectile for one validated shot.")]
         [Min(1)]
         [SerializeField] private int m_MaxValidatedHitsPerProjectile = 4;
-        
+
         [Tooltip("Maximum time in the past for shot validation (seconds).")]
         [SerializeField] private float m_MaxRewindTime = 0.5f;
 
         [Header("Server Damage Safety")]
-        [Tooltip("Prevents the built-in fallback hit reaction from moving server-authoritative NavMesh characters. " +
-                 "Use a custom ApplyDamageFunc if a project needs authored hit reactions for these targets.")]
+        [Tooltip("Prevents the built-in fallback hit reaction from moving server-authoritative NavMesh NPCs. " +
+                 "Player characters are never suppressed by this option.")]
         [SerializeField] private bool m_SuppressFallbackHitReactionsForServerNavMesh = true;
 
         [Tooltip("If fallback hit reactions are allowed for server NavMesh targets, remove vertical hit direction before choosing the reaction.")]
@@ -101,96 +103,99 @@ namespace Arawn.GameCreator2.Networking.Shooter
         [Tooltip("Maximum NavMesh sample distance used when resnapping a server NavMesh target after a hit reaction.")]
         [Min(0.25f)]
         [SerializeField] private float m_ServerNavMeshHitReactionSnapDistance = 2f;
-        
+
         [Header("Debug")]
         [Tooltip("Logs Shooter manager/controller registration and missing transport delegate wiring.")]
         [SerializeField] private bool m_LogDiagnostics = true;
         [SerializeField] private bool m_LogShotRequests = false;
         [SerializeField] private bool m_LogHitRequests = false;
         [SerializeField] private bool m_LogBroadcasts = false;
-        
+
+        [NonSerialized] private float m_NextDamageInvariantWarningTime;
+        [NonSerialized] private float m_NextNativeOutcomeInvariantWarningTime;
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // NETWORK DELEGATES (Connect to your transport)
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         // --- Shot/Hit Delegates ---
-        
+
         /// <summary>[Client] Send shot request to server.</summary>
         public Action<NetworkShotRequest> SendShotRequestToServer;
-        
+
         /// <summary>[Client] Send hit request to server.</summary>
         public Action<NetworkShooterHitRequest> SendHitRequestToServer;
-        
+
         /// <summary>[Server] Send shot response to a specific client.</summary>
         public Action<uint, NetworkShotResponse> SendShotResponseToClient;
-        
+
         /// <summary>[Server] Send hit response to a specific client.</summary>
         public Action<uint, NetworkShooterHitResponse> SendHitResponseToClient;
-        
+
         /// <summary>[Server] Broadcast shot to all clients.</summary>
         public Action<NetworkShotBroadcast> BroadcastShotToAllClients;
-        
+
         /// <summary>[Server] Broadcast hit to all clients.</summary>
         public Action<NetworkShooterHitBroadcast> BroadcastHitToAllClients;
-        
+
         // --- Reload Delegates ---
-        
+
         /// <summary>[Client] Send reload request to server.</summary>
         public Action<NetworkReloadRequest> SendReloadRequestToServer;
-        
+
         /// <summary>[Client] Send quick reload request to server.</summary>
         public Action<NetworkQuickReloadRequest> SendQuickReloadRequestToServer;
-        
+
         /// <summary>[Server] Send reload response to a specific client.</summary>
         public Action<uint, NetworkReloadResponse> SendReloadResponseToClient;
-        
+
         /// <summary>[Server] Broadcast reload event to all clients.</summary>
         public Action<NetworkReloadBroadcast> BroadcastReloadToAllClients;
-        
+
         // --- Jam/Fix Delegates ---
-        
+
         /// <summary>[Client] Send fix jam request to server.</summary>
         public Action<NetworkFixJamRequest> SendFixJamRequestToServer;
-        
+
         /// <summary>[Server] Send fix jam response to a specific client.</summary>
         public Action<uint, NetworkFixJamResponse> SendFixJamResponseToClient;
-        
+
         /// <summary>[Server] Broadcast weapon jam to all clients.</summary>
         public Action<NetworkJamBroadcast> BroadcastJamToAllClients;
-        
+
         /// <summary>[Server] Broadcast jam fix to all clients.</summary>
         public Action<NetworkFixJamBroadcast> BroadcastFixJamToAllClients;
-        
+
         // --- Charge Delegates ---
-        
+
         /// <summary>[Client] Send charge start request to server.</summary>
         public Action<NetworkChargeStartRequest> SendChargeStartRequestToServer;
-        
+
         /// <summary>[Client] Send charge cancel request to server.</summary>
         public Action<NetworkChargeCancelRequest> SendChargeCancelRequestToServer;
-        
+
         /// <summary>[Server] Send charge start response to a specific client.</summary>
         public Action<uint, NetworkChargeStartResponse> SendChargeStartResponseToClient;
-        
+
         /// <summary>[Server] Broadcast charge state to all clients.</summary>
         public Action<NetworkChargeBroadcast> BroadcastChargeToAllClients;
-        
+
         // --- Sight Switch Delegates ---
-        
+
         /// <summary>[Client] Send sight switch request to server.</summary>
         public Action<NetworkSightSwitchRequest> SendSightSwitchRequestToServer;
-        
+
         /// <summary>[Server] Send sight switch response to a specific client.</summary>
         public Action<uint, NetworkSightSwitchResponse> SendSightSwitchResponseToClient;
-        
+
         /// <summary>[Server] Broadcast sight switch to all clients.</summary>
         public Action<NetworkSightSwitchBroadcast> BroadcastSightSwitchToAllClients;
-        
+
         // --- Utility Delegates ---
-        
+
         /// <summary>Get a NetworkCharacter by network ID.</summary>
         public Func<uint, NetworkCharacter> GetCharacterByNetworkIdFunc;
-        
+
         /// <summary>Get current network time.</summary>
         public Func<float> GetNetworkTimeFunc;
 
@@ -207,51 +212,66 @@ namespace Arawn.GameCreator2.Networking.Shooter
         /// </summary>
         public Func<int, GameObject, GameObject> ResolveMaterialTargetFunc;
 
-        /// <summary>Optional server-side damage application hook.</summary>
+        /// <summary>
+        /// Optional server-side damage application hook. Return true only when damage was handled.
+        /// This never replaces the authoritative target reaction.
+        /// </summary>
+        public Func<NetworkShooterHitRequest, float, bool> TryApplyDamageFunc;
+
+        /// <summary>
+        /// Legacy server-side damage application hook. Invoking it handles damage only and never
+        /// replaces the authoritative target reaction.
+        /// </summary>
         public Action<NetworkShooterHitRequest, float> ApplyDamageFunc;
-        
+
+        /// <summary>
+        /// Optional server-side reaction override. Return true when the supplied reaction context
+        /// was handled; false lets the manager execute the configured GC2 Shooter reaction.
+        /// </summary>
+        public Func<NetworkShooterReactionContext, bool> TryApplyAuthoritativeReactionFunc;
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // EVENTS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>Called when any shot request is sent.</summary>
         public event Action<NetworkShotRequest> OnShotRequestSent;
-        
+
         /// <summary>Called when any shot is validated on server.</summary>
         public event Action<NetworkShotBroadcast> OnShotValidated;
-        
+
         /// <summary>Called when any shot is rejected on server.</summary>
         public event Action<NetworkShotRequest, ShotRejectionReason> OnShotRejected;
-        
+
         /// <summary>Called when any hit is validated on server.</summary>
         public event Action<NetworkShooterHitBroadcast> OnHitValidated;
-        
+
         /// <summary>Called when any hit is rejected on server.</summary>
         public event Action<NetworkShooterHitRequest, HitRejectionReason> OnHitRejected;
-        
+
         /// <summary>Called when any reload is validated on server.</summary>
         public event Action<NetworkReloadBroadcast> OnReloadValidated;
-        
+
         /// <summary>Called when a weapon jams on server.</summary>
         public event Action<NetworkJamBroadcast> OnWeaponJammed;
-        
+
         /// <summary>Called when a weapon jam is fixed on server.</summary>
         public event Action<NetworkFixJamBroadcast> OnJamFixed;
-        
+
         /// <summary>Called when charge state changes on server.</summary>
         public event Action<NetworkChargeBroadcast> OnChargeStateChanged;
-        
+
         /// <summary>Called when sight is switched on server.</summary>
         public event Action<NetworkSightSwitchBroadcast> OnSightSwitched;
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // PRIVATE FIELDS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         private bool m_IsServer;
         private bool m_IsClient;
         private static readonly List<ulong> s_SharedValidatedShotKeyBuffer = new(32);
-        
+
         // Controller registry
         private readonly Dictionary<uint, NetworkShooterController> m_Controllers = new(32);
         private readonly List<PendingShotBroadcast> m_PendingShotBroadcasts = new(16);
@@ -277,7 +297,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
             public NetworkShooterImpactMotion Motion;
             public float ReceivedTime;
         }
-        
+
         // Server request queues
         private readonly Queue<QueuedShotRequest> m_ServerShotQueue = new(64);
         private readonly Queue<QueuedHitRequest> m_ServerHitQueue = new(128);
@@ -296,15 +316,31 @@ namespace Arawn.GameCreator2.Networking.Shooter
         }
 
         private readonly Dictionary<ulong, ValidatedShotReference> m_ValidatedShotReferences = new(128);
-        
+        private readonly Dictionary<ulong, NetworkBlockResult> m_TrustedNativeHitOutcomes = new(32);
+        private readonly Dictionary<ulong, float> m_TrustedNativeReactionPowers = new(32);
+        private readonly HashSet<int> m_MissingReactionWeaponDiagnostics = new();
+
+        private static readonly FieldInfo WEAPON_CAN_BE_BLOCKED_FIELD = typeof(ShooterWeapon).GetField(
+            "m_CanBeBlocked",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        private static readonly FieldInfo WEAPON_CAN_BE_PARRIED_FIELD = typeof(ShooterWeapon).GetField(
+            "m_CanBeParried",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        private static readonly MethodInfo WEAPON_ON_BLOCKED_METHOD = typeof(ShooterWeapon).GetMethod(
+            "OnBlocked",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        private static readonly MethodInfo WEAPON_ON_PARRIED_METHOD = typeof(ShooterWeapon).GetMethod(
+            "OnParried",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+
         // Statistics
         private ShooterNetworkStats m_Stats;
         private NetworkShooterPatchHooks m_PatchHooks;
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // WEAPON REGISTRY
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>
         /// Registry entry for a ShooterWeapon asset.
         /// </summary>
@@ -316,9 +352,9 @@ namespace Arawn.GameCreator2.Networking.Shooter
             public Handle Handle;
             public string Name;
         }
-        
+
         private static readonly Dictionary<int, ShooterWeaponRegistryEntry> s_WeaponRegistry = new(32);
-        
+
         /// <summary>
         /// Register a ShooterWeapon for network hash-to-asset lookup.
         /// Uses <c>weapon.Id.Hash</c> as the key.
@@ -340,7 +376,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 Name = weapon.name
             };
         }
-        
+
         /// <summary>
         /// Unregister a ShooterWeapon.
         /// </summary>
@@ -349,7 +385,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
             if (weapon == null) return;
             s_WeaponRegistry.Remove(weapon.Id.Hash);
         }
-        
+
         /// <summary>
         /// Get a ShooterWeapon by its <see cref="IdString"/> hash.
         /// </summary>
@@ -366,7 +402,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
         {
             return s_WeaponRegistry.TryGetValue(hash, out entry);
         }
-        
+
         /// <summary>
         /// Check if a ShooterWeapon is registered.
         /// </summary>
@@ -374,7 +410,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
         {
             return weapon != null && s_WeaponRegistry.ContainsKey(weapon.Id.Hash);
         }
-        
+
         /// <summary>
         /// Clear all weapon registries.
         /// Call on scene unload or session end.
@@ -383,11 +419,11 @@ namespace Arawn.GameCreator2.Networking.Shooter
         {
             s_WeaponRegistry.Clear();
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // STRUCTS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         private struct QueuedShotRequest
         {
             public uint ClientNetworkId;
@@ -395,37 +431,39 @@ namespace Arawn.GameCreator2.Networking.Shooter
             public float ReceivedTime;
             public bool TrustedServerOrigin;
         }
-        
+
         private struct QueuedHitRequest
         {
             public uint ClientNetworkId;
             public NetworkShooterHitRequest Request;
             public float ReceivedTime;
             public bool TrustedServerOrigin;
-            public bool NativeDamageWillApply;
+            public bool NativeHitWillContinue;
+            public bool HasPrevalidatedResponse;
+            public NetworkShooterHitResponse PrevalidatedResponse;
         }
-        
+
         private struct QueuedReloadRequest
         {
             public uint ClientNetworkId;
             public NetworkReloadRequest Request;
             public float ReceivedTime;
         }
-        
+
         private struct QueuedFixJamRequest
         {
             public uint ClientNetworkId;
             public NetworkFixJamRequest Request;
             public float ReceivedTime;
         }
-        
+
         private struct QueuedChargeRequest
         {
             public uint ClientNetworkId;
             public NetworkChargeStartRequest Request;
             public float ReceivedTime;
         }
-        
+
         private struct QueuedSightSwitchRequest
         {
             public uint ClientNetworkId;
@@ -455,20 +493,20 @@ namespace Arawn.GameCreator2.Networking.Shooter
             public int SightSwitchRequestsReceived;
             public int SightSwitchesValidated;
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // PROPERTIES
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         public bool IsServer => m_IsServer;
         public bool IsClient => m_IsClient;
         public ShooterNetworkStats Stats => m_Stats;
         public float NetworkTime => GetNetworkTimeFunc?.Invoke() ?? Time.time;
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // UNITY LIFECYCLE
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         private void Update()
         {
             if (m_IsClient)
@@ -491,7 +529,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
         // ════════════════════════════════════════════════════════════════════════════════════════
         // SERVER-SIDE: RECEIVING & PROCESSING REQUESTS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>
         /// [Server] Called when a shot request is received from a client.
         /// </summary>
@@ -540,7 +578,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 });
                 return;
             }
-            
+
             m_Stats.ShotRequestsReceived++;
 
             if (IsQueueAtCapacity(
@@ -563,7 +601,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 });
                 return;
             }
-            
+
             m_ServerShotQueue.Enqueue(new QueuedShotRequest
             {
                 ClientNetworkId = clientNetworkId,
@@ -610,12 +648,23 @@ namespace Arawn.GameCreator2.Networking.Shooter
             m_Stats.ShotRequestsReceived++;
             return true;
         }
-        
+
         /// <summary>
         /// [Server] Called when a hit request is received from a client.
         /// </summary>
         public void ReceiveHitRequest(uint clientNetworkId, NetworkShooterHitRequest request)
         {
+            if (!request.IsCharacterHit || request.TargetNetworkId == 0)
+            {
+                NetworkShooterDebug.LogPhysics(
+                    "ManagerReceiveHit",
+                    $"serverFlag={m_IsServer} client={clientNetworkId} actor={request.ActorNetworkId} " +
+                    $"req={request.RequestId} corr={request.CorrelationId} sourceShot={request.SourceShotRequestId} " +
+                    $"weaponHash={request.WeaponHash} point={request.HitPoint} normal={request.HitNormal} " +
+                    $"distance={request.Distance:F2} queue={m_ServerHitQueue.Count}",
+                    this);
+            }
+
             if (!m_IsServer)
             {
                 LogDiagnosticsWarning(
@@ -659,7 +708,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 });
                 return;
             }
-            
+
             m_Stats.HitRequestsReceived++;
 
             if (IsQueueAtCapacity(
@@ -682,14 +731,14 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 });
                 return;
             }
-            
+
             m_ServerHitQueue.Enqueue(new QueuedHitRequest
             {
                 ClientNetworkId = clientNetworkId,
                 Request = request,
                 ReceivedTime = Time.time,
                 TrustedServerOrigin = false,
-                NativeDamageWillApply = false
+                NativeHitWillContinue = false
             });
 
             LogDiagnostics(
@@ -723,18 +772,144 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 return false;
             }
 
+            NetworkShooterHitResponse prevalidatedResponse = default;
+            bool hasPrevalidatedResponse = false;
+            if (nativeDamageWillApply)
+            {
+                // The cancellable source hook runs before any native defense, reaction, damage,
+                // or OnHit instructions. Capture every validation result that depends on the
+                // pre-hit target state now; a lethal hit must not invalidate itself next frame.
+                if (!m_Controllers.TryGetValue(request.ActorNetworkId, out NetworkShooterController controller) ||
+                    controller == null)
+                {
+                    LogDiagnosticsWarning(
+                        $"trusted native hit rejected before continuation because actor controller " +
+                        $"{request.ActorNetworkId} is not registered");
+                    return false;
+                }
+
+                prevalidatedResponse = ValidateHitRequest(request);
+                prevalidatedResponse.ActorNetworkId = request.ActorNetworkId;
+                prevalidatedResponse.CorrelationId = request.CorrelationId;
+                if (!prevalidatedResponse.Validated)
+                {
+                    m_Stats.HitsRejected++;
+                    OnHitRejected?.Invoke(request, prevalidatedResponse.RejectionReason);
+                    LogDiagnosticsWarning(
+                        $"trusted native hit rejected before GC2 side effects actor={request.ActorNetworkId} " +
+                        $"req={request.RequestId} reason={prevalidatedResponse.RejectionReason}");
+                    return false;
+                }
+
+                hasPrevalidatedResponse = true;
+            }
+
             m_ServerHitQueue.Enqueue(new QueuedHitRequest
             {
                 ClientNetworkId = 0,
                 Request = request,
                 ReceivedTime = Time.time,
                 TrustedServerOrigin = true,
-                NativeDamageWillApply = nativeDamageWillApply
+                // Compatibility: the public parameter keeps its previous name for callers that
+                // use named arguments. In the cancellable patch this means the complete native
+                // OnHit path (damage, defense, reaction, and authored instructions) will continue.
+                NativeHitWillContinue = nativeDamageWillApply,
+                HasPrevalidatedResponse = hasPrevalidatedResponse,
+                PrevalidatedResponse = prevalidatedResponse
             });
             m_Stats.HitRequestsReceived++;
             return true;
         }
-        
+
+        /// <summary>
+        /// [Server] Records the authored GC2 shield outcome produced by the native continuation.
+        /// The current Shooter source patch invokes this after native defense/reaction resolution
+        /// and before damage-bearing OnHit instructions begin.
+        /// </summary>
+        public bool TryServerRecordNativeHitOutcome(
+            uint actorNetworkId,
+            uint correlationId,
+            NetworkBlockResult blockResult)
+        {
+            return TryServerRecordNativeHitOutcome(
+                actorNetworkId,
+                correlationId,
+                blockResult,
+                float.NaN);
+        }
+
+        /// <summary>
+        /// [Server] Records the authored GC2 shield outcome and the authoritative reaction power
+        /// evaluated by the native continuation. A non-finite power is treated as unavailable and
+        /// resolved from the validated request when the queued hit is processed.
+        /// </summary>
+        public bool TryServerRecordNativeHitOutcome(
+            uint actorNetworkId,
+            uint correlationId,
+            NetworkBlockResult blockResult,
+            float reactionPower)
+        {
+            if (!m_IsServer || actorNetworkId == 0 || correlationId == 0) return false;
+
+            bool hasMatchingContinuation = false;
+            foreach (QueuedHitRequest queued in m_ServerHitQueue)
+            {
+                if (!queued.NativeHitWillContinue) continue;
+                if (queued.Request.ActorNetworkId != actorNetworkId) continue;
+                if (queued.Request.CorrelationId != correlationId) continue;
+                hasMatchingContinuation = true;
+                break;
+            }
+
+            if (!hasMatchingContinuation) return false;
+            ulong key = GetNativeHitOutcomeKey(actorNetworkId, correlationId);
+            m_TrustedNativeHitOutcomes[key] = blockResult;
+            if (!float.IsNaN(reactionPower) && !float.IsInfinity(reactionPower))
+            {
+                m_TrustedNativeReactionPowers[key] = reactionPower;
+            }
+            else
+            {
+                m_TrustedNativeReactionPowers.Remove(key);
+            }
+
+            return true;
+        }
+
+        private static ulong GetNativeHitOutcomeKey(uint actorNetworkId, uint correlationId)
+        {
+            return ((ulong)actorNetworkId << 32) | correlationId;
+        }
+
+        internal static NetworkBlockResult MapBlockType(BlockType blockType)
+        {
+            return blockType switch
+            {
+                BlockType.Block => NetworkBlockResult.Blocked,
+                BlockType.Parry => NetworkBlockResult.Parried,
+                BlockType.Break => NetworkBlockResult.BlockBroken,
+                _ => NetworkBlockResult.None
+            };
+        }
+
+        private bool TryTakeNativeHitOutcome(
+            NetworkShooterHitRequest request,
+            out NetworkBlockResult blockResult,
+            out float reactionPower)
+        {
+            ulong key = GetNativeHitOutcomeKey(request.ActorNetworkId, request.CorrelationId);
+            reactionPower = float.NaN;
+            if (!m_TrustedNativeHitOutcomes.TryGetValue(key, out blockResult)) return false;
+            m_TrustedNativeHitOutcomes.Remove(key);
+            if (m_TrustedNativeReactionPowers.TryGetValue(key, out float storedPower))
+            {
+                reactionPower = storedPower;
+            }
+
+            m_TrustedNativeReactionPowers.Remove(key);
+            return true;
+        }
+
         private void ProcessServerShotQueue()
         {
             int staleDropped = DropStaleRequests(m_ServerShotQueue, m_MaxQueueAgeSeconds, queued => queued.ReceivedTime);
@@ -744,7 +919,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
             }
 
             int processed = 0;
-            
+
             while (m_ServerShotQueue.Count > 0 && processed < m_MaxShotsPerFrame)
             {
                 var queued = m_ServerShotQueue.Dequeue();
@@ -752,17 +927,17 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 processed++;
             }
         }
-        
+
         private void ProcessServerHitQueue()
         {
-            int staleDropped = DropStaleRequests(m_ServerHitQueue, m_MaxQueueAgeSeconds, queued => queued.ReceivedTime);
+            int staleDropped = DropStaleHitRequests();
             if (staleDropped > 0 && (m_LogHitRequests || m_LogBroadcasts))
             {
                 Debug.LogWarning($"[NetworkShooterManager] Dropped {staleDropped} stale hit requests");
             }
 
             int processed = 0;
-            
+
             while (m_ServerHitQueue.Count > 0 && processed < m_MaxHitsPerFrame)
             {
                 var queued = m_ServerHitQueue.Dequeue();
@@ -770,14 +945,40 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 processed++;
             }
         }
-        
+
+        private int DropStaleHitRequests()
+        {
+            if (m_ServerHitQueue.Count == 0) return 0;
+
+            float now = Time.time;
+            int dropped = 0;
+            while (m_ServerHitQueue.Count > 0)
+            {
+                QueuedHitRequest queued = m_ServerHitQueue.Peek();
+                if (now - queued.ReceivedTime <= m_MaxQueueAgeSeconds) break;
+
+                m_ServerHitQueue.Dequeue();
+                if (queued.NativeHitWillContinue)
+                {
+                    // The native defense/reaction callback has already run synchronously. Remove its
+                    // captured outcome when overload protection discards the matching request so
+                    // correlation wrap-around cannot inherit stale defense state.
+                    TryTakeNativeHitOutcome(queued.Request, out _, out _);
+                }
+
+                dropped++;
+            }
+
+            return dropped;
+        }
+
         private void ProcessShotRequest(QueuedShotRequest queued)
         {
             var request = queued.Request;
             LogDiagnostics(
                 $"processing shot request client={queued.ClientNetworkId} actor={request.ActorNetworkId} " +
                 $"req={request.RequestId} corr={request.CorrelationId} weaponHash={request.WeaponHash}");
-            
+
             NetworkShotResponse response;
             if (request.ActorNetworkId == 0 || request.ActorNetworkId != request.ShooterNetworkId)
             {
@@ -833,7 +1034,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 : controller.ProcessShotRequest(request, queued.ClientNetworkId);
             response.ActorNetworkId = request.ActorNetworkId;
             response.CorrelationId = request.CorrelationId;
-            
+
             if (!queued.TrustedServerOrigin)
             {
                 SendShotResponseToClient?.Invoke(queued.ClientNetworkId, response);
@@ -841,12 +1042,12 @@ namespace Arawn.GameCreator2.Networking.Shooter
                     $"shot response sent client={queued.ClientNetworkId} actor={request.ActorNetworkId} " +
                     $"req={request.RequestId} validated={response.Validated} reason={response.RejectionReason}");
             }
-            
+
             if (response.Validated)
             {
                 m_Stats.ShotsValidated++;
                 RecordValidatedShot(request);
-                
+
                 // Broadcast to all clients
                 var broadcast = new NetworkShotBroadcast
                 {
@@ -858,41 +1059,52 @@ namespace Arawn.GameCreator2.Networking.Shooter
                     HitPoint = request.MuzzlePosition + request.ShotDirection * 100f, // Default far point
                     DidHit = false
                 };
-                
+
                 BroadcastShotToAllClients?.Invoke(broadcast);
                 m_Stats.ShotBroadcastsSent++;
                 LogDiagnostics(
                     $"broadcasting shot actor={request.ActorNetworkId} weaponHash={request.WeaponHash} " +
                     $"muzzle={request.MuzzlePosition} end={broadcast.HitPoint}");
-                
+
                 if (m_LogBroadcasts)
                 {
                     Debug.Log($"[NetworkShooterManager] Shot broadcast: {request.ActorNetworkId}");
                 }
-                
+
                 OnShotValidated?.Invoke(broadcast);
             }
             else
             {
                 m_Stats.ShotsRejected++;
-                
+
                 if (m_LogShotRequests)
                 {
                     Debug.Log($"[NetworkShooterManager] Shot rejected: {response.RejectionReason}");
                 }
-                
+
                 OnShotRejected?.Invoke(request, response.RejectionReason);
             }
         }
-        
+
         private void ProcessHitRequest(QueuedHitRequest queued)
         {
             var request = queued.Request;
+            bool environmentHit = !request.IsCharacterHit || request.TargetNetworkId == 0;
+            if (environmentHit)
+            {
+                NetworkShooterDebug.LogPhysics(
+                    "ManagerProcessHit",
+                    $"begin client={queued.ClientNetworkId} trusted={queued.TrustedServerOrigin} " +
+                    $"nativeContinues={queued.NativeHitWillContinue} actor={request.ActorNetworkId} " +
+                    $"req={request.RequestId} corr={request.CorrelationId} sourceShot={request.SourceShotRequestId} " +
+                    $"weaponHash={request.WeaponHash} point={request.HitPoint} queueRemaining={m_ServerHitQueue.Count}",
+                    this);
+            }
             LogDiagnostics(
                 $"processing hit request client={queued.ClientNetworkId} actor={request.ActorNetworkId} " +
                 $"req={request.RequestId} sourceShot={request.SourceShotRequestId} target={request.TargetNetworkId} " +
                 $"impactProp={request.ImpactPropNetworkId}");
-            
+
             NetworkShooterHitResponse response;
             ulong sourceShotKey = 0;
             if (request.ActorNetworkId == 0 || request.ActorNetworkId != request.ShooterNetworkId)
@@ -917,7 +1129,11 @@ namespace Arawn.GameCreator2.Networking.Shooter
 
             if (queued.TrustedServerOrigin)
             {
-                if (!m_Controllers.TryGetValue(request.ActorNetworkId, out var trustedController) ||
+                if (queued.HasPrevalidatedResponse)
+                {
+                    response = queued.PrevalidatedResponse;
+                }
+                else if (!m_Controllers.TryGetValue(request.ActorNetworkId, out var trustedController) ||
                     trustedController == null)
                 {
                     response = new NetworkShooterHitResponse
@@ -975,7 +1191,64 @@ namespace Arawn.GameCreator2.Networking.Shooter
 
             response.ActorNetworkId = request.ActorNetworkId;
             response.CorrelationId = request.CorrelationId;
-            
+            float authoritativeReactionPower = 0f;
+
+            if (environmentHit)
+            {
+                NetworkShooterDebug.LogPhysics(
+                    "ManagerProcessHit",
+                    $"validated={response.Validated} reason={response.RejectionReason} " +
+                    $"client={queued.ClientNetworkId} trusted={queued.TrustedServerOrigin} " +
+                    $"actor={request.ActorNetworkId} req={request.RequestId} corr={request.CorrelationId} " +
+                    $"sourceShot={request.SourceShotRequestId} weaponHash={request.WeaponHash}",
+                    this);
+            }
+
+            if (queued.NativeHitWillContinue)
+            {
+                if (TryTakeNativeHitOutcome(
+                        request,
+                        out NetworkBlockResult nativeBlockResult,
+                        out float nativeReactionPower))
+                {
+                    if (response.Validated)
+                    {
+                        response.BlockResult = nativeBlockResult;
+                        authoritativeReactionPower = IsFinite(nativeReactionPower)
+                            ? nativeReactionPower
+                            : ResolveAuthoritativeReactionPower(request, response.Damage);
+                    }
+                }
+                else if (response.Validated)
+                {
+                    response.BlockResult = NetworkBlockResult.UnresolvedNative;
+                    LogNativeOutcomeInvariantWarning(
+                        $"validated native Shooter hit actor={request.ActorNetworkId} req={request.RequestId} " +
+                        "had no post-OnHit shield outcome. Client reaction reconstruction is suppressed; " +
+                        "reapply the current cancellable Shooter source patch on the optional Shooter package.");
+                }
+            }
+            else if (response.Validated)
+            {
+                // Resolve authored shield defense/reaction before damage. This guarantees a custom
+                // or Stats health handler cannot make a lethal hit suppress the target reaction.
+                response.BlockResult = ApplyAuthoritativeReactionOnServerWithPower(
+                    request,
+                    response.Damage,
+                    response.BlockResult,
+                    out authoritativeReactionPower);
+
+                if (response.BlockResult == NetworkBlockResult.None ||
+                    response.BlockResult == NetworkBlockResult.BlockBroken)
+                {
+                    ApplyDamageOnServer(request, response.Damage);
+                }
+                else
+                {
+                    response.Damage = 0f;
+                }
+            }
+
             if (!queued.TrustedServerOrigin)
             {
                 SendHitResponseToClient?.Invoke(queued.ClientNetworkId, response);
@@ -983,20 +1256,14 @@ namespace Arawn.GameCreator2.Networking.Shooter
                     $"hit response sent client={queued.ClientNetworkId} actor={request.ActorNetworkId} " +
                     $"req={request.RequestId} validated={response.Validated} reason={response.RejectionReason} damage={response.Damage:F2}");
             }
-            
+
             if (response.Validated)
             {
                 m_Stats.HitsValidated++;
 
                 // Consume one authoritative hit claim from this validated shot.
                 RecordValidatedHitClaim(sourceShotKey, request);
-                
-                // Apply damage on server
-                if (!queued.NativeDamageWillApply)
-                {
-                    ApplyDamageOnServer(request, response.Damage);
-                }
-                
+
                 bool hasImpactMotion = TryBuildImpactMotion(request, out NetworkShooterImpactMotion impactMotion);
 
                 // Broadcast to all clients
@@ -1008,45 +1275,56 @@ namespace Arawn.GameCreator2.Networking.Shooter
                     HitNormal = request.HitNormal,
                     WeaponHash = request.WeaponHash,
                     BlockResult = (byte)response.BlockResult,
+                    ReactionPower = authoritativeReactionPower,
                     MaterialHash = ResolveMaterialHashFunc?.Invoke(request) ?? 0,
                     HasImpactMotion = hasImpactMotion,
                     ImpactMotion = impactMotion
                 };
-                
+
                 BroadcastHitToAllClients?.Invoke(broadcast);
+                if (environmentHit)
+                {
+                    NetworkShooterDebug.LogPhysics(
+                        "ManagerBroadcastHit",
+                        $"delegate={(BroadcastHitToAllClients != null)} actor={request.ActorNetworkId} " +
+                        $"req={request.RequestId} corr={request.CorrelationId} weaponHash={request.WeaponHash} " +
+                        $"point={request.HitPoint} normal={request.HitNormal} impactMotion={hasImpactMotion}",
+                        this);
+                }
                 m_Stats.HitBroadcastsSent++;
                 LogDiagnostics(
                     $"broadcasting hit actor={request.ActorNetworkId} target={request.TargetNetworkId} " +
-                    $"weaponHash={request.WeaponHash} point={request.HitPoint} material={broadcast.MaterialHash} " +
+                    $"weaponHash={request.WeaponHash} point={request.HitPoint} power={broadcast.ReactionPower:F2} " +
+                    $"material={broadcast.MaterialHash} " +
                     $"impactProp={request.ImpactPropNetworkId} impactMotion={hasImpactMotion}");
-                
+
                 if (m_LogBroadcasts)
                 {
                     Debug.Log($"[NetworkShooterManager] Hit broadcast: {request.ActorNetworkId} -> {request.TargetNetworkId}");
                 }
-                
+
                 OnHitValidated?.Invoke(broadcast);
             }
             else
             {
                 m_Stats.HitsRejected++;
-                
+
                 if (m_LogHitRequests)
                 {
                     Debug.Log($"[NetworkShooterManager] Hit rejected: {response.RejectionReason}");
                 }
-                
+
                 OnHitRejected?.Invoke(request, response.RejectionReason);
             }
         }
-        
+
         private NetworkShotResponse ValidateShotRequest(NetworkShotRequest request)
         {
             // Basic validation without controller
             float networkTime = GetNetworkTimeFunc?.Invoke() ?? Time.time;
             float age = networkTime - request.ClientTimestamp;
             uint shooterNetworkId = request.ActorNetworkId != 0 ? request.ActorNetworkId : request.ShooterNetworkId;
-            
+
             if (age > m_MaxRewindTime)
             {
                 return new NetworkShotResponse
@@ -1058,7 +1336,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                     RejectionReason = ShotRejectionReason.TimestampTooOld
                 };
             }
-            
+
             var shooterNetworkChar = GetCharacterByNetworkId(shooterNetworkId);
             if (shooterNetworkChar == null)
             {
@@ -1071,7 +1349,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                     RejectionReason = ShotRejectionReason.ShooterNotFound
                 };
             }
-            
+
             return new NetworkShotResponse
             {
                 RequestId = request.RequestId,
@@ -1082,12 +1360,12 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 AmmoRemaining = 0
             };
         }
-        
+
         private NetworkShooterHitResponse ValidateHitRequest(NetworkShooterHitRequest request)
         {
             float networkTime = GetNetworkTimeFunc?.Invoke() ?? Time.time;
             float age = networkTime - request.ClientTimestamp;
-            
+
             if (age > m_MaxRewindTime)
             {
                 return new NetworkShooterHitResponse
@@ -1099,7 +1377,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                     RejectionReason = HitRejectionReason.TimestampTooOld
                 };
             }
-            
+
             if (request.IsCharacterHit && request.TargetNetworkId != 0)
             {
                 var targetNetworkChar = GetCharacterByNetworkId(request.TargetNetworkId);
@@ -1114,10 +1392,22 @@ namespace Arawn.GameCreator2.Networking.Shooter
                         RejectionReason = HitRejectionReason.TargetNotFound
                     };
                 }
-                
+
                 var targetCharacter = targetNetworkChar.GetComponent<Character>();
                 if (targetCharacter != null)
                 {
+                    if (targetCharacter.IsDead)
+                    {
+                        return new NetworkShooterHitResponse
+                        {
+                            RequestId = request.RequestId,
+                            ActorNetworkId = request.ActorNetworkId,
+                            CorrelationId = request.CorrelationId,
+                            Validated = false,
+                            RejectionReason = HitRejectionReason.TargetDead
+                        };
+                    }
+
                     if (targetCharacter.Combat.Invincibility.IsInvincible)
                     {
                         return new NetworkShooterHitResponse
@@ -1129,7 +1419,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                             RejectionReason = HitRejectionReason.TargetInvincible
                         };
                     }
-                    
+
                     if (targetCharacter.Dash != null && targetCharacter.Dash.IsDodge)
                     {
                         return new NetworkShooterHitResponse
@@ -1143,7 +1433,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                     }
                 }
             }
-            
+
             return new NetworkShooterHitResponse
             {
                 RequestId = request.RequestId,
@@ -1194,18 +1484,33 @@ namespace Arawn.GameCreator2.Networking.Shooter
             prop.ApplyImpactMotion(motion);
             return true;
         }
-        
+
         private void ApplyDamageOnServer(NetworkShooterHitRequest request, float damage)
         {
             if (!request.IsCharacterHit || request.TargetNetworkId == 0) return;
             if (float.IsNaN(damage) || float.IsInfinity(damage) || damage <= 0f) return;
-            
+
             var targetNetworkChar = GetCharacterByNetworkId(request.TargetNetworkId);
             if (targetNetworkChar == null) return;
-            
+
             var targetCharacter = targetNetworkChar.GetComponent<Character>();
             if (targetCharacter == null) return;
-            
+
+            if (TryApplyDamageFunc != null)
+            {
+                try
+                {
+                    if (TryApplyDamageFunc.Invoke(request, damage)) return;
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogError(
+                        $"[NetworkShooterManager] TryApplyDamageFunc threw an exception. " +
+                        $"Falling back to the legacy damage hook.\n{ex.Message}",
+                        this);
+                }
+            }
+
             if (ApplyDamageFunc != null)
             {
                 try
@@ -1217,26 +1522,51 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 {
                     Debug.LogError(
                         $"[NetworkShooterManager] ApplyDamageFunc threw an exception. " +
-                        $"Falling back to built-in reaction damage path.\n{ex.Message}");
+                        $"No custom damage handler completed this hit.\n{ex.Message}",
+                        this);
                 }
             }
+
+            LogDamageInvariantWarning(
+                $"Validated Shooter hit actor={request.ActorNetworkId} target={request.TargetNetworkId} " +
+                $"weaponHash={request.WeaponHash} damage={damage:F2} could not modify health because " +
+                "neither TryApplyDamageFunc nor ApplyDamageFunc handled it. Configure a damage adapter " +
+                "such as NetworkShooterStatsDamageBridge. The authoritative reaction will still run.");
+        }
+
+        private NetworkBlockResult ApplyAuthoritativeReactionOnServer(
+            NetworkShooterHitRequest request,
+            float damage,
+            NetworkBlockResult blockResult)
+        {
+            return ApplyAuthoritativeReactionOnServerWithPower(
+                request,
+                damage,
+                blockResult,
+                out _);
+        }
+
+        private NetworkBlockResult ApplyAuthoritativeReactionOnServerWithPower(
+            NetworkShooterHitRequest request,
+            float damage,
+            NetworkBlockResult blockResult,
+            out float reactionPower)
+        {
+            reactionPower = 0f;
+            if (!request.IsCharacterHit || request.TargetNetworkId == 0) return blockResult;
+
+            NetworkCharacter targetNetworkChar = GetCharacterByNetworkId(request.TargetNetworkId);
+            if (targetNetworkChar == null) return blockResult;
+
+            Character targetCharacter = targetNetworkChar.GetComponent<Character>();
+            if (targetCharacter == null || targetCharacter.IsDead) return blockResult;
 
             uint shooterNetworkId = request.ActorNetworkId != 0 ? request.ActorNetworkId : request.ShooterNetworkId;
-            var attackerNetworkChar = GetCharacterByNetworkId(shooterNetworkId);
+            NetworkCharacter attackerNetworkChar = GetCharacterByNetworkId(shooterNetworkId);
+            Character attackerCharacter = attackerNetworkChar != null
+                ? attackerNetworkChar.GetComponent<Character>()
+                : null;
             bool targetUsesServerNavMesh = UsesServerAuthoritativeNavMesh(targetCharacter, targetNetworkChar);
-
-            if (targetUsesServerNavMesh && m_SuppressFallbackHitReactionsForServerNavMesh)
-            {
-                if (m_LogHitRequests || NetworkShooterDebug.ForceDiagnostics)
-                {
-                    Debug.Log(
-                        $"[NetworkShooterManager] Suppressed fallback hit reaction for server NavMesh target " +
-                        $"target={targetCharacter.name} damage={damage:F2} hitPoint={request.HitPoint} hitNormal={request.HitNormal}",
-                        targetCharacter);
-                }
-
-                return;
-            }
 
             Vector3 beforeReactionPosition = targetCharacter.transform.position;
             Vector3 incomingDirection;
@@ -1268,11 +1598,135 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 localDirection = Vector3.forward;
             }
 
-            var reactionInput = new ReactionInput(localDirection, Mathf.Max(0f, damage));
-            var args = new Args(attackerNetworkChar != null ? attackerNetworkChar.gameObject : null, targetCharacter.gameObject);
-            _ = targetCharacter.Combat.GetHitReaction(reactionInput, args, null);
+            var args = new Args(
+                attackerCharacter != null ? attackerCharacter.gameObject : null,
+                targetCharacter.gameObject);
+            ShooterWeapon weapon = GetShooterWeaponByHash(request.WeaponHash);
+            reactionPower = IsFinite(damage) ? Mathf.Max(0f, damage) : 0f;
 
-            if (targetUsesServerNavMesh && m_ResnapServerNavMeshAfterHitReaction)
+            if (weapon != null)
+            {
+                try
+                {
+                    float configuredPower = (float)weapon.Fire.Power(args);
+                    if (!float.IsNaN(configuredPower) && !float.IsInfinity(configuredPower))
+                    {
+                        reactionPower = Mathf.Max(0f, configuredPower);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    LogDiagnosticsWarning(
+                        $"failed to evaluate Shooter reaction power weaponHash={request.WeaponHash}; " +
+                        $"using validated damage {damage:F2}. {ex.Message}");
+                }
+            }
+            else if (m_MissingReactionWeaponDiagnostics.Add(request.WeaponHash))
+            {
+                Debug.LogWarning(
+                    $"[NetworkShooterManager] Cannot resolve Shooter weapon hash {request.WeaponHash} " +
+                    "for the authoritative reaction. The generic GC2 reaction will be used once; " +
+                    "register the same weapon assets on every peer.",
+                    this);
+            }
+
+            var reactionInput = new ReactionInput(localDirection, reactionPower);
+            IShield shield = null;
+            ShieldOutput shieldOutput = default;
+
+            if (blockResult == NetworkBlockResult.None && weapon != null)
+            {
+                blockResult = ResolveManagerOwnedBlock(
+                    targetCharacter,
+                    weapon,
+                    args,
+                    reactionInput,
+                    request.HitPoint,
+                    out shield,
+                    out shieldOutput);
+            }
+
+            if (blockResult == NetworkBlockResult.Blocked ||
+                blockResult == NetworkBlockResult.Parried)
+            {
+                InvokeWeaponDefenseResponse(weapon, args, blockResult);
+                ApplyShieldDefense(shield, shieldOutput, reactionInput, args);
+                return blockResult;
+            }
+
+            bool suppressReaction =
+                targetUsesServerNavMesh &&
+                m_SuppressFallbackHitReactionsForServerNavMesh;
+            if (!suppressReaction)
+            {
+                // Pair the owner's confirmed reaction window with a server-approved receive gate.
+                // UnitDriverNetworkServer otherwise rejects owner-authored root-motion/Y samples,
+                // even when the combat request itself was valid.
+                (targetCharacter.Driver as INetworkServerOwnerMotionAuthority)
+                    ?.OpenServerOwnerMotionWindow(1f, request.CorrelationId);
+            }
+
+            var context = new NetworkShooterReactionContext(
+                request,
+                damage,
+                weapon,
+                attackerCharacter,
+                targetCharacter,
+                incomingDirection,
+                blockResult,
+                reactionInput,
+                args);
+
+            bool reactionHandled = false;
+
+            if (!suppressReaction && TryApplyAuthoritativeReactionFunc != null)
+            {
+                try
+                {
+                    reactionHandled = TryApplyAuthoritativeReactionFunc.Invoke(context);
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogError(
+                        $"[NetworkShooterManager] TryApplyAuthoritativeReactionFunc threw an exception. " +
+                        $"Falling back to the configured GC2 Shooter reaction.\n{ex.Message}",
+                        this);
+                }
+            }
+
+            if (suppressReaction)
+            {
+                if (m_LogHitRequests || NetworkShooterDebug.ForceDiagnostics)
+                {
+                    Debug.Log(
+                        $"[NetworkShooterManager] Suppressed fallback hit reaction for server NavMesh target " +
+                        $"target={targetCharacter.name} damage={damage:F2} hitPoint={request.HitPoint} " +
+                        $"hitNormal={request.HitNormal}",
+                        targetCharacter);
+                }
+            }
+            else if (!reactionHandled)
+            {
+                ReactionOutput reactionOutput = targetCharacter.Combat.GetHitReaction(
+                    reactionInput,
+                    args,
+                    weapon != null ? weapon.HitReaction : null);
+                context.SetReactionOutput(reactionOutput);
+            }
+
+            if (!suppressReaction)
+            {
+                (targetCharacter.Driver as INetworkServerOwnerMotionAuthority)
+                    ?.OpenServerOwnerMotionWindow(
+                        context.OwnerMotionWindowSeconds,
+                        request.CorrelationId);
+            }
+
+            ApplyShieldDefense(shield, shieldOutput, reactionInput, args);
+
+            if (!suppressReaction &&
+                targetUsesServerNavMesh &&
+                m_ResnapServerNavMeshAfterHitReaction)
             {
                 ResnapServerNavMeshTargetAfterHitReaction(targetCharacter, beforeReactionPosition, request);
             }
@@ -1280,7 +1734,186 @@ namespace Arawn.GameCreator2.Networking.Shooter
             if (m_LogHitRequests)
             {
                 Debug.Log(
-                    $"[NetworkShooterManager] Applied built-in server reaction damage={damage:F2} target={targetCharacter.name}");
+                    $"[NetworkShooterManager] Applied authoritative server reaction damage={damage:F2} " +
+                    $"power={reactionPower:F2} target={targetCharacter.name} weaponHash={request.WeaponHash}");
+            }
+
+            return blockResult;
+        }
+
+        private float ResolveAuthoritativeReactionPower(
+            NetworkShooterHitRequest request,
+            float validatedDamage)
+        {
+            float fallbackPower = IsFinite(validatedDamage)
+                ? Mathf.Max(0f, validatedDamage)
+                : 0f;
+            ShooterWeapon weapon = GetShooterWeaponByHash(request.WeaponHash);
+            if (weapon == null) return fallbackPower;
+
+            NetworkCharacter targetNetworkCharacter =
+                GetCharacterByNetworkId(request.TargetNetworkId);
+            Character targetCharacter = targetNetworkCharacter != null
+                ? targetNetworkCharacter.GetComponent<Character>()
+                : null;
+            uint attackerNetworkId = request.ActorNetworkId != 0
+                ? request.ActorNetworkId
+                : request.ShooterNetworkId;
+            NetworkCharacter attackerNetworkCharacter =
+                GetCharacterByNetworkId(attackerNetworkId);
+            Character attackerCharacter = attackerNetworkCharacter != null
+                ? attackerNetworkCharacter.GetComponent<Character>()
+                : null;
+            var args = new Args(
+                attackerCharacter != null ? attackerCharacter.gameObject : null,
+                targetCharacter != null ? targetCharacter.gameObject : null);
+
+            try
+            {
+                float configuredPower = (float) weapon.Fire.Power(args);
+                return IsFinite(configuredPower)
+                    ? Mathf.Max(0f, configuredPower)
+                    : fallbackPower;
+            }
+            catch (Exception ex)
+            {
+                LogDiagnosticsWarning(
+                    $"failed to reconstruct native Shooter reaction power weaponHash={request.WeaponHash}; " +
+                    $"using validated damage {fallbackPower:F2}. {ex.Message}");
+                return fallbackPower;
+            }
+        }
+
+        private static bool IsFinite(float value)
+        {
+            return !float.IsNaN(value) && !float.IsInfinity(value);
+        }
+
+        private NetworkBlockResult ResolveManagerOwnedBlock(
+            Character targetCharacter,
+            ShooterWeapon weapon,
+            Args args,
+            ReactionInput reactionInput,
+            Vector3 hitPoint,
+            out IShield shield,
+            out ShieldOutput shieldOutput)
+        {
+            shield = null;
+            shieldOutput = default;
+            if (targetCharacter == null || weapon == null) return NetworkBlockResult.None;
+
+            bool canBeBlocked = CheckWeaponDefenseCondition(
+                WEAPON_CAN_BE_BLOCKED_FIELD,
+                weapon,
+                args,
+                "block");
+            bool canBeParried = CheckWeaponDefenseCondition(
+                WEAPON_CAN_BE_PARRIED_FIELD,
+                weapon,
+                args,
+                "parry");
+
+            try
+            {
+                var shieldInput = new ShieldInput(
+                    reactionInput.Direction,
+                    hitPoint,
+                    reactionInput.Power);
+                shield = targetCharacter.Combat.GetBlock(
+                    shieldInput,
+                    args,
+                    canBeBlocked,
+                    canBeParried,
+                    out shieldOutput);
+            }
+            catch (Exception ex)
+            {
+                LogNativeOutcomeInvariantWarning(
+                    $"failed to evaluate authored Shooter defense target={targetCharacter.name} " +
+                    $"weapon={weapon.name}; treating it as an unblocked hit. {ex.Message}");
+                shield = null;
+                shieldOutput = default;
+                return NetworkBlockResult.None;
+            }
+
+            return MapBlockType(shieldOutput.Type);
+        }
+
+        private bool CheckWeaponDefenseCondition(
+            FieldInfo field,
+            ShooterWeapon weapon,
+            Args args,
+            string defenseName)
+        {
+            if (field?.GetValue(weapon) is not RunConditionsList conditions)
+            {
+                LogNativeOutcomeInvariantWarning(
+                    $"ShooterWeapon.{defenseName} conditions could not be resolved for '{weapon.name}'. " +
+                    "The optional Shooter package version does not match this networking release.");
+                return false;
+            }
+
+            try
+            {
+                return conditions.Check(args);
+            }
+            catch (Exception ex)
+            {
+                LogNativeOutcomeInvariantWarning(
+                    $"ShooterWeapon.{defenseName} conditions threw for '{weapon.name}'; " +
+                    $"that defense is disabled for this hit. {ex.Message}");
+                return false;
+            }
+        }
+
+        private void InvokeWeaponDefenseResponse(
+            ShooterWeapon weapon,
+            Args args,
+            NetworkBlockResult blockResult)
+        {
+            if (weapon == null) return;
+            MethodInfo method = blockResult == NetworkBlockResult.Parried
+                ? WEAPON_ON_PARRIED_METHOD
+                : WEAPON_ON_BLOCKED_METHOD;
+
+            if (method == null)
+            {
+                LogNativeOutcomeInvariantWarning(
+                    $"ShooterWeapon authored {blockResult} response could not be resolved for '{weapon.name}'. " +
+                    "The optional Shooter package version does not match this networking release.");
+                return;
+            }
+
+            try
+            {
+                method.Invoke(weapon, new object[] { args, weapon });
+            }
+            catch (Exception ex)
+            {
+                LogNativeOutcomeInvariantWarning(
+                    $"ShooterWeapon authored {blockResult} response failed for '{weapon.name}'. " +
+                    $"Shield state remains authoritative. {ex.GetBaseException().Message}");
+            }
+        }
+
+        private void ApplyShieldDefense(
+            IShield shield,
+            ShieldOutput shieldOutput,
+            ReactionInput reactionInput,
+            Args hitArgs)
+        {
+            if (shield == null) return;
+
+            try
+            {
+                var blockArgs = new Args(hitArgs.Target, hitArgs.Self);
+                shield.OnDefend(blockArgs, shieldOutput, reactionInput);
+            }
+            catch (Exception ex)
+            {
+                LogNativeOutcomeInvariantWarning(
+                    $"Shooter shield defense callback failed after {shieldOutput.Type}. " +
+                    $"The hit outcome remains authoritative. {ex.Message}");
             }
         }
 
@@ -1359,11 +1992,11 @@ namespace Arawn.GameCreator2.Networking.Shooter
                     targetCharacter);
             }
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // CLIENT-SIDE: RECEIVING RESPONSES & BROADCASTS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>
         /// [Client] Called when server sends a shot response.
         /// </summary>
@@ -1382,7 +2015,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 $"dropped shot response because controller was not found actor={response.ActorNetworkId} " +
                 $"req={response.RequestId} validated={response.Validated}");
         }
-        
+
         /// <summary>
         /// [Client] Called when server sends a hit response.
         /// </summary>
@@ -1401,7 +2034,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 $"dropped hit response because controller was not found actor={response.ActorNetworkId} " +
                 $"req={response.RequestId} validated={response.Validated}");
         }
-        
+
         /// <summary>
         /// [Client] Called when server broadcasts a confirmed shot.
         /// </summary>
@@ -1411,7 +2044,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
             {
                 Debug.Log($"[NetworkShooterManager] Received shot broadcast: {broadcast.ShooterNetworkId}");
             }
-            
+
             if (m_Controllers.TryGetValue(broadcast.ShooterNetworkId, out var controller))
             {
                 LogDiagnostics(
@@ -1425,12 +2058,21 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 $"queued shot broadcast while shooter controller spawns shooter={broadcast.ShooterNetworkId} " +
                 $"weaponHash={broadcast.WeaponHash}");
         }
-        
+
         /// <summary>
         /// [Client] Called when server broadcasts a confirmed hit.
         /// </summary>
         public void ReceiveHitBroadcast(NetworkShooterHitBroadcast broadcast)
         {
+            if (broadcast.TargetNetworkId == 0 && !broadcast.HasImpactMotion)
+            {
+                NetworkShooterDebug.LogPhysics(
+                    "ManagerReceiveBroadcast",
+                    $"server={m_IsServer} client={m_IsClient} shooter={broadcast.ShooterNetworkId} " +
+                    $"weaponHash={broadcast.WeaponHash} point={broadcast.HitPoint} normal={broadcast.HitNormal} " +
+                    $"controllers={m_Controllers.Count}",
+                    this);
+            }
             if (m_LogBroadcasts)
             {
                 Debug.Log($"[NetworkShooterManager] Received hit broadcast: {broadcast.ShooterNetworkId} -> {broadcast.TargetNetworkId}");
@@ -1449,7 +2091,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                     $"queued impact motion while prop registers prop={broadcast.ImpactMotion.PropNetworkId} " +
                     $"shooter={broadcast.ShooterNetworkId} target={broadcast.TargetNetworkId}");
             }
-            
+
             RouteHitBroadcast(broadcast, out bool needsShooter, out bool needsTarget);
             if (needsShooter || needsTarget)
             {
@@ -1484,11 +2126,27 @@ namespace Arawn.GameCreator2.Networking.Shooter
             if (m_Controllers.TryGetValue(broadcast.ShooterNetworkId, out var shooterController) &&
                 shooterController != null)
             {
+                if (broadcast.TargetNetworkId == 0 && !broadcast.HasImpactMotion)
+                {
+                    NetworkShooterDebug.LogPhysics(
+                        "ManagerRouteBroadcast",
+                        $"resolved shooter={broadcast.ShooterNetworkId} controller={shooterController.name} " +
+                        $"server={shooterController.IsServer} local={shooterController.IsLocalClient}",
+                        shooterController);
+                }
                 // The attacker owns shared impact VFX and optimistic reconciliation.
                 shooterController.ReceiveHitBroadcast(broadcast);
             }
             else
             {
+                if (broadcast.TargetNetworkId == 0 && !broadcast.HasImpactMotion)
+                {
+                    NetworkShooterDebug.LogPhysics(
+                        "ManagerRouteBroadcast",
+                        $"missing shooter={broadcast.ShooterNetworkId}; queued={broadcast.ShooterNetworkId != 0} " +
+                        $"controllers={m_Controllers.Count}",
+                        this);
+                }
                 needsShooter = broadcast.ShooterNetworkId != 0;
             }
 

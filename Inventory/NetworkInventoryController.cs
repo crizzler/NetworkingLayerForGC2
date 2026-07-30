@@ -33,35 +33,35 @@ namespace Arawn.GameCreator2.Networking.Inventory
         // ════════════════════════════════════════════════════════════════════════════════════════
         // INSPECTOR
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         [Header("Network Settings")]
         [Tooltip("Apply changes optimistically before server confirmation (items only).")]
         [SerializeField] private bool m_OptimisticUpdates = false;
-        
+
         [Tooltip("Rollback optimistic updates if server rejects.")]
         [SerializeField] private bool m_RollbackOnReject = true;
 
         [Tooltip("Optional stable network id for scene/world bags. Leave 0 to derive one from the scene hierarchy.")]
         [SerializeField] private uint m_StaticNetworkIdOverride = 0;
-        
+
         [Header("Sync Settings")]
         [Tooltip("Send full state sync at this interval (seconds). 0 = never.")]
         [SerializeField] private float m_FullSyncInterval = 10f;
-        
+
         [Tooltip("Send delta updates at this interval (seconds).")]
         [SerializeField] private float m_DeltaSyncInterval = 0.2f;
-        
+
         [Header("Validation")]
         [Tooltip("Log rejected operations for debugging.")]
         [SerializeField] private bool m_LogRejections = false;
-        
+
         [Header("Debug")]
         [SerializeField] private bool m_LogAllChanges = false;
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // EVENTS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         // Content events
         public event Action<NetworkContentAddRequest> OnContentAddRequested;
         public event Action<NetworkItemAddedBroadcast> OnItemAdded;
@@ -71,37 +71,38 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public event Action<NetworkItemMovedBroadcast> OnItemMoved;
         public event Action<NetworkContentUseRequest> OnContentUseRequested;
         public event Action<NetworkItemUsedBroadcast> OnItemUsed;
-        
+
         // Equipment events
         public event Action<NetworkEquipmentRequest> OnEquipmentRequested;
         public event Action<NetworkItemEquippedBroadcast> OnItemEquipped;
         public event Action<NetworkItemUnequippedBroadcast> OnItemUnequipped;
-        
+
         // Socket events
         public event Action<NetworkSocketRequest> OnSocketRequested;
         public event Action<NetworkSocketChangeBroadcast> OnSocketChanged;
-        
+
         // Wealth events
         public event Action<NetworkWealthRequest> OnWealthRequested;
         public event Action<NetworkWealthChangeBroadcast> OnWealthChanged;
-        
+
         // Rejection event
         public event Action<InventoryRejectionReason, string> OnOperationRejected;
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // PRIVATE FIELDS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         private Bag m_Bag;
         private NetworkCharacter m_NetworkCharacter;
         private uint m_CachedStaticNetworkId;
         private bool m_IsApplyingNetworkState;
-        
+        private int m_NetworkMutationDepth;
+
         // Network role
         private bool m_IsServer;
         private bool m_IsLocalClient;
         private bool m_IsRemoteClient;
-        
+
         // Request tracking
         private ushort m_NextRequestId = 1;
         private ushort m_LastIssuedRequestId = 1;
@@ -113,14 +114,74 @@ namespace Arawn.GameCreator2.Networking.Inventory
         private readonly Dictionary<ulong, PendingEquipment> m_PendingEquipment = new(8);
         private readonly Dictionary<ulong, PendingWealth> m_PendingWealth = new(8);
         private readonly Dictionary<long, long> m_PendingPickupLocalRuntimeByServerRuntime = new(8);
-        
+        private readonly HashSet<long> m_SocketAttachPrimitiveRemovePassthrough = new();
+        private readonly HashSet<long> m_ServerSocketDirectRemoveSuppression = new();
+        private readonly Dictionary<long, PendingServerSocketAttach>
+            m_PendingServerSocketAttachBroadcasts = new();
+        private readonly HashSet<TransientUseEventKey> m_ReceivedTransientUseEvents = new();
+        private readonly Queue<TransientUseEventKey> m_ReceivedTransientUseEventOrder = new();
+
+        private const int MAX_RECEIVED_TRANSIENT_USE_EVENTS = 256;
+
+        private readonly struct TransientUseEventKey : IEquatable<TransientUseEventKey>
+        {
+            public readonly long RuntimeIdHash;
+            public readonly uint EventToken;
+
+            public TransientUseEventKey(long runtimeIdHash, uint eventToken)
+            {
+                RuntimeIdHash = runtimeIdHash;
+                EventToken = eventToken;
+            }
+
+            public bool Equals(TransientUseEventKey other)
+            {
+                return RuntimeIdHash == other.RuntimeIdHash && EventToken == other.EventToken;
+            }
+
+            public override bool Equals(object obj)
+            {
+                return obj is TransientUseEventKey other && Equals(other);
+            }
+
+            public override int GetHashCode()
+            {
+                return HashCode.Combine(RuntimeIdHash, EventToken);
+            }
+        }
+
+        private readonly struct PendingServerSocketAttach
+        {
+            public readonly RuntimeItem Parent;
+            public readonly IdString SocketId;
+
+            public PendingServerSocketAttach(RuntimeItem parent, IdString socketId)
+            {
+                Parent = parent;
+                SocketId = socketId;
+            }
+        }
+
         // State tracking for delta sync
-        private readonly Dictionary<long, Vector2Int> m_LastSyncedPositions = new(32);
+        private readonly Dictionary<Vector2Int, ulong> m_LastSyncedCells = new(32);
         private readonly Dictionary<int, int> m_LastSyncedWealth = new(8);
         private readonly Dictionary<int, long> m_LastSyncedEquipment = new(8);
         private float m_LastFullSync;
         private float m_LastDeltaSync;
-        
+        private uint m_StateVersion;
+        private uint m_LastAppliedStateVersion;
+        private bool m_HasAppliedStateVersion;
+        private ulong m_LastVersionedStateFingerprint;
+        private bool m_HasVersionedStateFingerprint;
+        private uint m_FullSnapshotApplyCount;
+
+        // ReliableOrdered preserves packet order, but several GC2 equipment operations complete
+        // asynchronously. Serialize every versioned state application so a later revision cannot
+        // be admitted while an earlier equip, snapshot, or delta is still awaiting convergence.
+        private readonly Queue<Func<Task>> m_StateApplicationQueue = new(16);
+        private bool m_StateApplicationQueueRunning;
+        private int m_StateApplicationGeneration;
+
         // RuntimeItem ID mapping (for server-assigned IDs)
         private readonly Dictionary<long, RuntimeItem> m_RuntimeItemMap = new(64);
 
@@ -131,7 +192,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
         private static readonly Dictionary<long, ServerDroppedWorldItem> s_ServerDroppedWorldItems = new();
         private static bool s_StaticHooksInstalled;
         private static NetworkInventoryController s_LocalPlayerController;
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // STRUCTS
         // ════════════════════════════════════════════════════════════════════════════════════════
@@ -142,7 +203,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
             public float SentTime;
             public float PendingSentTime => SentTime;
         }
-        
+
         private struct PendingContentRemove : ITimedPendingRequest
         {
             public NetworkContentRemoveRequest Request;
@@ -150,21 +211,21 @@ namespace Arawn.GameCreator2.Networking.Inventory
             public float SentTime;
             public float PendingSentTime => SentTime;
         }
-        
+
         private struct PendingContentMove : ITimedPendingRequest
         {
             public NetworkContentMoveRequest Request;
             public float SentTime;
             public float PendingSentTime => SentTime;
         }
-        
+
         private struct PendingEquipment : ITimedPendingRequest
         {
             public NetworkEquipmentRequest Request;
             public float SentTime;
             public float PendingSentTime => SentTime;
         }
-        
+
         private struct PendingWealth : ITimedPendingRequest
         {
             public NetworkWealthRequest Request;
@@ -199,6 +260,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
 
         private static void LogPickupDebug(string message, UnityEngine.Object context = null)
         {
+            if (!(NetworkInventoryManager.Instance?.DiagnosticsEnabled ?? false)) return;
             if (context != null) Debug.Log($"[NetworkInventoryPickupDebug] {message}", context);
             else Debug.Log($"[NetworkInventoryPickupDebug] {message}");
         }
@@ -219,14 +281,14 @@ namespace Arawn.GameCreator2.Networking.Inventory
         {
             return $"{item.ItemIdString} runtime={item.RuntimeIdString} hash={item.RuntimeIdHash} itemHash={item.ItemHash}";
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // PROPERTIES
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>The underlying GC2 Bag component.</summary>
         public Bag Bag => m_Bag;
-        
+
         /// <summary>Network ID of this bag's owner.</summary>
         public uint NetworkId => m_NetworkCharacter != null
             ? m_NetworkCharacter.NetworkId
@@ -237,44 +299,171 @@ namespace Arawn.GameCreator2.Networking.Inventory
 
         /// <summary>Whether this inventory is a scene/world bag such as a chest.</summary>
         public bool IsWorldInventory => m_NetworkCharacter == null;
-        
+
         /// <summary>Whether this is running on the server.</summary>
         public bool IsServer => m_IsServer;
-        
+
         /// <summary>Whether this is the local player's inventory.</summary>
         public bool IsLocalClient => m_IsLocalClient;
 
         public bool OptimisticUpdates => m_OptimisticUpdates;
 
         public bool RollbackOnReject => m_RollbackOnReject;
-        
+
+        /// <summary>
+        /// True while an authoritative request, broadcast, or snapshot is mutating the GC2 bag.
+        /// Patched GC2 entry points use this to avoid recursively creating network requests.
+        /// </summary>
+        internal bool IsApplyingNetworkMutation => m_IsApplyingNetworkState || m_NetworkMutationDepth > 0;
+
+        internal IDisposable EnterNetworkMutationScope()
+        {
+            return new NetworkMutationScope(this);
+        }
+
+        internal static bool TryResolveForContent(TBagContent content, out NetworkInventoryController controller)
+        {
+            for (int i = 0; i < s_Controllers.Count; i++)
+            {
+                NetworkInventoryController candidate = s_Controllers[i];
+                if (candidate == null || candidate.m_Bag == null) continue;
+                if (!ReferenceEquals(candidate.m_Bag.Content, content)) continue;
+
+                controller = candidate;
+                return true;
+            }
+
+            controller = null;
+            return false;
+        }
+
+        internal static bool TryResolveForBag(Bag bag, out NetworkInventoryController controller)
+        {
+            if (bag != null && bag.Content is TBagContent content)
+            {
+                return TryResolveForContent(content, out controller);
+            }
+
+            controller = null;
+            return false;
+        }
+
+        internal static bool TryResolveForWealth(BagWealth wealth, out NetworkInventoryController controller)
+        {
+            for (int i = 0; i < s_Controllers.Count; i++)
+            {
+                NetworkInventoryController candidate = s_Controllers[i];
+                if (candidate == null || candidate.m_Bag == null) continue;
+                if (!ReferenceEquals(candidate.m_Bag.Wealth, wealth)) continue;
+
+                controller = candidate;
+                return true;
+            }
+
+            controller = null;
+            return false;
+        }
+
+        private sealed class NetworkMutationScope : IDisposable
+        {
+            private NetworkInventoryController m_Controller;
+
+            public NetworkMutationScope(NetworkInventoryController controller)
+            {
+                m_Controller = controller;
+                controller.m_NetworkMutationDepth++;
+                controller.m_IsApplyingNetworkState = true;
+            }
+
+            public void Dispose()
+            {
+                NetworkInventoryController controller = m_Controller;
+                if (controller == null) return;
+
+                m_Controller = null;
+                controller.m_NetworkMutationDepth = Math.Max(0, controller.m_NetworkMutationDepth - 1);
+                controller.m_IsApplyingNetworkState = controller.m_NetworkMutationDepth > 0;
+            }
+        }
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // UNITY LIFECYCLE
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         private void Awake()
         {
             m_Bag = GetComponent<Bag>();
             m_NetworkCharacter = GetComponent<NetworkCharacter>();
         }
-        
+
         private void Start()
         {
             // Subscribe to GC2 events for local change detection
             SubscribeToBagEvents();
         }
-        
+
         private void OnDestroy()
         {
+            m_StateApplicationGeneration++;
+            m_StateApplicationQueue.Clear();
             UnsubscribeFromBagEvents();
+            m_SocketAttachPrimitiveRemovePassthrough.Clear();
+            m_ServerSocketDirectRemoveSuppression.Clear();
+            m_PendingServerSocketAttachBroadcasts.Clear();
+            m_ReceivedTransientUseEvents.Clear();
+            m_ReceivedTransientUseEventOrder.Clear();
         }
-        
+
+        private void EnqueueStateApplication(Func<Task> application)
+        {
+            if (application == null || this == null) return;
+
+            m_StateApplicationQueue.Enqueue(application);
+            if (!m_StateApplicationQueueRunning)
+            {
+                _ = PumpStateApplicationQueueAsync();
+            }
+        }
+
+        private async Task PumpStateApplicationQueueAsync()
+        {
+            if (m_StateApplicationQueueRunning) return;
+
+            m_StateApplicationQueueRunning = true;
+            int generation = m_StateApplicationGeneration;
+            try
+            {
+                while (this != null && generation == m_StateApplicationGeneration &&
+                       m_StateApplicationQueue.Count > 0)
+                {
+                    Func<Task> application = m_StateApplicationQueue.Dequeue();
+                    try
+                    {
+                        await application.Invoke();
+                    }
+                    catch (Exception exception)
+                    {
+                        Debug.LogException(exception, this);
+                    }
+                }
+            }
+            finally
+            {
+                m_StateApplicationQueueRunning = false;
+                if (this != null && generation == m_StateApplicationGeneration &&
+                    m_StateApplicationQueue.Count > 0)
+                {
+                    _ = PumpStateApplicationQueueAsync();
+                }
+            }
+        }
+
         private void Update()
         {
             if (!m_IsServer && !m_IsLocalClient) return;
-            
+
             float currentTime = Time.time;
-            
+
             // Server-side sync
             if (m_IsServer)
             {
@@ -283,21 +472,21 @@ namespace Arawn.GameCreator2.Networking.Inventory
                     BroadcastFullState();
                     m_LastFullSync = currentTime;
                 }
-                
+
                 if (m_DeltaSyncInterval > 0 && currentTime - m_LastDeltaSync > m_DeltaSyncInterval)
                 {
                     BroadcastDeltaState();
                     m_LastDeltaSync = currentTime;
                 }
             }
-            
+
             CleanupPendingRequests();
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // INITIALIZATION
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>
         /// Initialize the network inventory controller with role information.
         /// </summary>
@@ -311,7 +500,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
             {
                 s_LocalPlayerController = this;
             }
-            
+
             InitializeStateTracking();
 
             if (IsWorldInventory)
@@ -320,14 +509,14 @@ namespace Arawn.GameCreator2.Networking.Inventory
                     $"{name}: world inventory initialized networkId={NetworkId} path={BuildStableScenePath(transform)} server={m_IsServer} local={m_IsLocalClient} remote={m_IsRemoteClient} trackedItems={m_RuntimeItemMap.Count}",
                     this);
             }
-            
+
             if (m_LogAllChanges)
             {
                 string role = m_IsServer ? "Server" : (m_IsLocalClient ? "LocalClient" : "RemoteClient");
                 Debug.Log($"[NetworkInventoryController] {gameObject.name} initialized as {role}");
             }
         }
-        
+
         private void InitializeStateTracking()
         {
             // Build RuntimeItem map
@@ -335,7 +524,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
             foreach (var cell in m_Bag.Content.CellList)
             {
                 if (cell == null || cell.Available) continue;
-                
+
                 foreach (var runtimeIdEntry in cell.List)
                 {
                     var runtimeItem = m_Bag.Content.GetRuntimeItem(runtimeIdEntry);
@@ -345,7 +534,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
                     }
                 }
             }
-            
+
             // Cache initial wealth
             foreach (var currencyId in m_Bag.Wealth.List)
             {
@@ -353,8 +542,15 @@ namespace Arawn.GameCreator2.Networking.Inventory
             }
 
             CacheCurrentSyncState();
+
+            if (m_IsServer && !m_HasVersionedStateFingerprint)
+            {
+                m_StateVersion = 1u;
+                m_LastVersionedStateFingerprint = ComputeInventoryFingerprint();
+                m_HasVersionedStateFingerprint = true;
+            }
         }
-        
+
         private void SubscribeToBagEvents()
         {
             if (!s_Controllers.Contains(this))
@@ -370,19 +566,19 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 m_Bag.Content.EventRemove += OnLocalItemRemoved;
                 m_Bag.Content.EventUse += OnLocalItemUsed;
             }
-            
+
             if (m_Bag.Equipment != null)
             {
                 m_Bag.Equipment.EventEquip += OnLocalItemEquipped;
                 m_Bag.Equipment.EventUnequip += OnLocalItemUnequipped;
             }
-            
+
             if (m_Bag.Wealth != null)
             {
                 m_Bag.Wealth.EventChange += OnLocalWealthChanged;
             }
         }
-        
+
         private void UnsubscribeFromBagEvents()
         {
             s_Controllers.Remove(this);
@@ -401,13 +597,13 @@ namespace Arawn.GameCreator2.Networking.Inventory
                     m_Bag.Content.EventRemove -= OnLocalItemRemoved;
                     m_Bag.Content.EventUse -= OnLocalItemUsed;
                 }
-                
+
                 if (m_Bag.Equipment != null)
                 {
                     m_Bag.Equipment.EventEquip -= OnLocalItemEquipped;
                     m_Bag.Equipment.EventUnequip -= OnLocalItemUnequipped;
                 }
-                
+
                 if (m_Bag.Wealth != null)
                 {
                     m_Bag.Wealth.EventChange -= OnLocalWealthChanged;

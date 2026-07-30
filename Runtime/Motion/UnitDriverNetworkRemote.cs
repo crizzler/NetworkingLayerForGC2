@@ -29,14 +29,14 @@ namespace Arawn.GameCreator2.Networking
         [SerializeField] private float m_SnapDistance = 5f;
 
         [Header("Debug")]
-        [SerializeField] private bool m_LogMotionDiagnostics = true;
+        [SerializeField] private bool m_LogMotionDiagnostics = false;
         [SerializeField] private float m_MotionDiagnosticInterval = 0.5f;
 
         // MEMBERS: -------------------------------------------------------------------------------
 
         [NonSerialized] protected CharacterController m_Controller;
         [NonSerialized] protected Vector3 m_MoveDirection;
-        
+
         // Interpolation state
         [NonSerialized] private List<PositionSnapshot> m_SnapshotBuffer;
         [NonSerialized] private Vector3 m_InterpolatedPosition;
@@ -82,11 +82,11 @@ namespace Arawn.GameCreator2.Networking
             get => this.m_Axonometry;
             set => this.m_Axonometry = value;
         }
-        
+
         public bool IsExtrapolating => m_IsExtrapolating;
         public float InterpolationDelay => m_InterpolationDelay;
         public bool IsJumping => m_IsJumping;
-        
+
         public void ApplyTierSettings(NetworkRelevanceSettings settings)
         {
             m_InterpolationDelay = settings.interpolationDelay;
@@ -243,33 +243,37 @@ namespace Arawn.GameCreator2.Networking
             Vector3 position = ResolveSnapshotWorldPosition(incomingSnapshot);
             float rotationY = ResolveSnapshotWorldRotation(incomingSnapshot).eulerAngles.y;
             float realtime = Time.realtimeSinceStartup;
-            Vector3 previousSnapshotPosition = m_SnapshotBuffer.Count > 0
-                ? ResolveSnapshotWorldPosition(m_SnapshotBuffer[m_SnapshotBuffer.Count - 1])
-                : this.Transform.position;
-            float previousSnapshotRotationY = m_SnapshotBuffer.Count > 0
-                ? ResolveSnapshotWorldRotation(m_SnapshotBuffer[m_SnapshotBuffer.Count - 1]).eulerAngles.y
-                : this.Transform.eulerAngles.y;
-            float snapshotDistance = Vector3.Distance(position, previousSnapshotPosition);
-            float snapshotYDelta = position.y - previousSnapshotPosition.y;
-            float snapshotRotationDelta = Mathf.DeltaAngle(previousSnapshotRotationY, rotationY);
 
             m_IsGrounded = state.IsGrounded;
             m_IsJumping = state.IsJumping;
 
-            if (IsTraversalLikeRemoteMotion() ||
-                Mathf.Abs(snapshotYDelta) > 0.05f ||
-                Mathf.Abs(snapshotRotationDelta) > 5f)
+            if (m_LogMotionDiagnostics)
             {
-                LogTraversalPose(
-                    $"received-state-snapshot serverTime={serverTimestamp:F3} seq={state.lastProcessedInput} " +
-                    $"statePos={FormatVector(position)} stateY={position.y:F3} " +
-                    $"stateRotY={rotationY:F2} previousSnapshot={FormatVector(previousSnapshotPosition)} " +
-                    $"previousY={previousSnapshotPosition.y:F3} previousRotY={previousSnapshotRotationY:F2} " +
-                    $"snapshotDistance={snapshotDistance:F3} snapshotYDelta={snapshotYDelta:F3} " +
-                    $"snapshotRotDelta={snapshotRotationDelta:F2} verticalSpeed={state.GetVerticalVelocity():F3} " +
-                    $"hasMoveVelocity={state.HasMoveVelocity} moveVelocity={FormatVector(state.GetMoveVelocity())} " +
-                    $"flags=0x{state.flags:X2} grounded={state.IsGrounded} jumping={state.IsJumping} " +
-                    $"buffer={m_SnapshotBuffer.Count} serverTimeLocal={m_ServerTime:F3} {FormatBusyState()}");
+                Vector3 previousSnapshotPosition = m_SnapshotBuffer.Count > 0
+                    ? ResolveSnapshotWorldPosition(m_SnapshotBuffer[m_SnapshotBuffer.Count - 1])
+                    : this.Transform.position;
+                float previousSnapshotRotationY = m_SnapshotBuffer.Count > 0
+                    ? ResolveSnapshotWorldRotation(m_SnapshotBuffer[m_SnapshotBuffer.Count - 1]).eulerAngles.y
+                    : this.Transform.eulerAngles.y;
+                float snapshotDistance = Vector3.Distance(position, previousSnapshotPosition);
+                float snapshotYDelta = position.y - previousSnapshotPosition.y;
+                float snapshotRotationDelta = Mathf.DeltaAngle(previousSnapshotRotationY, rotationY);
+
+                if (IsTraversalLikeRemoteMotion() ||
+                    Mathf.Abs(snapshotYDelta) > 0.05f ||
+                    Mathf.Abs(snapshotRotationDelta) > 5f)
+                {
+                    LogTraversalPose(
+                        $"received-state-snapshot serverTime={serverTimestamp:F3} seq={state.lastProcessedInput} " +
+                        $"statePos={FormatVector(position)} stateY={position.y:F3} " +
+                        $"stateRotY={rotationY:F2} previousSnapshot={FormatVector(previousSnapshotPosition)} " +
+                        $"previousY={previousSnapshotPosition.y:F3} previousRotY={previousSnapshotRotationY:F2} " +
+                        $"snapshotDistance={snapshotDistance:F3} snapshotYDelta={snapshotYDelta:F3} " +
+                        $"snapshotRotDelta={snapshotRotationDelta:F2} verticalSpeed={state.GetVerticalVelocity():F3} " +
+                        $"hasMoveVelocity={state.HasMoveVelocity} moveVelocity={FormatVector(state.GetMoveVelocity())} " +
+                        $"flags=0x{state.flags:X2} grounded={state.IsGrounded} jumping={state.IsJumping} " +
+                        $"buffer={m_SnapshotBuffer.Count} serverTimeLocal={m_ServerTime:F3} {FormatBusyState()}");
+                }
             }
 
             if (m_HasLastReceivedSnapshot)
@@ -317,7 +321,7 @@ namespace Arawn.GameCreator2.Networking
                     TeleportTo(position, rotationY);
                 }
             }
-            
+
             // Prefer the authoritative move velocity carried with the state. For
             // traversal/free-climb this preserves the owner's animation direction
             // even when root attachment corrections make position deltas ambiguous.
@@ -369,11 +373,11 @@ namespace Arawn.GameCreator2.Networking
             if (this.Character.IsDead) return;
 
             float deltaTime = this.Character.Time.DeltaTime;
-            
+
             // Calculate render time (with delay for interpolation)
             float targetRenderTime = CalculateTargetRenderTime();
             float renderTime = AdvanceRenderTime(targetRenderTime, deltaTime);
-            
+
             // Interpolate position
             InterpolatePosition(renderTime, deltaTime);
 
@@ -389,13 +393,13 @@ namespace Arawn.GameCreator2.Networking
 
             // Apply interpolated transform
             ApplyInterpolatedTransform();
-            
+
             // Update controller size
             if (m_Controller != null)
             {
                 float height = this.Character.Motion.Height;
                 float radius = this.Character.Motion.Radius;
-                
+
                 if (Math.Abs(m_Controller.height - height) > float.Epsilon)
                 {
                     m_Controller.height = height;
@@ -464,7 +468,7 @@ namespace Arawn.GameCreator2.Networking
                 m_IsExtrapolating = false;
                 return;
             }
-            
+
             if (m_SnapshotBuffer.Count == 1)
             {
                 // Only one snapshot, use it directly
@@ -474,11 +478,11 @@ namespace Arawn.GameCreator2.Networking
                 m_IsExtrapolating = false;
                 return;
             }
-            
+
             // Find the two snapshots to interpolate between
             PositionSnapshot? before = null;
             PositionSnapshot? after = null;
-            
+
             for (int i = 0; i < m_SnapshotBuffer.Count; i++)
             {
                 if (m_SnapshotBuffer[i].timestamp <= renderTime)
@@ -491,7 +495,7 @@ namespace Arawn.GameCreator2.Networking
                     break;
                 }
             }
-            
+
             if (before.HasValue && after.HasValue)
             {
                 // Interpolate between two snapshots
@@ -517,7 +521,7 @@ namespace Arawn.GameCreator2.Networking
             {
                 // No future snapshot - extrapolate
                 float timeSinceLastSnapshot = (float)(renderTime - before.Value.timestamp);
-                
+
                 if (timeSinceLastSnapshot <= m_MaxExtrapolationTime)
                 {
                     if (TryExtrapolateSupportedPose(before.Value, timeSinceLastSnapshot, out Vector3 supportedPosition, out Quaternion supportedRotation))
@@ -673,7 +677,7 @@ namespace Arawn.GameCreator2.Networking
             m_InterpolatedPosition = position;
             m_InterpolatedRotation = Quaternion.Euler(0f, rotationY, 0f);
             m_MoveDirection = Vector3.zero;
-            
+
             ApplyInterpolatedTransform();
         }
 
@@ -719,6 +723,12 @@ namespace Arawn.GameCreator2.Networking
 
         private void LogTraversalPose(string message)
         {
+            if (!m_LogMotionDiagnostics) return;
+
+            float now = Time.realtimeSinceStartup;
+            float interval = Mathf.Max(0.05f, m_MotionDiagnosticInterval);
+            if (now - m_LastMotionDiagnosticRealtime < interval) return;
+
             Debug.Log(
                 $"[TraversalPoseDebug][RemoteDriver] {this.Character?.name ?? "Character"} " +
                 $"pos={FormatVector(this.Transform.position)} y={this.Transform.position.y:F3} " +
@@ -727,6 +737,7 @@ namespace Arawn.GameCreator2.Networking
                 $"interpolatedRotY={m_InterpolatedRotation.eulerAngles.y:F2} extrapolating={m_IsExtrapolating} " +
                 $"{message}",
                 this.Character);
+            m_LastMotionDiagnosticRealtime = now;
         }
 
         private bool IsTraversalLikeRemoteMotion()

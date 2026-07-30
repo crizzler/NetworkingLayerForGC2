@@ -39,6 +39,10 @@ namespace Arawn.GameCreator2.Networking.Traversal
         public Action<NetworkTraversalBroadcast> OnBroadcastTraversalChange;
         public Action<NetworkTraversalSnapshot> OnBroadcastFullSnapshot;
         public Action<ulong, NetworkTraversalSnapshot> OnSendSnapshotToClient;
+        public Func<uint, TraversalRouteStatus> OnResolveRequestRouteStatusForActor;
+
+        [Obsolete("Use OnResolveRequestRouteStatusForActor so the transport validates the exact requesting actor.")]
+        public Func<TraversalRouteStatus> OnResolveRequestRouteStatus;
 
         [Header("Settings")]
         [SerializeField] private bool m_IsServer;
@@ -46,12 +50,46 @@ namespace Arawn.GameCreator2.Networking.Traversal
         [Header("Validation")]
         [SerializeField] private int m_MaxPendingRequestsPerPlayer = 50;
 
+        [Header("Spawn Readiness")]
+        [Min(0.1f)]
+        [SerializeField] private float m_TransientStateTtl = 2f;
+
+        [Min(1)]
+        [SerializeField] private int m_MaxPendingTransientStatesPerCharacter = 16;
+
+        [Min(8)]
+        [SerializeField] private int m_MaxPendingCharacterStates = 128;
+
         [Header("Debug")]
         [SerializeField] private bool m_LogNetworkMessages;
 
         private readonly Dictionary<uint, NetworkTraversalController> m_Controllers = new(32);
         private readonly Dictionary<ulong, int> m_PendingRequestCounts = new(32);
+        private readonly Dictionary<uint, PendingSnapshot> m_PendingSnapshots = new(32);
+        private readonly Dictionary<uint, List<PendingBroadcast>> m_PendingBroadcasts = new(32);
+        private readonly Dictionary<uint, List<PendingResponse>> m_PendingResponses = new(8);
+        private readonly List<uint> m_PendingStateRemovalBuffer = new(32);
+        private readonly Dictionary<string, float> m_DiagnosticTimes = new(StringComparer.Ordinal);
         private NetworkTraversalPatchHooks m_PatchHooks;
+        private bool m_ClimbDiagnosticsActive;
+
+        private struct PendingSnapshot
+        {
+            public NetworkTraversalSnapshot Value;
+            public float ReceivedAt;
+        }
+
+        private struct PendingBroadcast
+        {
+            public NetworkTraversalBroadcast Value;
+            public float ReceivedAt;
+        }
+
+        private struct PendingResponse
+        {
+            public NetworkTraversalResponse Value;
+            public float ReceivedAt;
+        }
 
         public Func<NetworkTraversalRequest, uint, TraversalRejectionReason> CustomTraversalValidator;
 
@@ -81,22 +119,52 @@ namespace Arawn.GameCreator2.Networking.Traversal
         }
 
         public bool IsPatchModeActive => m_PatchHooks != null && m_PatchHooks.IsPatchActive;
+        public bool DiagnosticsEnabled =>
+            m_LogNetworkMessages || NetworkTraversalDebug.ForceClimbDiagnostics;
 
         private void OnEnable()
         {
+            SetClimbDiagnosticsActive(DiagnosticsEnabled);
             SecurityIntegration.SetModuleServerContext("Traversal", m_IsServer);
             SecurityIntegration.EnsureSecurityManagerInitialized(m_IsServer, ResolveSecurityTimeProvider);
             SyncPatchHooks();
             InstallOwnerAuthorityPoseSyncHook();
         }
 
+        private void Update()
+        {
+            SetClimbDiagnosticsActive(DiagnosticsEnabled);
+            CleanupExpiredPendingState();
+        }
+
         private void OnDisable()
         {
+            SetClimbDiagnosticsActive(false);
             SecurityIntegration.SetModuleServerContext("Traversal", false);
             UninstallOwnerAuthorityPoseSyncHook();
             if (m_PatchHooks != null)
             {
-                m_PatchHooks.Initialize(false, false);
+                m_PatchHooks.Initialize(false, false, DiagnosticsEnabled);
+            }
+
+            m_PendingSnapshots.Clear();
+            m_PendingBroadcasts.Clear();
+            m_PendingResponses.Clear();
+            m_PendingStateRemovalBuffer.Clear();
+        }
+
+        private void SetClimbDiagnosticsActive(bool active)
+        {
+            if (m_ClimbDiagnosticsActive == active) return;
+            m_ClimbDiagnosticsActive = active;
+            NetworkTraversalClimbDiagnostics.SetManagerActive(active);
+
+            if (active)
+            {
+                NetworkTraversalClimbDiagnostics.Log(
+                    "Manager",
+                    $"enabled manager='{name}' server={m_IsServer} focusedHz=10",
+                    this);
             }
         }
 
@@ -129,7 +197,20 @@ namespace Arawn.GameCreator2.Networking.Traversal
                 return string.Empty;
             }
 
-            return $"traversal-interactive-transition:{interactive.name}";
+            string reason = $"traversal-interactive-transition:{interactive.name}";
+            if (NetworkTraversalClimbDiagnostics.IsFocused(character.gameObject))
+            {
+                NetworkCharacter networkCharacter = character.GetComponent<NetworkCharacter>();
+                NetworkTraversalClimbDiagnostics.Log(
+                    "OwnerPoseHook",
+                    $"actor={networkCharacter?.NetworkId ?? 0} role={networkCharacter?.CurrentRole.ToString() ?? "none"} " +
+                    $"result=rejected reason='{reason}' requested={NetworkTraversalClimbDiagnostics.Vector(ownerAuthorityPosition)} " +
+                    $"current={NetworkTraversalClimbDiagnostics.Vector(character.transform.position)} " +
+                    $"traverse='{interactive.name}' transition={inTransition}",
+                    character);
+            }
+
+            return reason;
         }
 
         private static string AllowInteractiveTraversalRootWrite(Character character, Vector3 rootPosition)
@@ -175,6 +256,21 @@ namespace Arawn.GameCreator2.Networking.Traversal
 
             s_TraversalStanceRelativePositionProperty.SetValue(stance, localPosition);
 
+            if (NetworkTraversalClimbDiagnostics.IsFocused(character.gameObject))
+            {
+                NetworkCharacter networkCharacter = character.GetComponent<NetworkCharacter>();
+                NetworkTraversalClimbDiagnostics.Log(
+                    "RelativePose",
+                    $"actor={networkCharacter?.NetworkId ?? 0} role={networkCharacter?.CurrentRole.ToString() ?? "none"} " +
+                    $"traverse='{interactive.name}' owner={NetworkTraversalClimbDiagnostics.Vector(ownerAuthorityPosition)} " +
+                    $"anchor={NetworkTraversalClimbDiagnostics.Vector(anchorPosition)} " +
+                    $"before={NetworkTraversalClimbDiagnostics.Vector(previousRelative)} " +
+                    $"after={NetworkTraversalClimbDiagnostics.Vector(localPosition)} " +
+                    $"bounds={interactive.PositionA:F3}/{interactive.PositionB:F3} width={interactive.Width:F3}",
+                    character,
+                    $"relative-pose:{character.GetInstanceID()}");
+            }
+
             float now = Time.realtimeSinceStartup;
             if ((localPosition - previousRelative).sqrMagnitude <= 0.0001f &&
                 now - s_LastOwnerAuthorityPoseSyncLogRealtime < 0.25f)
@@ -182,14 +278,18 @@ namespace Arawn.GameCreator2.Networking.Traversal
                 return;
             }
 
-            Debug.Log(
-                $"[TraversalPoseDebug][Manager] synced owner-authority traversal relative position " +
-                $"character='{character.name}' traverse='{interactive.name}:{interactive.GetType().Name}' " +
-                $"ownerRoot={FormatVector(ownerAuthorityPosition)} anchor={FormatVector(anchorPosition)} " +
-                $"previousRelative={FormatVector(previousRelative)} relative={FormatVector(localPosition)} " +
-                $"boundsA={interactive.PositionA:F3} boundsB={interactive.PositionB:F3} width={interactive.Width:F3}",
-                character);
-            s_LastOwnerAuthorityPoseSyncLogRealtime = now;
+            NetworkTraversalManager manager = Instance;
+            if (manager != null && manager.m_LogNetworkMessages)
+            {
+                Debug.Log(
+                    $"[TraversalPoseDebug][Manager] synced owner-authority traversal relative position " +
+                    $"character='{character.name}' traverse='{interactive.name}:{interactive.GetType().Name}' " +
+                    $"ownerRoot={FormatVector(ownerAuthorityPosition)} anchor={FormatVector(anchorPosition)} " +
+                    $"previousRelative={FormatVector(previousRelative)} relative={FormatVector(localPosition)} " +
+                    $"boundsA={interactive.PositionA:F3} boundsB={interactive.PositionB:F3} width={interactive.Width:F3}",
+                    character);
+                s_LastOwnerAuthorityPoseSyncLogRealtime = now;
+            }
         }
 
         private static bool TryGetActiveInteractiveTraversal(
@@ -243,10 +343,11 @@ namespace Arawn.GameCreator2.Networking.Traversal
 
         public void RegisterController(uint networkId, NetworkTraversalController controller)
         {
-            if (controller == null || networkId == 0) return;
+            if (controller == null || networkId == 0 || !controller.IsReadyForNetworkRouting) return;
 
             m_Controllers[networkId] = controller;
             RegisterOwnedEntityMapping(networkId);
+            FlushPendingState(networkId, controller);
 
             if (m_LogNetworkMessages)
             {
@@ -256,7 +357,17 @@ namespace Arawn.GameCreator2.Networking.Traversal
 
         public void UnregisterController(uint networkId)
         {
-            if (!m_Controllers.Remove(networkId)) return;
+            if (!m_Controllers.TryGetValue(networkId, out NetworkTraversalController controller)) return;
+
+            m_Controllers.Remove(networkId);
+            if (controller != null)
+            {
+                m_PatchHooks?.ClearLedgeEdgeIntent(controller.GetComponent<Character>());
+                NetworkTraversalClimbDiagnostics.SetCharacterFocus(
+                    controller.gameObject,
+                    networkId,
+                    false);
+            }
 
             SecurityIntegration.UnregisterEntity(networkId);
             if (m_LogNetworkMessages)
@@ -267,19 +378,100 @@ namespace Arawn.GameCreator2.Networking.Traversal
 
         public NetworkTraversalController GetController(uint networkId)
         {
-            return m_Controllers.TryGetValue(networkId, out NetworkTraversalController controller)
-                ? controller
-                : null;
+            if (!m_Controllers.TryGetValue(networkId, out NetworkTraversalController controller) ||
+                controller == null ||
+                !controller.IsReadyForNetworkRouting)
+            {
+                return null;
+            }
+
+            return controller;
+        }
+
+        internal void ClearLedgeEdgeIntent(Character character)
+        {
+            m_PatchHooks?.ClearLedgeEdgeIntent(character);
         }
 
         public void SendTraversalRequest(NetworkTraversalRequest request)
         {
+            if (TrySendTraversalRequest(request, out _)) return;
+        }
+
+        public bool TrySendTraversalRequest(
+            NetworkTraversalRequest request,
+            out TraversalRouteStatus routeStatus)
+        {
+            routeStatus = ResolveRequestRouteStatus(request.ActorNetworkId);
+            if (routeStatus != TraversalRouteStatus.Ready)
+            {
+                WarnRateLimited(
+                    $"request-route:{routeStatus}",
+                    $"[NetworkTraversalManager] Traversal request failed closed because the route is {routeStatus}. " +
+                    "The request was not queued or applied locally.");
+                return false;
+            }
+
             if (m_LogNetworkMessages)
             {
                 Debug.Log($"[NetworkTraversalManager] Sending traversal request: Action={request.Action}, RequestId={request.RequestId}");
             }
 
-            OnSendTraversalRequest?.Invoke(request);
+            try
+            {
+                OnSendTraversalRequest.Invoke(request);
+                return true;
+            }
+            catch (Exception exception)
+            {
+                routeStatus = TraversalRouteStatus.TransportUnavailable;
+                WarnRateLimited(
+                    "request-send-exception",
+                    $"[NetworkTraversalManager] Traversal request transport failed: {exception.Message}");
+                return false;
+            }
+        }
+
+        public TraversalRouteStatus ResolveRequestRouteStatus(uint actorNetworkId)
+        {
+            if (OnSendTraversalRequest == null)
+            {
+                return TraversalRouteStatus.TransportUnavailable;
+            }
+
+            TraversalRouteStatus status;
+            if (OnResolveRequestRouteStatusForActor != null)
+            {
+                status = OnResolveRequestRouteStatusForActor.Invoke(actorNetworkId);
+            }
+            else
+            {
+#pragma warning disable CS0618 // Compatibility path for transports compiled before actor-aware routing.
+                status = OnResolveRequestRouteStatus?.Invoke() ?? TraversalRouteStatus.Ready;
+#pragma warning restore CS0618
+            }
+
+            return status == TraversalRouteStatus.Unknown
+                ? TraversalRouteStatus.TransportUnavailable
+                : status;
+        }
+
+        [Obsolete("Use ResolveRequestRouteStatus(uint actorNetworkId) to validate the exact requesting actor.")]
+        public TraversalRouteStatus ResolveRequestRouteStatus()
+        {
+            if (OnSendTraversalRequest == null)
+            {
+                return TraversalRouteStatus.TransportUnavailable;
+            }
+
+#pragma warning disable CS0618 // Compatibility path for callers that cannot yet supply an actor id.
+            TraversalRouteStatus status = OnResolveRequestRouteStatus != null
+                ? OnResolveRequestRouteStatus.Invoke()
+                : OnResolveRequestRouteStatusForActor?.Invoke(0) ?? TraversalRouteStatus.Ready;
+#pragma warning restore CS0618
+            return status == TraversalRouteStatus.Unknown
+                ? TraversalRouteStatus.TransportUnavailable
+                : status;
         }
 
         public async Task ReceiveTraversalRequest(NetworkTraversalRequest request, ulong clientId)
@@ -300,6 +492,15 @@ namespace Arawn.GameCreator2.Networking.Traversal
 
             try
             {
+                if (request.RequestId == 0 ||
+                    request.ActorNetworkId == 0 ||
+                    request.TargetNetworkId == 0 ||
+                    request.TargetNetworkId != request.ActorNetworkId)
+                {
+                    SendRejectedResponse(senderClientId, request, TraversalRejectionReason.IdentityMismatch);
+                    return;
+                }
+
                 if (!SecurityIntegration.ValidateModuleRequest(
                         senderClientId,
                         BuildContext(request.ActorNetworkId, request.CorrelationId),
@@ -346,7 +547,7 @@ namespace Arawn.GameCreator2.Networking.Traversal
                     TraceTraversal(
                         $"reject no controller requestId={request.RequestId} target={request.TargetNetworkId} " +
                         $"registered={m_Controllers.Count}");
-                    SendRejectedResponse(senderClientId, request, TraversalRejectionReason.TargetNotFound);
+                    SendRejectedResponse(senderClientId, request, TraversalRejectionReason.ControllerNotReady);
                     return;
                 }
 
@@ -377,11 +578,61 @@ namespace Arawn.GameCreator2.Networking.Traversal
             }
         }
 
+        /// <summary>
+        /// Applies a request originating from trusted server gameplay code. This deliberately bypasses
+        /// client ownership/rate checks, but retains controller identity, action, and runtime validation.
+        /// Host-player input must use the normal request route so it receives the same validation as a client.
+        /// </summary>
+        public async Task<NetworkTraversalResponse> ProcessTrustedServerRequestAsync(
+            NetworkTraversalRequest request)
+        {
+            if (!m_IsServer)
+            {
+                return CreateRejectedResponse(request, TraversalRejectionReason.NotAuthorized);
+            }
+
+            if (request.ActorNetworkId == 0 ||
+                request.TargetNetworkId == 0 ||
+                request.ActorNetworkId != request.TargetNetworkId)
+            {
+                return CreateRejectedResponse(request, TraversalRejectionReason.IdentityMismatch);
+            }
+
+            NetworkTraversalController controller = GetController(request.TargetNetworkId);
+            if (controller == null)
+            {
+                return CreateRejectedResponse(request, TraversalRejectionReason.ControllerNotReady);
+            }
+
+            try
+            {
+                NetworkTraversalResponse response = await controller.ProcessTraversalRequestAsync(
+                    request,
+                    NetworkTransportBridge.InvalidClientId);
+                response.ActorNetworkId = request.ActorNetworkId;
+                response.CorrelationId = request.CorrelationId;
+                return response;
+            }
+            catch (Exception exception)
+            {
+                WarnRateLimited(
+                    $"trusted-request:{request.TargetNetworkId}",
+                    $"[NetworkTraversalManager] Trusted server traversal request failed: {exception.Message}");
+                return CreateRejectedResponse(request, TraversalRejectionReason.Exception);
+            }
+        }
+
         public void ReceiveTraversalResponse(NetworkTraversalResponse response, uint targetNetworkId)
         {
             uint actorId = response.ActorNetworkId != 0 ? response.ActorNetworkId : targetNetworkId;
             NetworkTraversalController controller = GetController(actorId);
-            controller?.ReceiveTraversalResponse(response);
+            if (controller != null)
+            {
+                controller.ReceiveTraversalResponse(response);
+                return;
+            }
+
+            CachePendingResponse(actorId, response);
         }
 
         public void BroadcastTraversalChange(NetworkTraversalBroadcast broadcast)
@@ -399,7 +650,13 @@ namespace Arawn.GameCreator2.Networking.Traversal
         public void ReceiveTraversalChangeBroadcast(NetworkTraversalBroadcast broadcast)
         {
             NetworkTraversalController controller = GetController(broadcast.NetworkId);
-            controller?.ReceiveTraversalChangeBroadcast(broadcast);
+            if (controller != null)
+            {
+                controller.ReceiveTraversalChangeBroadcast(broadcast);
+                return;
+            }
+
+            CachePendingBroadcast(broadcast);
         }
 
         public void BroadcastFullSnapshot(NetworkTraversalSnapshot snapshot)
@@ -417,7 +674,13 @@ namespace Arawn.GameCreator2.Networking.Traversal
         public void ReceiveFullSnapshot(NetworkTraversalSnapshot snapshot)
         {
             NetworkTraversalController controller = GetController(snapshot.NetworkId);
-            controller?.ReceiveFullSnapshot(snapshot);
+            if (controller != null)
+            {
+                controller.ReceiveFullSnapshot(snapshot);
+                return;
+            }
+
+            CachePendingSnapshot(snapshot);
         }
 
         public void SendSnapshotToClient(ulong clientId, NetworkTraversalSnapshot snapshot)
@@ -473,7 +736,14 @@ namespace Arawn.GameCreator2.Networking.Traversal
                 $"target={request.TargetNetworkId} correlation={request.CorrelationId} action={request.Action} " +
                 $"reason={reason} traverse='{request.TraverseIdString}' hash={request.TraverseHash}");
 
-            OnSendTraversalResponse?.Invoke(senderClientId, new NetworkTraversalResponse
+            OnSendTraversalResponse?.Invoke(senderClientId, CreateRejectedResponse(request, reason));
+        }
+
+        private static NetworkTraversalResponse CreateRejectedResponse(
+            in NetworkTraversalRequest request,
+            TraversalRejectionReason reason)
+        {
+            return new NetworkTraversalResponse
             {
                 RequestId = request.RequestId,
                 ActorNetworkId = request.ActorNetworkId,
@@ -491,8 +761,280 @@ namespace Arawn.GameCreator2.Networking.Traversal
                 ArgsSelfNetworkId = request.ArgsSelfNetworkId,
                 ArgsTargetNetworkId = request.ArgsTargetNetworkId,
                 IsTraversing = false,
+                StateVersion = 0,
                 Error = reason.ToString()
+            };
+        }
+
+        private void CachePendingSnapshot(in NetworkTraversalSnapshot snapshot)
+        {
+            if (snapshot.NetworkId == 0) return;
+            EnsurePendingCharacterCapacity(snapshot.NetworkId);
+
+            if (m_PendingSnapshots.TryGetValue(snapshot.NetworkId, out PendingSnapshot existing) &&
+                !ShouldReplaceSnapshot(existing.Value, snapshot))
+            {
+                return;
+            }
+
+            m_PendingSnapshots[snapshot.NetworkId] = new PendingSnapshot
+            {
+                Value = snapshot,
+                ReceivedAt = Time.unscaledTime
+            };
+
+            TraceTraversal(
+                $"cached latest traversal snapshot for NetworkId={snapshot.NetworkId} " +
+                "until its controller becomes ready");
+        }
+
+        private void CachePendingBroadcast(in NetworkTraversalBroadcast broadcast)
+        {
+            if (broadcast.NetworkId == 0) return;
+            EnsurePendingCharacterCapacity(broadcast.NetworkId);
+
+            if (!m_PendingBroadcasts.TryGetValue(broadcast.NetworkId, out List<PendingBroadcast> pending))
+            {
+                pending = new List<PendingBroadcast>(4);
+                m_PendingBroadcasts[broadcast.NetworkId] = pending;
+            }
+
+            RemoveExpiredBroadcasts(pending, Time.unscaledTime);
+            int maxEntries = Mathf.Max(1, m_MaxPendingTransientStatesPerCharacter);
+            while (pending.Count >= maxEntries)
+            {
+                pending.RemoveAt(0);
+            }
+
+            pending.Add(new PendingBroadcast
+            {
+                Value = broadcast,
+                ReceivedAt = Time.unscaledTime
             });
+
+            TraceTraversal(
+                $"temporarily cached traversal events for NetworkId={broadcast.NetworkId} " +
+                $"while its controller is not ready (TTL={Mathf.Max(0.1f, m_TransientStateTtl):F1}s)");
+        }
+
+        private void CachePendingResponse(uint actorNetworkId, in NetworkTraversalResponse response)
+        {
+            if (actorNetworkId == 0) return;
+            EnsurePendingCharacterCapacity(actorNetworkId);
+
+            if (!m_PendingResponses.TryGetValue(actorNetworkId, out List<PendingResponse> pending))
+            {
+                pending = new List<PendingResponse>(2);
+                m_PendingResponses[actorNetworkId] = pending;
+            }
+
+            RemoveExpiredResponses(pending, Time.unscaledTime);
+            int maxEntries = Mathf.Max(1, m_MaxPendingTransientStatesPerCharacter);
+            while (pending.Count >= maxEntries)
+            {
+                pending.RemoveAt(0);
+            }
+
+            pending.Add(new PendingResponse
+            {
+                Value = response,
+                ReceivedAt = Time.unscaledTime
+            });
+
+            TraceTraversal(
+                $"temporarily cached a traversal response for NetworkId={actorNetworkId} " +
+                "while its controller is not ready");
+        }
+
+        private void FlushPendingState(uint networkId, NetworkTraversalController controller)
+        {
+            if (controller == null || !controller.IsReadyForNetworkRouting) return;
+
+            float now = Time.unscaledTime;
+            if (m_PendingResponses.TryGetValue(networkId, out List<PendingResponse> responses))
+            {
+                RemoveExpiredResponses(responses, now);
+                for (int i = 0; i < responses.Count; i++)
+                {
+                    controller.ReceiveTraversalResponse(responses[i].Value);
+                }
+
+                m_PendingResponses.Remove(networkId);
+            }
+
+            uint snapshotVersion = 0;
+            if (m_PendingSnapshots.TryGetValue(networkId, out PendingSnapshot pendingSnapshot))
+            {
+                snapshotVersion = pendingSnapshot.Value.StateVersion;
+                controller.ReceiveFullSnapshot(pendingSnapshot.Value);
+                m_PendingSnapshots.Remove(networkId);
+            }
+
+            if (m_PendingBroadcasts.TryGetValue(networkId, out List<PendingBroadcast> broadcasts))
+            {
+                RemoveExpiredBroadcasts(broadcasts, now);
+                broadcasts.Sort(ComparePendingBroadcasts);
+
+                for (int i = 0; i < broadcasts.Count; i++)
+                {
+                    NetworkTraversalBroadcast value = broadcasts[i].Value;
+                    if (snapshotVersion != 0 &&
+                        value.StateVersion != 0 &&
+                        !NetworkTraversalVersion.IsNewer(value.StateVersion, snapshotVersion))
+                    {
+                        continue;
+                    }
+
+                    controller.ReceiveTraversalChangeBroadcast(value);
+                }
+
+                m_PendingBroadcasts.Remove(networkId);
+            }
+        }
+
+        private void CleanupExpiredPendingState()
+        {
+            float now = Time.unscaledTime;
+            m_PendingStateRemovalBuffer.Clear();
+
+            foreach (KeyValuePair<uint, List<PendingBroadcast>> pair in m_PendingBroadcasts)
+            {
+                RemoveExpiredBroadcasts(pair.Value, now);
+                if (pair.Value.Count == 0) m_PendingStateRemovalBuffer.Add(pair.Key);
+            }
+
+            for (int i = 0; i < m_PendingStateRemovalBuffer.Count; i++)
+            {
+                uint networkId = m_PendingStateRemovalBuffer[i];
+                m_PendingBroadcasts.Remove(networkId);
+                TraceTraversal(
+                    $"expired queued traversal events for NetworkId={networkId} " +
+                    "before its controller became ready");
+            }
+
+            m_PendingStateRemovalBuffer.Clear();
+            foreach (KeyValuePair<uint, List<PendingResponse>> pair in m_PendingResponses)
+            {
+                RemoveExpiredResponses(pair.Value, now);
+                if (pair.Value.Count == 0) m_PendingStateRemovalBuffer.Add(pair.Key);
+            }
+
+            for (int i = 0; i < m_PendingStateRemovalBuffer.Count; i++)
+            {
+                uint networkId = m_PendingStateRemovalBuffer[i];
+                m_PendingResponses.Remove(networkId);
+                TraceTraversal(
+                    $"expired a queued traversal response for NetworkId={networkId} " +
+                    "before its controller became ready");
+            }
+
+            m_PendingStateRemovalBuffer.Clear();
+        }
+
+        private void RemoveExpiredBroadcasts(List<PendingBroadcast> pending, float now)
+        {
+            float ttl = Mathf.Max(0.1f, m_TransientStateTtl);
+            for (int i = pending.Count - 1; i >= 0; i--)
+            {
+                if (now - pending[i].ReceivedAt > ttl) pending.RemoveAt(i);
+            }
+        }
+
+        private void RemoveExpiredResponses(List<PendingResponse> pending, float now)
+        {
+            float ttl = Mathf.Max(0.1f, m_TransientStateTtl);
+            for (int i = pending.Count - 1; i >= 0; i--)
+            {
+                if (now - pending[i].ReceivedAt > ttl) pending.RemoveAt(i);
+            }
+        }
+
+        private void EnsurePendingCharacterCapacity(uint incomingNetworkId)
+        {
+            if (m_PendingSnapshots.ContainsKey(incomingNetworkId) ||
+                m_PendingBroadcasts.ContainsKey(incomingNetworkId) ||
+                m_PendingResponses.ContainsKey(incomingNetworkId))
+            {
+                return;
+            }
+
+            int maxCharacters = Mathf.Max(8, m_MaxPendingCharacterStates);
+            var knownIds = new HashSet<uint>(m_PendingSnapshots.Keys);
+            knownIds.UnionWith(m_PendingBroadcasts.Keys);
+            knownIds.UnionWith(m_PendingResponses.Keys);
+            if (knownIds.Count < maxCharacters) return;
+
+            uint oldestId = 0;
+            float oldestTime = float.PositiveInfinity;
+            foreach (uint networkId in knownIds)
+            {
+                float receivedAt = GetOldestPendingTime(networkId);
+                if (receivedAt >= oldestTime) continue;
+                oldestTime = receivedAt;
+                oldestId = networkId;
+            }
+
+            if (oldestId == 0) return;
+            m_PendingSnapshots.Remove(oldestId);
+            m_PendingBroadcasts.Remove(oldestId);
+            m_PendingResponses.Remove(oldestId);
+            WarnRateLimited(
+                "pending-capacity",
+                $"[NetworkTraversalManager] Evicted pending traversal state for NetworkId={oldestId}; " +
+                $"the bounded readiness cache reached {maxCharacters} characters.");
+        }
+
+        private float GetOldestPendingTime(uint networkId)
+        {
+            float oldest = float.PositiveInfinity;
+            if (m_PendingSnapshots.TryGetValue(networkId, out PendingSnapshot snapshot))
+            {
+                oldest = Mathf.Min(oldest, snapshot.ReceivedAt);
+            }
+
+            if (m_PendingBroadcasts.TryGetValue(networkId, out List<PendingBroadcast> broadcasts) &&
+                broadcasts.Count > 0)
+            {
+                oldest = Mathf.Min(oldest, broadcasts[0].ReceivedAt);
+            }
+
+            if (m_PendingResponses.TryGetValue(networkId, out List<PendingResponse> responses) &&
+                responses.Count > 0)
+            {
+                oldest = Mathf.Min(oldest, responses[0].ReceivedAt);
+            }
+
+            return oldest;
+        }
+
+        private static bool ShouldReplaceSnapshot(
+            in NetworkTraversalSnapshot current,
+            in NetworkTraversalSnapshot incoming)
+        {
+            if (incoming.StateVersion != 0 && current.StateVersion != 0)
+            {
+                if (incoming.StateVersion == current.StateVersion)
+                {
+                    return incoming.ServerTime >= current.ServerTime;
+                }
+
+                return NetworkTraversalVersion.IsNewer(incoming.StateVersion, current.StateVersion);
+            }
+
+            return incoming.ServerTime >= current.ServerTime;
+        }
+
+        private static int ComparePendingBroadcasts(PendingBroadcast left, PendingBroadcast right)
+        {
+            uint leftVersion = left.Value.StateVersion;
+            uint rightVersion = right.Value.StateVersion;
+            if (leftVersion != 0 && rightVersion != 0 && leftVersion != rightVersion)
+            {
+                return NetworkTraversalVersion.IsNewer(leftVersion, rightVersion) ? 1 : -1;
+            }
+
+            int timeComparison = left.Value.ServerTime.CompareTo(right.Value.ServerTime);
+            return timeComparison != 0 ? timeComparison : left.ReceivedAt.CompareTo(right.ReceivedAt);
         }
 
         private void RegisterOwnedEntityMapping(uint entityNetworkId)
@@ -535,7 +1077,7 @@ namespace Arawn.GameCreator2.Networking.Traversal
                 }
             }
 
-            m_PatchHooks.Initialize(m_IsServer, true);
+            m_PatchHooks.Initialize(m_IsServer, true, DiagnosticsEnabled);
         }
 
         private bool CheckAndIncrementPendingRequests(ulong clientId)
@@ -561,7 +1103,22 @@ namespace Arawn.GameCreator2.Networking.Traversal
 
         private void TraceTraversal(string message)
         {
+            if (!m_LogNetworkMessages) return;
+
             Debug.Log($"[TraversalTrace][Manager] server={m_IsServer} controllers={m_Controllers.Count} {message}", this);
+        }
+
+        private void WarnRateLimited(string key, string message, float interval = 5f)
+        {
+            float now = Time.unscaledTime;
+            if (m_DiagnosticTimes.TryGetValue(key, out float lastTime) &&
+                now - lastTime < Mathf.Max(0.1f, interval))
+            {
+                return;
+            }
+
+            m_DiagnosticTimes[key] = now;
+            Debug.LogWarning(message, this);
         }
 
         private static string FormatVector(Vector3 value)

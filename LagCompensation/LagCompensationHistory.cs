@@ -21,7 +21,7 @@ namespace Arawn.NetworkingCore.LagCompensation
     public class LagCompensationHistory
     {
         // STRUCTS ────────────────────────────────────────────────────────────
-        
+
         /// <summary>
         /// A single snapshot of entity state.
         /// </summary>
@@ -32,19 +32,19 @@ namespace Arawn.NetworkingCore.LagCompensation
             public Quaternion rotation;
             public Bounds bounds;
             public bool isActive;
-            
+
             /// <summary>
             /// Check if a point is within this snapshot's bounds.
             /// </summary>
             public bool ContainsPoint(Vector3 point, float tolerance = 0f)
             {
                 if (!isActive) return false;
-                
+
                 Bounds expanded = bounds;
                 expanded.Expand(tolerance * 2f);
                 return expanded.Contains(point);
             }
-            
+
             /// <summary>
             /// Get distance from a point to the nearest point on bounds.
             /// </summary>
@@ -53,27 +53,27 @@ namespace Arawn.NetworkingCore.LagCompensation
                 return Vector3.Distance(point, bounds.ClosestPoint(point));
             }
         }
-        
+
         // FIELDS ─────────────────────────────────────────────────────────────
-        
+
         private readonly StateSnapshot[] m_Buffer;
         private readonly int m_Capacity;
         private int m_WriteIndex;
         private int m_Count;
         private readonly object m_Lock = new object();
-        
+
         // PROPERTIES ─────────────────────────────────────────────────────────
-        
+
         /// <summary>
         /// Number of snapshots currently stored.
         /// </summary>
         public int Count => m_Count;
-        
+
         /// <summary>
         /// Maximum number of snapshots that can be stored.
         /// </summary>
         public int Capacity => m_Capacity;
-        
+
         /// <summary>
         /// Oldest timestamp in the buffer (if any snapshots exist).
         /// </summary>
@@ -89,7 +89,7 @@ namespace Arawn.NetworkingCore.LagCompensation
                 }
             }
         }
-        
+
         /// <summary>
         /// Newest timestamp in the buffer (if any snapshots exist).
         /// </summary>
@@ -105,7 +105,7 @@ namespace Arawn.NetworkingCore.LagCompensation
                 }
             }
         }
-        
+
         /// <summary>
         /// Duration of history stored (newest - oldest).
         /// </summary>
@@ -119,9 +119,9 @@ namespace Arawn.NetworkingCore.LagCompensation
                 return newest.Value.serverTime - oldest.Value.serverTime;
             }
         }
-        
+
         // CONSTRUCTOR ────────────────────────────────────────────────────────
-        
+
         /// <summary>
         /// Creates a new history buffer with the specified capacity.
         /// </summary>
@@ -133,9 +133,9 @@ namespace Arawn.NetworkingCore.LagCompensation
             m_WriteIndex = 0;
             m_Count = 0;
         }
-        
+
         // PUBLIC METHODS ─────────────────────────────────────────────────────
-        
+
         /// <summary>
         /// Record a new snapshot from an ILagCompensated entity.
         /// </summary>
@@ -149,11 +149,11 @@ namespace Arawn.NetworkingCore.LagCompensation
                 entity.IsActive
             );
         }
-        
+
         /// <summary>
         /// Record a new snapshot with explicit values.
         /// </summary>
-        public void RecordSnapshot(NetworkTimestamp timestamp, Vector3 position, 
+        public void RecordSnapshot(NetworkTimestamp timestamp, Vector3 position,
             Quaternion rotation, Bounds bounds, bool isActive)
         {
             lock (m_Lock)
@@ -166,12 +166,12 @@ namespace Arawn.NetworkingCore.LagCompensation
                     bounds = bounds,
                     isActive = isActive
                 };
-                
+
                 m_WriteIndex = (m_WriteIndex + 1) % m_Capacity;
                 m_Count = Mathf.Min(m_Count + 1, m_Capacity);
             }
         }
-        
+
         /// <summary>
         /// Try to get the interpolated state at a specific timestamp.
         /// </summary>
@@ -183,18 +183,18 @@ namespace Arawn.NetworkingCore.LagCompensation
             lock (m_Lock)
             {
                 snapshot = default;
-                
+
                 if (m_Count == 0) return false;
-                
+
                 // Find the two snapshots surrounding the target timestamp
                 StateSnapshot? before = null;
                 StateSnapshot? after = null;
-                
+
                 for (int i = 0; i < m_Count; i++)
                 {
                     int index = (m_WriteIndex - m_Count + i + m_Capacity) % m_Capacity;
                     var current = m_Buffer[index];
-                    
+
                     if (current.timestamp <= timestamp)
                     {
                         before = current;
@@ -205,27 +205,27 @@ namespace Arawn.NetworkingCore.LagCompensation
                         break;
                     }
                 }
-                
+
                 // Exact match or extrapolation cases
                 if (before == null && after == null)
                 {
                     return false;
                 }
-                
+
                 if (before == null)
                 {
                     // Timestamp is before our history - return oldest
                     snapshot = after.Value;
                     return true;
                 }
-                
+
                 if (after == null)
                 {
                     // Timestamp is after our history - return newest
                     snapshot = before.Value;
                     return true;
                 }
-                
+
                 // Interpolate between before and after
                 double range = after.Value.timestamp.serverTime - before.Value.timestamp.serverTime;
                 if (range < 0.0001)
@@ -233,10 +233,10 @@ namespace Arawn.NetworkingCore.LagCompensation
                     snapshot = before.Value;
                     return true;
                 }
-                
+
                 float t = (float)((timestamp.serverTime - before.Value.timestamp.serverTime) / range);
                 t = Mathf.Clamp01(t);
-                
+
                 snapshot = new StateSnapshot
                 {
                     timestamp = timestamp,
@@ -245,11 +245,11 @@ namespace Arawn.NetworkingCore.LagCompensation
                     bounds = LerpBounds(before.Value.bounds, after.Value.bounds, t),
                     isActive = before.Value.isActive && after.Value.isActive
                 };
-                
+
                 return true;
             }
         }
-        
+
         /// <summary>
         /// Try to get the position at a specific timestamp.
         /// </summary>
@@ -263,7 +263,7 @@ namespace Arawn.NetworkingCore.LagCompensation
             position = Vector3.zero;
             return false;
         }
-        
+
         /// <summary>
         /// Try to get the bounds at a specific timestamp.
         /// </summary>
@@ -277,7 +277,7 @@ namespace Arawn.NetworkingCore.LagCompensation
             bounds = default;
             return false;
         }
-        
+
         /// <summary>
         /// Check if a point was inside the entity's bounds at a specific timestamp.
         /// </summary>
@@ -292,7 +292,7 @@ namespace Arawn.NetworkingCore.LagCompensation
             }
             return false;
         }
-        
+
         /// <summary>
         /// Get all snapshots in time order (oldest first).
         /// </summary>
@@ -309,7 +309,7 @@ namespace Arawn.NetworkingCore.LagCompensation
                 return result;
             }
         }
-        
+
         /// <summary>
         /// Clear all stored history.
         /// </summary>
@@ -321,9 +321,9 @@ namespace Arawn.NetworkingCore.LagCompensation
                 m_Count = 0;
             }
         }
-        
+
         // PRIVATE HELPERS ────────────────────────────────────────────────────
-        
+
         private static Bounds LerpBounds(Bounds a, Bounds b, float t)
         {
             return new Bounds(
@@ -332,7 +332,7 @@ namespace Arawn.NetworkingCore.LagCompensation
             );
         }
     }
-    
+
     /// <summary>
     /// Configuration for lag compensation history.
     /// </summary>
@@ -342,23 +342,23 @@ namespace Arawn.NetworkingCore.LagCompensation
         [Tooltip("How many snapshots to store per entity")]
         [Range(16, 256)]
         public int historySize = 64;
-        
+
         [Tooltip("How often to record snapshots (Hz)")]
         [Range(10, 120)]
         public int snapshotRate = 60;
-        
+
         [Tooltip("Maximum age of snapshots to consider (seconds)")]
         [Range(0.1f, 2f)]
         public float maxHistoryAge = 1f;
-        
+
         [Tooltip("Extra tolerance when validating hits (meters)")]
         [Range(0f, 1f)]
         public float hitTolerance = 0.2f;
-        
+
         [Tooltip("Maximum allowed client timestamp in the past (seconds)")]
         [Range(0.1f, 1f)]
         public float maxRewindTime = 0.5f;
-        
+
         /// <summary>
         /// Calculate required buffer size for the configured history age.
         /// </summary>

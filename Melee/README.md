@@ -2,6 +2,9 @@
 
 Server-authoritative melee combat networking for Game Creator 2.
 
+For melee hit presentation and the broader multiplayer prefab decision guide,
+see [Spawning Prefabs and UI in Multiplayer](../Documentation/spawning-prefabs-and-ui-in-multiplayer.md).
+
 ## Overview
 
 This module provides network-aware melee combat for GC2, enabling server-authoritative hit validation with lag compensation. It integrates seamlessly with the base GC2 Network Integration and requires it as a dependency.
@@ -12,6 +15,7 @@ This module provides network-aware melee combat for GC2, enabling server-authori
 - Game Creator 2 Melee Module
 - GC2 Network Integration (base module)
 - PurrNet integration or a configured custom transport adapter (NGO/FishNet/Mirror/custom)
+- The required GC2 Melee source patch (`3.3.0-melee` or newer)
 
 ## Installation
 
@@ -21,7 +25,7 @@ This module provides network-aware melee combat for GC2, enabling server-authori
 
 ## PurrNet Scene Setup Wizard
 
-For PurrNet projects, enable **Melee** on the PurrNet wizard Modules page. The wizard creates/reuses `NetworkMeleeManager` and `PurrNetMeleeTransportBridge`.
+For PurrNet projects, enable **Melee** on the PurrNet wizard Modules page. The wizard applies/verifies the required source patch, then creates/reuses `NetworkMeleeManager` and `PurrNetMeleeTransportBridge`. Setup is blocked when the patch is missing or stale.
 
 When a Player Prefab is assigned on the Scene page and prefab preparation is enabled, selecting Melee adds `NetworkMeleeController` to that prefab. If Stats is also selected, the Core page can add the optional Melee -> Stats damage bridge.
 
@@ -43,16 +47,16 @@ The PurrNet path synchronizes skill input, skill validation/broadcasts, hit vali
 │     ↓                            │                         │            │
 │  2. Striker detects hit          │                         │            │
 │     ↓                            │                         │            │
-│  3. ConditionNetworkMeleeHit     │                         │            │
-│     intercepts via CanHit        │                         │            │
+│  3. Patched AttackSkill hook     │                         │            │
+│     intercepts after CanHit      │                         │            │
 │     ↓                            │                         │            │
 │  4. NetworkMeleeController       │                         │            │
 │     sends hit request ─────────► 5. Validate hit           │            │
 │     ↓                            │  (lag compensation)     │            │
 │  [Optimistic effects]            │     ↓                   │            │
-│                                  │  6. Apply damage        │            │
-│                                  │     ↓                   │            │
-│  7. Receive response ◄─────────── 8. Send response ───────► 9. Play FX │
+│                                  │  6. Apply damage and    │            │
+│                                  │     target reaction     │            │
+│  7. Receive response ◄─────────── 8. Send/broadcast ──────► 9. React/FX│
 │     ↓                            │     ↓                   │            │
 │  8. Confirm/rollback             │  9. Broadcast hit       │            │
 │                                  │                         │            │
@@ -120,18 +124,10 @@ Per-character component that handles melee hit interception.
 - `Optimistic Effects`: Show hit effects before server confirmation
 - `Log Hits`: Debug logging for hit detection
 
-#### ConditionNetworkMeleeHit (Visual Scripting)
-A GC2 Condition that intercepts hits in the Skill's "Can Hit" conditions.
+#### ConditionNetworkMeleeHit (legacy Visual Scripting fallback)
+Upgraded Skill assets may keep this condition. The required AttackSkill patch now intercepts every networked strike automatically, so new Skills do not need it.
 
-**Usage:**
-1. Open your Melee Skill asset
-2. Find the "Can Hit" conditions section
-3. Add the "Network Melee Hit" condition
-
-This condition:
-- Returns `true` on server (server processes hits directly)
-- Returns `true/false` on client based on optimistic setting
-- Always returns `false` on remote clients (they receive broadcasts)
+When present, the condition queues the same request before the automatic hook is reached. It always suppresses native gameplay for a network character. Optimistic feedback is played through the presentation registry and never by replaying `Skill.OnHit`.
 
 ## Setup Guide
 
@@ -146,17 +142,19 @@ For each networked character with melee combat:
 
 1. Add `NetworkCharacter` component
    - Set Combat Mode = **Disabled** (important!)
-   
+
 2. Add `NetworkMeleeController` component
    - Configure optimistic effects preference
 
-### Step 3: Skill Setup
+### Step 3: Patch and Skill Setup
 
-For each Melee Skill that should use network hit validation:
+1. Apply the required Melee patch from the PurrNet wizard or **Game Creator > Networking Layer > Patches > Melee > Patch (Server Authority)**.
+2. Register every remotely resolved Skill/weapon on all peers.
+3. Configure presentation-only hit effects on `NetworkMeleeManager` when desired.
 
-1. Open the Skill ScriptableObject
-2. In "Can Hit" conditions, add **Network Melee Hit** condition
-3. This intercepts the hit and routes through server
+Do not add `ConditionNetworkMeleeHit` to new Skills. Existing conditions can remain during migration.
+
+Server damage hooks and reactions are independent. `NetworkMeleeStatsDamageBridge`, `TryApplyDamageFunc`, and `ApplyDamageFunc` only modify damage; returning handled cannot suppress the target's authored reaction. Use `TryApplyAuthoritativeReactionFunc` only when replacing the complete GC2 reaction yourself. The current source patch emits the reaction broadcast immediately after GC2 enters its Reaction phase, so even a very short reaction cannot be missed by a frame poll.
 
 ### Step 4: Network Transport
 
@@ -170,31 +168,31 @@ public class MeleeNetworkBridge : NetworkBehaviour
     private void Start()
     {
         var manager = NetworkMeleeManager.Instance;
-        
+
         manager.SendHitRequestToServer = SendHitRequestRpc;
         manager.SendHitResponseToClient = SendResponseToClient;
         manager.BroadcastHitToAllClients = BroadcastHitRpc;
     }
-    
+
     [Rpc(SendTo.Server, InvokePermission = RpcInvokePermission.Everyone)]
     private void SendHitRequestRpc(NetworkMeleeHitRequest request, RpcParams rpcParams = default)
     {
         ulong clientId = rpcParams.Receive.SenderClientId;
         NetworkMeleeManager.Instance.ReceiveHitRequest((uint)clientId, request);
     }
-    
+
     [Rpc(SendTo.SpecifiedInParams)]
     private void SendHitResponseRpc(NetworkMeleeHitResponse response, RpcParams rpcParams = default)
     {
         NetworkMeleeManager.Instance.ReceiveHitResponse(response);
     }
-    
+
     [Rpc(SendTo.ClientsAndHost)]
     private void BroadcastHitRpc(NetworkMeleeHitBroadcast broadcast)
     {
         NetworkMeleeManager.Instance.ReceiveHitBroadcast(broadcast);
     }
-    
+
     private void SendResponseToClient(uint clientId, NetworkMeleeHitResponse response)
     {
         SendHitResponseRpc(
@@ -272,12 +270,12 @@ Override validation by extending `NetworkMeleeController`:
 public class MyNetworkMeleeController : NetworkMeleeController
 {
     public override NetworkMeleeHitResponse ProcessHitRequest(
-        NetworkMeleeHitRequest request, 
+        NetworkMeleeHitRequest request,
         uint clientNetworkId)
     {
         // Custom validation logic
         // e.g., check line of sight, special armor, etc.
-        
+
         return base.ProcessHitRequest(request, clientNetworkId);
     }
 }
@@ -300,9 +298,9 @@ Configure per-character via `NetworkMeleeController.OptimisticEffects`.
 ## Troubleshooting
 
 ### Hits not being intercepted
-1. Check `ConditionNetworkMeleeHit` is in skill's "Can Hit" conditions
+1. Check the wizard reports the required Melee patch as applied
 2. Verify `NetworkMeleeController` is on the attacker character
-3. Check network role is initialized correctly
+3. Check the transport ownership registry and network role are initialized before attacks are enabled
 
 ### All hits rejected
 1. Check `NetworkMeleeManager` is in scene and initialized

@@ -15,7 +15,7 @@ namespace Arawn.GameCreator2.Networking
         // ════════════════════════════════════════════════════════════════════════════════════════
         // CLIENT-SIDE: REQUEST ABILITY CAST
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>
         /// Request to cast an ability. Called by client.
         /// </summary>
@@ -34,15 +34,15 @@ namespace Arawn.GameCreator2.Networking
                 Debug.LogWarning("[NetworkAbilitiesController] Not initialized.");
                 return;
             }
-            
+
             if (ability == null)
             {
                 Debug.LogWarning("[NetworkAbilitiesController] Cannot cast null ability.");
                 return;
             }
-            
+
             ushort requestId = GetNextRequestId();
-            
+
             var request = new NetworkAbilityCastRequest
             {
                 RequestId = requestId,
@@ -56,7 +56,7 @@ namespace Arawn.GameCreator2.Networking
                 TargetNetworkId = GetTargetNetworkId(target),
                 AutoConfirm = false
             };
-            
+
             if (m_IsClient)
             {
                 // Client and host both route through the transport. On host, the
@@ -71,12 +71,12 @@ namespace Arawn.GameCreator2.Networking
                     Callback = callback,
                     Ability = ability
                 };
-                
+
                 SendCastRequestToServer?.Invoke(request);
                 OnCastRequestSent?.Invoke(request);
-                
+
                 m_Stats.TotalCastRequests++;
-                
+
                 if (m_DebugLog)
                 {
                     Debug.Log($"[NetworkAbilitiesController] Cast request sent: {ability.name} (ID: {requestId})");
@@ -88,7 +88,7 @@ namespace Arawn.GameCreator2.Networking
                 ProcessCastRequest(casterNetworkId, request);
             }
         }
-        
+
         /// <summary>
         /// Request to cast ability with auto-confirm (for AI/instructions).
         /// </summary>
@@ -104,7 +104,7 @@ namespace Arawn.GameCreator2.Networking
                 Debug.LogWarning("[NetworkAbilitiesController] Not initialized.");
                 return;
             }
-            
+
             if (ability == null)
             {
                 Debug.LogWarning("[NetworkAbilitiesController] Cannot cast null ability.");
@@ -112,9 +112,9 @@ namespace Arawn.GameCreator2.Networking
             }
 
             ushort requestId = GetNextRequestId();
-            
+
             byte targetType = (byte)(targetNetworkId != 0 ? 2 : 1);
-            
+
             var request = new NetworkAbilityCastRequest
             {
                 RequestId = requestId,
@@ -128,7 +128,7 @@ namespace Arawn.GameCreator2.Networking
                 TargetNetworkId = targetNetworkId,
                 AutoConfirm = true
             };
-            
+
             if (m_IsClient)
             {
                 ulong pendingKey = GetPendingKey(request.ActorNetworkId, request.CorrelationId, request.RequestId);
@@ -139,7 +139,7 @@ namespace Arawn.GameCreator2.Networking
                     Callback = callback,
                     Ability = ability
                 };
-                
+
                 SendCastRequestToServer?.Invoke(request);
                 OnCastRequestSent?.Invoke(request);
                 m_Stats.TotalCastRequests++;
@@ -149,11 +149,11 @@ namespace Arawn.GameCreator2.Networking
                 ProcessCastRequest(casterNetworkId, request);
             }
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // CLIENT-SIDE: ABILITY LEARNING
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>
         /// Request to learn an ability into a slot.
         /// </summary>
@@ -165,9 +165,9 @@ namespace Arawn.GameCreator2.Networking
         {
             if (!m_IsClient && !m_IsServer) return;
             if (ability == null) return;
-            
+
             ushort requestId = GetNextRequestId();
-            
+
             var request = new NetworkAbilityLearnRequest
             {
                 RequestId = requestId,
@@ -178,7 +178,7 @@ namespace Arawn.GameCreator2.Networking
                 Slot = (sbyte)slot,
                 IsLearning = true
             };
-            
+
             if (m_IsClient)
             {
                 ulong pendingKey = GetPendingKey(request.ActorNetworkId, request.CorrelationId, request.RequestId);
@@ -188,7 +188,7 @@ namespace Arawn.GameCreator2.Networking
                     SentTime = Time.time,
                     Callback = callback
                 };
-                
+
                 SendLearnRequestToServer?.Invoke(request);
                 OnLearnRequestSent?.Invoke(request);
             }
@@ -197,7 +197,7 @@ namespace Arawn.GameCreator2.Networking
                 ProcessLearnRequest(characterNetworkId, request);
             }
         }
-        
+
         /// <summary>
         /// Request to unlearn an ability from a slot.
         /// </summary>
@@ -207,9 +207,9 @@ namespace Arawn.GameCreator2.Networking
             Action<NetworkAbilityLearnResponse> callback = null)
         {
             if (!m_IsClient && !m_IsServer) return;
-            
+
             ushort requestId = GetNextRequestId();
-            
+
             var request = new NetworkAbilityLearnRequest
             {
                 RequestId = requestId,
@@ -220,7 +220,7 @@ namespace Arawn.GameCreator2.Networking
                 Slot = (sbyte)slot,
                 IsLearning = false
             };
-            
+
             if (m_IsClient)
             {
                 ulong pendingKey = GetPendingKey(request.ActorNetworkId, request.CorrelationId, request.RequestId);
@@ -230,7 +230,7 @@ namespace Arawn.GameCreator2.Networking
                     SentTime = Time.time,
                     Callback = callback
                 };
-                
+
                 SendLearnRequestToServer?.Invoke(request);
             }
             else if (m_IsServer)
@@ -320,26 +320,26 @@ namespace Arawn.GameCreator2.Networking
                 ProcessCancelRequest(casterNetworkId, request);
             }
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // CLIENT-SIDE: RECEIVE RESPONSES AND BROADCASTS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>
         /// Client receives cast response from server.
         /// </summary>
         public void ReceiveCastResponse(NetworkAbilityCastResponse response)
         {
             if (!m_IsClient) return;
-            
+
             OnCastResponseReceived?.Invoke(response);
-            
+
             ulong pendingKey = GetPendingKey(response.ActorNetworkId, response.CorrelationId, response.RequestId);
             if (m_PendingCastRequests.TryGetValue(pendingKey, out var pending))
             {
                 m_PendingCastRequests.Remove(pendingKey);
                 pending.Callback?.Invoke(response);
-                
+
                 if (m_DebugLog)
                 {
                     Debug.Log($"[NetworkAbilitiesController] Cast response received: " +
@@ -347,14 +347,14 @@ namespace Arawn.GameCreator2.Networking
                 }
             }
         }
-        
+
         /// <summary>
         /// Client receives cast broadcast (for other players' casts).
         /// </summary>
         public void ReceiveCastBroadcast(NetworkAbilityCastBroadcast broadcast)
         {
             if (!m_IsClient) return;
-            
+
             OnCastBroadcastReceived?.Invoke(broadcast);
 
             HandleVisualCast(broadcast);
@@ -369,19 +369,19 @@ namespace Arawn.GameCreator2.Networking
 
             OnEffectBroadcastReceived?.Invoke(broadcast);
         }
-        
+
         private void HandleVisualCast(NetworkAbilityCastBroadcast broadcast)
         {
             // Get the pawn/character
             Pawn pawn = GetPawnByNetworkId?.Invoke(broadcast.CasterNetworkId);
             if (pawn == null) return;
-            
+
             Caster caster = pawn.GetFeature<Caster>();
             if (caster == null) return;
-            
+
             Ability ability = GetAbilityByHash?.Invoke(broadcast.AbilityIdHash);
             if (ability == null) return;
-            
+
             switch (broadcast.CastState)
             {
                 case AbilityCastState.Started:
@@ -398,11 +398,11 @@ namespace Arawn.GameCreator2.Networking
                             $"{ability.name} caster={broadcast.CasterNetworkId} castId={broadcast.CastInstanceId}");
                     }
                     break;
-                    
+
                 case AbilityCastState.Triggered:
                     // The visual replay runs the local ability timeline, including its own trigger point.
                     break;
-                    
+
                 case AbilityCastState.Completed:
                 case AbilityCastState.Canceled:
                     m_ClientVisualReplayCastIds.Remove(broadcast.CastInstanceId);
@@ -475,29 +475,29 @@ namespace Arawn.GameCreator2.Networking
         {
             return target.HasPosition || target.GameObject != null;
         }
-        
+
         /// <summary>
         /// Client receives cooldown broadcast.
         /// </summary>
         public void ReceiveCooldownBroadcast(NetworkCooldownBroadcast broadcast)
         {
             if (!m_IsClient) return;
-            
+
             OnCooldownBroadcastReceived?.Invoke(broadcast);
-            
+
             // Sync cooldown locally
             Pawn pawn = GetPawnByNetworkId?.Invoke(broadcast.CharacterNetworkId);
             if (pawn == null) return;
-            
+
             Caster caster = pawn.GetFeature<Caster>();
             if (caster == null) return;
-            
+
             Cooldowns cooldowns = caster.Get<Cooldowns>();
             if (cooldowns == null) return;
-            
+
             Ability ability = GetAbilityByHash?.Invoke(broadcast.AbilityIdHash);
             if (ability == null) return;
-            
+
             // Apply the server's cooldown
             if (broadcast.CooldownEndTime > 0)
             {
@@ -525,16 +525,16 @@ namespace Arawn.GameCreator2.Networking
                 pending.Callback?.Invoke(response);
             }
         }
-        
+
         /// <summary>
         /// Client receives learn response.
         /// </summary>
         public void ReceiveLearnResponse(NetworkAbilityLearnResponse response)
         {
             if (!m_IsClient) return;
-            
+
             OnLearnResponseReceived?.Invoke(response);
-            
+
             ulong pendingKey = GetPendingKey(response.ActorNetworkId, response.CorrelationId, response.RequestId);
             if (m_PendingLearnRequests.TryGetValue(pendingKey, out var pending))
             {
@@ -559,23 +559,23 @@ namespace Arawn.GameCreator2.Networking
                 pending.Callback?.Invoke(response);
             }
         }
-        
+
         /// <summary>
         /// Client receives learn broadcast.
         /// </summary>
         public void ReceiveLearnBroadcast(NetworkAbilityLearnBroadcast broadcast)
         {
             if (!m_IsClient) return;
-            
+
             OnLearnBroadcastReceived?.Invoke(broadcast);
-            
+
             // Sync locally
             Pawn pawn = GetPawnByNetworkId?.Invoke(broadcast.CharacterNetworkId);
             if (pawn == null) return;
-            
+
             Caster caster = pawn.GetFeature<Caster>();
             if (caster == null) return;
-            
+
             if (broadcast.IsLearned)
             {
                 Ability ability = GetAbilityByHash?.Invoke(broadcast.AbilityIdHash);
@@ -589,35 +589,35 @@ namespace Arawn.GameCreator2.Networking
                 caster.UnLearn(broadcast.Slot);
             }
         }
-        
+
         /// <summary>
         /// Client receives projectile spawn broadcast.
         /// </summary>
         public void ReceiveProjectileSpawnBroadcast(NetworkProjectileSpawnBroadcast broadcast)
         {
             if (!m_IsClient) return;
-            
+
             OnProjectileSpawnReceived?.Invoke(broadcast);
-            
+
             // Spawn visual projectile on client
             Projectile projectileSO = GetProjectileByHash?.Invoke(broadcast.ProjectileHash);
             if (projectileSO == null) return;
-            
+
             // Calculate lag-compensated position
             float timeSinceSpawn = (GetServerTime?.Invoke() ?? Time.time) - broadcast.ServerTime;
             Vector3 compensatedPosition = broadcast.SpawnPosition + broadcast.Direction * timeSinceSpawn * 5f; // Estimate speed
-            
+
             RuntimeProjectile instance = projectileSO.Get(
                 new Args((GameObject)null),
                 compensatedPosition,
                 Quaternion.LookRotation(broadcast.Direction)
             );
-            
+
             if (instance != null)
             {
                 // Initialize with broadcast data
                 var extendedArgs = new ExtendedArgs(instance.gameObject);
-                
+
                 if (broadcast.TargetNetworkId != 0)
                 {
                     Pawn targetPawn = GetPawnByNetworkId?.Invoke(broadcast.TargetNetworkId);
@@ -630,7 +630,7 @@ namespace Arawn.GameCreator2.Networking
                 {
                     extendedArgs.Set(new Target(broadcast.TargetPosition));
                 }
-                
+
                 instance.Initialize(extendedArgs, broadcast.Direction);
             }
         }
@@ -644,25 +644,25 @@ namespace Arawn.GameCreator2.Networking
 
             OnProjectileEventReceived?.Invoke(broadcast);
         }
-        
+
         /// <summary>
         /// Client receives impact spawn broadcast.
         /// </summary>
         public void ReceiveImpactSpawnBroadcast(NetworkImpactSpawnBroadcast broadcast)
         {
             if (!m_IsClient) return;
-            
+
             OnImpactSpawnReceived?.Invoke(broadcast);
-            
+
             Impact impactSO = GetImpactByHash?.Invoke(broadcast.ImpactHash);
             if (impactSO == null) return;
-            
+
             RuntimeImpact instance = impactSO.Get(
                 new Args((GameObject)null),
                 broadcast.Position,
                 broadcast.Rotation
             );
-            
+
             // Client-side impacts are visual only - server handles actual effects
         }
 

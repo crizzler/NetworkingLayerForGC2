@@ -2,12 +2,51 @@
 using System.IO;
 using NUnit.Framework;
 using Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches;
+using Arawn.GameCreator2.Networking.Editor;
 using UnityEngine;
 
 namespace Arawn.GameCreator2.Networking.Tests
 {
     public class PatcherVerificationTests
     {
+        [Test]
+        public void InventoryPatchDefineDetector_RequiresCompleteV3Abi()
+        {
+            const string completeAbi = @"
+// [GC2_NETWORK_PATCH_Inventory_3_0_0_inventory]
+public enum NetworkInventoryInterceptResult : byte { }
+public static object NetworkInstructionAddItemInterceptor;
+public const int NetworkPatchRevision = 300;";
+
+            Assert.IsTrue(GC2NetworkingDefineSymbols.HasInventoryAuthorityPatchAbi(completeAbi));
+            Assert.IsFalse(GC2NetworkingDefineSymbols.HasInventoryAuthorityPatchAbi(
+                completeAbi.Replace("public const int NetworkPatchRevision = 300;", string.Empty)));
+            Assert.IsFalse(GC2NetworkingDefineSymbols.HasInventoryAuthorityPatchAbi(
+                completeAbi.Replace("NetworkInstructionAddItemInterceptor", "MissingInterceptor")));
+            Assert.IsFalse(GC2NetworkingDefineSymbols.HasInventoryAuthorityPatchAbi(string.Empty));
+        }
+
+        [Test]
+        public void InventoryDependentAssemblies_RequireAuthorityPatchDefine()
+        {
+            string[] paths =
+            {
+                "Arawn/NetworkingLayerForGC2/Inventory/Arawn.GameCreator2.Networking.Inventory.asmdef",
+                "Arawn/NetworkingLayerForGC2/Editor/Inventory/Arawn.GameCreator2.Networking.Inventory.Editor.asmdef",
+                "Arawn/NetworkingLayerForGC2/Runtime/Transport/PurrNet/Inventory/Arawn.GameCreator2.Networking.Inventory.Transport.PurrNet.asmdef",
+                "Arawn/NetworkingLayerForGC2/Tests/Inventory/Arawn.GameCreator2.Networking.Inventory.Tests.asmdef"
+            };
+
+            foreach (string relativePath in paths)
+            {
+                string content = File.ReadAllText(Path.Combine(Application.dataPath, relativePath));
+                StringAssert.Contains(
+                    $"\"{GC2NetworkingDefineSymbols.SYMBOL_INVENTORY_AUTHORITY_PATCH}\"",
+                    content,
+                    relativePath);
+            }
+        }
+
         private sealed class ShooterPatcherProxy : ShooterPatcher
         {
             public string Marker => PatchMarker;
@@ -50,6 +89,44 @@ namespace Arawn.GameCreator2.Networking.Tests
             {
                 return VerifyPatchedFile(relativePath, content, out reason);
             }
+
+            public bool ReplaceFlexible(ref string content, string original, string replacement)
+            {
+                return TryReplaceWithFlexibleWhitespace(ref content, original, replacement);
+            }
+        }
+
+        [Test]
+        public void FlexiblePatchAnchor_DoesNotConsumePrecedingNewline()
+        {
+            var patcher = new InventoryPatcherProxy();
+            string content =
+                "        // RUN METHOD: ----------------------------------------\n\n" +
+                "        protected override Task Run(Args args)\n" +
+                "        {\n" +
+                "            return DefaultResult;\n" +
+                "        }";
+            const string original =
+                "        protected override Task Run(Args args)\n" +
+                "        {\n" +
+                "\n" +
+                "            return DefaultResult;\n" +
+                "        }";
+            const string replacement =
+                "        protected override Task Run(Args args)\n" +
+                "        {\n" +
+                "            return RunNetworkOrLocal();\n" +
+                "        }";
+
+            Assert.IsTrue(patcher.ReplaceFlexible(ref content, original, replacement));
+            int replacementIndex = content.IndexOf(
+                "        protected override Task Run",
+                System.StringComparison.Ordinal);
+            Assert.Greater(replacementIndex, 0);
+            Assert.AreEqual('\n', content[replacementIndex - 1]);
+            StringAssert.DoesNotContain(
+                "// RUN METHOD: ----------------------------------------        protected override",
+                content);
         }
 
         private sealed class StatsPatcherProxy : StatsPatcher
@@ -104,6 +181,11 @@ namespace Arawn.GameCreator2.Networking.Tests
             public bool Verify(string relativePath, string content, out string reason)
             {
                 return VerifyPatchedFile(relativePath, content, out reason);
+            }
+
+            public bool PrepareMigration(string relativePath, ref string content)
+            {
+                return PrepareContentForPatch(relativePath, ref content) == ExistingPatchState.Continue;
             }
         }
 
@@ -187,6 +269,286 @@ namespace Arawn.GameCreator2.Networking.Tests
         }
 
         [Test]
+        public void ShooterPatcher_VerifyShooterWeapon_FailsForLegacyNotificationOnlyHook()
+        {
+            var patcher = new ShooterPatcherProxy();
+            string content =
+                $"{patcher.Marker}\n" +
+                "// [GC2_NETWORK_PATCH]\n" +
+                "public class ShooterWeapon {\n" +
+                "public static System.Action<ShotData, Args> NetworkHitDetected;\n" +
+                "internal void OnHit(ShotData data, Args args)\n" +
+                "{\n" +
+                "    NetworkHitDetected?.Invoke(data, args);\n" +
+                "}\n" +
+                "}\n" +
+                "// [GC2_NETWORK_PATCH_END]\n";
+
+            bool valid = patcher.Verify(
+                "Plugins/GameCreator/Packages/Shooter/Runtime/ScriptableObjects/ShooterWeapon.cs",
+                content,
+                out string reason);
+
+            Assert.IsFalse(valid);
+            StringAssert.Contains("NetworkOnHitValidator", reason);
+        }
+
+        [Test]
+        public void ShooterPatcher_VerifyShooterWeapon_FailsWithoutNativeOutcomeCallback()
+        {
+            var patcher = new ShooterPatcherProxy();
+            string content =
+                $"{patcher.Marker}\n" +
+                "// [GC2_NETWORK_PATCH]\n" +
+                "public class ShooterWeapon {\n" +
+                "public static System.Action<ShotData> NetworkShotFiredExact;\n" +
+                "public static System.Func<ShotData, Args, bool> NetworkOnHitValidator;\n" +
+                "public static System.Action<ShotData, Args> NetworkHitDetected;\n" +
+                "internal void OnHit(ShotData data, Args args)\n" +
+                "{\n" +
+                "    if (NetworkOnHitValidator != null && !NetworkOnHitValidator.Invoke(data, args)) return;\n" +
+                "    NetworkHitDetected?.Invoke(data, args);\n" +
+                "}\n" +
+                "}\n" +
+                "// [GC2_NETWORK_PATCH_END]\n";
+
+            bool valid = patcher.Verify(
+                "Plugins/GameCreator/Packages/Shooter/Runtime/ScriptableObjects/ShooterWeapon.cs",
+                content,
+                out string reason);
+
+            Assert.IsFalse(valid);
+            StringAssert.Contains("NetworkOnHitResolved", reason);
+        }
+
+        [Test]
+        public void ShooterPatcher_VerifyShooterWeapon_PassesWithCancellableValidatorAndCompatibilityEvent()
+        {
+            var patcher = new ShooterPatcherProxy();
+            string content =
+                $"{patcher.Marker}\n" +
+                "// [GC2_NETWORK_PATCH]\n" +
+                "public class ShooterWeapon {\n" +
+                "public static System.Func<ShotData, Args, bool> NetworkOnHitValidator;\n" +
+                "public static System.Action<ShotData, Args> NetworkHitDetected;\n" +
+                "public static System.Action<ShotData, Args, BlockType, ReactionOutput, float> NetworkOnHitResolved;\n" +
+                "internal void OnShoot(ShotData data, Args args) { NetworkShotFiredExact?.Invoke(data); }\n" +
+                "internal void OnHit(ShotData data, Args args)\n" +
+                "{\n" +
+                "    if (NetworkOnHitValidator != null && !NetworkOnHitValidator.Invoke(data, args)) return;\n" +
+                "    NetworkHitDetected?.Invoke(data, args);\n" +
+                "    BlockType networkBlockType = BlockType.None;\n" +
+                "    ReactionOutput networkReactionOutput = ReactionOutput.None;\n" +
+                "    float networkReactionPower = float.NaN;\n" +
+                "    networkReactionPower = reactionInput.Power;\n" +
+                "    networkBlockType = shieldOutput.Type;\n" +
+                "    networkReactionOutput = target.Combat.GetHitReaction(reactionInput, args, data.Weapon.HitReaction);\n" +
+                "    NetworkOnHitResolved?.Invoke(data, args, networkBlockType, networkReactionOutput, networkReactionPower);\n" +
+                "    _ = this.m_OnHit.Run(args);\n" +
+                "}\n" +
+                "}\n" +
+                "// [GC2_NETWORK_PATCH_END]\n";
+
+            bool valid = patcher.Verify(
+                "Plugins/GameCreator/Packages/Shooter/Runtime/ScriptableObjects/ShooterWeapon.cs",
+                content,
+                out string reason);
+
+            Assert.IsTrue(valid, reason);
+        }
+
+        [Test]
+        public void ShooterPatcher_VerifyShooterWeapon_RejectsResolvedCallbackAfterDamageInstructions()
+        {
+            var patcher = new ShooterPatcherProxy();
+            string content =
+                $"{patcher.Marker}\n" +
+                "public class ShooterWeapon {\n" +
+                "public static System.Func<ShotData, Args, bool> NetworkOnHitValidator;\n" +
+                "public static System.Action<ShotData, Args> NetworkHitDetected;\n" +
+                "public static System.Action<ShotData, Args, BlockType, ReactionOutput, float> NetworkOnHitResolved;\n" +
+                "void OnHit(ShotData data, Args args) {\n" +
+                "if (NetworkOnHitValidator != null && !NetworkOnHitValidator.Invoke(data, args)) return;\n" +
+                "NetworkHitDetected?.Invoke(data, args);\n" +
+                "BlockType networkBlockType = BlockType.None;\n" +
+                "ReactionOutput networkReactionOutput = ReactionOutput.None;\n" +
+                "float networkReactionPower = float.NaN;\n" +
+                "networkReactionPower = reactionInput.Power;\n" +
+                "networkBlockType = shieldOutput.Type;\n" +
+                "networkReactionOutput = target.Combat.GetHitReaction(input, args, reaction);\n" +
+                "_ = this.m_OnHit.Run(args);\n" +
+                "NetworkOnHitResolved?.Invoke(data, args, networkBlockType, networkReactionOutput, networkReactionPower);\n" +
+                "}\n}\n";
+
+            bool valid = patcher.Verify(
+                "Plugins/GameCreator/Packages/Shooter/Runtime/ScriptableObjects/ShooterWeapon.cs",
+                content,
+                out _);
+
+            Assert.IsFalse(valid);
+        }
+
+        [Test]
+        public void ShooterPatcher_VerifyShooterWeapon_RejectsLegacyThreeArgumentResultCallback()
+        {
+            var patcher = new ShooterPatcherProxy();
+            string content =
+                $"{patcher.Marker}\n" +
+                "// [GC2_NETWORK_PATCH]\n" +
+                "public class ShooterWeapon {\n" +
+                "public static System.Func<ShotData, Args, bool> NetworkOnHitValidator;\n" +
+                "public static System.Action<ShotData, Args> NetworkHitDetected;\n" +
+                "public static System.Action<ShotData, Args, BlockType> NetworkOnHitResolved;\n" +
+                "internal void OnHit(ShotData data, Args args)\n" +
+                "{\n" +
+                "    if (NetworkOnHitValidator != null && !NetworkOnHitValidator.Invoke(data, args)) return;\n" +
+                "    NetworkHitDetected?.Invoke(data, args);\n" +
+                "    BlockType networkBlockType = BlockType.None;\n" +
+                "    networkBlockType = shieldOutput.Type;\n" +
+                "    NetworkOnHitResolved?.Invoke(data, args, networkBlockType);\n" +
+                "}\n" +
+                "}\n" +
+                "// [GC2_NETWORK_PATCH_END]\n";
+
+            bool valid = patcher.Verify(
+                "Plugins/GameCreator/Packages/Shooter/Runtime/ScriptableObjects/ShooterWeapon.cs",
+                content,
+                out _);
+
+            Assert.IsFalse(valid);
+        }
+
+        [Test]
+        public void ShooterPatcher_VerifyShooterWeapon_RejectsLegacyFourArgumentResultCallback()
+        {
+            var patcher = new ShooterPatcherProxy();
+            string content =
+                $"{patcher.Marker}\n" +
+                "// [GC2_NETWORK_PATCH]\n" +
+                "public class ShooterWeapon {\n" +
+                "public static System.Func<ShotData, Args, bool> NetworkOnHitValidator;\n" +
+                "public static System.Action<ShotData, Args> NetworkHitDetected;\n" +
+                "public static System.Action<ShotData, Args, BlockType, ReactionOutput> NetworkOnHitResolved;\n" +
+                "internal void OnHit(ShotData data, Args args)\n" +
+                "{\n" +
+                "    if (NetworkOnHitValidator != null && !NetworkOnHitValidator.Invoke(data, args)) return;\n" +
+                "    NetworkHitDetected?.Invoke(data, args);\n" +
+                "    BlockType networkBlockType = BlockType.None;\n" +
+                "    ReactionOutput networkReactionOutput = ReactionOutput.None;\n" +
+                "    networkBlockType = shieldOutput.Type;\n" +
+                "    networkReactionOutput = target.Combat.GetHitReaction(reactionInput, args, reaction);\n" +
+                "    NetworkOnHitResolved?.Invoke(data, args, networkBlockType, networkReactionOutput);\n" +
+                "    _ = this.m_OnHit.Run(args);\n" +
+                "}\n" +
+                "}\n" +
+                "// [GC2_NETWORK_PATCH_END]\n";
+
+            bool valid = patcher.Verify(
+                "Plugins/GameCreator/Packages/Shooter/Runtime/ScriptableObjects/ShooterWeapon.cs",
+                content,
+                out _);
+
+            Assert.IsFalse(valid);
+        }
+
+        [Test]
+        public void ShooterPatcher_VerifyShooterWeapon_RejectsReevaluatedOrMissingReactionPower()
+        {
+            var patcher = new ShooterPatcherProxy();
+            string content =
+                $"{patcher.Marker}\n" +
+                "// [GC2_NETWORK_PATCH]\n" +
+                "public class ShooterWeapon {\n" +
+                "public static System.Func<ShotData, Args, bool> NetworkOnHitValidator;\n" +
+                "public static System.Action<ShotData, Args> NetworkHitDetected;\n" +
+                "public static System.Action<ShotData, Args, BlockType, ReactionOutput, float> NetworkOnHitResolved;\n" +
+                "void OnHit(ShotData data, Args args) {\n" +
+                "if (NetworkOnHitValidator != null && !NetworkOnHitValidator.Invoke(data, args)) return;\n" +
+                "NetworkHitDetected?.Invoke(data, args);\n" +
+                "BlockType networkBlockType = BlockType.None;\n" +
+                "ReactionOutput networkReactionOutput = ReactionOutput.None;\n" +
+                "float networkReactionPower = (float) data.Weapon.Fire.Power(args);\n" +
+                "networkBlockType = shieldOutput.Type;\n" +
+                "networkReactionOutput = target.Combat.GetHitReaction(reactionInput, args, reaction);\n" +
+                "NetworkOnHitResolved?.Invoke(data, args, networkBlockType, networkReactionOutput, networkReactionPower);\n" +
+                "_ = this.m_OnHit.Run(args);\n" +
+                "}\n}\n";
+
+            bool valid = patcher.Verify(
+                "Plugins/GameCreator/Packages/Shooter/Runtime/ScriptableObjects/ShooterWeapon.cs",
+                content,
+                out _);
+
+            Assert.IsFalse(valid);
+        }
+
+        [Test]
+        public void MeleePatcher_VerifyStance_FailsWithoutBothReactionTransitionCallbacks()
+        {
+            var patcher = new MeleePatcherProxy();
+            string content = BuildMeleeStanceVerificationContent(patcher.Marker, 1);
+
+            bool valid = patcher.Verify(
+                "Plugins/GameCreator/Packages/Melee/Runtime/Classes/Stance/MeleeStance.cs",
+                content,
+                out string reason);
+
+            Assert.IsFalse(valid);
+            StringAssert.Contains("NetworkReactionStarted?.Invoke", reason);
+        }
+
+        [Test]
+        public void MeleePatcher_VerifyStance_PassesWithReactionTransitionCallbacks()
+        {
+            var patcher = new MeleePatcherProxy();
+            string content = BuildMeleeStanceVerificationContent(patcher.Marker, 2);
+
+            bool valid = patcher.Verify(
+                "Plugins/GameCreator/Packages/Melee/Runtime/Classes/Stance/MeleeStance.cs",
+                content,
+                out string reason);
+
+            Assert.IsTrue(valid, reason);
+        }
+
+        private static string BuildMeleeStanceVerificationContent(
+            string marker,
+            int reactionCallbackCount)
+        {
+            string reactionCallbacks = reactionCallbackCount >= 1
+                ? "NetworkReactionStarted?.Invoke(this, from, input, reaction);\n"
+                : string.Empty;
+            if (reactionCallbackCount >= 2)
+            {
+                reactionCallbacks += "NetworkReactionStarted?.Invoke(this, from, input, reaction);\n";
+            }
+
+            return
+                $"{marker}\n" +
+                "// [GC2_NETWORK_PATCH]\n" +
+                "public class MeleeStance {\n" +
+                "object NetworkInputChargeValidator, NetworkInputExecuteValidator;\n" +
+                "object NetworkPlaySkillValidator, NetworkPlayReactionValidator;\n" +
+                "object NetworkReactionStarted, NetworkSkillExecuted, NetworkHitRegistered;\n" +
+                "void Verify() {\n" +
+                "NetworkInputChargeValidator.Invoke();\n" +
+                "NetworkInputExecuteValidator.Invoke();\n" +
+                "NetworkPlaySkillValidator.Invoke();\n" +
+                "NetworkPlayReactionValidator.Invoke();\n" +
+                reactionCallbacks +
+                "NetworkSkillExecuted?.Invoke();\n" +
+                "NetworkHitRegistered?.Invoke();\n" +
+                "}\n" +
+                "void InputChargeDirect() {}\n" +
+                "void InputExecuteDirect() {}\n" +
+                "void PlaySkillDirect() {}\n" +
+                "void PlayReactionDirect() {}\n" +
+                "void HitDirect() {}\n" +
+                "}\n" +
+                "// [GC2_NETWORK_PATCH_END]\n";
+        }
+
+        [Test]
         public void MeleePatcher_VerifySkill_FailsWithoutOnHitInvocation()
         {
             var patcher = new MeleePatcherProxy();
@@ -209,6 +571,371 @@ namespace Arawn.GameCreator2.Networking.Tests
 
             Assert.IsFalse(valid);
             StringAssert.Contains("NetworkOnHitValidator.Invoke", reason);
+        }
+
+        [Test]
+        public void MeleePatcher_VerifySkill_FailsWithoutAuthoredDefenseResolver()
+        {
+            var patcher = new MeleePatcherProxy();
+            string content =
+                $"{patcher.Marker}\n" +
+                "// [GC2_NETWORK_PATCH]\n" +
+                "public class Skill {\n" +
+                "public static System.Func<Skill, Args, Vector3, Vector3, bool> NetworkOnHitValidator;\n" +
+                "internal void OnHit(Args args, Vector3 point, Vector3 direction)\n" +
+                "{\n" +
+                "    if (NetworkOnHitValidator != null && !NetworkOnHitValidator.Invoke(this, args, point, direction)) return;\n" +
+                "}\n" +
+                "}\n" +
+                "// [GC2_NETWORK_PATCH_END]\n";
+
+            bool valid = patcher.Verify(
+                "Plugins/GameCreator/Packages/Melee/Runtime/ScriptableObjects/Skill.cs",
+                content,
+                out string reason);
+
+            Assert.IsFalse(valid);
+            StringAssert.Contains("NetworkResolveDefenseDirect", reason);
+        }
+
+        [Test]
+        public void MeleePatcher_VerifySkill_PassesWithAuthoredDefenseResolver()
+        {
+            var patcher = new MeleePatcherProxy();
+            string content =
+                $"{patcher.Marker}\n" +
+                "// [GC2_NETWORK_PATCH]\n" +
+                "public class Skill {\n" +
+                "public static System.Func<Skill, Args, Vector3, Vector3, bool> NetworkOnHitValidator;\n" +
+                "internal void OnHit(Args args, Vector3 point, Vector3 direction)\n" +
+                "{\n" +
+                "    if (NetworkOnHitValidator != null && !NetworkOnHitValidator.Invoke(this, args, point, direction)) return;\n" +
+                "}\n" +
+                "public BlockType NetworkResolveDefenseDirect(\n" +
+                "    Character attacker, Character target, Vector3 point,\n" +
+                "    Vector3 targetLocalDirection, float power) => BlockType.None;\n" +
+                "}\n" +
+                "// [GC2_NETWORK_PATCH_END]\n";
+
+            bool valid = patcher.Verify(
+                "Plugins/GameCreator/Packages/Melee/Runtime/ScriptableObjects/Skill.cs",
+                content,
+                out string reason);
+
+            Assert.IsTrue(valid, reason);
+        }
+
+        [Test]
+        public void MeleePatcher_VerifyShieldResponse_RequiresExactReactionOutputCallback()
+        {
+            var patcher = new MeleePatcherProxy();
+            string missingCallback =
+                $"{patcher.Marker}\n" +
+                "public abstract class TShieldResponse {\n" +
+                "public static System.Action<TShieldResponse, Args, ShieldOutput, ReactionInput, Reaction, ReactionOutput> NetworkReactionResolved;\n" +
+                "void Run() { ReactionOutput reactionOutput = this.m_Reaction.Run(character, args, reactionInput); }\n" +
+                "}\n";
+
+            bool valid = patcher.Verify(
+                "Plugins/GameCreator/Packages/Melee/Runtime/Classes/Shield/TShieldResponse.cs",
+                missingCallback,
+                out string reason);
+
+            Assert.IsFalse(valid);
+            StringAssert.Contains("NetworkReactionResolved?.Invoke", reason);
+        }
+
+        [Test]
+        public void MeleePatcher_VerifyShieldResponse_PassesWithExactReactionOutputCallback()
+        {
+            var patcher = new MeleePatcherProxy();
+            string content =
+                $"{patcher.Marker}\n" +
+                "public abstract class TShieldResponse {\n" +
+                "public static System.Action<TShieldResponse, Args, ShieldOutput, ReactionInput, Reaction, ReactionOutput> NetworkReactionResolved;\n" +
+                "void Run() {\n" +
+                "ReactionOutput reactionOutput = this.m_Reaction.Run(character, args, reactionInput);\n" +
+                "NetworkReactionResolved?.Invoke(this, args, shieldOutput, reactionInput, this.m_Reaction, reactionOutput);\n" +
+                "}\n" +
+                "}\n";
+
+            bool valid = patcher.Verify(
+                "Plugins/GameCreator/Packages/Melee/Runtime/Classes/Shield/TShieldResponse.cs",
+                content,
+                out string reason);
+
+            Assert.IsTrue(valid, reason);
+        }
+
+        [Test]
+        public void MeleePatcher_VerifyAttackSkill_FailsWithoutStrikeInvocation()
+        {
+            var patcher = new MeleePatcherProxy();
+            string content =
+                $"{patcher.Marker}\n" +
+                "// [GC2_NETWORK_PATCH]\n" +
+                "public class AttackSkill {\n" +
+                "public static System.Func<MeleeStance, StrikeOutput, Skill, bool> NetworkStrikeValidator;\n" +
+                "private readonly System.Collections.Generic.HashSet<int> m_HitsBuffer = new();\n" +
+                "private void OnUpdatePhaseStrike()\n" +
+                "{\n" +
+                "    if (!this.ComboSkill.CanHit(hitArgs))\n" +
+                "    {\n" +
+                "        this.m_HitsBuffer.Add(hit.GameObject.GetInstanceID());\n" +
+                "        continue;\n" +
+                "    }\n" +
+                "}\n" +
+                "}\n" +
+                "// [GC2_NETWORK_PATCH_END]\n";
+
+            bool valid = patcher.Verify(
+                "Plugins/GameCreator/Packages/Melee/Runtime/Classes/Stance/Attacks/States/AttackSkill.cs",
+                content,
+                out string reason);
+
+            Assert.IsFalse(valid);
+            StringAssert.Contains("NetworkStrikeValidator.Invoke", reason);
+        }
+
+        [Test]
+        public void MeleePatcher_VerifyAttackSkill_PassesWithPostCanHitInterceptor()
+        {
+            var patcher = new MeleePatcherProxy();
+            string content =
+                $"{patcher.Marker}\n" +
+                "// [GC2_NETWORK_PATCH]\n" +
+                "public class AttackSkill {\n" +
+                "public static System.Func<MeleeStance, StrikeOutput, Skill, bool> NetworkStrikeValidator;\n" +
+                "public static System.Action<MeleeStance, Skill, int, int> NetworkStrikeProbe;\n" +
+                "public static System.Action<MeleeStance, MeleeWeapon, Skill, int> NetworkSkillStarted;\n" +
+                "private readonly System.Collections.Generic.HashSet<int> m_HitsBuffer = new();\n" +
+                "private void WhenEnter()\n" +
+                "{\n" +
+                "    this.m_Duration = this.ComboSkill.GetDuration(this.m_Speed, this.m_Args);\n" +
+                "    NetworkSkillStarted?.Invoke(\n" +
+                "        this.Attacks.MeleeStance, this.Attacks.Weapon, this.ComboSkill, this.Attacks.ComboId);\n" +
+                "    this.ComboSkill.Run();\n" +
+                "}\n" +
+                "private void OnUpdatePhaseStrike()\n" +
+                "{\n" +
+                "    var hits = new System.Collections.Generic.List<StrikeOutput>();\n" +
+                "    hits.Add(candidate);\n" +
+                "    NetworkStrikeProbe?.Invoke(\n" +
+                "        this.Attacks.MeleeStance, this.ComboSkill, this.m_Strikers.Count, hits.Count);\n" +
+                "    foreach (StrikeOutput hit in hits)\n" +
+                "    {\n" +
+                "    if (!this.ComboSkill.CanHit(hitArgs))\n" +
+                "    {\n" +
+                "        this.m_HitsBuffer.Add(hit.GameObject.GetInstanceID());\n" +
+                "        continue;\n" +
+                "    }\n" +
+                "    if (NetworkStrikeValidator != null &&\n" +
+                "        !NetworkStrikeValidator.Invoke(this.Attacks.MeleeStance, hit, this.ComboSkill))\n" +
+                "    {\n" +
+                "        this.m_HitsBuffer.Add(hit.GameObject.GetInstanceID());\n" +
+                "        continue;\n" +
+                "    }\n" +
+                "    }\n" +
+                "}\n" +
+                "}\n" +
+                "// [GC2_NETWORK_PATCH_END]\n";
+
+            bool valid = patcher.Verify(
+                "Plugins/GameCreator/Packages/Melee/Runtime/Classes/Stance/Attacks/States/AttackSkill.cs",
+                content,
+                out string reason);
+
+            Assert.IsTrue(valid, reason);
+        }
+
+        [Test]
+        public void MeleePatcher_VerifyAttackSkill_FailsWithoutPersistentStrikeProbe()
+        {
+            var patcher = new MeleePatcherProxy();
+            string content =
+                "// [GC2_NETWORK_PATCH_Melee_v3_3_0_melee]\n" +
+                "// [GC2_NETWORK_PATCH]\n" +
+                "public class AttackSkill {\n" +
+                "public static System.Func<MeleeStance, StrikeOutput, Skill, bool> NetworkStrikeValidator;\n" +
+                "private readonly System.Collections.Generic.HashSet<int> m_HitsBuffer = new();\n" +
+                "private void OnUpdatePhaseStrike()\n" +
+                "{\n" +
+                "    var hits = new System.Collections.Generic.List<StrikeOutput>();\n" +
+                "    hits.Add(candidate);\n" +
+                "    foreach (StrikeOutput hit in hits)\n" +
+                "    {\n" +
+                "        if (!this.ComboSkill.CanHit(hitArgs))\n" +
+                "        {\n" +
+                "            this.m_HitsBuffer.Add(hit.GameObject.GetInstanceID());\n" +
+                "            continue;\n" +
+                "        }\n" +
+                "        if (NetworkStrikeValidator != null &&\n" +
+                "            !NetworkStrikeValidator.Invoke(this.Attacks.MeleeStance, hit, this.ComboSkill))\n" +
+                "        {\n" +
+                "            this.m_HitsBuffer.Add(hit.GameObject.GetInstanceID());\n" +
+                "            continue;\n" +
+                "        }\n" +
+                "    }\n" +
+                "}\n" +
+                "}\n" +
+                "// [GC2_NETWORK_PATCH_END]\n";
+
+            bool valid = patcher.Verify(
+                "Plugins/GameCreator/Packages/Melee/Runtime/Classes/Stance/Attacks/States/AttackSkill.cs",
+                content,
+                out string reason);
+
+            Assert.IsFalse(valid);
+            StringAssert.Contains("NetworkStrikeProbe", reason);
+        }
+
+        [Test]
+        public void MeleePatcher_VerifyAttackSkill_FailsWhenStrikeProbeRunsInsideHitLoop()
+        {
+            var patcher = new MeleePatcherProxy();
+            string content =
+                $"{patcher.Marker}\n" +
+                "// [GC2_NETWORK_PATCH]\n" +
+                "public class AttackSkill {\n" +
+                "public static System.Func<MeleeStance, StrikeOutput, Skill, bool> NetworkStrikeValidator;\n" +
+                "public static System.Action<MeleeStance, Skill, int, int> NetworkStrikeProbe;\n" +
+                "public static System.Action<MeleeStance, MeleeWeapon, Skill, int> NetworkSkillStarted;\n" +
+                "private readonly System.Collections.Generic.HashSet<int> m_HitsBuffer = new();\n" +
+                "private void WhenEnter()\n" +
+                "{\n" +
+                "    this.m_Duration = this.ComboSkill.GetDuration(this.m_Speed, this.m_Args);\n" +
+                "    NetworkSkillStarted?.Invoke(\n" +
+                "        this.Attacks.MeleeStance, this.Attacks.Weapon, this.ComboSkill, this.Attacks.ComboId);\n" +
+                "    this.ComboSkill.Run();\n" +
+                "}\n" +
+                "private void OnUpdatePhaseStrike()\n" +
+                "{\n" +
+                "    var hits = new System.Collections.Generic.List<StrikeOutput>();\n" +
+                "    hits.Add(candidate);\n" +
+                "    foreach (StrikeOutput hit in hits)\n" +
+                "    {\n" +
+                "        NetworkStrikeProbe?.Invoke(\n" +
+                "            this.Attacks.MeleeStance, this.ComboSkill, this.m_Strikers.Count, hits.Count);\n" +
+                "        if (!this.ComboSkill.CanHit(hitArgs))\n" +
+                "        {\n" +
+                "            this.m_HitsBuffer.Add(hit.GameObject.GetInstanceID());\n" +
+                "            continue;\n" +
+                "        }\n" +
+                "        if (NetworkStrikeValidator != null &&\n" +
+                "            !NetworkStrikeValidator.Invoke(this.Attacks.MeleeStance, hit, this.ComboSkill))\n" +
+                "        {\n" +
+                "            this.m_HitsBuffer.Add(hit.GameObject.GetInstanceID());\n" +
+                "            continue;\n" +
+                "        }\n" +
+                "    }\n" +
+                "}\n" +
+                "}\n" +
+                "// [GC2_NETWORK_PATCH_END]\n";
+
+            bool valid = patcher.Verify(
+                "Plugins/GameCreator/Packages/Melee/Runtime/Classes/Stance/Attacks/States/AttackSkill.cs",
+                content,
+                out string reason);
+
+            Assert.IsFalse(valid);
+            StringAssert.Contains("NetworkStrikeProbe", reason);
+        }
+
+        [Test]
+        public void MeleePatcher_VerifyAttackSkill_FailsWithoutSkillStartInvocation()
+        {
+            var patcher = new MeleePatcherProxy();
+            string content =
+                $"{patcher.Marker}\n" +
+                "// [GC2_NETWORK_PATCH]\n" +
+                "public class AttackSkill {\n" +
+                "public static System.Func<MeleeStance, StrikeOutput, Skill, bool> NetworkStrikeValidator;\n" +
+                "public static System.Action<MeleeStance, Skill, int, int> NetworkStrikeProbe;\n" +
+                "public static System.Action<MeleeStance, MeleeWeapon, Skill, int> NetworkSkillStarted;\n" +
+                "private readonly System.Collections.Generic.HashSet<int> m_HitsBuffer = new();\n" +
+                "private void OnUpdatePhaseStrike()\n" +
+                "{\n" +
+                "    var hits = new System.Collections.Generic.List<StrikeOutput>();\n" +
+                "    hits.Add(candidate);\n" +
+                "    NetworkStrikeProbe?.Invoke(\n" +
+                "        this.Attacks.MeleeStance, this.ComboSkill, this.m_Strikers.Count, hits.Count);\n" +
+                "    foreach (StrikeOutput hit in hits)\n" +
+                "    {\n" +
+                "        if (!this.ComboSkill.CanHit(hitArgs))\n" +
+                "        {\n" +
+                "            this.m_HitsBuffer.Add(hit.GameObject.GetInstanceID());\n" +
+                "            continue;\n" +
+                "        }\n" +
+                "        if (NetworkStrikeValidator != null &&\n" +
+                "            !NetworkStrikeValidator.Invoke(this.Attacks.MeleeStance, hit, this.ComboSkill))\n" +
+                "        {\n" +
+                "            this.m_HitsBuffer.Add(hit.GameObject.GetInstanceID());\n" +
+                "            continue;\n" +
+                "        }\n" +
+                "    }\n" +
+                "}\n" +
+                "}\n" +
+                "// [GC2_NETWORK_PATCH_END]\n";
+
+            bool valid = patcher.Verify(
+                "Plugins/GameCreator/Packages/Melee/Runtime/Classes/Stance/Attacks/States/AttackSkill.cs",
+                content,
+                out string reason);
+
+            Assert.IsFalse(valid);
+            StringAssert.Contains("NetworkSkillStarted?.Invoke", reason);
+        }
+
+        [Test]
+        public void MeleePatcher_VerifyAttackSkill_FailsWhenSkillStartRunsAfterSkillInstructions()
+        {
+            var patcher = new MeleePatcherProxy();
+            string content =
+                $"{patcher.Marker}\n" +
+                "// [GC2_NETWORK_PATCH]\n" +
+                "public class AttackSkill {\n" +
+                "public static System.Func<MeleeStance, StrikeOutput, Skill, bool> NetworkStrikeValidator;\n" +
+                "public static System.Action<MeleeStance, Skill, int, int> NetworkStrikeProbe;\n" +
+                "public static System.Action<MeleeStance, MeleeWeapon, Skill, int> NetworkSkillStarted;\n" +
+                "private readonly System.Collections.Generic.HashSet<int> m_HitsBuffer = new();\n" +
+                "private void WhenEnter()\n" +
+                "{\n" +
+                "    this.m_Duration = this.ComboSkill.GetDuration(this.m_Speed, this.m_Args);\n" +
+                "    this.ComboSkill.Run();\n" +
+                "    NetworkSkillStarted?.Invoke(\n" +
+                "        this.Attacks.MeleeStance, this.Attacks.Weapon, this.ComboSkill, this.Attacks.ComboId);\n" +
+                "}\n" +
+                "private void OnUpdatePhaseStrike()\n" +
+                "{\n" +
+                "    var hits = new System.Collections.Generic.List<StrikeOutput>();\n" +
+                "    hits.Add(candidate);\n" +
+                "    NetworkStrikeProbe?.Invoke(\n" +
+                "        this.Attacks.MeleeStance, this.ComboSkill, this.m_Strikers.Count, hits.Count);\n" +
+                "    foreach (StrikeOutput hit in hits)\n" +
+                "    {\n" +
+                "        if (!this.ComboSkill.CanHit(hitArgs))\n" +
+                "        {\n" +
+                "            this.m_HitsBuffer.Add(hit.GameObject.GetInstanceID());\n" +
+                "            continue;\n" +
+                "        }\n" +
+                "        if (NetworkStrikeValidator != null &&\n" +
+                "            !NetworkStrikeValidator.Invoke(this.Attacks.MeleeStance, hit, this.ComboSkill))\n" +
+                "        {\n" +
+                "            this.m_HitsBuffer.Add(hit.GameObject.GetInstanceID());\n" +
+                "            continue;\n" +
+                "        }\n" +
+                "    }\n" +
+                "}\n" +
+                "}\n" +
+                "// [GC2_NETWORK_PATCH_END]\n";
+
+            bool valid = patcher.Verify(
+                "Plugins/GameCreator/Packages/Melee/Runtime/Classes/Stance/Attacks/States/AttackSkill.cs",
+                content,
+                out string reason);
+
+            Assert.IsFalse(valid);
+            StringAssert.Contains("NetworkSkillStarted", reason);
         }
 
         [Test]
@@ -610,6 +1337,11 @@ namespace Arawn.GameCreator2.Networking.Tests
                 "public static System.Func<TraversalStance, IdString, bool> NetworkTryActionValidator;\n" +
                 "public static System.Func<TraversalStance, IdString, bool> NetworkTryStateEnterValidator;\n" +
                 "public static System.Func<TraversalStance, bool> NetworkTryStateExitValidator;\n" +
+                "private uint m_NetworkEnterSequence;\n" +
+                "public TraversalToken NetworkSnapshotToken => this.m_CurrentToken;\n" +
+                "public void NetworkInvalidatePendingEnter() { ++this.m_NetworkEnterSequence; }\n" +
+                "public bool NetworkRestoreInteractiveSnapshot(TraverseInteractive traverse, Vector3 relativePosition) => true;\n" +
+                "public bool NetworkClearSnapshot() => true;\n" +
                 "void Hooks() {\n" +
                 "NetworkTryCancelValidator.Invoke(this, null);\n" +
                 "NetworkForceCancelValidator.Invoke(this);\n" +
@@ -617,6 +1349,9 @@ namespace Arawn.GameCreator2.Networking.Tests
                 "NetworkTryActionValidator.Invoke(this, default);\n" +
                 "NetworkTryStateEnterValidator.Invoke(this, default);\n" +
                 "}\n" +
+                "void OnTraverseEnter() { uint networkEnterSequence = ++this.m_NetworkEnterSequence; " +
+                "if (networkEnterSequence != this.m_NetworkEnterSequence) return; }\n" +
+                "void OnTraverseExit(object traverse, object token) { if (token != this.m_CurrentToken) return; }\n" +
                 "}\n" +
                 "// [GC2_NETWORK_PATCH_END]\n";
 
@@ -627,6 +1362,92 @@ namespace Arawn.GameCreator2.Networking.Tests
 
             Assert.IsFalse(valid);
             StringAssert.Contains("NetworkTryStateExitValidator.Invoke", reason);
+        }
+
+        [Test]
+        public void TraversalPatcher_VerifyMotionInteractive_RequiresResolverBeforeAuthoredContinue()
+        {
+            var patcher = new TraversalPatcherProxy();
+            string commonHeader =
+                $"{patcher.Marker}\n" +
+                "// [GC2_NETWORK_PATCH]\n" +
+                "public class MotionInteractive {\n" +
+                "public object NetworkEdgeConnectionResolver;\n" +
+                "public object NetworkConnectionSkipTransitionResolver;\n" +
+                "public void NetworkResumeInteractiveSnapshot() { }\n" +
+                "void Enter() { NetworkConnectionSkipTransitionResolver.Invoke(a, b, c); }\n";
+            string edgeB =
+                "if (traverseInteractive.PushingOutB(currentLocalPosition, swizzleLocalInput)) {\n" +
+                "if (NetworkEdgeConnectionResolver != null) {\n" +
+                "Traverse networkConnection = NetworkEdgeConnectionResolver.Invoke(this, traverseInteractive, character, currentLocalPosition, swizzleLocalInput, true);\n" +
+                "if (networkConnection != null) { return networkConnection; }\n}\n" +
+                "else if (traverseInteractive.ContinueB != null) return traverseInteractive.ContinueB;\n" +
+                "}\n";
+
+            string validContent = commonHeader +
+                "void OnUpdate() {\n" +
+                "if (traverseInteractive.PushingOutA(currentLocalPosition, swizzleLocalInput)) {\n" +
+                "if (NetworkEdgeConnectionResolver != null) {\n" +
+                "Traverse networkConnection = NetworkEdgeConnectionResolver.Invoke(this, traverseInteractive, character, currentLocalPosition, swizzleLocalInput, false);\n" +
+                "if (networkConnection != null) { return networkConnection; }\n}\n" +
+                "else if (traverseInteractive.ContinueA != null) return traverseInteractive.ContinueA;\n" +
+                "}\n" + edgeB + "}\n}\n" +
+                "// [GC2_NETWORK_PATCH_END]\n";
+
+            bool valid = patcher.Verify(
+                "Plugins/GameCreator/Packages/Traversal/Runtime/ScriptableObjects/MotionInteractive.cs",
+                validContent,
+                out string validReason);
+            Assert.IsTrue(valid, validReason);
+
+            string legacyContent = commonHeader +
+                "void OnUpdate() {\n" +
+                "if (traverseInteractive.PushingOutA(currentLocalPosition, swizzleLocalInput)) {\n" +
+                "if (traverseInteractive.ContinueA != null) return traverseInteractive.ContinueA;\n" +
+                "if (NetworkEdgeConnectionResolver != null) {\n" +
+                "Traverse networkConnection = NetworkEdgeConnectionResolver.Invoke(this, traverseInteractive, character, currentLocalPosition, swizzleLocalInput, false);\n" +
+                "if (networkConnection != null) { return networkConnection; }\n}\n" +
+                "}\n" + edgeB + "}\n}\n" +
+                "// [GC2_NETWORK_PATCH_END]\n";
+
+            valid = patcher.Verify(
+                "Plugins/GameCreator/Packages/Traversal/Runtime/ScriptableObjects/MotionInteractive.cs",
+                legacyContent,
+                out string legacyReason);
+            Assert.IsFalse(valid);
+            StringAssert.Contains("Required patch regex", legacyReason);
+        }
+
+        [Test]
+        public void TraversalPatcher_StaleReplacementLayout_RestoresPristineBackupBeforeMigration()
+        {
+            const string relativePath =
+                "Plugins/GameCreator/Packages/Traversal/Runtime/ScriptableObjects/MotionInteractive.cs";
+            string backupPath = Path.GetFullPath(Path.Combine(
+                Application.dataPath,
+                "../Library/GameCreator2NetworkingLayer/Patches/Backups/Traversal",
+                relativePath + ".backup"));
+            if (!File.Exists(backupPath))
+            {
+                Assert.Ignore("Traversal migration test requires the pristine source backup created by the patch transaction.");
+            }
+
+            var patcher = new TraversalPatcherProxy();
+            string staleContent =
+                "// [GC2_NETWORK_PATCH_Traversal_v2_5_0_traversal]\n" +
+                "namespace GameCreator.Runtime.Traversal { class MotionInteractive {\n" +
+                "void OnUpdate() {\n" +
+                "// [GC2_NETWORK_PATCH]\n" +
+                "if (NetworkEdgeConnectionResolver != null) { return; }\n" +
+                "// [GC2_NETWORK_PATCH_END]\n" +
+                "}\n}\n}\n";
+
+            bool prepared = patcher.PrepareMigration(relativePath, ref staleContent);
+
+            Assert.IsTrue(prepared);
+            StringAssert.DoesNotContain("GC2_NETWORK_PATCH", staleContent);
+            StringAssert.Contains("traverseInteractive.ContinueA", staleContent);
+            StringAssert.Contains("traverseInteractive.ContinueB", staleContent);
         }
 
         [Test]
@@ -642,6 +1463,7 @@ namespace Arawn.GameCreator2.Networking.Tests
                 "public async System.Threading.Tasks.Task Run(Character character)\n" +
                 "{\n" +
                 "    if (NetworkRunValidator != null && !NetworkRunValidator.Invoke(this, character)) return;\n" +
+                "    object token = null; if (token == null || token.IsCancelled) return;\n" +
                 "}\n" +
                 "}\n" +
                 "// [GC2_NETWORK_PATCH_END]\n";
@@ -661,6 +1483,7 @@ namespace Arawn.GameCreator2.Networking.Tests
                 "public async System.Threading.Tasks.Task Enter(Character character, InteractiveTransitionData transition)\n" +
                 "{\n" +
                 "    if (NetworkEnterValidator != null && !NetworkEnterValidator.Invoke(this, character, transition)) return;\n" +
+                "    object token = null; if (token == null || token.IsCancelled) return;\n" +
                 "}\n" +
                 "}\n" +
                 "// [GC2_NETWORK_PATCH_END]\n";
@@ -709,6 +1532,52 @@ namespace Arawn.GameCreator2.Networking.Tests
             {
                 Assert.Ignore("No patched runtime files detected in this workspace.");
             }
+        }
+
+        [Test]
+        public void MeleeRuntime_DefaultLogging_HasNoTemporaryHostOrClientPrefixes()
+        {
+            string[] relativePaths =
+            {
+                "Arawn/NetworkingLayerForGC2/Melee/NetworkMeleeController.cs",
+                "Arawn/NetworkingLayerForGC2/Melee/NetworkMeleeController.GuardsSkills.cs",
+                "Arawn/NetworkingLayerForGC2/Melee/NetworkMeleeController.Hits.cs",
+                "Arawn/NetworkingLayerForGC2/Melee/NetworkMeleeManager.cs",
+                "Arawn/NetworkingLayerForGC2/Melee/NetworkMeleePatchHooks.cs"
+            };
+
+            foreach (string relativePath in relativePaths)
+            {
+                string fullPath = Path.Combine(Application.dataPath, relativePath);
+                Assert.That(File.Exists(fullPath), Is.True, $"Missing Melee runtime source: {relativePath}");
+
+                string source = File.ReadAllText(fullPath);
+                StringAssert.DoesNotContain("[NetworkMeleeHostDebug]", source, relativePath);
+                StringAssert.DoesNotContain("[NetworkMeleeClientDebug]", source, relativePath);
+                StringAssert.DoesNotContain("NetworkMeleeHostTrace", source, relativePath);
+            }
+        }
+
+        [Test]
+        public void MeleeRuntime_StrikeProbe_RemainsFunctionalWithoutTemporaryDiagnostics()
+        {
+            string fullPath = Path.Combine(
+                Application.dataPath,
+                "Arawn/NetworkingLayerForGC2/Melee/NetworkMeleePatchHooks.cs");
+            string source = File.ReadAllText(fullPath);
+
+            StringAssert.Contains("NetworkStrikeProbe", source);
+            StringAssert.Contains("if (candidateCount == 0)", source);
+            StringAssert.Contains("EnsureIntendedTargetPhysicsProxy(stance);", source);
+            StringAssert.DoesNotContain("HostStrikeProbeState", source);
+            StringAssert.DoesNotContain("BuildStrikeSpatialSnapshot", source);
+            StringAssert.DoesNotContain("HostTrace", source);
+
+            string managerSource = File.ReadAllText(Path.Combine(
+                Application.dataPath,
+                "Arawn/NetworkingLayerForGC2/Melee/NetworkMeleeManager.cs"));
+            StringAssert.DoesNotContain("m_EnableHostTrace", managerSource);
+            StringAssert.DoesNotContain("NetworkMeleeHostTrace", managerSource);
         }
     }
 }

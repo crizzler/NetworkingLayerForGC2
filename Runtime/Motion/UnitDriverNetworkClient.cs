@@ -16,7 +16,7 @@ namespace Arawn.GameCreator2.Networking
     [Description("Client-side driver with prediction and reconciliation. " +
                  "Provides responsive local movement that syncs with server authority.")]
     [Serializable]
-    public class UnitDriverNetworkClient : TUnitDriver, INetworkDirectionalInputSink
+    public class UnitDriverNetworkClient : TUnitDriver, INetworkDirectionalInputSink, INetworkOwnerMotionAuthority
     {
         // EXPOSED MEMBERS: -----------------------------------------------------------------------
 
@@ -24,7 +24,7 @@ namespace Arawn.GameCreator2.Networking
         [SerializeField] protected float m_MaxSlope = 45f;
         [SerializeField] protected float m_StepHeight = 0.3f;
         [SerializeField] private Axonometry m_Axonometry = new Axonometry();
-        
+
         [Header("Network Settings")]
         [SerializeField] private NetworkCharacterConfig m_Config = new NetworkCharacterConfig();
 
@@ -38,7 +38,7 @@ namespace Arawn.GameCreator2.Networking
         [NonSerialized] protected Vector3 m_MoveDirection;
         [NonSerialized] protected float m_VerticalSpeed;
         [NonSerialized] protected AnimVector3 m_FloorNormal;
-        
+
         // Prediction and reconciliation
         [NonSerialized] private PredictedState[] m_PredictionHistory;
         [NonSerialized] private int m_PredictionHistoryStart;
@@ -58,7 +58,8 @@ namespace Arawn.GameCreator2.Networking
         [NonSerialized] private float m_LastExternalMoveDirectionRealtime;
         [NonSerialized] private float m_LastExplicitMoveDirectionRealtime;
         [NonSerialized] private bool m_PreserveExplicitMoveDirectionWhileTraversal;
-        
+        [NonSerialized] private bool m_ClimbDiagnosticOwnerWindowWasActive;
+
         // Input buffering
         [NonSerialized] private List<NetworkInputState> m_UnacknowledgedInputs;
         [NonSerialized] private float m_InputAccumulator;
@@ -77,12 +78,12 @@ namespace Arawn.GameCreator2.Networking
         [NonSerialized] private bool m_IsOnSteepSlope;
 
         // EVENTS: --------------------------------------------------------------------------------
-        
+
         /// <summary>
         /// Fired when input should be sent to server. Contains all unacknowledged inputs for redundancy.
         /// </summary>
         public event Action<NetworkInputState[]> OnSendInput;
-        
+
         /// <summary>
         /// Fired when reconciliation occurs (useful for debugging).
         /// </summary>
@@ -121,9 +122,13 @@ namespace Arawn.GameCreator2.Networking
             get => this.m_Axonometry;
             set => this.m_Axonometry = value;
         }
-        
+
         public ushort CurrentSequence => m_CurrentSequence;
         public NetworkCharacterConfig Config => m_Config;
+        public float OwnerMotionAuthorityRemaining =>
+            Mathf.Max(0f, m_OwnerAuthorityPoseSyncUntil - Time.time);
+        public float ReconciliationSuppressionRemaining =>
+            Mathf.Max(0f, m_ReconciliationSuppressedUntil - Time.time);
 
         public void SetExternalMoveDirection(Vector3 velocity)
         {
@@ -165,26 +170,40 @@ namespace Arawn.GameCreator2.Networking
 
             m_OwnerAuthorityPoseSyncUntil = until;
             ClearVisualReconciliationOffset();
+            LogFocusedTraversalMotion(
+                "OwnerWindow",
+                $"side=client operation=open duration={duration:F3} until={m_OwnerAuthorityPoseSyncUntil:F3} " +
+                $"position={NetworkTraversalClimbDiagnostics.Vector(this.Transform.position)}",
+                $"client-window-open:{this.Character?.GetInstanceID() ?? 0}");
             LogTraversalPose(
                 $"owner-authority-pose-sync-enabled duration={duration:F3} until={m_OwnerAuthorityPoseSyncUntil:F3} " +
                 $"rootMotion={this.Character?.RootMotionPosition ?? 0f:F3} {FormatBusyState()}");
         }
-        
+
+        /// <inheritdoc />
+        public void OpenOwnerMotionWindow(float durationSeconds)
+        {
+            if (durationSeconds <= 0f) return;
+
+            SuppressReconciliation(durationSeconds);
+            EnableOwnerAuthorityPoseSync(durationSeconds);
+        }
+
         /// <summary>
         /// Visual offset caused by reconciliation. External systems (camera, visual mesh)
         /// should read this to smooth the visual snap. Decays to zero over time.
         /// </summary>
         public Vector3 ReconciliationVisualOffset => m_ReconciliationVisualOffset;
-        
+
         /// <summary>
         /// Whether smooth reconciliation is currently in progress.
         /// </summary>
         public bool IsReconciling => m_IsReconciling;
-        
+
         public void ApplySessionProfile(NetworkSessionProfile profile)
         {
             if (profile == null) return;
-            
+
             m_Config.inputSendRate = profile.inputSendRate;
             m_Config.inputRedundancy = profile.inputRedundancy;
             m_Config.reconciliationThreshold = profile.reconciliationThreshold;
@@ -203,6 +222,7 @@ namespace Arawn.GameCreator2.Networking
             public float rotationY;
             public float verticalSpeed;
             public NetworkInputState input;
+            public bool updateKinematics;
         }
 
         private const int PREDICTION_HISTORY_CAPACITY = 128;
@@ -308,6 +328,7 @@ namespace Arawn.GameCreator2.Networking
         /// </remarks>
         public void ProcessLocalInput(Vector2 inputDirection, Transform cameraTransform, bool jump = false)
         {
+            LogFocusedOwnerWindowTransition();
             float deltaTime = this.Character.Time.DeltaTime;
 
             // PER-FRAME: smooth visual movement using live frame dt.
@@ -357,6 +378,13 @@ namespace Arawn.GameCreator2.Networking
 
                 if (ownerAuthorityPosition.HasValue)
                 {
+                    LogFocusedTraversalMotion(
+                        "OwnerPoseSend",
+                        $"seq={input.sequenceNumber} hasPose=true pose={NetworkTraversalClimbDiagnostics.Vector(input.GetOwnerAuthorityPosition())} " +
+                        $"raw={NetworkTraversalClimbDiagnostics.Vector(m_LastInputDirection)} network={NetworkTraversalClimbDiagnostics.Vector(networkInput)} " +
+                        $"dt={input.GetDeltaTime():F3} unacked={m_UnacknowledgedInputs.Count} " +
+                        $"grounded={IsGrounded} rootMotion={this.Character.RootMotionPosition:F3}",
+                        $"client-owner-pose:{this.Character.GetInstanceID()}");
                     LogTraversalPose(
                         $"send-owner-authority-input seq={input.sequenceNumber} dt={input.GetDeltaTime():F3} " +
                         $"rawInput={FormatVector2(m_LastInputDirection)} networkInput={FormatVector2(networkInput)} " +
@@ -379,7 +407,8 @@ namespace Arawn.GameCreator2.Networking
                     position = this.Transform.position,
                     rotationY = this.Transform.eulerAngles.y,
                     verticalSpeed = m_VerticalSpeed,
-                    input = input
+                    input = input,
+                    updateKinematics = this.UpdateKinematics
                 });
 
                 m_CurrentSequence++;
@@ -422,7 +451,9 @@ namespace Arawn.GameCreator2.Networking
             if (inputDirection.sqrMagnitude > 1f) inputDirection.Normalize();
 
             float speed = this.Character.Motion.LinearSpeed;
-            Vector3 horizontalMovement = inputDirection * speed * deltaTime;
+            Vector3 horizontalMovement = this.UpdateKinematics
+                ? inputDirection * speed * deltaTime
+                : Vector3.zero;
 
             UpdateGravity(deltaTime);
 
@@ -450,26 +481,31 @@ namespace Arawn.GameCreator2.Networking
             }
         }
 
-        private void ApplyInputPrediction(NetworkInputState input, Transform cameraTransform)
+        private void ApplyInputPrediction(
+            NetworkInputState input,
+            Transform cameraTransform,
+            bool updateKinematics)
         {
             Vector2 rawInput = input.GetInputDirection();
             float deltaTime = input.GetDeltaTime();
             this.Transform.rotation = Quaternion.Euler(0f, input.GetRotationY(), 0f);
-            
+
             // Convert to world direction
             Vector3 inputDirection = new Vector3(rawInput.x, 0f, rawInput.y);
-            
+
             if (cameraTransform != null)
             {
                 Quaternion cameraRotation = Quaternion.Euler(0f, cameraTransform.eulerAngles.y, 0f);
                 inputDirection = cameraRotation * inputDirection;
             }
-            
+
             if (inputDirection.sqrMagnitude > 1f) inputDirection.Normalize();
 
             // Calculate movement
             float speed = this.Character.Motion.LinearSpeed;
-            Vector3 horizontalMovement = inputDirection * speed * deltaTime;
+            Vector3 horizontalMovement = updateKinematics
+                ? inputDirection * speed * deltaTime
+                : Vector3.zero;
 
             // Apply gravity
             UpdateGravity(deltaTime);
@@ -485,7 +521,7 @@ namespace Arawn.GameCreator2.Networking
 
             // Combine and move
             Vector3 totalMovement = translation + Vector3.up * m_VerticalSpeed * deltaTime;
-            
+
             if (m_Controller != null && m_Controller.enabled)
             {
                 m_Controller.Move(totalMovement);
@@ -499,7 +535,7 @@ namespace Arawn.GameCreator2.Networking
                 m_GroundFrame = this.Character.Time.Frame;
             }
 
-            if (!ShouldPreserveExternalMoveDirectionForAnimation())
+            if (updateKinematics && !ShouldPreserveExternalMoveDirectionForAnimation())
             {
                 m_MoveDirection = translation / deltaTime;
             }
@@ -549,11 +585,14 @@ namespace Arawn.GameCreator2.Networking
         /// </summary>
         public void ApplyServerState(NetworkPositionState serverState)
         {
+            Vector3 focusedClientPositionBefore = this.Transform.position;
+            Vector3 focusedServerPosition = serverState.GetPosition();
+            float focusedInitialDistance = Vector3.Distance(focusedClientPositionBefore, focusedServerPosition);
             m_LastAcknowledgedSequence = serverState.lastProcessedInput;
-            
+
             // Remove acknowledged inputs
             m_UnacknowledgedInputs.RemoveAll(i => !IsSequenceNewer(i.sequenceNumber, serverState.lastProcessedInput));
-            
+
             // Find the predicted state at this sequence
             int predictedIndex = -1;
             for (int i = 0; i < m_PredictionHistoryCount; i++)
@@ -564,7 +603,7 @@ namespace Arawn.GameCreator2.Networking
                     break;
                 }
             }
-            
+
             bool externalAuthorityActive = Time.time < m_ReconciliationSuppressedUntil;
             bool ownerAuthorityPoseActive = IsOwnerAuthorityPoseSyncActive;
 
@@ -578,7 +617,7 @@ namespace Arawn.GameCreator2.Networking
                 bool externalAuthorityApplied = !ownerAuthorityPoseActive &&
                     externalAuthorityActive &&
                     TryApplyExternalAuthorityState(serverState, predictedIndex);
-                
+
                 if (ownerAuthorityPoseActive)
                 {
                     LogTraversalPose(
@@ -641,10 +680,10 @@ namespace Arawn.GameCreator2.Networking
                         // Smooth reconciliation
                         StartReconciliation(serverPosition, serverRotationY, serverState.GetVerticalVelocity(), predictedIndex);
                     }
-                    
+
                     OnReconciliation?.Invoke(positionError);
                 }
-                
+
                 // Remove old prediction history
                 if (predictedIndex > 0)
                 {
@@ -686,6 +725,55 @@ namespace Arawn.GameCreator2.Networking
                     $"latest={GetPredictionState(m_PredictionHistoryCount - 1).sequence} " +
                     $"unacked={m_UnacknowledgedInputs.Count} currentSeq={m_CurrentSequence}");
             }
+
+            if (NetworkTraversalClimbDiagnostics.IsFocused(this.Character?.gameObject))
+            {
+                string mode = ownerAuthorityPoseActive
+                    ? "suppressed-owner-window"
+                    : focusedInitialDistance > m_Config.maxReconciliationDistance
+                        ? "teleport"
+                        : focusedInitialDistance > m_Config.reconciliationThreshold
+                            ? "smooth"
+                            : externalAuthorityActive ? "external-window" : "none";
+                LogFocusedTraversalMotion(
+                    "Reconcile",
+                    $"seq={serverState.lastProcessedInput} predictionFound={predictedIndex >= 0} " +
+                    $"ownerWindow={ownerAuthorityPoseActive} suppression={externalAuthorityActive} " +
+                    $"mode={mode} distance={focusedInitialDistance:F3} " +
+                    $"threshold={m_Config.reconciliationThreshold:F3} max={m_Config.maxReconciliationDistance:F3} " +
+                    $"server={NetworkTraversalClimbDiagnostics.Vector(focusedServerPosition)} " +
+                    $"before={NetworkTraversalClimbDiagnostics.Vector(focusedClientPositionBefore)} " +
+                    $"after={NetworkTraversalClimbDiagnostics.Vector(this.Transform.position)} " +
+                    $"grounded={IsGrounded} reconciling={m_IsReconciling} " +
+                    $"ownerRemaining={Mathf.Max(0f, m_OwnerAuthorityPoseSyncUntil - Time.time):F3} " +
+                    $"suppressRemaining={Mathf.Max(0f, m_ReconciliationSuppressedUntil - Time.time):F3}",
+                    $"client-reconcile:{this.Character.GetInstanceID()}");
+            }
+        }
+
+        private void LogFocusedOwnerWindowTransition()
+        {
+            if (!NetworkTraversalClimbDiagnostics.IsFocused(this.Character?.gameObject)) return;
+
+            bool active = IsOwnerAuthorityPoseSyncActive;
+            if (active == m_ClimbDiagnosticOwnerWindowWasActive) return;
+            m_ClimbDiagnosticOwnerWindowWasActive = active;
+            LogFocusedTraversalMotion(
+                "OwnerWindow",
+                $"side=client operation={(active ? "active" : "expired")} " +
+                $"remaining={Mathf.Max(0f, m_OwnerAuthorityPoseSyncUntil - Time.time):F3} " +
+                $"position={NetworkTraversalClimbDiagnostics.Vector(this.Transform.position)}");
+        }
+
+        private void LogFocusedTraversalMotion(string stage, string message, string sampleKey = null)
+        {
+            if (!NetworkTraversalClimbDiagnostics.IsFocused(this.Character?.gameObject)) return;
+            NetworkCharacter networkCharacter = this.Character.GetComponent<NetworkCharacter>();
+            NetworkTraversalClimbDiagnostics.Log(
+                stage,
+                $"actor={networkCharacter?.NetworkId ?? 0} role={networkCharacter?.CurrentRole.ToString() ?? "none"} {message}",
+                this.Character,
+                sampleKey);
         }
 
         private bool TryApplyExternalAuthorityState(NetworkPositionState serverState, int fromIndex)
@@ -753,16 +841,16 @@ namespace Arawn.GameCreator2.Networking
             Vector3 preReconcilePosition =
                 this.Transform.position + this.Transform.TransformVector(m_LastAppliedVisualOffset);
             float preReconcileRotationY = this.Transform.eulerAngles.y + m_LastAppliedVisualRotationOffsetY;
-            
+
             // Teleport to server position (physics correction)
             TeleportTo(serverPosition, serverRotationY, serverVerticalSpeed);
-            
+
             // Re-apply all inputs after this point (standard CSP replay)
             for (int i = fromIndex + 1; i < m_PredictionHistoryCount; i++)
             {
                 var state = GetPredictionState(i);
-                ApplyInputPrediction(state.input, null);
-                
+                ApplyInputPrediction(state.input, null, state.updateKinematics);
+
                 // Update the stored prediction
                 SetPredictionState(i, new PredictedState
                 {
@@ -770,10 +858,11 @@ namespace Arawn.GameCreator2.Networking
                     position = this.Transform.position,
                     rotationY = this.Transform.eulerAngles.y,
                     verticalSpeed = m_VerticalSpeed,
-                    input = state.input
+                    input = state.input,
+                    updateKinematics = state.updateKinematics
                 });
             }
-            
+
             // Calculate visual offset: the difference between where the player WAS visually
             // and where they ARE after correction+replay. The authoritative root is already
             // corrected; only the GC2 model offset is smoothed back to zero.
@@ -816,7 +905,7 @@ namespace Arawn.GameCreator2.Networking
                 this.Transform.position = position;
                 this.Transform.rotation = Quaternion.Euler(0f, rotationY, 0f);
             }
-            
+
             m_VerticalSpeed = verticalSpeed;
         }
 
@@ -829,9 +918,9 @@ namespace Arawn.GameCreator2.Networking
             m_ReconciliationVisualOffset *= decayFactor;
             m_ReconciliationVisualRotationOffsetY *= decayFactor;
             ApplyVisualReconciliationOffset();
-            
+
             m_ReconciliationProgress += deltaTime * m_Config.reconciliationSpeed;
-            
+
             // Snap to zero once the offset is negligible (< 1mm)
             if ((m_ReconciliationVisualOffset.sqrMagnitude < 0.000001f &&
                  Mathf.Abs(m_ReconciliationVisualRotationOffsetY) < 0.01f) ||
@@ -919,6 +1008,12 @@ namespace Arawn.GameCreator2.Networking
 
         private void LogTraversalPose(string message)
         {
+            if (!m_LogMotionDiagnostics) return;
+
+            float now = Time.realtimeSinceStartup;
+            float interval = Mathf.Max(0.05f, m_MotionDiagnosticInterval);
+            if (now - m_LastMotionDiagnosticRealtime < interval) return;
+
             Debug.Log(
                 $"[TraversalPoseDebug][ClientDriver] {this.Character?.name ?? "Character"} " +
                 $"pos={FormatVector(this.Transform.position)} y={this.Transform.position.y:F3} " +
@@ -929,6 +1024,7 @@ namespace Arawn.GameCreator2.Networking
                 $"isReconciling={m_IsReconciling} visualOffset={FormatVector(m_ReconciliationVisualOffset)} " +
                 $"{message}",
                 this.Character);
+            m_LastMotionDiagnosticRealtime = now;
         }
 
         private string FormatBusyState()
@@ -967,8 +1063,8 @@ namespace Arawn.GameCreator2.Networking
 
             if (!IsGrounded)
             {
-                float gravity = m_VerticalSpeed >= 0 
-                    ? this.Character.Motion.GravityUpwards 
+                float gravity = m_VerticalSpeed >= 0
+                    ? this.Character.Motion.GravityUpwards
                     : this.Character.Motion.GravityDownwards;
 
                 gravity *= gravityInfluence;
@@ -1002,10 +1098,10 @@ namespace Arawn.GameCreator2.Networking
         private bool CanJump()
         {
             if (!this.Character.Motion.CanJump) return false;
-            
+
             float timeSinceGrounded = this.Character.Time.Time - m_GroundTime;
             int framesSinceGrounded = this.Character.Time.Frame - m_GroundFrame;
-            
+
             bool inCoyoteTime = timeSinceGrounded < COYOTE_TIME || framesSinceGrounded < COYOTE_FRAMES;
             return IsGrounded || inCoyoteTime;
         }
@@ -1196,6 +1292,7 @@ namespace Arawn.GameCreator2.Networking
         public override void SetRotation(Quaternion rotation)
         {
             this.Transform.rotation = rotation;
+            Physics.SyncTransforms();
         }
 
         public override void SetScale(Vector3 scale)
@@ -1233,6 +1330,7 @@ namespace Arawn.GameCreator2.Networking
 
         private bool ShouldPreserveExternalMoveDirectionForAnimation()
         {
+            if (!this.UpdateKinematics) return true;
             if (ShouldPreserveExplicitMoveDirectionForAnimation()) return true;
             if (!IsTraversalLikeAuthorityMotion()) return false;
             return Time.realtimeSinceStartup - m_LastExternalMoveDirectionRealtime <=
@@ -1264,6 +1362,7 @@ namespace Arawn.GameCreator2.Networking
         public override void AddRotation(Quaternion amount)
         {
             this.Transform.rotation *= amount;
+            Physics.SyncTransforms();
         }
 
         public override void AddScale(Vector3 scale)

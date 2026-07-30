@@ -2,6 +2,9 @@
 
 Server-authoritative shooter combat networking for Game Creator 2.
 
+For weapon model registration, local projectile/VFX playback, impact props, and
+the multiplayer prefab decision guide, see [Spawning Prefabs and UI in Multiplayer](../Documentation/spawning-prefabs-and-ui-in-multiplayer.md).
+
 ## Overview
 
 This module provides network-aware shooter combat for GC2, enabling server-authoritative shot and hit validation with lag compensation. It integrates seamlessly with the base GC2 Network Integration and supports raycast, projectile, and all GC2 shot types.
@@ -25,7 +28,11 @@ For PurrNet projects, enable **Shooter** on the PurrNet wizard Modules page. The
 
 When a Player Prefab is assigned on the Scene page and prefab preparation is enabled, selecting Shooter adds `NetworkShooterController` to that prefab. The PurrNet bridge synchronizes owner aim, weapon state, shot requests/responses, shot broadcasts, bullet/tracer/VFX events, reload/weapon actions, hit validation, and impact broadcasts.
 
-The GC2 Shooter Sight patch is mandatory for PurrNet Shooter networking. The wizard checks it when Shooter is selected and blocks setup until `Game Creator > Networking Layer > Patches > Shooter Sight > Patch (Remote Camera Safety)` has been applied. This hook prevents remote character replicas from running local-only Sight OnEnter/OnExit instructions such as camera FOV, crosshair, view effects, and local IK side effects.
+The GC2 Shooter and Shooter Sight patches are mandatory for PurrNet Shooter networking. The wizard checks both and blocks setup until `Game Creator > Networking Layer > Patches > Shooter > Patch (Server Authority)` and `Game Creator > Networking Layer > Patches > Shooter Sight > Patch (Remote Camera Safety)` have been applied. The Shooter patch installs a cancellable pre-side-effect hit validator and a post-hit callback that captures the native Block, Parry, or Block Break result together with the authored reaction duration for owner-motion authority. The older notification-only and three-argument result patches must be upgraded. The Sight hook prevents remote replicas from running local-only camera, crosshair, view-effect, and IK instructions.
+
+When Shooter and Stats are selected together, the wizard can also add `NetworkShooterStatsDamageBridge`. It modifies authoritative health once; Shooter reactions remain a separate manager responsibility, so a handled Stats damage callback never suppresses the target animation/root motion.
+
+Custom health integrations can use `TryApplyDamageFunc` (or the legacy damage-only `ApplyDamageFunc`). Custom reaction systems can use `TryApplyAuthoritativeReactionFunc` and the transport-independent `NetworkShooterReactionContext`. The manager starts an accepted normal or block-broken reaction before it invokes damage, so a lethal health change cannot erase the authored response.
 
 GC2 bullets configured to use rigidbody impacts can broadcast the impact event and let clients apply the push locally. Add `NetworkShooterImpactProp` only to important props that need a stable network prop id and more controlled impact routing; lightweight crates and debris can use the default local impact path.
 
@@ -53,14 +60,14 @@ GC2 bullets configured to use rigidbody impacts can broadcast the impact event a
 │  4. Raycast/projectile detects   │                         │            │
 │     hit                          │                         │            │
 │     ↓                            │                         │            │
-│  5. ConditionNetworkShooterHit   │                         │            │
-│     intercepts via CanHit        │                         │            │
+│  5. Cancellable source hook      │                         │            │
+│     suppresses client gameplay   │                         │            │
 │     ↓                            │                         │            │
 │  6. Send hit request ──────────► 7. Validate hit           │            │
 │     ↓                            │  (lag compensation)     │            │
 │  [Optimistic impact FX]          │     ↓                   │            │
-│                                  │  8. Apply damage        │            │
-│                                  │     ↓                   │            │
+│                                  │  8. Apply reaction      │            │
+│                                  │     then damage         │            │
 │  9. Receive response ◄─────────── 10. Broadcast hit ──────► 11. Play FX│
 │                                  │                         │            │
 └─────────────────────────────────────────────────────────────────────────┘
@@ -73,7 +80,7 @@ Unlike melee, shooter combat uses **two-phase validation**:
 1. **Shot Validation**: When trigger is pulled
    - Validates: ammo, weapon state, cooldown, position
    - Results in: muzzle flash, tracer, sound
-   
+
 2. **Hit Validation**: When shot hits something
    - Validates: hit position, target state, obstruction
    - Results in: damage, impact effects, reactions
@@ -140,16 +147,12 @@ Per-character component that handles shot and hit interception.
 **Properties:**
 - `Optimistic Shot Effects`: Show tracer/muzzle flash before server confirmation
 - `Optimistic Hit Effects`: Show impact effects before server confirmation
+- `Use Generated Fallback Presentation`: Opt in to simple generated tracer/impact primitives when an authored asset cannot be resolved. It is off by default; missing registrations otherwise remain non-visual while event routing continues.
 - `Weapon State Sync Interval`: How often to sync ammo/reload/jam state
 - `Aim State Sync Interval`: How often to sync aim direction
 
-#### ConditionNetworkShooterHit (Visual Scripting)
-A GC2 Condition that intercepts hits in the ShooterWeapon's "Can Hit" conditions.
-
-**Usage:**
-1. Open your ShooterWeapon asset
-2. Find the "Can Hit" conditions section
-3. Add the "Network Shooter Hit" condition
+#### ConditionNetworkShooterHit (legacy fallback)
+Older ShooterWeapon assets may still contain this condition in their "Can Hit" list. Because GC2 evaluates that list before `ShooterWeapon.OnHit`, the condition becomes a pass-through whenever the current cancellable source validator is installed and active; the source validator then owns the single authoritative request. Without an active validator it retains its fail-closed legacy fallback behavior. New setups rely on the mandatory source patch and do not need to add this condition to every weapon.
 
 ## Setup Guide
 
@@ -164,7 +167,7 @@ For each networked character with shooter weapons:
 
 1. Add `NetworkCharacter` component
    - Set Combat Mode = **Disabled**
-   
+
 2. Add `NetworkShooterController` component
    - Configure optimistic effects preferences
 
@@ -172,8 +175,9 @@ For each networked character with shooter weapons:
 
 For each ShooterWeapon that should use network hit validation:
 
-1. Open the ShooterWeapon ScriptableObject
-2. In "Can Hit" conditions, add **Network Shooter Hit** condition
+1. Apply the required Shooter server-authority patch from the Game Creator networking menu
+2. Register the weapon on the transport bridge using the same asset/hash on every peer
+3. Existing **Network Shooter Hit** Can Hit conditions may remain as compatibility fallbacks; do not add them to newly configured weapons
 
 ### Step 4: Network Transport
 
@@ -187,7 +191,7 @@ public class ShooterNetworkBridge : NetworkBehaviour
     private void Start()
     {
         var manager = NetworkShooterManager.Instance;
-        
+
         manager.SendShotRequestToServer = SendShotRequestRpc;
         manager.SendHitRequestToServer = SendHitRequestRpc;
         manager.SendShotResponseToClient = SendShotResponse;
@@ -195,33 +199,33 @@ public class ShooterNetworkBridge : NetworkBehaviour
         manager.BroadcastShotToAllClients = BroadcastShotRpc;
         manager.BroadcastHitToAllClients = BroadcastHitRpc;
     }
-    
+
     [Rpc(SendTo.Server, InvokePermission = RpcInvokePermission.Everyone)]
     private void SendShotRequestRpc(NetworkShotRequest request, RpcParams rpcParams = default)
     {
         ulong clientId = rpcParams.Receive.SenderClientId;
         NetworkShooterManager.Instance.ReceiveShotRequest((uint)clientId, request);
     }
-    
+
     [Rpc(SendTo.Server, InvokePermission = RpcInvokePermission.Everyone)]
     private void SendHitRequestRpc(NetworkShooterHitRequest request, RpcParams rpcParams = default)
     {
         ulong clientId = rpcParams.Receive.SenderClientId;
         NetworkShooterManager.Instance.ReceiveHitRequest((uint)clientId, request);
     }
-    
+
     [Rpc(SendTo.ClientsAndHost)]
     private void BroadcastShotRpc(NetworkShotBroadcast broadcast)
     {
         NetworkShooterManager.Instance.ReceiveShotBroadcast(broadcast);
     }
-    
+
     [Rpc(SendTo.ClientsAndHost)]
     private void BroadcastHitRpc(NetworkShooterHitBroadcast broadcast)
     {
         NetworkShooterManager.Instance.ReceiveHitBroadcast(broadcast);
     }
-    
+
     [Rpc(SendTo.SpecifiedInParams)]
     private void SendShotResponseRpc(NetworkShotResponse response, RpcParams rpcParams = default)
     {
@@ -390,7 +394,7 @@ public class MyNetworkShot : TShot
     public override bool Run(Args args, ShooterWeapon weapon, ...)
     {
         var controller = args.Self.Get<NetworkShooterController>();
-        
+
         // Before firing
         if (controller != null)
         {
@@ -402,12 +406,12 @@ public class MyNetworkShot : TShot
                 projectileIndex,
                 totalProjectiles
             );
-            
+
             if (!shouldProceed) return false;
         }
-        
+
         // ... normal shot logic ...
-        
+
         // On hit
         if (controller != null)
         {
@@ -419,10 +423,10 @@ public class MyNetworkShot : TShot
                 weapon,
                 pierceIndex
             );
-            
+
             if (!shouldApplyHit) return true; // Shot fired, but hit handled by network
         }
-        
+
         // ... normal hit logic ...
     }
 }
@@ -438,7 +442,8 @@ public class MyNetworkShot : TShot
 ### Tracer not showing on remote clients
 1. Verify `BroadcastShotToAllClients` is connected
 2. Check remote clients are receiving broadcasts
-3. Ensure weapon effects are configured
+3. Ensure the Shooter weapon and its effects are registered on every peer
+4. For temporary diagnostics only, enable `Use Generated Fallback Presentation`; it is disabled by default and is not a substitute for authored registration
 
 ### Hit effects delayed
 1. Check optimistic effects setting

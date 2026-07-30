@@ -36,34 +36,34 @@ namespace Arawn.GameCreator2.Networking
         // ════════════════════════════════════════════════════════════════════════════════════════
         // CONFIGURATION
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         protected override DuplicatePolicy OnDuplicatePolicy => DuplicatePolicy.WarnOnly;
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // INSPECTOR
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         [Header("Network Settings")]
         [Tooltip("Maximum time in the past that hits can be validated (seconds).")]
         [SerializeField] private float m_MaxRewindTime = 0.5f;
-        
+
         [Tooltip("Additional tolerance for hit detection (meters).")]
         [SerializeField] private float m_HitTolerance = 0.2f;
-        
+
         [Tooltip("Send hit requests unreliably for lower latency (may drop).")]
         [SerializeField] private bool m_UseUnreliableHitRequests = false;
-        
+
         [Header("Client Settings")]
         [Tooltip("Show optimistic hit effects before server confirmation.")]
         [SerializeField] private bool m_OptimisticHitEffects = true;
-        
+
         [Tooltip("Timeout for hit response before giving up (seconds).")]
         [SerializeField] private float m_HitResponseTimeout = 1f;
-        
+
         [Header("Server Settings")]
         [Tooltip("Log rejected hits for anti-cheat analysis.")]
         [SerializeField] private bool m_LogRejectedHits = true;
-        
+
         [Tooltip("Maximum hit requests to process per frame.")]
         [SerializeField] private int m_MaxHitsPerFrame = 10;
 
@@ -76,73 +76,73 @@ namespace Arawn.GameCreator2.Networking
         [Tooltip("Fallback base damage when no external authoritative damage resolver is assigned.")]
         [Min(0f)]
         [SerializeField] private float m_DefaultBaseDamage = 10f;
-        
+
         [Header("Debug")]
         [SerializeField] private bool m_DebugDrawHits = false;
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // EVENTS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>
         /// [Client] Called when a hit request is sent to the server.
         /// </summary>
         public event Action<NetworkHitRequest> OnHitRequestSent;
-        
+
         /// <summary>
         /// [Client] Called when server responds to our hit request.
         /// </summary>
         public event Action<NetworkHitResponse> OnHitResponseReceived;
-        
+
         /// <summary>
         /// [Server] Called when a hit request is received from a client.
         /// </summary>
         public event Action<uint, NetworkHitRequest> OnHitRequestReceived;
-        
+
         /// <summary>
         /// [Server] Called when a hit is validated and damage applied.
         /// </summary>
         public event Action<ValidatedDamage> OnHitValidated;
-        
+
         /// <summary>
         /// [Server] Called when a hit is rejected.
         /// </summary>
         public event Action<NetworkHitRequest, HitResult> OnHitRejected;
-        
+
         /// <summary>
         /// [All] Called when a hit broadcast is received (for effects).
         /// </summary>
         public event Action<NetworkHitBroadcast> OnHitBroadcastReceived;
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // DELEGATES (Network Integration Points)
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>
         /// Assign this to send hit requests to the server.
         /// </summary>
         public Action<NetworkHitRequest> SendHitRequestToServer;
-        
+
         /// <summary>
         /// Assign this to send hit responses to specific clients.
         /// </summary>
         public Action<uint, NetworkHitResponse> SendHitResponseToClient;
-        
+
         /// <summary>
         /// Assign this to broadcast hits to all clients.
         /// </summary>
         public Action<NetworkHitBroadcast> BroadcastHitToClients;
-        
+
         /// <summary>
         /// Assign this to get the current server time.
         /// </summary>
         public Func<float> GetServerTime;
-        
+
         /// <summary>
         /// Assign this to get a character by network ID.
         /// </summary>
         public Func<uint, Character> GetCharacterByNetworkId;
-        
+
         /// <summary>
         /// Assign this to get the local player's network ID.
         /// </summary>
@@ -153,38 +153,38 @@ namespace Arawn.GameCreator2.Networking
         /// Return base damage for a validated hit using request + attacker/target context.
         /// </summary>
         public Func<NetworkHitRequest, Character, Character, float> ResolveAuthoritativeBaseDamage;
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // PRIVATE FIELDS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         private bool m_IsServer;
         private bool m_IsClient;
-        
+
         // Reusable key buffer to avoid GC allocations during cleanup
         private static readonly List<ushort> s_SharedKeyBuffer = new(16);
-        
+
         // Client-side pending requests
         private ushort m_NextRequestId = 1;
         private readonly Dictionary<ushort, PendingHitRequest> m_PendingRequests = new(32);
-        
+
         // Server-side request queue
         private readonly Queue<QueuedHitRequest> m_ServerHitQueue = new(64);
-        
+
         // Statistics
         private NetworkCombatStats m_Stats;
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // STRUCTS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         private struct PendingHitRequest
         {
             public NetworkHitRequest request;
             public float sentTime;
             public bool optimisticEffectsPlayed;
         }
-        
+
         private struct QueuedHitRequest
         {
             public uint clientNetworkId;
@@ -278,40 +278,40 @@ namespace Arawn.GameCreator2.Networking
 
             return Mathf.Max(0f, m_DefaultBaseDamage);
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // PROPERTIES
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>Whether this is running on the server.</summary>
         public bool IsServer => m_IsServer;
-        
+
         /// <summary>Whether this is running on a client.</summary>
         public bool IsClient => m_IsClient;
-        
+
         /// <summary>Combat network statistics.</summary>
         public NetworkCombatStats Stats => m_Stats;
-        
+
         /// <summary>Whether hit requests should be sent unreliably (lower latency, may drop).</summary>
         public bool UseUnreliableHitRequests => m_UseUnreliableHitRequests;
-        
+
         /// <summary>Maximum rewind time for hit validation.</summary>
         public float MaxRewindTime => m_MaxRewindTime;
-        
+
         /// <summary>Hit tolerance for validation.</summary>
         public float HitTolerance => m_HitTolerance;
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // UNITY LIFECYCLE
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         private void Update()
         {
             if (m_IsClient)
             {
                 UpdatePendingRequests();
             }
-            
+
             if (m_IsServer)
             {
                 ProcessServerHitQueue();
@@ -322,11 +322,11 @@ namespace Arawn.GameCreator2.Networking
         {
             SecurityIntegration.SetModuleServerContext("Combat", false);
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // INITIALIZATION
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>
         /// Initialize the combat controller with network role.
         /// </summary>
@@ -336,23 +336,23 @@ namespace Arawn.GameCreator2.Networking
             m_IsClient = isClient;
             SecurityIntegration.SetModuleServerContext("Combat", isServer);
             SecurityIntegration.EnsureSecurityManagerInitialized(isServer, () => GetServerTime?.Invoke() ?? Time.time);
-            
+
             m_PendingRequests.Clear();
             m_ServerHitQueue.Clear();
             m_Stats = default;
-            
+
             Debug.Log($"[NetworkCombat] Initialized - Server: {isServer}, Client: {isClient}");
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // CLIENT METHODS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>
         /// [Client] Request server validation for a melee hit.
         /// Call this instead of applying damage directly.
         /// </summary>
-        public void RequestMeleeHit(Character target, Vector3 hitPoint, Vector3 hitDirection, 
+        public void RequestMeleeHit(Character target, Vector3 hitPoint, Vector3 hitDirection,
             int weaponHash, float clientTime = -1f)
         {
             if (!m_IsClient)
@@ -360,15 +360,15 @@ namespace Arawn.GameCreator2.Networking
                 Debug.LogWarning("[NetworkCombat] RequestMeleeHit called on non-client");
                 return;
             }
-            
+
             var request = CreateHitRequest(
-                target, hitPoint, hitDirection, weaponHash, 
+                target, hitPoint, hitDirection, weaponHash,
                 HitType.MeleeStrike, clientTime
             );
-            
+
             SendHitRequest(request);
         }
-        
+
         /// <summary>
         /// [Client] Request server validation for a projectile hit.
         /// </summary>
@@ -380,15 +380,15 @@ namespace Arawn.GameCreator2.Networking
                 Debug.LogWarning("[NetworkCombat] RequestProjectileHit called on non-client");
                 return;
             }
-            
+
             var request = CreateHitRequest(
                 target, hitPoint, hitDirection, weaponHash,
                 HitType.Projectile, clientTime
             );
-            
+
             SendHitRequest(request);
         }
-        
+
         /// <summary>
         /// [Client] Request server validation for AOE damage.
         /// </summary>
@@ -400,16 +400,16 @@ namespace Arawn.GameCreator2.Networking
                 Debug.LogWarning("[NetworkCombat] RequestAOEHit called on non-client");
                 return;
             }
-            
+
             var request = CreateHitRequest(
                 target, hitPoint, sourceDirection, sourceHash,
                 HitType.AreaOfEffect, clientTime
             );
-            
+
             SendHitRequest(request);
         }
-        
-        private NetworkHitRequest CreateHitRequest(Character target, Vector3 hitPoint, 
+
+        private NetworkHitRequest CreateHitRequest(Character target, Vector3 hitPoint,
             Vector3 hitDirection, int weaponHash, HitType hitType, float clientTime)
         {
             ushort requestId = GetNextRequestId();
@@ -423,7 +423,7 @@ namespace Arawn.GameCreator2.Networking
             {
                 targetNetworkId = networkChar.NetworkId;
             }
-            
+
             var request = new NetworkHitRequest
             {
                 requestId = requestId,
@@ -438,7 +438,7 @@ namespace Arawn.GameCreator2.Networking
                 hitType = hitType
             };
             request.SetDirection(hitDirection);
-            
+
             return request;
         }
 
@@ -463,7 +463,7 @@ namespace Arawn.GameCreator2.Networking
 
             return 0;
         }
-        
+
         private void SendHitRequest(NetworkHitRequest request)
         {
             // Store pending request
@@ -473,7 +473,7 @@ namespace Arawn.GameCreator2.Networking
                 sentTime = Time.time,
                 optimisticEffectsPlayed = false
             };
-            
+
             // Play optimistic effects if enabled
             if (m_OptimisticHitEffects)
             {
@@ -482,31 +482,31 @@ namespace Arawn.GameCreator2.Networking
                 pending.optimisticEffectsPlayed = true;
                 m_PendingRequests[request.requestId] = pending;
             }
-            
+
             // Send to server
             SendHitRequestToServer?.Invoke(request);
-            
+
             m_Stats.hitRequestsSent++;
             OnHitRequestSent?.Invoke(request);
-            
+
             if (m_DebugDrawHits)
             {
                 Debug.DrawRay(request.hitPoint, request.GetDirection() * 0.5f, Color.yellow, 1f);
             }
         }
-        
+
         private void PlayOptimisticHitEffects(NetworkHitRequest request)
         {
             // Play local hit effects (particles, sounds) before server confirmation
             // These are cosmetic only - no damage applied yet
-            
+
             var target = GetCharacterByNetworkId?.Invoke(request.targetNetworkId);
             if (target == null) return;
-            
+
             // TODO: Play local particle effects, hit sounds
             // This is game-specific - hook into your VFX system
         }
-        
+
         /// <summary>
         /// [Client] Called when server responds to our hit request.
         /// </summary>
@@ -517,9 +517,9 @@ namespace Arawn.GameCreator2.Networking
                 Debug.LogWarning($"[NetworkCombat] Received response for unknown request: {response.requestId}");
                 return;
             }
-            
+
             m_PendingRequests.Remove(response.requestId);
-            
+
             if (response.result == HitResult.Valid)
             {
                 // Hit confirmed - effects already played if optimistic
@@ -529,28 +529,28 @@ namespace Arawn.GameCreator2.Networking
             {
                 // Hit rejected - may need to revert optimistic effects
                 m_Stats.hitsRejected++;
-                
+
                 if (pending.optimisticEffectsPlayed)
                 {
                     RevertOptimisticEffects(pending.request, response);
                 }
             }
-            
+
             OnHitResponseReceived?.Invoke(response);
         }
-        
+
         private void RevertOptimisticEffects(NetworkHitRequest request, NetworkHitResponse response)
         {
             // Optionally revert visual effects if hit was rejected
             // This is usually not noticeable in fast-paced combat
         }
-        
+
         private void UpdatePendingRequests()
         {
             // Clean up timed-out requests (pooled list avoids per-frame GC allocation)
             s_SharedKeyBuffer.Clear();
             float currentTime = Time.time;
-            
+
             foreach (var kvp in m_PendingRequests)
             {
                 if (currentTime - kvp.Value.sentTime > m_HitResponseTimeout)
@@ -559,17 +559,17 @@ namespace Arawn.GameCreator2.Networking
                     Debug.LogWarning($"[NetworkCombat] Hit request {kvp.Key} timed out");
                 }
             }
-            
+
             foreach (var id in s_SharedKeyBuffer)
             {
                 m_PendingRequests.Remove(id);
             }
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // SERVER METHODS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>
         /// [Server] Called when a client sends a hit request.
         /// </summary>
@@ -617,7 +617,7 @@ namespace Arawn.GameCreator2.Networking
 
             m_Stats.hitRequestsReceived++;
             OnHitRequestReceived?.Invoke(clientNetworkId, request);
-            
+
             // Queue for processing
             m_ServerHitQueue.Enqueue(new QueuedHitRequest
             {
@@ -626,7 +626,7 @@ namespace Arawn.GameCreator2.Networking
                 receivedTime = GetServerTime?.Invoke() ?? Time.time
             });
         }
-        
+
         private void ProcessServerHitQueue()
         {
             int staleDropped = DropStaleRequests(m_ServerHitQueue, m_MaxQueueAgeSeconds);
@@ -636,7 +636,7 @@ namespace Arawn.GameCreator2.Networking
             }
 
             int processedCount = 0;
-            
+
             while (m_ServerHitQueue.Count > 0 && processedCount < m_MaxHitsPerFrame)
             {
                 var queued = m_ServerHitQueue.Dequeue();
@@ -644,14 +644,14 @@ namespace Arawn.GameCreator2.Networking
                 processedCount++;
             }
         }
-        
+
         private void ProcessHitRequest(uint clientNetworkId, NetworkHitRequest request)
         {
             float startTime = Time.realtimeSinceStartup;
-            
+
             // Validate the hit
             var result = ValidateHit(clientNetworkId, request, out var validatedDamage);
-            
+
             // Create response
             var response = new NetworkHitResponse
             {
@@ -663,18 +663,18 @@ namespace Arawn.GameCreator2.Networking
                 hitZone = validatedDamage.hitZone,
                 effects = validatedDamage.effects
             };
-            
+
             // Send response to requesting client
             SendHitResponseToClient?.Invoke(clientNetworkId, response);
-            
+
             if (result == HitResult.Valid)
             {
                 // Apply damage on server
                 ApplyValidatedDamage(validatedDamage);
-                
+
                 // Broadcast to all clients for effects
                 BroadcastHit(validatedDamage);
-                
+
                 m_Stats.hitsValidated++;
                 OnHitValidated?.Invoke(validatedDamage);
             }
@@ -682,19 +682,19 @@ namespace Arawn.GameCreator2.Networking
             {
                 m_Stats.hitsRejected++;
                 OnHitRejected?.Invoke(request, result);
-                
+
                 if (m_LogRejectedHits)
                 {
                     Debug.Log($"[NetworkCombat] Rejected hit from client {clientNetworkId}: {result}");
                 }
             }
-            
+
             // Update stats
             float validationTime = Time.realtimeSinceStartup - startTime;
             m_Stats.averageValidationTime = Mathf.Lerp(m_Stats.averageValidationTime, validationTime, 0.1f);
         }
-        
-        private HitResult ValidateHit(uint clientNetworkId, NetworkHitRequest request, 
+
+        private HitResult ValidateHit(uint clientNetworkId, NetworkHitRequest request,
             out ValidatedDamage validatedDamage)
         {
             validatedDamage = default;
@@ -704,20 +704,20 @@ namespace Arawn.GameCreator2.Networking
             {
                 return HitResult.InvalidTarget;
             }
-            
+
             // Get target character
             var target = GetCharacterByNetworkId?.Invoke(request.targetNetworkId);
             if (target == null)
             {
                 return HitResult.InvalidTarget;
             }
-            
+
             // Check if target is alive
             if (target.IsDead)
             {
                 return HitResult.InvalidTarget;
             }
-            
+
             // Get lag compensation data
             var lagComp = target.GetComponent<CharacterLagCompensation>();
             if (lagComp == null)
@@ -725,71 +725,71 @@ namespace Arawn.GameCreator2.Networking
                 // No lag compensation - validate against current position
                 return ValidateHitAgainstCurrentPosition(target, request, out validatedDamage);
             }
-            
+
             // Calculate rewind time
             float serverTime = GetServerTime?.Invoke() ?? Time.time;
             float rewindAmount = serverTime - request.clientTime;
-            
+
             // Check if request is too old
             if (rewindAmount > m_MaxRewindTime)
             {
                 return HitResult.TooOld;
             }
-            
+
             // Validate using lag compensation
             var timestamp = new NetworkTimestamp { serverTime = request.clientTime };
             var lagResult = lagComp.ValidateHit(request.hitPoint, timestamp);
-            
+
             if (!lagResult.isValid)
             {
                 return HitResult.OutOfRange;
             }
-            
+
             // Check invincibility at historical time
             if (target.Combat.Invincibility.IsInvincible)
             {
                 return HitResult.Invincible;
             }
-            
+
             // Check dodge
             if (target.Dash.IsDodge)
             {
                 return HitResult.Invincible;
             }
-            
+
             // Check block/parry
             var shieldResult = ValidateBlockParry(target, request);
             if (shieldResult != HitResult.Valid)
             {
                 return shieldResult;
             }
-            
+
             // Hit is valid - calculate damage
             validatedDamage = CalculateDamage(request.actorNetworkId, request, target, lagResult);
-            
+
             return HitResult.Valid;
         }
-        
+
         private HitResult ValidateHitAgainstCurrentPosition(Character target, NetworkHitRequest request,
             out ValidatedDamage validatedDamage)
         {
             validatedDamage = default;
-            
+
             // Simple distance check
             float distance = Vector3.Distance(request.hitPoint, target.transform.position);
             float maxDistance = target.Motion.Radius + m_HitTolerance;
-            
+
             if (distance > maxDistance + target.Motion.Height)
             {
                 return HitResult.OutOfRange;
             }
-            
+
             // Check invincibility
             if (target.Combat.Invincibility.IsInvincible)
             {
                 return HitResult.Invincible;
             }
-            
+
             // Calculate damage
             float baseDamage = ResolveBaseDamage(request.actorNetworkId, in request, target);
             validatedDamage = new ValidatedDamage
@@ -806,10 +806,10 @@ namespace Arawn.GameCreator2.Networking
                 weaponHash = request.weaponHash,
                 hitType = request.hitType
             };
-            
+
             return HitResult.Valid;
         }
-        
+
         private HitResult ValidateBlockParry(Character target, NetworkHitRequest request)
         {
             // Check if target is blocking
@@ -817,14 +817,14 @@ namespace Arawn.GameCreator2.Networking
             {
                 return HitResult.Valid;
             }
-            
+
             // Determine if attack can be blocked/parried
             Vector3 attackDirection = request.GetDirection();
             Vector3 toAttacker = -attackDirection;
             Vector3 targetForward = target.transform.forward;
-            
+
             float dotProduct = Vector3.Dot(toAttacker, targetForward);
-            
+
             // Check if attack is from front (within ~120 degree arc)
             if (dotProduct > 0.5f)
             {
@@ -834,21 +834,21 @@ namespace Arawn.GameCreator2.Networking
                 {
                     return HitResult.Parried;
                 }
-                
+
                 return HitResult.Blocked;
             }
-            
+
             return HitResult.Valid;
         }
-        
+
         private ValidatedDamage CalculateDamage(uint attackerNetworkId, NetworkHitRequest request,
             Character target, HitValidationResult lagResult)
         {
             float baseDamage = ResolveBaseDamage(attackerNetworkId, in request, target);
-            
+
             // Apply zone multiplier
             float zoneMultiplier = lagResult.damageMultiplier;
-            
+
             // Determine hit zone from lag compensation result
             HitZone hitZone = HitZone.Body;
             if (!string.IsNullOrEmpty(lagResult.hitZoneName))
@@ -861,7 +861,7 @@ namespace Arawn.GameCreator2.Networking
                     _ => HitZone.Body
                 };
             }
-            
+
             // Check for backstab
             HitEffectFlags effects = HitEffectFlags.None;
             Vector3 attackDirection = request.GetDirection();
@@ -871,23 +871,23 @@ namespace Arawn.GameCreator2.Networking
                 effects |= HitEffectFlags.Backstab;
                 zoneMultiplier *= 1.5f;
             }
-            
+
             // Check for critical
             if (hitZone == HitZone.Head)
             {
                 effects |= HitEffectFlags.Critical;
             }
-            
+
             // Calculate final damage
             float finalDamage = baseDamage * zoneMultiplier;
-            
+
             // Apply target's defense
             float defense = target.Combat.CurrentDefense;
             finalDamage = Mathf.Max(1f, finalDamage - defense);
-            
+
             // Check if lethal
             // (Would need to integrate with Stats module for actual health)
-            
+
             return new ValidatedDamage
             {
                 attackerNetworkId = attackerNetworkId,
@@ -903,36 +903,36 @@ namespace Arawn.GameCreator2.Networking
                 hitType = request.hitType
             };
         }
-        
+
         private void ApplyValidatedDamage(ValidatedDamage damage)
         {
             var target = GetCharacterByNetworkId?.Invoke(damage.targetNetworkId);
             if (target == null) return;
-            
+
             // Get attacker for Args
             var attacker = GetCharacterByNetworkId?.Invoke(damage.attackerNetworkId);
             GameObject attackerObj = attacker != null ? attacker.gameObject : null;
-            
+
             Args args = new Args(attackerObj, target.gameObject);
-            
+
             // Create reaction input
             ReactionInput reactionInput = damage.ToReactionInput();
-            
+
             // Apply through GC2's combat system
             _ = target.Combat.GetHitReaction(reactionInput, args, null);
-            
+
             if (m_DebugDrawHits)
             {
                 Debug.DrawRay(damage.hitPoint, damage.hitDirection * 0.5f, Color.red, 2f);
                 Debug.DrawRay(damage.hitPoint, Vector3.up * 0.5f, Color.green, 2f);
             }
         }
-        
+
         private void BroadcastHit(ValidatedDamage damage)
         {
             var target = GetCharacterByNetworkId?.Invoke(damage.targetNetworkId);
             if (target == null) return;
-            
+
             var broadcast = new NetworkHitBroadcast
             {
                 attackerNetworkId = damage.attackerNetworkId,
@@ -941,10 +941,10 @@ namespace Arawn.GameCreator2.Networking
                 effects = damage.effects
             };
             broadcast.SetHitOffset(target.transform.position, damage.hitPoint);
-            
+
             BroadcastHitToClients?.Invoke(broadcast);
         }
-        
+
         /// <summary>
         /// [All Clients] Called when receiving a hit broadcast from server.
         /// </summary>
@@ -953,40 +953,40 @@ namespace Arawn.GameCreator2.Networking
             // Play hit effects (particles, sounds, reactions)
             var target = GetCharacterByNetworkId?.Invoke(broadcast.targetNetworkId);
             if (target == null) return;
-            
+
             Vector3 hitPoint = broadcast.GetHitPoint(target.transform.position);
-            
+
             // Play hit VFX
             PlayHitEffects(target, hitPoint, broadcast.hitZone, broadcast.effects);
-            
+
             OnHitBroadcastReceived?.Invoke(broadcast);
         }
-        
+
         private void PlayHitEffects(Character target, Vector3 hitPoint, HitZone zone, HitEffectFlags effects)
         {
             // Play appropriate effects based on zone and flags
             // This is game-specific - integrate with your VFX/audio system
-            
+
             if ((effects & HitEffectFlags.Critical) != 0)
             {
                 // Play critical hit effect
             }
-            
+
             if ((effects & HitEffectFlags.Backstab) != 0)
             {
                 // Play backstab effect
             }
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // DEBUG
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
 #if UNITY_EDITOR
         private void OnDrawGizmos()
         {
             if (!m_DebugDrawHits) return;
-            
+
             // Draw pending requests
             Gizmos.color = Color.yellow;
             foreach (var pending in m_PendingRequests.Values)

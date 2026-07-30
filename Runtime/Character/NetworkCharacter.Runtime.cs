@@ -11,39 +11,39 @@ namespace Arawn.GameCreator2.Networking
         // ════════════════════════════════════════════════════════════════════════════════════════
         // CHARACTER EVENT HANDLING
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         private void SubscribeToCharacterEvents()
         {
             if (m_Character == null) return;
-            
+
             m_Character.EventDie += OnLocalDeath;
             m_Character.EventRevive += OnLocalRevive;
         }
-        
+
         private void UnsubscribeFromCharacterEvents()
         {
             if (m_Character == null) return;
-            
+
             m_Character.EventDie -= OnLocalDeath;
             m_Character.EventRevive -= OnLocalRevive;
         }
-        
+
         private void OnLocalDeath()
         {
             m_LastIsDead = true;
             OnNetworkDeathChanged?.Invoke(true);
         }
-        
+
         private void OnLocalRevive()
         {
             m_LastIsDead = false;
             OnNetworkDeathChanged?.Invoke(false);
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // SERVER-AUTHORITATIVE STATE CHANGES
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>
         /// Server-authoritative kill. Only callable on server.
         /// </summary>
@@ -54,12 +54,12 @@ namespace Arawn.GameCreator2.Networking
                 Debug.LogWarning("[NetworkCharacter] ServerKill called on client");
                 return;
             }
-            
+
             m_Character.IsDead = true;
             m_LastIsDead = true;
             OnNetworkDeathChanged?.Invoke(true);
         }
-        
+
         /// <summary>
         /// Server-authoritative revive. Only callable on server.
         /// </summary>
@@ -70,12 +70,12 @@ namespace Arawn.GameCreator2.Networking
                 Debug.LogWarning("[NetworkCharacter] ServerRevive called on client");
                 return;
             }
-            
+
             m_Character.IsDead = false;
             m_LastIsDead = false;
             OnNetworkDeathChanged?.Invoke(false);
         }
-        
+
         /// <summary>
         /// Server-authoritative player designation. Only callable on server.
         /// </summary>
@@ -86,16 +86,16 @@ namespace Arawn.GameCreator2.Networking
                 Debug.LogWarning("[NetworkCharacter] ServerSetIsPlayer called on client");
                 return;
             }
-            
+
             m_Character.IsPlayer = isPlayer;
             m_LastIsPlayer = isPlayer;
             OnNetworkPlayerChanged?.Invoke(isPlayer);
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // FACING UNIT SUPPORT
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>
         /// Called by a network facing unit when it initializes.
         /// </summary>
@@ -108,7 +108,7 @@ namespace Arawn.GameCreator2.Networking
                 m_NetworkFacingUnit.OnServerYawReceived(transform.eulerAngles.y);
             }
         }
-        
+
         /// <summary>
         /// Called by a network facing unit when it is disposed.
         /// </summary>
@@ -116,7 +116,7 @@ namespace Arawn.GameCreator2.Networking
         {
             m_NetworkFacingUnit = null;
         }
-        
+
         /// <summary>
         /// Request a facing update from the server. Called by local client.
         /// </summary>
@@ -128,11 +128,11 @@ namespace Arawn.GameCreator2.Networking
             float validatedYaw = m_NetworkFacingUnit.ValidateFacingRequest(desiredYaw);
             m_NetworkFacingUnit.OnServerYawReceived(validatedYaw);
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // ANIMIM UNIT SUPPORT
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>
         /// Called by UnitAnimimNetworkKinematic when it initializes.
         /// </summary>
@@ -145,7 +145,7 @@ namespace Arawn.GameCreator2.Networking
                 m_NetworkAnimimUnit.OnServerStateReceived(m_NetworkAnimimUnit.GetCurrentState());
             }
         }
-        
+
         /// <summary>
         /// Called by UnitAnimimNetworkKinematic when it is disposed.
         /// </summary>
@@ -153,7 +153,7 @@ namespace Arawn.GameCreator2.Networking
         {
             m_NetworkAnimimUnit = null;
         }
-        
+
         /// <summary>
         /// Request an animim state update from the server. Called by local client.
         /// </summary>
@@ -164,15 +164,15 @@ namespace Arawn.GameCreator2.Networking
 
             m_NetworkAnimimUnit.OnServerStateReceived(state);
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // UPDATE
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         private void Update()
         {
             if (!m_IsInitialized) return;
-            
+
             float deltaTime = m_Character != null ? m_Character.Time.DeltaTime : Time.deltaTime;
             if (m_RegisteredBridge == null && NetworkTransportBridge.HasActive)
             {
@@ -180,7 +180,7 @@ namespace Arawn.GameCreator2.Networking
                 RegisterWithBridge();
                 ApplySessionProfileToDrivers();
             }
-            
+
             if (m_RuntimeIsServer && m_ActivePredictionBackend == null)
             {
                 ProcessServerSimulation(deltaTime);
@@ -191,11 +191,11 @@ namespace Arawn.GameCreator2.Networking
             {
                 m_RemoteDriver.SetServerTime(NetworkTransportBridge.Active.ServerTime);
             }
-            
+
             ApplyCurrentRelevanceTier();
             DetectStateChanges();
         }
-        
+
         private void DetectStateChanges()
         {
             // Only relevant for server or solutions that need polling
@@ -204,25 +204,30 @@ namespace Arawn.GameCreator2.Networking
                 m_LastIsDead = m_Character.IsDead;
                 OnNetworkDeathChanged?.Invoke(m_LastIsDead);
             }
-            
+
             if (m_Character.IsPlayer != m_LastIsPlayer)
             {
                 m_LastIsPlayer = m_Character.IsPlayer;
                 OnNetworkPlayerChanged?.Invoke(m_LastIsPlayer);
             }
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // CLEANUP
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         private void OnDestroy()
         {
             Cleanup();
         }
-        
+
         private void Cleanup()
         {
+            if (m_LagCompensation != null)
+            {
+                m_LagCompensation.Configure(NetworkId, false);
+            }
+
             if (m_UseCoreNetworking && NetworkId != 0)
             {
                 NetworkCoreManager.Instance?.ForgetCharacterState(NetworkId);
@@ -255,11 +260,11 @@ namespace Arawn.GameCreator2.Networking
         {
             Cleanup();
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // MANUAL NETWORK SYNC (For non-provider solutions)
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>
         /// Apply state received from network. Call this when receiving state updates.
         /// For Photon, FishNet, Mirror, etc.
@@ -270,12 +275,12 @@ namespace Arawn.GameCreator2.Networking
             {
                 return; // Server doesn't apply received state
             }
-            
+
             if (m_Character.IsDead != state.isDead)
             {
                 m_Character.IsDead = state.isDead;
             }
-            
+
             // GC2's IsPlayer gates local input, so remote replicas must never inherit it.
             bool isLocalPlayer = m_CurrentRole != NetworkRole.RemoteClient && state.isPlayer;
             if (m_Character.IsPlayer != isLocalPlayer)
@@ -283,7 +288,7 @@ namespace Arawn.GameCreator2.Networking
                 m_Character.IsPlayer = isLocalPlayer;
             }
         }
-        
+
         /// <summary>
         /// Get current state for sending over network.
         /// </summary>
@@ -295,7 +300,7 @@ namespace Arawn.GameCreator2.Networking
                 isPlayer = m_Character.IsPlayer
             };
         }
-        
+
 #if UNITY_EDITOR
         private void OnValidate()
         {
@@ -303,7 +308,7 @@ namespace Arawn.GameCreator2.Networking
             {
                 m_ManualNetworkId = 1;
             }
-            
+
             if (m_IsInitialized)
             {
                 RefreshNetworkId();

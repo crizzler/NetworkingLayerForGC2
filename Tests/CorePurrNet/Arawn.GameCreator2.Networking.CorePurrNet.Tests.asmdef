@@ -1,0 +1,25 @@
+{
+    "name": "Arawn.GameCreator2.Networking.CorePurrNet.Tests",
+    "rootNamespace": "Arawn.GameCreator2.Networking.CorePurrNet.Tests",
+    "references": [
+        "Arawn.GameCreator2.Networking",
+        "Arawn.GameCreator2.Networking.Transport.PurrNet",
+        "PurrNet.Runtime",
+        "GameCreator.Runtime.Core"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": true,
+    "precompiledReferences": [
+        "nunit.framework.dll"
+    ],
+    "autoReferenced": false,
+    "defineConstraints": [
+        "UNITY_INCLUDE_TESTS"
+    ],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

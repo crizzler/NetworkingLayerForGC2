@@ -46,47 +46,47 @@ namespace Arawn.GameCreator2.Networking
         // ════════════════════════════════════════════════════════════════════════════════════════
         // DUPLICATE POLICY
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>How duplicate singleton instances are handled.</summary>
         protected enum DuplicatePolicy
         {
             /// <summary>Destroy the entire GameObject of the duplicate.</summary>
             DestroyGameObject,
-            
+
             /// <summary>Destroy only the duplicate component, leaving the GameObject intact.</summary>
             DestroyComponent,
-            
+
             /// <summary>Log a warning but keep both instances alive. Only the first is the singleton.</summary>
             WarnOnly
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // SINGLETON
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>Backing field for the singleton instance. Accessible to subclasses for lazy-find overrides.</summary>
         protected static T s_Instance;
-        
+
         /// <summary>The singleton instance, or <c>null</c> if none exists.</summary>
         public static T Instance => s_Instance;
-        
+
         /// <summary>Whether a singleton instance currently exists.</summary>
         public static bool HasInstance => s_Instance != null;
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // CONFIGURATION
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>
         /// Override to change how duplicate instances are handled.
         /// Default: <see cref="DuplicatePolicy.DestroyGameObject"/>.
         /// </summary>
         protected virtual DuplicatePolicy OnDuplicatePolicy => DuplicatePolicy.DestroyGameObject;
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // LIFECYCLE
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         protected virtual void Awake()
         {
             if (s_Instance != null && s_Instance != this)
@@ -94,11 +94,11 @@ namespace Arawn.GameCreator2.Networking
                 HandleDuplicate();
                 return;
             }
-            
+
             s_Instance = (T)this;
             OnSingletonAwake();
         }
-        
+
         protected virtual void OnDestroy()
         {
             if (s_Instance == (T)this)
@@ -107,43 +107,43 @@ namespace Arawn.GameCreator2.Networking
                 s_Instance = null;
             }
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // HOOKS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>
         /// Called once when this instance claims the singleton slot.
         /// Override instead of <c>Awake()</c> for initialization logic.
         /// </summary>
         protected virtual void OnSingletonAwake() { }
-        
+
         /// <summary>
         /// Called when the singleton instance is being destroyed, before the slot is cleared.
         /// Override instead of <c>OnDestroy()</c> for cleanup logic.
         /// </summary>
         protected virtual void OnSingletonCleanup() { }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // INTERNAL
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         private void HandleDuplicate()
         {
             string typeName = typeof(T).Name;
-            
+
             switch (OnDuplicatePolicy)
             {
                 case DuplicatePolicy.DestroyGameObject:
                     Debug.LogWarning($"[{typeName}] Duplicate instance destroyed.");
                     Destroy(gameObject);
                     break;
-                    
+
                 case DuplicatePolicy.DestroyComponent:
                     Debug.LogWarning($"[{typeName}] Duplicate component destroyed.");
                     Destroy(this);
                     break;
-                    
+
                 case DuplicatePolicy.WarnOnly:
                     Debug.LogWarning($"[{typeName}] Multiple instances detected. Using first.");
                     break;

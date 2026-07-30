@@ -1,0 +1,34 @@
+{
+    "name": "Arawn.GameCreator2.Networking.Inventory.Tests",
+    "rootNamespace": "Arawn.GameCreator2.Networking.Inventory.Tests",
+    "references": [
+        "Arawn.GameCreator2.Networking",
+        "Arawn.GameCreator2.Networking.Inventory",
+        "Arawn.GameCreator2.Networking.Editor",
+        "GameCreator.Runtime.Core",
+        "GameCreator.Runtime.Inventory"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": true,
+    "precompiledReferences": [
+        "nunit.framework.dll"
+    ],
+    "autoReferenced": false,
+    "defineConstraints": [
+        "UNITY_INCLUDE_TESTS",
+        "GC2_INVENTORY",
+        "GC2_NETWORK_INVENTORY_PATCHED"
+    ],
+    "versionDefines": [
+        {
+            "name": "com.gamecreator.inventory",
+            "expression": "",
+            "define": "GC2_INVENTORY"
+        }
+    ],
+    "noEngineReferences": false
+}

@@ -29,35 +29,36 @@ namespace Arawn.GameCreator2.Networking.Combat
         // ════════════════════════════════════════════════════════════════════
         // CONFIGURATION
         // ════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>Configuration for melee validation.</summary>
         public MeleeValidationConfig Config { get; set; }
-        
+
         // ════════════════════════════════════════════════════════════════════
         // PRIVATE FIELDS
         // ════════════════════════════════════════════════════════════════════
-        
-        private readonly LagCompensationManager m_LagManager;
+
+        private LagCompensationManager m_LagManager;
         private readonly HashSet<int> m_HitThisSwing = new(16);
-        
+
         // Cache for per-swing tracking
-        private uint m_CurrentSwingAttacker;
-        private int m_CurrentSwingHash;
-        
+        private ulong m_CurrentSwingKey;
+
         // ════════════════════════════════════════════════════════════════════
         // CONSTRUCTOR
         // ════════════════════════════════════════════════════════════════════
-        
+
         public MeleeLagCompensationValidator(MeleeValidationConfig config = null)
         {
             Config = config ?? new MeleeValidationConfig();
-            m_LagManager = LagCompensationManager.Instance;
+            m_LagManager = LagCompensationManager.IsInitialized
+                ? LagCompensationManager.Instance
+                : null;
         }
-        
+
         // ════════════════════════════════════════════════════════════════════
         // ICombatLagCompensationValidator IMPLEMENTATION
         // ════════════════════════════════════════════════════════════════════
-        
+
         public bool Validate(ref CombatValidationResult result)
         {
             // This base method is not used for melee - use ValidateMeleeHit instead
@@ -67,11 +68,11 @@ namespace Arawn.GameCreator2.Networking.Combat
             );
             return false;
         }
-        
+
         // ════════════════════════════════════════════════════════════════════
         // MELEE-SPECIFIC VALIDATION
         // ════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>
         /// Validate a melee hit request using lag compensation.
         /// </summary>
@@ -95,17 +96,26 @@ namespace Arawn.GameCreator2.Networking.Combat
                 HitZoneDamageMultiplier = 1f,
                 DistanceFalloff = 1f
             };
-            
+
+            if (!TryRefreshLagManager())
+            {
+                result.IsValid = false;
+                result.RejectionReason = CombatValidationRejectionReason.InternalError;
+                result.RejectionDetails =
+                    "Lag compensation is not initialized on the authoritative server";
+                return result;
+            }
+
             // Convert client timestamp
             result.ClientTimestamp = NetworkTimestamp.FromServerTime(request.ClientTimestamp);
             result.ServerTimestamp = m_LagManager.LastTimestamp;
-            
+
             // ═══════════════════════════════════════════════════════════════
             // STEP 1: Validate timestamp
             // ═══════════════════════════════════════════════════════════════
-            
+
             double rewindAmount = result.RewindAmount;
-            
+
             if (rewindAmount < -Config.FutureTimestampTolerance)
             {
                 result.IsValid = false;
@@ -113,7 +123,7 @@ namespace Arawn.GameCreator2.Networking.Combat
                 result.RejectionDetails = $"Timestamp {rewindAmount * 1000:F0}ms in future";
                 return result;
             }
-            
+
             if (rewindAmount > Config.MaxRewindTime)
             {
                 result.IsValid = false;
@@ -121,14 +131,14 @@ namespace Arawn.GameCreator2.Networking.Combat
                 result.RejectionDetails = $"Rewind {rewindAmount * 1000:F0}ms exceeds max {Config.MaxRewindTime * 1000:F0}ms";
                 return result;
             }
-            
+
             // ═══════════════════════════════════════════════════════════════
             // STEP 2: Get historical target state
             // ═══════════════════════════════════════════════════════════════
-            
+
             if (!m_LagManager.TryGetStateAtTime(
-                request.TargetNetworkId, 
-                result.ClientTimestamp, 
+                request.TargetNetworkId,
+                result.ClientTimestamp,
                 out var targetSnapshot))
             {
                 result.IsValid = false;
@@ -136,11 +146,11 @@ namespace Arawn.GameCreator2.Networking.Combat
                 result.RejectionDetails = $"No history for target {request.TargetNetworkId}";
                 return result;
             }
-            
+
             result.HistoricalTargetPosition = targetSnapshot.position;
             result.HistoricalTargetRotation = targetSnapshot.rotation;
             result.HistoricalTargetBounds = targetSnapshot.bounds;
-            
+
             // Check if target was active
             if (!targetSnapshot.isActive)
             {
@@ -149,11 +159,11 @@ namespace Arawn.GameCreator2.Networking.Combat
                 result.RejectionDetails = "Target was not active at claimed timestamp";
                 return result;
             }
-            
+
             // ═══════════════════════════════════════════════════════════════
             // STEP 3: Get attacker's historical position (for range check)
             // ═══════════════════════════════════════════════════════════════
-            
+
             Vector3 attackerPosition = attackerCharacter.transform.position;
             Quaternion attackerRotation = attackerCharacter.transform.rotation;
 
@@ -172,11 +182,11 @@ namespace Arawn.GameCreator2.Networking.Combat
             {
                 attackerPosition = historicalAttackerPos;
             }
-            
+
             // ═══════════════════════════════════════════════════════════════
             // STEP 4: Validate attack phase
             // ═══════════════════════════════════════════════════════════════
-            
+
             MeleePhase phase = (MeleePhase)request.AttackPhase;
             if (!IsValidHitPhase(phase))
             {
@@ -185,15 +195,15 @@ namespace Arawn.GameCreator2.Networking.Combat
                 result.RejectionDetails = $"Phase {phase} is not a valid hit phase";
                 return result;
             }
-            
+
             // ═══════════════════════════════════════════════════════════════
             // STEP 5: Validate range (with tolerance)
             // ═══════════════════════════════════════════════════════════════
-            
+
             float weaponReach = GetWeaponReach(weapon, skill, attackerCharacter);
             float distanceToTarget = Vector3.Distance(attackerPosition, targetSnapshot.position);
             float maxRange = weaponReach + Config.RangeTolerance;
-            
+
             if (distanceToTarget > maxRange)
             {
                 result.IsValid = false;
@@ -201,11 +211,11 @@ namespace Arawn.GameCreator2.Networking.Combat
                 result.RejectionDetails = $"Distance {distanceToTarget:F2}m exceeds range {maxRange:F2}m";
                 return result;
             }
-            
+
             // ═══════════════════════════════════════════════════════════════
             // STEP 6: Validate attack arc/cone
             // ═══════════════════════════════════════════════════════════════
-            
+
             Vector3 toTarget = targetSnapshot.position - attackerPosition;
             Vector3 flatToTarget = Vector3.ProjectOnPlane(toTarget, Vector3.up);
             if (flatToTarget.sqrMagnitude < 0.0001f)
@@ -227,7 +237,7 @@ namespace Arawn.GameCreator2.Networking.Combat
             float angle = Vector3.Angle(attackDirection.normalized, flatToTarget.normalized);
             float attackArc = GetAttackArc(weapon, skill);
             float maxAngle = (attackArc * 0.5f) + Config.ArcTolerance;
-            
+
             if (angle > maxAngle)
             {
                 result.IsValid = false;
@@ -235,20 +245,26 @@ namespace Arawn.GameCreator2.Networking.Combat
                 result.RejectionDetails = $"Angle {angle:F1}° exceeds arc {maxAngle:F1}°";
                 return result;
             }
-            
+
             // ═══════════════════════════════════════════════════════════════
             // STEP 7: Check for duplicate hits (same swing)
             // ═══════════════════════════════════════════════════════════════
-            
-            int swingHash = HashCode.Combine(request.AttackerNetworkId, request.SkillHash, request.ComboNodeId);
-            if (swingHash != m_CurrentSwingHash || request.AttackerNetworkId != m_CurrentSwingAttacker)
+
+            // A combo node may be used repeatedly (and the same Skill can occupy more than one
+            // node). The accepted skill correlation is the unique attack operation; using only
+            // Skill/combo here caused later uses of the same air-combo strike to inherit the
+            // previous swing's hit set indefinitely.
+            uint operationKey = request.AttackCorrelationId != 0
+                ? request.AttackCorrelationId
+                : unchecked((uint)HashCode.Combine(request.SkillHash, request.ComboNodeId));
+            ulong swingKey = ((ulong)request.AttackerNetworkId << 32) | operationKey;
+            if (swingKey != m_CurrentSwingKey)
             {
                 // New swing - clear hit tracking
                 m_HitThisSwing.Clear();
-                m_CurrentSwingHash = swingHash;
-                m_CurrentSwingAttacker = request.AttackerNetworkId;
+                m_CurrentSwingKey = swingKey;
             }
-            
+
             int targetHitHash = (int)request.TargetNetworkId;
             if (m_HitThisSwing.Contains(targetHitHash))
             {
@@ -257,22 +273,22 @@ namespace Arawn.GameCreator2.Networking.Combat
                 result.RejectionDetails = "Target already hit in this swing";
                 return result;
             }
-            
+
             // ═══════════════════════════════════════════════════════════════
             // STEP 8: Validate hit point (with tolerance)
             // ═══════════════════════════════════════════════════════════════
-            
+
             Bounds expandedBounds = targetSnapshot.bounds;
             expandedBounds.Expand(Config.HitPointTolerance * 2f);
-            
+
             Vector3 validatedHitPoint = request.HitPoint;
-            
+
             if (!expandedBounds.Contains(request.HitPoint))
             {
                 // Clamp hit point to bounds
                 validatedHitPoint = expandedBounds.ClosestPoint(request.HitPoint);
                 result.HitPointDeviation = Vector3.Distance(request.HitPoint, validatedHitPoint);
-                
+
                 if (result.HitPointDeviation > Config.MaxHitPointDeviation)
                 {
                     result.IsValid = false;
@@ -281,36 +297,36 @@ namespace Arawn.GameCreator2.Networking.Combat
                     return result;
                 }
             }
-            
+
             result.ValidatedHitPoint = validatedHitPoint;
-            
+
             // ═══════════════════════════════════════════════════════════════
             // STEP 9: Determine hit zone
             // ═══════════════════════════════════════════════════════════════
-            
+
             DetermineHitZone(ref result, targetSnapshot);
-            
+
             // ═══════════════════════════════════════════════════════════════
             // STEP 10: Calculate damage
             // ═══════════════════════════════════════════════════════════════
-            
+
             result.BaseDamage = GetBaseDamage(weapon, skill, attackerCharacter);
             result.DistanceFalloff = 1f; // Melee typically doesn't have distance falloff
             result.FinalDamage = result.BaseDamage * result.HitZoneDamageMultiplier * result.DistanceFalloff;
-            
+
             // ═══════════════════════════════════════════════════════════════
             // HIT VALIDATED!
             // ═══════════════════════════════════════════════════════════════
-            
+
             result.IsValid = true;
             result.RejectionReason = CombatValidationRejectionReason.None;
-            
+
             // Track this hit for duplicate prevention
             m_HitThisSwing.Add(targetHitHash);
-            
+
             return result;
         }
-        
+
         /// <summary>
         /// Validate an arc sweep at a historical timestamp.
         /// Returns all valid targets within the attack arc.
@@ -325,70 +341,84 @@ namespace Arawn.GameCreator2.Networking.Combat
             uint[] excludeNetworkIds = null)
         {
             var results = new List<CombatValidationResult>();
+            if (!TryRefreshLagManager()) return results;
+
             var allEntityIds = m_LagManager.GetAllEntityIds();
-            
+
             HashSet<uint> excludeSet = null;
             if (excludeNetworkIds != null && excludeNetworkIds.Length > 0)
             {
                 excludeSet = new HashSet<uint>(excludeNetworkIds);
             }
-            
+
             float maxRange = weaponReach + Config.RangeTolerance;
             float maxAngle = (attackArc * 0.5f) + Config.ArcTolerance;
-            
+
             foreach (var entityId in allEntityIds)
             {
                 if (excludeSet != null && excludeSet.Contains(entityId))
                     continue;
-                
+
                 if (!m_LagManager.TryGetStateAtTime(entityId, clientTimestamp, out var snapshot))
                     continue;
-                
+
                 if (!snapshot.isActive)
                     continue;
-                
+
                 // Range check
                 float distance = Vector3.Distance(attackerPosition, snapshot.position);
                 if (distance > maxRange)
                     continue;
-                
+
                 // Arc check
                 Vector3 toTarget = (snapshot.position - attackerPosition).normalized;
                 float angle = Vector3.Angle(attackDirection, toTarget);
                 if (angle > maxAngle)
                     continue;
-                
+
                 // Valid target
                 var result = CombatValidationResult.Success(
                     attackerNetworkId,
                     entityId,
                     snapshot.bounds.center
                 );
-                
+
                 result.HistoricalTargetPosition = snapshot.position;
                 result.HistoricalTargetRotation = snapshot.rotation;
                 result.HistoricalTargetBounds = snapshot.bounds;
                 result.ClientTimestamp = clientTimestamp;
                 result.ServerTimestamp = m_LagManager.LastTimestamp;
-                
+
                 DetermineHitZone(ref result, snapshot);
-                
+
                 results.Add(result);
             }
-            
+
             return results;
         }
-        
+
+        private bool TryRefreshLagManager()
+        {
+            if (!LagCompensationManager.IsInitialized)
+            {
+                m_LagManager = null;
+                return false;
+            }
+
+            m_LagManager = LagCompensationManager.Instance;
+            return true;
+        }
+
         // ════════════════════════════════════════════════════════════════════
         // HELPER METHODS
         // ════════════════════════════════════════════════════════════════════
-        
+
         private bool IsValidHitPhase(MeleePhase phase)
         {
             // Only active phases can register hits
             return phase == MeleePhase.Strike;
         }
-        
+
         private float GetWeaponReach(MeleeWeapon weapon, Skill skill, Character attacker)
         {
             // GC2 MeleeWeapon has no explicit reach property — melee hit detection
@@ -396,13 +426,13 @@ namespace Arawn.GameCreator2.Networking.Combat
             // server-side range gate for anti-cheat validation.
             return Config.DefaultWeaponReach;
         }
-        
+
         private float GetAttackArc(MeleeWeapon weapon, Skill skill)
         {
             // Default arc (in degrees)
             return Config.DefaultAttackArc;
         }
-        
+
         private float GetBaseDamage(MeleeWeapon weapon, Skill skill, Character attacker)
         {
             // Use the skill's configured power value if available.
@@ -412,10 +442,10 @@ namespace Arawn.GameCreator2.Networking.Combat
                 float power = skill.GetPower(args);
                 if (power > 0f) return power;
             }
-            
+
             return Config.DefaultBaseDamage;
         }
-        
+
         private void DetermineHitZone(
             ref CombatValidationResult result,
             LagCompensationHistory.StateSnapshot snapshot)
@@ -424,7 +454,7 @@ namespace Arawn.GameCreator2.Networking.Combat
             float localHitY = result.ValidatedHitPoint.y - snapshot.position.y;
             float targetHeight = snapshot.bounds.size.y;
             float normalizedHeight = Mathf.Clamp01(localHitY / targetHeight);
-            
+
             // Simple zone determination based on height
             if (normalizedHeight >= 0.75f)
             {
@@ -445,18 +475,17 @@ namespace Arawn.GameCreator2.Networking.Combat
                 result.IsCriticalZone = false;
             }
         }
-        
+
         /// <summary>
         /// Clear swing tracking (call when a swing ends).
         /// </summary>
         public void ClearSwingTracking()
         {
             m_HitThisSwing.Clear();
-            m_CurrentSwingHash = 0;
-            m_CurrentSwingAttacker = 0;
+            m_CurrentSwingKey = 0;
         }
     }
-    
+
     /// <summary>
     /// Configuration for melee lag compensation validation.
     /// </summary>
@@ -466,38 +495,38 @@ namespace Arawn.GameCreator2.Networking.Combat
         [Header("Timing")]
         [Tooltip("Maximum time to rewind for validation (seconds).")]
         public double MaxRewindTime = 0.5;
-        
+
         [Tooltip("Tolerance for timestamps slightly in the future (seconds).")]
         public double FutureTimestampTolerance = 0.05;
-        
+
         [Header("Range")]
         [Tooltip("Default weapon reach if not specified (meters).")]
         public float DefaultWeaponReach = 2f;
-        
+
         [Tooltip("Additional tolerance on range checks (meters).")]
         public float RangeTolerance = 0.3f;
-        
+
         [Header("Attack Arc")]
         [Tooltip("Default attack arc if not specified (degrees).")]
         public float DefaultAttackArc = 120f;
-        
+
         [Tooltip("Additional tolerance on arc checks (degrees).")]
         public float ArcTolerance = 15f;
-        
+
         [Header("Hit Point")]
         [Tooltip("Tolerance for hit point validation (meters).")]
         public float HitPointTolerance = 0.3f;
-        
+
         [Tooltip("Maximum allowed hit point deviation before rejection (meters).")]
         public float MaxHitPointDeviation = 1f;
-        
+
         [Header("Damage")]
         [Tooltip("Default base damage if not specified.")]
         public float DefaultBaseDamage = 10f;
-        
+
         [Tooltip("Head hit zone damage multiplier.")]
         public float HeadDamageMultiplier = 1.5f;
-        
+
         [Tooltip("Legs hit zone damage multiplier.")]
         public float LegsDamageMultiplier = 0.75f;
     }

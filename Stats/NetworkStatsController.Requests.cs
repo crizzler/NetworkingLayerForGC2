@@ -12,13 +12,13 @@ namespace Arawn.GameCreator2.Networking.Stats
         // ════════════════════════════════════════════════════════════════════════════════════════
         // CLIENT-SIDE: REQUEST MODIFICATIONS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>
         /// Request a stat base value modification. Client-side only.
         /// </summary>
         public void RequestStatModify(
-            IdString statId, 
-            StatModificationType modType, 
+            IdString statId,
+            StatModificationType modType,
             float value,
             StatModificationSource source = StatModificationSource.Direct,
             int sourceHash = 0)
@@ -28,14 +28,14 @@ namespace Arawn.GameCreator2.Networking.Stats
                 Debug.LogWarning("[NetworkStatsController] Cannot modify stats on remote client");
                 return;
             }
-            
+
             // Rate limit check
             if (!CheckRateLimit(statId.Hash, value, m_StatChangeAccumulator))
             {
                 OnModificationRejected?.Invoke(StatRejectionReason.RateLimitExceeded, $"Stat: {statId.String}");
                 return;
             }
-            
+
             var request = new NetworkStatModifyRequest
             {
                 RequestId = GetNextRequestId(),
@@ -48,18 +48,18 @@ namespace Arawn.GameCreator2.Networking.Stats
                 Source = source,
                 SourceHash = sourceHash
             };
-            
+
             // Store original value for rollback
             var stat = m_Traits.RuntimeStats.Get(statId);
             float originalValue = stat != null ? (float)stat.Base : 0f;
-            
+
             // Optimistic update
             if (m_OptimisticUpdates && !m_IsServer)
             {
                 m_OptimisticStatValues[statId.Hash] = originalValue;
                 ApplyStatModifyLocally(request);
             }
-            
+
             // Track pending request
             m_PendingStatMods[GetPendingKey(request.ActorNetworkId, request.CorrelationId, request.RequestId)] = new PendingStatModify
             {
@@ -67,9 +67,9 @@ namespace Arawn.GameCreator2.Networking.Stats
                 OriginalValue = originalValue,
                 SentTime = Time.time
             };
-            
+
             OnStatModifyRequested?.Invoke(request);
-            
+
             // If server, process immediately
             if (m_IsServer)
             {
@@ -84,7 +84,7 @@ namespace Arawn.GameCreator2.Networking.Stats
                 NetworkStatsManager.Instance?.SendStatModifyRequest(request);
             }
         }
-        
+
         /// <summary>
         /// Request an attribute value modification. Client-side only.
         /// </summary>
@@ -100,14 +100,14 @@ namespace Arawn.GameCreator2.Networking.Stats
                 Debug.LogWarning("[NetworkStatsController] Cannot modify attributes on remote client");
                 return;
             }
-            
+
             // Rate limit check
             if (!CheckRateLimit(attributeId.Hash, value, m_AttrChangeAccumulator))
             {
                 OnModificationRejected?.Invoke(StatRejectionReason.RateLimitExceeded, $"Attribute: {attributeId.String}");
                 return;
             }
-            
+
             var request = new NetworkAttributeModifyRequest
             {
                 RequestId = GetNextRequestId(),
@@ -120,18 +120,18 @@ namespace Arawn.GameCreator2.Networking.Stats
                 Source = source,
                 SourceHash = sourceHash
             };
-            
+
             // Store original value for rollback
             var attr = m_Traits.RuntimeAttributes.Get(attributeId);
             float originalValue = attr != null ? (float)attr.Value : 0f;
-            
+
             // Optimistic update
             if (m_OptimisticUpdates && !m_IsServer)
             {
                 m_OptimisticAttrValues[attributeId.Hash] = originalValue;
                 ApplyAttributeModifyLocally(request);
             }
-            
+
             // Track pending request
             m_PendingAttrMods[GetPendingKey(request.ActorNetworkId, request.CorrelationId, request.RequestId)] = new PendingAttributeModify
             {
@@ -139,9 +139,9 @@ namespace Arawn.GameCreator2.Networking.Stats
                 OriginalValue = originalValue,
                 SentTime = Time.time
             };
-            
+
             OnAttributeModifyRequested?.Invoke(request);
-            
+
             // If server, process immediately
             if (m_IsServer)
             {
@@ -155,7 +155,7 @@ namespace Arawn.GameCreator2.Networking.Stats
                 NetworkStatsManager.Instance?.SendAttributeModifyRequest(request);
             }
         }
-        
+
         /// <summary>
         /// Request a status effect action.
         /// </summary>
@@ -171,7 +171,7 @@ namespace Arawn.GameCreator2.Networking.Stats
                 Debug.LogWarning("[NetworkStatsController] Cannot modify status effects on remote client");
                 return;
             }
-            
+
             var request = new NetworkStatusEffectRequest
             {
                 RequestId = GetNextRequestId(),
@@ -184,15 +184,15 @@ namespace Arawn.GameCreator2.Networking.Stats
                 Source = source,
                 SourceHash = sourceHash
             };
-            
+
             m_PendingStatusEffects[GetPendingKey(request.ActorNetworkId, request.CorrelationId, request.RequestId)] = new PendingStatusEffectAction
             {
                 Request = request,
                 SentTime = Time.time
             };
-            
+
             OnStatusEffectRequested?.Invoke(request);
-            
+
             if (m_IsServer)
             {
                 var response = ProcessStatusEffectRequest(request, NetworkId);
@@ -205,7 +205,7 @@ namespace Arawn.GameCreator2.Networking.Stats
                 NetworkStatsManager.Instance?.SendStatusEffectRequest(request);
             }
         }
-        
+
         /// <summary>
         /// Request to add a stat modifier.
         /// </summary>
@@ -221,7 +221,7 @@ namespace Arawn.GameCreator2.Networking.Stats
                 Debug.LogWarning("[NetworkStatsController] Cannot add modifiers on remote client");
                 return;
             }
-            
+
             var request = new NetworkStatModifierRequest
             {
                 RequestId = GetNextRequestId(),
@@ -235,15 +235,15 @@ namespace Arawn.GameCreator2.Networking.Stats
                 Source = source,
                 SourceHash = sourceHash
             };
-            
+
             m_PendingModifierRequests[GetPendingKey(request.ActorNetworkId, request.CorrelationId, request.RequestId)] = new PendingStatModifierAction
             {
                 Request = request,
                 SentTime = Time.time
             };
-            
+
             OnStatModifierRequested?.Invoke(request);
-            
+
             if (m_IsServer)
             {
                 var response = ProcessStatModifierRequest(request, NetworkId);
@@ -256,7 +256,7 @@ namespace Arawn.GameCreator2.Networking.Stats
                 NetworkStatsManager.Instance?.SendStatModifierRequest(request);
             }
         }
-        
+
         /// <summary>
         /// Request to remove a stat modifier.
         /// </summary>
@@ -272,7 +272,7 @@ namespace Arawn.GameCreator2.Networking.Stats
                 Debug.LogWarning("[NetworkStatsController] Cannot remove modifiers on remote client");
                 return;
             }
-            
+
             var request = new NetworkStatModifierRequest
             {
                 RequestId = GetNextRequestId(),
@@ -286,15 +286,15 @@ namespace Arawn.GameCreator2.Networking.Stats
                 Source = source,
                 SourceHash = sourceHash
             };
-            
+
             m_PendingModifierRequests[GetPendingKey(request.ActorNetworkId, request.CorrelationId, request.RequestId)] = new PendingStatModifierAction
             {
                 Request = request,
                 SentTime = Time.time
             };
-            
+
             OnStatModifierRequested?.Invoke(request);
-            
+
             if (m_IsServer)
             {
                 var response = ProcessStatModifierRequest(request, NetworkId);
@@ -307,7 +307,7 @@ namespace Arawn.GameCreator2.Networking.Stats
                 NetworkStatsManager.Instance?.SendStatModifierRequest(request);
             }
         }
-        
+
         /// <summary>
         /// Request to clear all stat modifiers.
         /// </summary>
@@ -320,7 +320,7 @@ namespace Arawn.GameCreator2.Networking.Stats
                 Debug.LogWarning("[NetworkStatsController] Cannot clear modifiers on remote client");
                 return;
             }
-            
+
             var request = new NetworkStatModifierRequest
             {
                 RequestId = GetNextRequestId(),
@@ -334,15 +334,15 @@ namespace Arawn.GameCreator2.Networking.Stats
                 Source = source,
                 SourceHash = sourceHash
             };
-            
+
             m_PendingModifierRequests[GetPendingKey(request.ActorNetworkId, request.CorrelationId, request.RequestId)] = new PendingStatModifierAction
             {
                 Request = request,
                 SentTime = Time.time
             };
-            
+
             OnStatModifierRequested?.Invoke(request);
-            
+
             if (m_IsServer)
             {
                 var response = ProcessStatModifierRequest(request, NetworkId);
@@ -355,7 +355,7 @@ namespace Arawn.GameCreator2.Networking.Stats
                 NetworkStatsManager.Instance?.SendStatModifierRequest(request);
             }
         }
-        
+
         /// <summary>
         /// Request to clear status effects by type mask.
         /// </summary>
@@ -369,7 +369,7 @@ namespace Arawn.GameCreator2.Networking.Stats
                 Debug.LogWarning("[NetworkStatsController] Cannot clear status effects on remote client");
                 return;
             }
-            
+
             var request = new NetworkClearStatusEffectsRequest
             {
                 RequestId = GetNextRequestId(),
@@ -380,13 +380,13 @@ namespace Arawn.GameCreator2.Networking.Stats
                 Source = source,
                 SourceHash = sourceHash
             };
-            
+
             m_PendingClearStatusEffects[GetPendingKey(request.ActorNetworkId, request.CorrelationId, request.RequestId)] = new PendingClearStatusEffectsAction
             {
                 Request = request,
                 SentTime = Time.time
             };
-            
+
             if (m_IsServer)
             {
                 var response = ProcessClearStatusEffectsRequest(request, NetworkId);
@@ -399,7 +399,7 @@ namespace Arawn.GameCreator2.Networking.Stats
                 NetworkStatsManager.Instance?.SendClearStatusEffectsRequest(request);
             }
         }
-        
+
     }
 }
 #endif

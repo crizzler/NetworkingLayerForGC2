@@ -19,10 +19,14 @@ namespace Arawn.GameCreator2.Networking.Shooter
         private bool m_WarnedMissingFullShooterPatch;
         private bool m_WarnedMissingSightPatch;
         private float m_NextAimResolverDiagnosticTime;
-        [SerializeField] private bool m_LogDiagnostics = true;
+        private float m_NextHitRoutingInvariantTime;
+        [SerializeField] private bool m_LogDiagnostics;
+
+        public bool IsHitValidatorActive =>
+            m_FullShooterHooksInstalled && IsShooterPatched();
 
         public bool IsPatchActive =>
-            (m_FullShooterHooksInstalled && IsShooterPatched()) ||
+            IsHitValidatorActive ||
             (m_SightHookInstalled && IsSightInstructionsPatched());
 
         private void LogDiagnostics(string message)
@@ -88,8 +92,16 @@ namespace Arawn.GameCreator2.Networking.Shooter
                     typeof(Action<WeaponData, Vector3, Vector3, float>)) &&
                 HasPublicStaticField(
                     typeof(ShooterWeapon),
-                    "NetworkHitDetected",
-                    typeof(Action<ShotData, Args>)) &&
+                    "NetworkOnHitValidator",
+                    typeof(Func<ShotData, Args, bool>)) &&
+                HasPublicStaticField(
+                    typeof(ShooterWeapon),
+                    "NetworkShotFiredExact",
+                    typeof(Action<ShotData>)) &&
+                HasPublicStaticField(
+                    typeof(ShooterWeapon),
+                    "NetworkOnHitResolved",
+                    typeof(Action<ShotData, Args, BlockType, ReactionOutput, float>)) &&
                 HasPublicStaticProperty(typeof(ShooterStance), "IsNetworkingActive", typeof(bool)) &&
                 HasPublicStaticProperty(typeof(WeaponData), "IsNetworkingActive", typeof(bool)) &&
                 HasInstanceMethod(typeof(ShooterStance), "PullTriggerDirect", typeof(ShooterWeapon)) &&
@@ -119,7 +131,9 @@ namespace Arawn.GameCreator2.Networking.Shooter
                     "[NetworkShooterPatchHooks] Shooter runtime patch markers were not detected. " +
                     "NetworkShooterController.InterceptShot will only run if Shooter assets explicitly call " +
                     "the network interception path; vanilla GC2 Shooter fire/reload animations and particles " +
-                    "will stay local unless a transport bridge or patched Shooter runtime forwards them.");
+                    "will stay local unless a transport bridge or patched Shooter runtime forwards them. " +
+                    "The legacy NetworkHitDetected-only patch is unsafe because it cannot cancel client gameplay; " +
+                    "reapply the required Shooter patch in the setup wizard.");
             }
 
             if (!m_FullShooterHooksInstalled && fullShooterPatched)
@@ -128,8 +142,15 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 SetStaticField(typeof(ShooterStance), "NetworkReleaseTriggerValidator", new Func<ShooterStance, ShooterWeapon, bool>(ValidateReleaseTrigger));
                 SetStaticField(typeof(ShooterStance), "NetworkReloadValidator", new Func<ShooterStance, ShooterWeapon, bool>(ValidateReload));
                 SetStaticField(typeof(WeaponData), "NetworkShootValidator", new Func<WeaponData, bool>(ValidateShoot));
-                SetStaticField(typeof(WeaponData), "NetworkShotFired", new Action<WeaponData, Vector3, Vector3, float>(NotifyShotFired));
-                SetStaticField(typeof(ShooterWeapon), "NetworkHitDetected", new Action<ShotData, Args>(NotifyHitDetected));
+                // The legacy pre-projectile callback does not include GC2's final spread.
+                // Leave it unwired and use ShooterWeapon.OnShoot's exact ShotData instead.
+                SetStaticField(typeof(WeaponData), "NetworkShotFired", null);
+                SetStaticField(typeof(ShooterWeapon), "NetworkShotFiredExact", new Action<ShotData>(NotifyShotFiredExact));
+                SetStaticField(typeof(ShooterWeapon), "NetworkOnHitValidator", new Func<ShotData, Args, bool>(ValidateHit));
+                SetStaticField(
+                    typeof(ShooterWeapon),
+                    "NetworkOnHitResolved",
+                    new Action<ShotData, Args, BlockType, ReactionOutput, float>(NotifyHitResolved));
                 if (HasPublicStaticField(typeof(Aim), "NetworkAimPointResolver", typeof(Func<Args, Aim, Vector3?>)))
                 {
                     SetStaticField(typeof(Aim), "NetworkAimPointResolver", new Func<Args, Aim, Vector3?>(ResolveAimPoint));
@@ -179,7 +200,9 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 SetStaticField(typeof(ShooterStance), "NetworkReloadValidator", null);
                 SetStaticField(typeof(WeaponData), "NetworkShootValidator", null);
                 SetStaticField(typeof(WeaponData), "NetworkShotFired", null);
-                SetStaticField(typeof(ShooterWeapon), "NetworkHitDetected", null);
+                SetStaticField(typeof(ShooterWeapon), "NetworkShotFiredExact", null);
+                SetStaticField(typeof(ShooterWeapon), "NetworkOnHitValidator", null);
+                SetStaticField(typeof(ShooterWeapon), "NetworkOnHitResolved", null);
                 if (HasPublicStaticField(typeof(Aim), "NetworkAimPointResolver", typeof(Func<Args, Aim, Vector3?>)))
                 {
                     SetStaticField(typeof(Aim), "NetworkAimPointResolver", null);
@@ -273,31 +296,124 @@ namespace Arawn.GameCreator2.Networking.Shooter
             controller.NotifyShotFired(muzzlePosition, shotDirection, data.Weapon, chargeRatio);
         }
 
-        private void NotifyHitDetected(ShotData data, Args _)
+        private void NotifyShotFiredExact(ShotData data)
         {
-            if (data.Source == null || data.Target == null)
+            if (data.Source == null || data.Weapon == null)
             {
-                LogDiagnosticsWarning(
-                    $"hit hook skipped source={(data.Source != null ? data.Source.name : "null")} " +
-                    $"target={(data.Target != null ? data.Target.name : "null")} " +
-                    $"weapon={(data.Weapon != null ? data.Weapon.name : "null")}");
+                NetworkShooterDebug.LogPhysics(
+                    "ExactShotHook",
+                    $"dropped source={(data.Source != null)} weapon={(data.Weapon != null)}");
                 return;
             }
 
+            NetworkShooterController controller =
+                data.Source.GetComponent<NetworkShooterController>();
+            NetworkShooterDebug.LogPhysics(
+                "ExactShotHook",
+                $"source={data.Source.name} controller={(controller != null)} " +
+                $"weapon={data.Weapon.name} hash={data.Weapon.Id.Hash} " +
+                $"origin={data.ShootPosition} exactDirection={data.ShootDirection} " +
+                $"charge={data.ChargeRatio:F2}",
+                data.Source);
+
+            if (controller == null)
+            {
+                LogDiagnosticsWarning(
+                    $"exact shot hook could not find NetworkShooterController on {data.Source.name}");
+                return;
+            }
+
+            controller.NotifyShotFired(
+                data.ShootPosition,
+                data.ShootDirection,
+                data.Weapon,
+                data.ChargeRatio);
+        }
+
+        private bool ValidateHit(ShotData data, Args _)
+        {
+            if (data.Source == null)
+            {
+                LogDiagnosticsWarning(
+                    $"hit hook skipped source=null " +
+                    $"target={(data.Target != null ? data.Target.name : "null")} " +
+                    $"weapon={(data.Weapon != null ? data.Weapon.name : "null")}");
+                return true;
+            }
+
             var controller = data.Source.GetComponent<NetworkShooterController>();
+            Collider directCollider = data.Target != null
+                ? data.Target.GetComponent<Collider>()
+                : null;
+            Rigidbody directRigidbody = data.Target != null
+                ? data.Target.GetComponent<Rigidbody>()
+                : null;
+            Rigidbody resolvedRigidbody = directCollider != null && directCollider.attachedRigidbody != null
+                ? directCollider.attachedRigidbody
+                : data.Target != null ? data.Target.GetComponentInParent<Rigidbody>() : null;
+            NetworkShooterDebug.LogPhysics(
+                "NativeHitHook",
+                $"source={data.Source.name} controller={(controller != null)} " +
+                $"target={(data.Target != null ? data.Target.name : "null")} " +
+                $"weapon={(data.Weapon != null ? data.Weapon.name : "null")} " +
+                $"hash={(data.Weapon != null ? data.Weapon.Id.Hash : 0)} " +
+                $"forceEnabled={(data.Weapon != null && data.Weapon.Fire.ForceEnabled)} " +
+                $"force={(data.Weapon != null ? data.Weapon.Fire.Force : 0f):F2} " +
+                $"point={data.HitPoint} direction={data.ShootDirection} distance={data.Distance:F2} " +
+                $"collider={(directCollider != null ? directCollider.name : "null")} " +
+                $"directRb={(directRigidbody != null ? directRigidbody.name : "null")} " +
+                $"resolvedRb={(resolvedRigidbody != null ? resolvedRigidbody.name : "null")} " +
+                $"kinematic={(resolvedRigidbody != null && resolvedRigidbody.isKinematic)}",
+                data.Source);
             LogDiagnostics(
-                $"hit hook source={data.Source.name} target={data.Target.name} " +
+                $"hit hook source={data.Source.name} target={(data.Target != null ? data.Target.name : "null")} " +
                 $"weapon={(data.Weapon != null ? data.Weapon.name : "null")} " +
                 $"hash={(data.Weapon != null ? data.Weapon.Id.Hash : 0)} controller={(controller != null)} " +
                 $"point={data.HitPoint} distance={data.Distance:F2}");
 
             if (controller == null)
             {
+                NetworkCharacter networkCharacter = data.Source.GetComponent<NetworkCharacter>();
+                if (networkCharacter != null)
+                {
+                    LogHitRoutingInvariantWarning(
+                        $"suppressed Shooter hit from network character '{data.Source.name}' " +
+                        $"(networkId={networkCharacter.NetworkId}) because it has no NetworkShooterController. " +
+                        "Add/configure the Shooter controller before gameplay starts.");
+                    return false;
+                }
+
                 LogDiagnosticsWarning($"hit hook could not find NetworkShooterController on {data.Source.name}");
-                return;
+                return true;
             }
 
-            controller.NotifyHitDetected(data);
+            return controller.ValidatePatchedHit(data);
+        }
+
+        private void NotifyHitResolved(
+            ShotData data,
+            Args _,
+            BlockType blockType,
+            ReactionOutput reactionOutput,
+            float reactionPower)
+        {
+            if (data.Source == null) return;
+            NetworkShooterController controller = data.Source.GetComponent<NetworkShooterController>();
+            controller?.NotifyPatchedHitResolved(
+                data,
+                blockType,
+                reactionOutput,
+                reactionPower);
+        }
+
+        private void LogHitRoutingInvariantWarning(string message)
+        {
+            const float WarningInterval = 5f;
+            float now = Time.unscaledTime;
+            if (now < m_NextHitRoutingInvariantTime) return;
+
+            m_NextHitRoutingInvariantTime = now + WarningInterval;
+            Debug.LogWarning($"[NetworkShooterPatchHooks] {message}", this);
         }
 
         private static void SetStaticField(Type type, string fieldName, object value)

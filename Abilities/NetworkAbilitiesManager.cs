@@ -37,7 +37,7 @@ namespace Arawn.GameCreator2.Networking
         // ════════════════════════════════════════════════════════════════════════════════════════
         // MESSAGE TYPE IDS (230-259 reserved for Abilities)
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         public static class MessageTypes
         {
             // Cast Messages (230-234)
@@ -46,39 +46,39 @@ namespace Arawn.GameCreator2.Networking
             public const ushort AbilityCastBroadcast = 232;
             public const ushort AbilityEffectBroadcast = 233;
             public const ushort CastCancelRequest = 234;
-            
+
             // Projectile Messages (235-237)
             public const ushort ProjectileSpawnBroadcast = 235;
             public const ushort ProjectileEventBroadcast = 236;
-            
+
             // Impact Messages (238-239)
             public const ushort ImpactSpawnBroadcast = 238;
             public const ushort ImpactHitBroadcast = 239;
-            
+
             // Cooldown Messages (240-242)
             public const ushort CooldownRequest = 240;
             public const ushort CooldownResponse = 241;
             public const ushort CooldownBroadcast = 242;
-            
+
             // Learning Messages (243-245)
             public const ushort AbilityLearnRequest = 243;
             public const ushort AbilityLearnResponse = 244;
             public const ushort AbilityLearnBroadcast = 245;
-            
+
             // State Sync Messages (246-249)
             public const ushort AbilityStateRequest = 246;
             public const ushort AbilityStateResponse = 247;
             public const ushort AbilitySlotEntry = 248;
             public const ushort CooldownEntry = 249;
-            
+
             // Cancel Messages (250-251)
             public const ushort CastCancelResponse = 250;
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // REGISTRIES
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>
         /// Registry entry for an Ability asset.
         /// </summary>
@@ -88,7 +88,7 @@ namespace Arawn.GameCreator2.Networking
             public Ability Ability;
             public string Name;
         }
-        
+
         /// <summary>
         /// Registry entry for a Projectile asset.
         /// </summary>
@@ -98,7 +98,7 @@ namespace Arawn.GameCreator2.Networking
             public Projectile Projectile;
             public string Name;
         }
-        
+
         /// <summary>
         /// Registry entry for an Impact asset.
         /// </summary>
@@ -108,22 +108,22 @@ namespace Arawn.GameCreator2.Networking
             public Impact Impact;
             public string Name;
         }
-        
+
         private static readonly Dictionary<int, AbilityRegistryEntry> s_AbilityRegistry = new(128);
         private static readonly Dictionary<int, ProjectileRegistryEntry> s_ProjectileRegistry = new(64);
         private static readonly Dictionary<int, ImpactRegistryEntry> s_ImpactRegistry = new(32);
-        
+
         // Pawn tracking for network lookup
         private static readonly Dictionary<uint, Pawn> s_NetworkIdToPawn = new(64);
         private static readonly Dictionary<Pawn, uint> s_PawnToNetworkId = new(64);
-        
+
         private static Func<float> s_GetServerTime;
         private static Func<uint> s_GetLocalPlayerNetworkId;
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // INITIALIZATION
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>
         /// Initialize the manager with time and player ID providers.
         /// </summary>
@@ -131,14 +131,14 @@ namespace Arawn.GameCreator2.Networking
         {
             s_GetServerTime = getServerTime;
             s_GetLocalPlayerNetworkId = getLocalPlayerNetworkId;
-            
+
             // Wire up the controller if it exists
             if (NetworkAbilitiesController.HasInstance)
             {
                 WireUpController(NetworkAbilitiesController.Instance);
             }
         }
-        
+
         /// <summary>
         /// Wire up a controller instance with the registry lookups.
         /// </summary>
@@ -153,7 +153,7 @@ namespace Arawn.GameCreator2.Networking
             controller.GetImpactByHash = GetImpactByHash;
             controller.GetNetworkIdForPawn = GetNetworkIdForPawn;
         }
-        
+
         /// <summary>
         /// Clear all registries and tracking data.
         /// </summary>
@@ -165,11 +165,11 @@ namespace Arawn.GameCreator2.Networking
             s_NetworkIdToPawn.Clear();
             s_PawnToNetworkId.Clear();
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // ABILITY REGISTRY
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>
         /// Register an Ability for network lookup.
         /// </summary>
@@ -178,7 +178,7 @@ namespace Arawn.GameCreator2.Networking
             if (ability == null) return;
 
             NetworkAbilityAssetSourcePatcher.PatchAbility(ability);
-            
+
             int hash = ability.ID.Hash;
             s_AbilityRegistry[hash] = new AbilityRegistryEntry
             {
@@ -187,7 +187,7 @@ namespace Arawn.GameCreator2.Networking
                 Name = ability.name
             };
         }
-        
+
         /// <summary>
         /// Register multiple abilities at once.
         /// </summary>
@@ -198,7 +198,7 @@ namespace Arawn.GameCreator2.Networking
                 RegisterAbility(ability);
             }
         }
-        
+
         /// <summary>
         /// Unregister an Ability.
         /// </summary>
@@ -207,7 +207,7 @@ namespace Arawn.GameCreator2.Networking
             if (ability == null) return;
             s_AbilityRegistry.Remove(ability.ID.Hash);
         }
-        
+
         /// <summary>
         /// Get an Ability by its ID hash.
         /// </summary>
@@ -215,7 +215,7 @@ namespace Arawn.GameCreator2.Networking
         {
             return s_AbilityRegistry.TryGetValue(hash, out var entry) ? entry.Ability : null;
         }
-        
+
         /// <summary>
         /// Check if an ability is registered.
         /// </summary>
@@ -223,18 +223,18 @@ namespace Arawn.GameCreator2.Networking
         {
             return ability != null && s_AbilityRegistry.ContainsKey(ability.ID.Hash);
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // PROJECTILE REGISTRY
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>
         /// Register a Projectile for network lookup.
         /// </summary>
         public static void RegisterProjectile(Projectile projectile)
         {
             if (projectile == null) return;
-            
+
             int hash = StableHashUtility.GetStableHash(projectile);
             s_ProjectileRegistry[hash] = new ProjectileRegistryEntry
             {
@@ -243,7 +243,7 @@ namespace Arawn.GameCreator2.Networking
                 Name = projectile.name
             };
         }
-        
+
         /// <summary>
         /// Register multiple projectiles at once.
         /// </summary>
@@ -254,7 +254,7 @@ namespace Arawn.GameCreator2.Networking
                 RegisterProjectile(projectile);
             }
         }
-        
+
         /// <summary>
         /// Unregister a Projectile.
         /// </summary>
@@ -263,7 +263,7 @@ namespace Arawn.GameCreator2.Networking
             if (projectile == null) return;
             s_ProjectileRegistry.Remove(StableHashUtility.GetStableHash(projectile));
         }
-        
+
         /// <summary>
         /// Get a Projectile by its hash.
         /// </summary>
@@ -271,18 +271,18 @@ namespace Arawn.GameCreator2.Networking
         {
             return s_ProjectileRegistry.TryGetValue(hash, out var entry) ? entry.Projectile : null;
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // IMPACT REGISTRY
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>
         /// Register an Impact for network lookup.
         /// </summary>
         public static void RegisterImpact(Impact impact)
         {
             if (impact == null) return;
-            
+
             int hash = StableHashUtility.GetStableHash(impact);
             s_ImpactRegistry[hash] = new ImpactRegistryEntry
             {
@@ -291,7 +291,7 @@ namespace Arawn.GameCreator2.Networking
                 Name = impact.name
             };
         }
-        
+
         /// <summary>
         /// Register multiple impacts at once.
         /// </summary>
@@ -302,7 +302,7 @@ namespace Arawn.GameCreator2.Networking
                 RegisterImpact(impact);
             }
         }
-        
+
         /// <summary>
         /// Unregister an Impact.
         /// </summary>
@@ -311,7 +311,7 @@ namespace Arawn.GameCreator2.Networking
             if (impact == null) return;
             s_ImpactRegistry.Remove(StableHashUtility.GetStableHash(impact));
         }
-        
+
         /// <summary>
         /// Get an Impact by its hash.
         /// </summary>
@@ -319,11 +319,11 @@ namespace Arawn.GameCreator2.Networking
         {
             return s_ImpactRegistry.TryGetValue(hash, out var entry) ? entry.Impact : null;
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // PAWN TRACKING
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>
         /// Register a Pawn with its network ID.
         /// </summary>
@@ -346,25 +346,25 @@ namespace Arawn.GameCreator2.Networking
             {
                 s_PawnToNetworkId.Remove(existingPawn);
             }
-            
+
             s_NetworkIdToPawn[networkId] = pawn;
             s_PawnToNetworkId[pawn] = networkId;
         }
-        
+
         /// <summary>
         /// Unregister a Pawn.
         /// </summary>
         public static void UnregisterPawn(Pawn pawn)
         {
             if (pawn == null) return;
-            
+
             if (s_PawnToNetworkId.TryGetValue(pawn, out var networkId))
             {
                 s_NetworkIdToPawn.Remove(networkId);
                 s_PawnToNetworkId.Remove(pawn);
             }
         }
-        
+
         /// <summary>
         /// Unregister a Pawn by network ID.
         /// </summary>
@@ -376,7 +376,7 @@ namespace Arawn.GameCreator2.Networking
                 s_NetworkIdToPawn.Remove(networkId);
             }
         }
-        
+
         /// <summary>
         /// Get a Pawn by its network ID.
         /// </summary>
@@ -384,7 +384,7 @@ namespace Arawn.GameCreator2.Networking
         {
             return s_NetworkIdToPawn.TryGetValue(networkId, out var pawn) ? pawn : null;
         }
-        
+
         /// <summary>
         /// Get a Character by network ID (via Pawn lookup).
         /// </summary>
@@ -393,7 +393,7 @@ namespace Arawn.GameCreator2.Networking
             Pawn pawn = GetPawnByNetworkId(networkId);
             return pawn != null ? pawn.GetComponent<Character>() : null;
         }
-        
+
         /// <summary>
         /// Get the network ID for a Pawn.
         /// </summary>
@@ -401,11 +401,11 @@ namespace Arawn.GameCreator2.Networking
         {
             return pawn != null && s_PawnToNetworkId.TryGetValue(pawn, out var networkId) ? networkId : 0;
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // RECEIVE HANDLERS (Call from your network layer)
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>
         /// Route an incoming message to the appropriate handler based on message type.
         /// Call this from your network layer's message receive callback.
@@ -414,7 +414,7 @@ namespace Arawn.GameCreator2.Networking
         {
             if (!NetworkAbilitiesController.HasInstance) return;
             var controller = NetworkAbilitiesController.Instance;
-            
+
             switch (messageType)
             {
                 // Cast
@@ -422,12 +422,12 @@ namespace Arawn.GameCreator2.Networking
                     if (data is NetworkAbilityCastRequest castReq)
                         controller.ProcessCastRequest(senderId, castReq);
                     break;
-                    
+
                 case MessageTypes.AbilityCastResponse:
                     if (data is NetworkAbilityCastResponse castResp)
                         controller.ReceiveCastResponse(castResp);
                     break;
-                    
+
                 case MessageTypes.AbilityCastBroadcast:
                     if (data is NetworkAbilityCastBroadcast castBroadcast)
                         controller.ReceiveCastBroadcast(castBroadcast);
@@ -437,7 +437,7 @@ namespace Arawn.GameCreator2.Networking
                     if (data is NetworkAbilityEffectBroadcast effectBroadcast)
                         controller.ReceiveEffectBroadcast(effectBroadcast);
                     break;
-                    
+
                 // Cooldowns
                 case MessageTypes.CooldownRequest:
                     if (data is NetworkCooldownRequest cooldownReq)
@@ -453,18 +453,18 @@ namespace Arawn.GameCreator2.Networking
                     if (data is NetworkCooldownBroadcast cooldownBroadcast)
                         controller.ReceiveCooldownBroadcast(cooldownBroadcast);
                     break;
-                    
+
                 // Learning
                 case MessageTypes.AbilityLearnRequest:
                     if (data is NetworkAbilityLearnRequest learnReq)
                         controller.ProcessLearnRequest(senderId, learnReq);
                     break;
-                    
+
                 case MessageTypes.AbilityLearnResponse:
                     if (data is NetworkAbilityLearnResponse learnResp)
                         controller.ReceiveLearnResponse(learnResp);
                     break;
-                    
+
                 case MessageTypes.AbilityLearnBroadcast:
                     if (data is NetworkAbilityLearnBroadcast learnBroadcast)
                         controller.ReceiveLearnBroadcast(learnBroadcast);
@@ -480,7 +480,7 @@ namespace Arawn.GameCreator2.Networking
                     if (data is NetworkCastCancelResponse cancelResp)
                         controller.ReceiveCancelResponse(cancelResp);
                     break;
-                    
+
                 // Projectiles
                 case MessageTypes.ProjectileSpawnBroadcast:
                     if (data is NetworkProjectileSpawnBroadcast projSpawn)
@@ -491,7 +491,7 @@ namespace Arawn.GameCreator2.Networking
                     if (data is NetworkProjectileEventBroadcast projEvent)
                         controller.ReceiveProjectileEventBroadcast(projEvent);
                     break;
-                    
+
                 // Impacts
                 case MessageTypes.ImpactSpawnBroadcast:
                     if (data is NetworkImpactSpawnBroadcast impactSpawn)
@@ -504,11 +504,11 @@ namespace Arawn.GameCreator2.Networking
                     break;
             }
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // CONVENIENCE METHODS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>
         /// Request to cast an ability (convenience wrapper).
         /// </summary>
@@ -523,17 +523,17 @@ namespace Arawn.GameCreator2.Networking
                 Debug.LogWarning("[NetworkAbilitiesManager] Controller not available.");
                 return;
             }
-            
+
             uint networkId = GetNetworkIdForPawn(caster);
             if (networkId == 0)
             {
                 Debug.LogWarning("[NetworkAbilitiesManager] Caster not registered.");
                 return;
             }
-            
+
             NetworkAbilitiesController.Instance.RequestCastAbility(networkId, ability, target, callback);
         }
-        
+
         /// <summary>
         /// Request to cast ability at a position (convenience wrapper).
         /// </summary>
@@ -548,18 +548,18 @@ namespace Arawn.GameCreator2.Networking
                 Debug.LogWarning("[NetworkAbilitiesManager] Controller not available.");
                 return;
             }
-            
+
             uint networkId = GetNetworkIdForPawn(caster);
             if (networkId == 0)
             {
                 Debug.LogWarning("[NetworkAbilitiesManager] Caster not registered.");
                 return;
             }
-            
+
             NetworkAbilitiesController.Instance.RequestCastAbilityAutoConfirm(
                 networkId, ability, targetPosition, 0, callback);
         }
-        
+
         /// <summary>
         /// Request to cast ability at a target (convenience wrapper).
         /// </summary>
@@ -574,22 +574,22 @@ namespace Arawn.GameCreator2.Networking
                 Debug.LogWarning("[NetworkAbilitiesManager] Controller not available.");
                 return;
             }
-            
+
             uint casterNetworkId = GetNetworkIdForPawn(caster);
             uint targetNetworkId = GetNetworkIdForPawn(target);
-            
+
             if (casterNetworkId == 0)
             {
                 Debug.LogWarning("[NetworkAbilitiesManager] Caster not registered.");
                 return;
             }
-            
+
             Vector3 targetPos = target != null ? target.Position : Vector3.zero;
-            
+
             NetworkAbilitiesController.Instance.RequestCastAbilityAutoConfirm(
                 casterNetworkId, ability, targetPos, targetNetworkId, callback);
         }
-        
+
         /// <summary>
         /// Request to learn an ability (convenience wrapper).
         /// </summary>
@@ -600,13 +600,13 @@ namespace Arawn.GameCreator2.Networking
             Action<NetworkAbilityLearnResponse> callback = null)
         {
             if (!NetworkAbilitiesController.HasInstance) return;
-            
+
             uint networkId = GetNetworkIdForPawn(pawn);
             if (networkId == 0) return;
-            
+
             NetworkAbilitiesController.Instance.RequestLearnAbility(networkId, ability, slot, callback);
         }
-        
+
         /// <summary>
         /// Request to unlearn an ability (convenience wrapper).
         /// </summary>
@@ -616,39 +616,39 @@ namespace Arawn.GameCreator2.Networking
             Action<NetworkAbilityLearnResponse> callback = null)
         {
             if (!NetworkAbilitiesController.HasInstance) return;
-            
+
             uint networkId = GetNetworkIdForPawn(pawn);
             if (networkId == 0) return;
-            
+
             NetworkAbilitiesController.Instance.RequestUnlearnAbility(networkId, slot, callback);
         }
-        
+
         /// <summary>
         /// Check if an ability is on cooldown for a pawn.
         /// </summary>
         public static bool IsOnCooldown(Pawn pawn, Ability ability)
         {
             if (!NetworkAbilitiesController.HasInstance) return false;
-            
+
             uint networkId = GetNetworkIdForPawn(pawn);
             if (networkId == 0) return false;
-            
+
             return NetworkAbilitiesController.Instance.IsOnCooldown(networkId, ability.ID.Hash);
         }
-        
+
         /// <summary>
         /// Get remaining cooldown time for an ability.
         /// </summary>
         public static float GetCooldownRemaining(Pawn pawn, Ability ability)
         {
             if (!NetworkAbilitiesController.HasInstance) return 0f;
-            
+
             uint networkId = GetNetworkIdForPawn(pawn);
             if (networkId == 0) return 0f;
-            
+
             return NetworkAbilitiesController.Instance.GetCooldownRemaining(networkId, ability.ID.Hash);
         }
-        
+
         /// <summary>
         /// Server resets cooldown for a pawn's ability.
         /// </summary>
@@ -656,17 +656,17 @@ namespace Arawn.GameCreator2.Networking
         {
             if (!NetworkAbilitiesController.HasInstance) return;
             if (!NetworkAbilitiesController.Instance.IsServer) return;
-            
+
             uint networkId = GetNetworkIdForPawn(pawn);
             if (networkId == 0) return;
-            
+
             NetworkAbilitiesController.Instance.ServerResetCooldown(networkId, ability.ID.Hash);
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // SERVER PROJECTILE/IMPACT HELPERS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>
         /// Server spawns a projectile through the network system.
         /// Use this instead of direct Projectile.Get() for networked games.
@@ -682,13 +682,13 @@ namespace Arawn.GameCreator2.Networking
         {
             if (!NetworkAbilitiesController.HasInstance) return null;
             if (!NetworkAbilitiesController.Instance.IsServer) return null;
-            
+
             uint targetNetworkId = targetPawn != null ? GetNetworkIdForPawn(targetPawn) : 0;
-            
+
             return NetworkAbilitiesController.Instance.ServerSpawnProjectile(
                 castInstanceId, projectile, spawnPosition, direction, targetPosition, targetNetworkId, args);
         }
-        
+
         /// <summary>
         /// Server spawns an impact through the network system.
         /// Use this instead of direct Impact.Get() for networked games.
@@ -702,15 +702,15 @@ namespace Arawn.GameCreator2.Networking
         {
             if (!NetworkAbilitiesController.HasInstance) return null;
             if (!NetworkAbilitiesController.Instance.IsServer) return null;
-            
+
             return NetworkAbilitiesController.Instance.ServerSpawnImpact(
                 castInstanceId, impact, position, rotation, args);
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // STATISTICS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>
         /// Get registry statistics.
         /// </summary>
@@ -718,17 +718,17 @@ namespace Arawn.GameCreator2.Networking
         {
             return (s_AbilityRegistry.Count, s_ProjectileRegistry.Count, s_ImpactRegistry.Count, s_NetworkIdToPawn.Count);
         }
-        
+
         /// <summary>
         /// Get controller statistics.
         /// </summary>
         public static NetworkAbilitiesStats GetControllerStats()
         {
-            return NetworkAbilitiesController.HasInstance 
-                ? NetworkAbilitiesController.Instance.Stats 
+            return NetworkAbilitiesController.HasInstance
+                ? NetworkAbilitiesController.Instance.Stats
                 : default;
         }
-        
+
         /// <summary>
         /// Get current system state.
         /// </summary>

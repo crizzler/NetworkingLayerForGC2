@@ -15,7 +15,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
         // ════════════════════════════════════════════════════════════════════════════════════════
         // RELOAD NETWORKING
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>
         /// [Client] Request to start reloading the current weapon.
         /// </summary>
@@ -41,23 +41,23 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 LogDiagnosticsWarning("reload request ignored: no ShooterStance");
                 return false;
             }
-            
+
             // Don't request if already reloading
             if (m_ShooterStance.Reloading.IsReloading)
             {
                 LogDiagnostics("reload request ignored: already reloading");
                 return false;
             }
-            
+
             // Don't request if jammed
             if (m_CurrentWeaponData != null && m_CurrentWeaponData.IsJammed)
             {
                 LogDiagnostics("reload request ignored: weapon is jammed");
                 return false;
             }
-            
+
             uint networkId = m_NetworkCharacter != null ? m_NetworkCharacter.NetworkId : 0;
-            
+
             var request = new NetworkReloadRequest
             {
                 RequestId = GetNextRequestId(),
@@ -97,7 +97,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
             OnReloadRequestSent?.Invoke(request);
             return true;
         }
-        
+
         /// <summary>
         /// [Client] Request quick reload (active reload mechanic).
         /// </summary>
@@ -108,9 +108,9 @@ namespace Arawn.GameCreator2.Networking.Shooter
             if (m_IsServer && !m_IsLocalClient) return false;
             if (m_CurrentWeapon == null) return false;
             if (!m_ShooterStance.Reloading.IsReloading) return false;
-            
+
             uint networkId = m_NetworkCharacter != null ? m_NetworkCharacter.NetworkId : 0;
-            
+
             var request = new NetworkQuickReloadRequest
             {
                 RequestId = GetNextRequestId(),
@@ -120,13 +120,13 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 WeaponHash = m_CurrentWeapon.Id.Hash,
                 AttemptTime = normalizedTime
             };
-            
+
             // Quick reload is sent immediately, no pending tracking needed
             // The response will be in the reload broadcast
             OnQuickReloadRequestSent?.Invoke(request);
             return true;
         }
-        
+
         /// <summary>
         /// [Server] Process a reload request from a client.
         /// </summary>
@@ -147,7 +147,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                     RejectionReason = ReloadRejectionReason.InvalidState
                 };
             }
-            
+
             // Validate weapon is equipped
             if (m_CurrentWeapon == null || m_CurrentWeapon.Id.Hash != request.WeaponHash)
             {
@@ -161,7 +161,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                     RejectionReason = ReloadRejectionReason.WeaponNotEquipped
                 };
             }
-            
+
             // Host-owned players start their local reload optimistically before the
             // loopback request is validated on the same controller instance.
             bool hostLocalReloadAlreadyStarted = m_IsLocalClient &&
@@ -184,7 +184,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                     RejectionReason = ReloadRejectionReason.AlreadyReloading
                 };
             }
-            
+
             // Check if jammed
             if (m_CurrentWeaponData != null && m_CurrentWeaponData.IsJammed)
             {
@@ -198,7 +198,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                     RejectionReason = ReloadRejectionReason.WeaponJammed
                 };
             }
-            
+
             // Check magazine not full
             var munition = m_Character.Combat.RequestMunition(m_CurrentWeapon) as ShooterMunition;
             if (munition != null)
@@ -217,7 +217,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                     };
                 }
             }
-            
+
             // Get quick reload window from the reload asset
             byte quickStart = 0;
             byte quickEnd = 0;
@@ -249,7 +249,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                     $"[ShooterAmmoDebug] server reload already started locally req={request.RequestId} " +
                     $"{BuildAmmoDebug(m_CurrentWeapon)}");
             }
-            
+
             return new NetworkReloadResponse
             {
                 RequestId = request.RequestId,
@@ -259,7 +259,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 QuickReloadWindowEnd = quickEnd
             };
         }
-        
+
         /// <summary>
         /// [Server] Process a quick reload request from a client.
         /// </summary>
@@ -279,7 +279,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
             }
             return succeeded;
         }
-        
+
         /// <summary>
         /// [Client] Receive reload response from server.
         /// </summary>
@@ -293,13 +293,13 @@ namespace Arawn.GameCreator2.Networking.Shooter
             {
                 Debug.LogWarning($"[NetworkShooterController] Reload response dropped (stale/unknown): req={response.RequestId}, corr={response.CorrelationId}");
             }
-            
+
             if (!response.Validated && m_LogShots)
             {
                 Debug.Log($"[NetworkShooterController] Reload rejected: {response.RejectionReason}");
             }
         }
-        
+
         /// <summary>
         /// [All] Receive reload broadcast from server.
         /// </summary>
@@ -471,11 +471,11 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 $"{BuildAmmoDebug(m_CurrentWeapon)}");
             return true;
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // JAM / FIX NETWORKING
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>
         /// [Client] Request to fix a jammed weapon.
         /// </summary>
@@ -486,9 +486,9 @@ namespace Arawn.GameCreator2.Networking.Shooter
             if (m_CurrentWeapon == null) return false;
             if (m_CurrentWeaponData == null || !m_CurrentWeaponData.IsJammed) return false;
             if (m_ShooterStance.Jamming.IsFixing) return false;
-            
+
             uint networkId = m_NetworkCharacter != null ? m_NetworkCharacter.NetworkId : 0;
-            
+
             var request = new NetworkFixJamRequest
             {
                 RequestId = GetNextRequestId(),
@@ -511,11 +511,11 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 Request = request,
                 SentTime = Time.time
             };
-            
+
             OnFixJamRequestSent?.Invoke(request);
             return true;
         }
-        
+
         /// <summary>
         /// [Server] Process a fix jam request from a client.
         /// </summary>
@@ -530,7 +530,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                     RejectionReason = FixJamRejectionReason.InvalidState
                 };
             }
-            
+
             // Validate weapon is equipped
             if (m_CurrentWeapon == null || m_CurrentWeapon.Id.Hash != request.WeaponHash)
             {
@@ -541,7 +541,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                     RejectionReason = FixJamRejectionReason.WeaponNotEquipped
                 };
             }
-            
+
             // Check weapon is actually jammed
             if (m_CurrentWeaponData == null || !m_CurrentWeaponData.IsJammed)
             {
@@ -552,7 +552,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                     RejectionReason = FixJamRejectionReason.WeaponNotJammed
                 };
             }
-            
+
             // Check not already fixing
             if (m_ShooterStance.Jamming.IsFixing)
             {
@@ -563,7 +563,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                     RejectionReason = FixJamRejectionReason.AlreadyFixing
                 };
             }
-            
+
             return new NetworkFixJamResponse
             {
                 RequestId = request.RequestId,
@@ -571,7 +571,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 RejectionReason = FixJamRejectionReason.None
             };
         }
-        
+
         /// <summary>
         /// [Client] Receive fix jam response from server.
         /// </summary>
@@ -581,44 +581,44 @@ namespace Arawn.GameCreator2.Networking.Shooter
             {
                 Debug.LogWarning($"[NetworkShooterController] Fix-jam response dropped (stale/unknown): req={response.RequestId}, corr={response.CorrelationId}");
             }
-            
+
             if (!response.Validated && m_LogShots)
             {
                 Debug.Log($"[NetworkShooterController] Fix jam rejected: {response.RejectionReason}");
             }
         }
-        
+
         /// <summary>
         /// [All] Receive jam broadcast from server.
         /// </summary>
         public void ReceiveJamBroadcast(NetworkJamBroadcast broadcast)
         {
             OnWeaponJammed?.Invoke(broadcast);
-            
+
             // Apply to every non-owner presentation, including a host observing a remote player.
             if (!m_IsLocalClient && m_CurrentWeaponData != null)
             {
                 m_CurrentWeaponData.IsJammed = true;
             }
         }
-        
+
         /// <summary>
         /// [All] Receive fix jam broadcast from server.
         /// </summary>
         public void ReceiveFixJamBroadcast(NetworkFixJamBroadcast broadcast)
         {
             OnJamFixed?.Invoke(broadcast);
-            
+
             if (!m_IsLocalClient && m_CurrentWeaponData != null && broadcast.Success)
             {
                 m_CurrentWeaponData.IsJammed = false;
             }
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // CHARGE NETWORKING
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>
         /// [Client] Request to start charging the weapon.
         /// </summary>
@@ -629,16 +629,16 @@ namespace Arawn.GameCreator2.Networking.Shooter
             if (m_CurrentWeapon == null) return false;
             if (m_CurrentWeapon.Fire.Mode != ShootMode.Charge) return false;
             if (m_IsCharging) return false;
-            
+
             // Check basic requirements
             if (m_CurrentWeaponData != null && m_CurrentWeaponData.IsJammed) return false;
             if (m_ShooterStance.Reloading.IsReloading) return false;
-            
+
             var munition = m_Character.Combat.RequestMunition(m_CurrentWeapon) as ShooterMunition;
             if (munition != null && munition.InMagazine <= 0) return false;
-            
+
             uint networkId = m_NetworkCharacter != null ? m_NetworkCharacter.NetworkId : 0;
-            
+
             var request = new NetworkChargeStartRequest
             {
                 RequestId = GetNextRequestId(),
@@ -661,7 +661,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 Request = request,
                 SentTime = Time.time
             };
-            
+
             // Start charging optimistically
             m_IsCharging = true;
             m_ChargeStartTime = Time.time;
@@ -669,7 +669,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
             OnChargeStartRequestSent?.Invoke(request);
             return true;
         }
-        
+
         /// <summary>
         /// [Client] Request to cancel charging.
         /// </summary>
@@ -678,9 +678,9 @@ namespace Arawn.GameCreator2.Networking.Shooter
         {
             if (m_IsServer && !m_IsLocalClient) return false;
             if (!m_IsCharging) return false;
-            
+
             uint networkId = m_NetworkCharacter != null ? m_NetworkCharacter.NetworkId : 0;
-            
+
             var request = new NetworkChargeCancelRequest
             {
                 RequestId = GetNextRequestId(),
@@ -690,7 +690,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 WeaponHash = m_CurrentWeapon?.Id.Hash ?? 0,
                 ClientTimestamp = GetNetworkTime()
             };
-            
+
             m_IsCharging = false;
 
             OnChargeCancelRequestSent?.Invoke(request);
@@ -708,7 +708,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
             m_IsCharging = false;
             return true;
         }
-        
+
         /// <summary>
         /// [Server] Process a charge start request from a client.
         /// </summary>
@@ -723,7 +723,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                     RejectionReason = ChargeRejectionReason.InvalidState
                 };
             }
-            
+
             // Validate weapon is equipped
             if (m_CurrentWeapon == null || m_CurrentWeapon.Id.Hash != request.WeaponHash)
             {
@@ -734,7 +734,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                     RejectionReason = ChargeRejectionReason.WeaponNotEquipped
                 };
             }
-            
+
             // Validate weapon is charge type
             if (m_CurrentWeapon.Fire.Mode != ShootMode.Charge)
             {
@@ -745,7 +745,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                     RejectionReason = ChargeRejectionReason.WeaponNotChargeable
                 };
             }
-            
+
             // Check not jammed
             if (m_CurrentWeaponData != null && m_CurrentWeaponData.IsJammed)
             {
@@ -756,7 +756,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                     RejectionReason = ChargeRejectionReason.WeaponJammed
                 };
             }
-            
+
             // Check not reloading
             if (m_ShooterStance.Reloading.IsReloading)
             {
@@ -767,7 +767,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                     RejectionReason = ChargeRejectionReason.Reloading
                 };
             }
-            
+
             // Check has ammo
             var munition = m_Character.Combat.RequestMunition(m_CurrentWeapon) as ShooterMunition;
             if (munition != null && munition.InMagazine <= 0)
@@ -779,11 +779,11 @@ namespace Arawn.GameCreator2.Networking.Shooter
                     RejectionReason = ChargeRejectionReason.NoAmmo
                 };
             }
-            
+
             // Mark as charging on server
             m_IsCharging = true;
             m_ChargeStartTime = Time.time;
-            
+
             return new NetworkChargeStartResponse
             {
                 RequestId = request.RequestId,
@@ -791,7 +791,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 RejectionReason = ChargeRejectionReason.None
             };
         }
-        
+
         /// <summary>
         /// [Client] Receive charge start response from server.
         /// </summary>
@@ -801,38 +801,38 @@ namespace Arawn.GameCreator2.Networking.Shooter
             {
                 Debug.LogWarning($"[NetworkShooterController] Charge response dropped (stale/unknown): req={response.RequestId}, corr={response.CorrelationId}");
             }
-            
+
             if (!response.Validated)
             {
                 // Rollback optimistic charge
                 m_IsCharging = false;
-                
+
                 if (m_LogShots)
                 {
                     Debug.Log($"[NetworkShooterController] Charge rejected: {response.RejectionReason}");
                 }
             }
         }
-        
+
         /// <summary>
         /// [All] Receive charge broadcast from server.
         /// </summary>
         public void ReceiveChargeBroadcast(NetworkChargeBroadcast broadcast)
         {
             OnChargeBroadcastReceived?.Invoke(broadcast);
-            
+
             // Includes host-side presentation of remote actors.
             if (!m_IsLocalClient)
             {
                 float chargeRatio = broadcast.ChargeRatio / 255f;
-                
+
                 switch (broadcast.EventType)
                 {
                     case ChargeEventType.Started:
                         m_IsCharging = true;
                         m_ChargeStartTime = Time.time;
                         break;
-                        
+
                     case ChargeEventType.Released:
                     case ChargeEventType.Cancelled:
                     case ChargeEventType.AutoReleased:
@@ -841,7 +841,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 }
             }
         }
-        
+
         /// <summary>
         /// Get current charge ratio (0-1).
         /// </summary>
@@ -849,18 +849,18 @@ namespace Arawn.GameCreator2.Networking.Shooter
         {
             if (!m_IsCharging || m_CurrentWeapon == null) return 0f;
             if (m_CurrentWeaponData == null) return 0f;
-            
+
             float maxChargeTime = m_CurrentWeapon.Fire.MaxChargeTime(m_CurrentWeaponData.WeaponArgs);
             if (maxChargeTime <= 0f) return 1f;
-            
+
             float elapsed = Time.time - m_ChargeStartTime;
             return Mathf.Clamp01(elapsed / maxChargeTime);
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // SIGHT SWITCH NETWORKING
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         /// <summary>
         /// [Client] Request to switch to a different sight.
         /// </summary>
@@ -870,20 +870,20 @@ namespace Arawn.GameCreator2.Networking.Shooter
         {
             if (m_IsServer && !m_IsLocalClient) return false;
             if (m_CurrentWeapon == null) return false;
-            
+
             // Don't switch if already using this sight
             if (m_CurrentWeaponData != null && m_CurrentWeaponData.SightId == sightId) return false;
-            
+
             // Don't switch while reloading or shooting
             if (m_ShooterStance.Reloading.IsReloading) return false;
             if (m_ShooterStance.Shooting.IsShootingAnimation) return false;
-            
+
             // Validate sight exists on weapon
             var sightItem = m_CurrentWeapon.Sights.Get(sightId);
             if (sightItem == null) return false;
-            
+
             uint networkId = m_NetworkCharacter != null ? m_NetworkCharacter.NetworkId : 0;
-            
+
             var request = new NetworkSightSwitchRequest
             {
                 RequestId = GetNextRequestId(),
@@ -911,7 +911,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
             OnSightSwitchRequestSent?.Invoke(request);
             return true;
         }
-        
+
         /// <summary>
         /// [Server] Process a sight switch request from a client.
         /// </summary>
@@ -926,7 +926,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                     RejectionReason = SightSwitchRejectionReason.InvalidState
                 };
             }
-            
+
             // Validate weapon is equipped
             if (m_CurrentWeapon == null || m_CurrentWeapon.Id.Hash != request.WeaponHash)
             {
@@ -937,7 +937,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                     RejectionReason = SightSwitchRejectionReason.WeaponNotEquipped
                 };
             }
-            
+
             // Check not reloading
             if (m_ShooterStance.Reloading.IsReloading)
             {
@@ -948,7 +948,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                     RejectionReason = SightSwitchRejectionReason.Reloading
                 };
             }
-            
+
             // Check not shooting
             if (m_ShooterStance.Shooting.IsShootingAnimation)
             {
@@ -959,11 +959,11 @@ namespace Arawn.GameCreator2.Networking.Shooter
                     RejectionReason = SightSwitchRejectionReason.Shooting
                 };
             }
-            
+
             // Validate sight exists on weapon
             // We need to find the sight by hash
             bool sightFound = TryResolveSightIdByHash(m_CurrentWeapon.Sights, request.NewSightHash, out _);
-            
+
             if (!sightFound)
             {
                 return new NetworkSightSwitchResponse
@@ -973,7 +973,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                     RejectionReason = SightSwitchRejectionReason.SightNotAvailable
                 };
             }
-            
+
             // Check not already using this sight
             if (m_CurrentWeaponData != null && m_CurrentWeaponData.SightId.Hash == request.NewSightHash)
             {
@@ -986,7 +986,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
             }
 
             ApplyRemoteSightHash(m_CurrentWeapon, request.NewSightHash);
-            
+
             return new NetworkSightSwitchResponse
             {
                 RequestId = request.RequestId,
@@ -994,7 +994,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 RejectionReason = SightSwitchRejectionReason.None
             };
         }
-        
+
         /// <summary>
         /// [Client] Receive sight switch response from server.
         /// </summary>
@@ -1004,26 +1004,26 @@ namespace Arawn.GameCreator2.Networking.Shooter
             {
                 Debug.LogWarning($"[NetworkShooterController] Sight-switch response dropped (stale/unknown): req={response.RequestId}, corr={response.CorrelationId}");
             }
-            
+
             if (!response.Validated && m_LogShots)
             {
                 Debug.Log($"[NetworkShooterController] Sight switch rejected: {response.RejectionReason}");
             }
         }
-        
+
         /// <summary>
         /// [All] Receive sight switch broadcast from server.
         /// </summary>
         public void ReceiveSightSwitchBroadcast(NetworkSightSwitchBroadcast broadcast)
         {
             OnSightSwitchBroadcastReceived?.Invoke(broadcast);
-            
+
             if (!m_IsLocalClient && m_CurrentWeaponData != null)
             {
                 ApplyRemoteSightHash(m_CurrentWeapon, broadcast.NewSightHash);
             }
         }
-        
+
     }
 }
 #endif

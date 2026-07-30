@@ -13,7 +13,8 @@
     "precompiledReferences": [],
     "autoReferenced": true,
     "defineConstraints": [
-        "GC2_INVENTORY"
+        "GC2_INVENTORY",
+        "GC2_NETWORK_INVENTORY_PATCHED"
     ],
     "versionDefines": [
         {

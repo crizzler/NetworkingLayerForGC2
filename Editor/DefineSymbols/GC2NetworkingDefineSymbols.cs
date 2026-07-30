@@ -14,6 +14,7 @@ namespace Arawn.GameCreator2.Networking.Editor
     public static class GC2NetworkingDefineSymbols
     {
         private const string SYMBOL_INVENTORY = "GC2_INVENTORY";
+        public const string SYMBOL_INVENTORY_AUTHORITY_PATCH = "GC2_NETWORK_INVENTORY_PATCHED";
         private const string SYMBOL_STATS = "GC2_STATS";
         private const string SYMBOL_SHOOTER = "GC2_SHOOTER";
         private const string SYMBOL_MELEE = "GC2_MELEE";
@@ -26,6 +27,8 @@ namespace Arawn.GameCreator2.Networking.Editor
 
         private const string GC2_PACKAGES_ROOT = "Assets/Plugins/GameCreator/Packages";
         private const string GC2_INVENTORY_DIR = GC2_PACKAGES_ROOT + "/Inventory";
+        private const string GC2_INVENTORY_PATCH_ABI_FILE =
+            GC2_INVENTORY_DIR + "/Runtime/Classes/Bag/Content/TBagContent.cs";
         private const string GC2_STATS_DIR = GC2_PACKAGES_ROOT + "/Stats";
         private const string GC2_SHOOTER_DIR = GC2_PACKAGES_ROOT + "/Shooter";
         private const string GC2_MELEE_DIR = GC2_PACKAGES_ROOT + "/Melee";
@@ -48,10 +51,10 @@ namespace Arawn.GameCreator2.Networking.Editor
             QueueUpdate();
         }
 
-        public static void RefreshNow()
+        public static void RefreshNow(bool manageReloadLock = true)
         {
             s_NamespaceCache.Clear();
-            UpdateDefineSymbols();
+            UpdateDefineSymbols(manageReloadLock);
         }
 
         private static void OnAfterAssemblyReload()
@@ -72,7 +75,7 @@ namespace Arawn.GameCreator2.Networking.Editor
             };
         }
 
-        private static void UpdateDefineSymbols()
+        private static void UpdateDefineSymbols(bool manageReloadLock = true)
         {
             if (s_IsUpdating) return;
 
@@ -91,6 +94,10 @@ namespace Arawn.GameCreator2.Networking.Editor
                     .ToList();
 
                 ManageSymbol(symbolList, SYMBOL_INVENTORY, IsInventoryInstalled());
+                ManageSymbol(
+                    symbolList,
+                    SYMBOL_INVENTORY_AUTHORITY_PATCH,
+                    IsInventoryInstalled() && IsInventoryAuthorityPatchApplied());
                 ManageSymbol(symbolList, SYMBOL_STATS, IsStatsInstalled());
                 ManageSymbol(symbolList, SYMBOL_SHOOTER, IsShooterInstalled());
                 ManageSymbol(symbolList, SYMBOL_MELEE, IsMeleeInstalled());
@@ -104,7 +111,7 @@ namespace Arawn.GameCreator2.Networking.Editor
                 string newSymbols = string.Join(";", symbolList);
                 if (newSymbols == currentSymbols) return;
 
-                EditorApplication.LockReloadAssemblies();
+                if (manageReloadLock) EditorApplication.LockReloadAssemblies();
                 try
                 {
                     PlayerSettings.SetScriptingDefineSymbols(namedBuildTarget, newSymbols);
@@ -112,7 +119,7 @@ namespace Arawn.GameCreator2.Networking.Editor
                 }
                 finally
                 {
-                    EditorApplication.UnlockReloadAssemblies();
+                    if (manageReloadLock) EditorApplication.UnlockReloadAssemblies();
                 }
             }
             catch (Exception exception)
@@ -128,6 +135,43 @@ namespace Arawn.GameCreator2.Networking.Editor
         private static bool IsInventoryInstalled()
         {
             return Directory.Exists(GC2_INVENTORY_DIR) || IsNamespacePresentCached("GameCreator.Runtime.Inventory");
+        }
+
+        public static bool IsInventoryAuthorityPatchApplied()
+        {
+            if (!File.Exists(GC2_INVENTORY_PATCH_ABI_FILE)) return false;
+
+            try
+            {
+                if (!HasInventoryAuthorityPatchAbi(File.ReadAllText(GC2_INVENTORY_PATCH_ABI_FILE)))
+                {
+                    return false;
+                }
+
+                // The define enables code that consumes hook members spread across all twelve
+                // patched Inventory files. Reuse the patcher's complete structural verification;
+                // a partial or stale patch must never enable that compile-time ABI.
+                return new Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches.InventoryPatcher()
+                    .IsPatched();
+            }
+            catch (IOException)
+            {
+                return false;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return false;
+            }
+        }
+
+        public static bool HasInventoryAuthorityPatchAbi(string content)
+        {
+            if (string.IsNullOrEmpty(content)) return false;
+
+            return content.Contains("// [GC2_NETWORK_PATCH_Inventory_", StringComparison.Ordinal) &&
+                   content.Contains("public const int NetworkPatchRevision = 300;", StringComparison.Ordinal) &&
+                   content.Contains("public enum NetworkInventoryInterceptResult", StringComparison.Ordinal) &&
+                   content.Contains("NetworkInstructionAddItemInterceptor", StringComparison.Ordinal);
         }
 
         private static bool IsStatsInstalled()

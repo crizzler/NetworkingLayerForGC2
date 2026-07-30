@@ -634,7 +634,7 @@ namespace Arawn.GameCreator2.Networking
         // ════════════════════════════════════════════════════════════════════
 
         /// <summary>
-        /// [Server] Build a bundle without sending it. Useful for diagnostics 
+        /// [Server] Build a bundle without sending it. Useful for diagnostics
         /// or size estimation.
         /// </summary>
         public LateJoinBundle BuildBundle(ulong clientId)

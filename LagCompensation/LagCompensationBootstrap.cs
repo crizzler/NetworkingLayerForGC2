@@ -1,3 +1,4 @@
+using System;
 using UnityEngine;
 
 namespace Arawn.NetworkingCore.LagCompensation
@@ -84,6 +85,12 @@ namespace Arawn.NetworkingCore.LagCompensation
         /// </summary>
         public bool IsInitialized => m_IsInitialized;
 
+        /// <summary>
+        /// Optional authoritative clock supplied by the active transport. Combat requests and
+        /// history samples must use the same time domain for rewind validation.
+        /// </summary>
+        public Func<double> GetServerTimeFunc { get; set; }
+
         // UNITY LIFECYCLE ────────────────────────────────────────────────────
 
         private void Start()
@@ -96,19 +103,29 @@ namespace Arawn.NetworkingCore.LagCompensation
 
         private void FixedUpdate()
         {
-            if (!m_IsServer || !m_IsInitialized) return;
+            if (!m_IsServer) return;
 
-            var timestamp = NetworkTimestamp.FromServerTime(Time.timeAsDouble);
-            LagCompensationManager.Instance.RecordFrame(timestamp);
+            if (!m_IsInitialized ||
+                !LagCompensationManager.TryGetInitialized(out LagCompensationManager manager))
+            {
+                m_IsInitialized = false;
+                InitializeManager();
+                if (!LagCompensationManager.TryGetInitialized(out manager)) return;
+            }
+
+            var timestamp = NetworkTimestamp.FromServerTime(GetServerTime());
+            manager.RecordFrame(timestamp);
         }
 
         private void OnDestroy()
         {
-            if (m_IsInitialized && LagCompensationManager.IsInitialized)
+            if (m_IsInitialized &&
+                LagCompensationManager.TryGetInitialized(out LagCompensationManager manager))
             {
-                LagCompensationManager.Instance.Dispose();
-                m_IsInitialized = false;
+                manager.Dispose();
             }
+
+            m_IsInitialized = false;
         }
 
         // PUBLIC API ─────────────────────────────────────────────────────────
@@ -123,14 +140,17 @@ namespace Arawn.NetworkingCore.LagCompensation
         {
             m_IsServer = isServer;
 
-            if (isServer && !m_IsInitialized)
+            if (isServer && (!m_IsInitialized || !LagCompensationManager.IsInitialized))
             {
                 InitializeManager();
             }
             else if (!isServer && m_IsInitialized)
             {
                 // Switched away from server (unlikely, but handle gracefully)
-                LagCompensationManager.Instance.Dispose();
+                if (LagCompensationManager.TryGetInitialized(out LagCompensationManager manager))
+                {
+                    manager.Dispose();
+                }
                 m_IsInitialized = false;
             }
         }
@@ -154,10 +174,15 @@ namespace Arawn.NetworkingCore.LagCompensation
 
         private void InitializeManager()
         {
-            if (m_IsInitialized) return;
+            if (m_IsInitialized && LagCompensationManager.IsInitialized) return;
 
             var config = BuildConfig();
-            LagCompensationManager.Initialize(config);
+            LagCompensationManager manager = LagCompensationManager.Initialize(config);
+
+            // Establish the history clock before characters register. Character adapters seed
+            // their first snapshot from LastTimestamp, closing the startup warm-up gap without
+            // mixing Unity uptime and transport tick time.
+            manager.RecordFrame(NetworkTimestamp.FromServerTime(GetServerTime()));
 
             m_IsServer = true;
             m_IsInitialized = true;
@@ -165,6 +190,27 @@ namespace Arawn.NetworkingCore.LagCompensation
             Debug.Log("[LagCompensation] Manager initialized via bootstrap. " +
                       $"History={m_HistorySize}, Rate={m_SnapshotRate}Hz, " +
                       $"MaxRewind={m_MaxRewindTime}s");
+        }
+
+        private double GetServerTime()
+        {
+            if (GetServerTimeFunc != null)
+            {
+                try
+                {
+                    double serverTime = GetServerTimeFunc.Invoke();
+                    if (!double.IsNaN(serverTime) && !double.IsInfinity(serverTime))
+                    {
+                        return serverTime;
+                    }
+                }
+                catch (Exception exception)
+                {
+                    Debug.LogException(exception, this);
+                }
+            }
+
+            return Time.timeAsDouble;
         }
     }
 }

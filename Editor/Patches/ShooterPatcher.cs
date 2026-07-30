@@ -11,18 +11,20 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
     public class ShooterPatcher : GC2PatcherBase
     {
         public override string ModuleName => "Shooter";
-        public override string PatchVersion => "2.2.3-shooter";
+        public override string PatchVersion => "2.2.8-shooter";
         public override string DisplayName => "Shooter (Game Creator 2)";
-        
+
         public override string PatchDescription =>
             "This will modify the Game Creator 2 Shooter source code to add\n" +
             "server-authoritative networking hooks.\n\n" +
             "ShooterStance.PullTrigger/ReleaseTrigger will have network validation.\n" +
             "ShooterStance.Reload will have network hooks.\n" +
-            "WeaponData.Shoot will be intercepted for hit validation.\n" +
-            "ShooterWeapon.OnHit will report hit claims for server validation.\n" +
+            "WeaponData.Shoot will be intercepted for validation.\n" +
+            "ShooterWeapon.OnShoot will report the exact spread-adjusted shot direction.\n" +
+            "ShooterWeapon.OnHit will use a cancellable validator before native side effects.\n" +
+            "Native reactions report their exact authored power and duration for synchronized playback.\n" +
             "Also fixes obsolete API warnings in editor files.";
-        
+
         protected override string[] FilesToPatch => new[]
         {
             "Plugins/GameCreator/Packages/Shooter/Runtime/Classes/Stances/ShooterStance.cs",
@@ -70,8 +72,17 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
             {
                 return new[]
                 {
+                    "NetworkOnHitValidator",
+                    "NetworkOnHitValidator.Invoke",
+                    "NetworkOnHitResolved",
+                    "NetworkOnHitResolved?.Invoke",
+                    "networkBlockType = shieldOutput.Type",
+                    "networkReactionOutput = target.Combat.GetHitReaction",
+                    "networkReactionPower = reactionInput.Power",
                     "NetworkHitDetected",
-                    "NetworkHitDetected?.Invoke"
+                    "NetworkHitDetected?.Invoke",
+                    "NetworkShotFiredExact",
+                    "NetworkShotFiredExact?.Invoke"
                 };
             }
 
@@ -112,6 +123,12 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
             {
                 return new System.Collections.Generic.Dictionary<string, int>
                 {
+                    { "NetworkShotFiredExact?.Invoke", 1 },
+                    { "NetworkOnHitValidator.Invoke", 1 },
+                    { "NetworkOnHitResolved?.Invoke", 1 },
+                    { "networkBlockType = shieldOutput.Type", 1 },
+                    { "networkReactionOutput = target.Combat.GetHitReaction", 1 },
+                    { "networkReactionPower = reactionInput.Power", 1 },
                     { "NetworkHitDetected?.Invoke", 1 }
                 };
             }
@@ -152,6 +169,16 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
             {
                 return new System.Collections.Generic.Dictionary<string, int>
                 {
+                    { @"NetworkShotFiredExact\?\.Invoke\(data\)", 1 },
+                    { @"NetworkOnHitValidator\.Invoke\(data,\s*args\)", 1 },
+                    { @"NetworkOnHitResolved\?\.Invoke\(data,\s*args,\s*networkBlockType,\s*networkReactionOutput,\s*networkReactionPower\)", 1 },
+                    {
+                        @"(?s)NetworkOnHitResolved\?\.Invoke\(data,\s*args,\s*networkBlockType,\s*networkReactionOutput,\s*networkReactionPower\)\s*;.*?_\s*=\s*this\.m_OnHit\.Run\(args\)",
+                        1
+                    },
+                    { @"networkBlockType\s*=\s*shieldOutput\.Type", 1 },
+                    { @"networkReactionOutput\s*=\s*target\.Combat\.GetHitReaction", 1 },
+                    { @"networkReactionPower\s*=\s*reactionInput\.Power", 1 },
                     { @"NetworkHitDetected\?\.Invoke\(", 1 }
                 };
             }
@@ -166,7 +193,7 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
 
             return base.GetRequiredPatchRegexTokenCounts(relativePath);
         }
-        
+
         protected override bool PatchFile(string relativePath)
         {
             string content = ReadFile(relativePath);
@@ -174,7 +201,7 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
             ExistingPatchState existingPatchState = PrepareContentForPatch(relativePath, ref content);
             if (existingPatchState == ExistingPatchState.SkipAlreadyPatched) return true;
             if (existingPatchState == ExistingPatchState.Failed) return false;
-            
+
             if (relativePath.EndsWith("ShooterStance.cs"))
             {
                 return PatchShooterStance(relativePath, content);
@@ -195,10 +222,10 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
             {
                 return PatchEditorFile(relativePath, content);
             }
-            
+
             return false;
         }
-        
+
         private bool PatchShooterStance(string relativePath, string content)
         {
             // Add using statements and patch marker
@@ -231,22 +258,22 @@ namespace GameCreator.Runtime.Shooter
     public class ShooterStance : TStance
     {
         // [GC2_NETWORK_PATCH] Static hooks for server-authoritative networking
-        
+
         /// <summary>Validates if pulling trigger should proceed locally.</summary>
         public static Func<ShooterStance, ShooterWeapon, bool> NetworkPullTriggerValidator;
-        
+
         /// <summary>Validates if releasing trigger should proceed locally.</summary>
         public static Func<ShooterStance, ShooterWeapon, bool> NetworkReleaseTriggerValidator;
-        
+
         /// <summary>Validates if reload should proceed locally.</summary>
         public static Func<ShooterStance, ShooterWeapon, bool> NetworkReloadValidator;
-        
+
         /// <summary>Called when a shot is fired (for network sync).</summary>
         public static Action<ShooterStance, ShooterWeapon, Vector3, Vector3> NetworkShotFired;
-        
+
         /// <summary>Returns true if networking hooks are active.</summary>
         public static bool IsNetworkingActive => NetworkPullTriggerValidator != null;
-        
+
         // [GC2_NETWORK_PATCH_END]
 ";
 
@@ -257,28 +284,28 @@ namespace GameCreator.Runtime.Shooter
                 Debug.LogError("[GC2 Networking] Could not add network hook header in ShooterStance.cs.");
                 return false;
             }
-            
+
             // Patch PullTrigger method
             string originalPullTrigger = @"        public void PullTrigger(ShooterWeapon optionalWeapon)
         {
             ShooterWeapon shooterWeapon = this.GetWeapon(optionalWeapon);
             if (shooterWeapon == null) return;
-            
+
             int shooterWeaponId = shooterWeapon.GetInstanceID();
             if (!this.m_Equipment.TryGetValue(shooterWeaponId, out WeaponData weaponData)) return;";
-            
+
             string patchedPullTrigger = @"        public void PullTrigger(ShooterWeapon optionalWeapon)
         {
             ShooterWeapon shooterWeapon = this.GetWeapon(optionalWeapon);
             if (shooterWeapon == null) return;
-            
+
             // [GC2_NETWORK_PATCH] Server authority check
             if (NetworkPullTriggerValidator != null && !NetworkPullTriggerValidator.Invoke(this, shooterWeapon))
             {
                 return; // Network will handle this
             }
             // [GC2_NETWORK_PATCH_END]
-            
+
             int shooterWeaponId = shooterWeapon.GetInstanceID();
             if (!this.m_Equipment.TryGetValue(shooterWeaponId, out WeaponData weaponData)) return;";
 
@@ -288,37 +315,37 @@ namespace GameCreator.Runtime.Shooter
                 Debug.LogError("[GC2 Networking] Could not find expected PullTrigger method in ShooterStance.cs.");
                 return false;
             }
-            
+
             // Patch ReleaseTrigger method
             string originalReleaseTrigger = @"        public void ReleaseTrigger(ShooterWeapon optionalWeapon)
         {
             ShooterWeapon shooterWeapon = this.GetWeapon(optionalWeapon);
             if (shooterWeapon == null) return;
-            
+
             int shooterWeaponId = shooterWeapon.GetInstanceID();
             if (!this.m_Equipment.TryGetValue(shooterWeaponId, out WeaponData weaponData)) return;
-            
+
             weaponData.OnReleaseTrigger();
         }";
-            
+
             string patchedReleaseTrigger = @"        public void ReleaseTrigger(ShooterWeapon optionalWeapon)
         {
             ShooterWeapon shooterWeapon = this.GetWeapon(optionalWeapon);
             if (shooterWeapon == null) return;
-            
+
             // [GC2_NETWORK_PATCH] Server authority check
             if (NetworkReleaseTriggerValidator != null && !NetworkReleaseTriggerValidator.Invoke(this, shooterWeapon))
             {
                 return; // Network will handle this
             }
             // [GC2_NETWORK_PATCH_END]
-            
+
             int shooterWeaponId = shooterWeapon.GetInstanceID();
             if (!this.m_Equipment.TryGetValue(shooterWeaponId, out WeaponData weaponData)) return;
-            
+
             weaponData.OnReleaseTrigger();
         }
-        
+
         // [GC2_NETWORK_PATCH] Server-side direct release trigger (bypasses validation)
         public void ReleaseTriggerDirect(ShooterWeapon optionalWeapon)
         {
@@ -336,31 +363,31 @@ namespace GameCreator.Runtime.Shooter
                 Debug.LogError("[GC2 Networking] Could not find expected ReleaseTrigger method in ShooterStance.cs.");
                 return false;
             }
-            
+
             // Patch Reload method
             string originalReload = @"        public async Task Reload(ShooterWeapon optionalWeapon)
         {
             ShooterWeapon shooterWeapon = this.GetWeapon(optionalWeapon);
             if (shooterWeapon == null) return;
-            
+
             await this.Reloading.Reload(shooterWeapon);
         }";
-            
+
             string patchedReload = @"        public async Task Reload(ShooterWeapon optionalWeapon)
         {
             ShooterWeapon shooterWeapon = this.GetWeapon(optionalWeapon);
             if (shooterWeapon == null) return;
-            
+
             // [GC2_NETWORK_PATCH] Server authority check
             if (NetworkReloadValidator != null && !NetworkReloadValidator.Invoke(this, shooterWeapon))
             {
                 return; // Network will handle this
             }
             // [GC2_NETWORK_PATCH_END]
-            
+
             await this.Reloading.Reload(shooterWeapon);
         }
-        
+
         // [GC2_NETWORK_PATCH] Server-side direct reload (bypasses validation)
         public async Task ReloadDirect(ShooterWeapon optionalWeapon)
         {
@@ -376,7 +403,7 @@ namespace GameCreator.Runtime.Shooter
                 Debug.LogError("[GC2 Networking] Could not find expected Reload method in ShooterStance.cs.");
                 return false;
             }
-            
+
             // Add direct PullTrigger after CancelTrigger
             string originalCancelTrigger = @"        public void CancelTrigger(ShooterWeapon optionalWeapon)
         {
@@ -385,10 +412,10 @@ namespace GameCreator.Runtime.Shooter
 
             int shooterWeaponId = shooterWeapon.GetInstanceID();
             if (!this.m_Equipment.TryGetValue(shooterWeaponId, out WeaponData weaponData)) return;
-            
+
             weaponData.OnCancelTrigger();
         }";
-            
+
             string patchedCancelTrigger = @"        public void CancelTrigger(ShooterWeapon optionalWeapon)
         {
             ShooterWeapon shooterWeapon = this.GetWeapon(optionalWeapon);
@@ -396,10 +423,10 @@ namespace GameCreator.Runtime.Shooter
 
             int shooterWeaponId = shooterWeapon.GetInstanceID();
             if (!this.m_Equipment.TryGetValue(shooterWeaponId, out WeaponData weaponData)) return;
-            
+
             weaponData.OnCancelTrigger();
         }
-        
+
         // [GC2_NETWORK_PATCH] Server-side direct pull trigger (bypasses validation)
         public void PullTriggerDirect(ShooterWeapon optionalWeapon)
         {
@@ -407,14 +434,14 @@ namespace GameCreator.Runtime.Shooter
             if (shooterWeapon == null) return;
             int shooterWeaponId = shooterWeapon.GetInstanceID();
             if (!this.m_Equipment.TryGetValue(shooterWeaponId, out WeaponData weaponData)) return;
-            
+
             if (this.Reloading.WeaponReloading == shooterWeapon)
             {
                 if (!this.Reloading.CanPartialReload) return;
                 this.StopReload(shooterWeapon, CancelReason.PartialReload);
                 return;
             }
-            
+
             weaponData.OnPullTrigger();
         }
         // [GC2_NETWORK_PATCH_END]";
@@ -429,7 +456,7 @@ namespace GameCreator.Runtime.Shooter
                 Debug.LogError("[GC2 Networking] Could not ensure direct ShooterStance methods were inserted.");
                 return false;
             }
-            
+
             if (!EnsureRuntimePatchMarker(ref content))
             {
                 Debug.LogError("[GC2 Networking] Could not add Shooter patch marker in ShooterStance.cs.");
@@ -440,7 +467,7 @@ namespace GameCreator.Runtime.Shooter
             Debug.Log($"[GC2 Networking] Patched {relativePath}");
             return true;
         }
-        
+
         private bool PatchWeaponData(string relativePath, string content)
         {
             // Add using statements and patch marker
@@ -473,19 +500,19 @@ namespace GameCreator.Runtime.Shooter
     public class WeaponData
     {
         // [GC2_NETWORK_PATCH] Static hooks for server-authoritative networking
-        
+
         /// <summary>Validates if a shot should proceed locally.</summary>
         public static Func<WeaponData, bool> NetworkShootValidator;
-        
+
         /// <summary>Called when a shot is fired (for network sync).</summary>
         public static Action<WeaponData, Vector3, Vector3, float> NetworkShotFired;
-        
+
         /// <summary>Called when a projectile hits something (for damage validation).</summary>
         public static Action<WeaponData, GameObject, Vector3, Vector3> NetworkProjectileHit;
-        
+
         /// <summary>Returns true if networking hooks are active.</summary>
         public static bool IsNetworkingActive => NetworkShootValidator != null;
-        
+
         // [GC2_NETWORK_PATCH_END]
 ";
 
@@ -506,13 +533,13 @@ namespace GameCreator.Runtime.Shooter
                 Debug.LogError("[GC2 Networking] Could not normalize legacy charge ratio expression in WeaponData.cs.");
                 return false;
             }
-            
+
             // Patch the private Shoot method - insert validation at the beginning
             string originalShoot = @"        private void Shoot()
         {
             if (this.Weapon.Jam.Run(this.WeaponArgs, this.IsJammed))
             {";
-            
+
             string patchedShoot = @"        private void Shoot()
         {
             // [GC2_NETWORK_PATCH] Server authority check
@@ -521,7 +548,7 @@ namespace GameCreator.Runtime.Shooter
                 return; // Network will handle this
             }
             // [GC2_NETWORK_PATCH_END]
-            
+
             if (this.Weapon.Jam.Run(this.WeaponArgs, this.IsJammed))
             {";
 
@@ -539,7 +566,7 @@ namespace GameCreator.Runtime.Shooter
                 Debug.LogError("[GC2 Networking] Could not find shot success anchor in WeaponData.cs.");
                 return false;
             }
-            
+
             // Add a direct shoot method
             if (!content.Contains("ShootDirect("))
             {
@@ -552,12 +579,12 @@ namespace GameCreator.Runtime.Shooter
                 this.IsJammed = true;
                 return;
             }
-            
+
             float maxChargeTime = this.Weapon.Fire.MaxChargeTime(this.WeaponArgs);
 	            float chargeRatio = 1f;
-	            
+
 	            bool success = this.Weapon.Projectile.Run(
-	                this.WeaponArgs, 
+	                this.WeaponArgs,
 	                this.Weapon,
 	                chargeRatio,
 	                this.m_LastTriggerPull
@@ -578,7 +605,7 @@ namespace GameCreator.Runtime.Shooter
                     return false;
                 }
             }
-            
+
             if (!EnsureRuntimePatchMarker(ref content))
             {
                 Debug.LogError("[GC2 Networking] Could not add Shooter patch marker in WeaponData.cs.");
@@ -594,23 +621,29 @@ namespace GameCreator.Runtime.Shooter
         {
             NormalizeShooterWeaponHookSections(ref content);
 
-            if (!content.Contains("NetworkHitDetected"))
+            if (!content.Contains("NetworkOnHitResolved"))
             {
                 const string lastShotData = "        public static ShotData LastShotData { get; private set; }";
                 const string patchedLastShotData =
                     "        public static ShotData LastShotData { get; private set; }\n\n" +
-                    "        // [GC2_NETWORK_PATCH] Reports Shooter hit data to networking validation.\n" +
+                    "        // [GC2_NETWORK_PATCH] Cancellable networking validation runs before native hit side effects.\n" +
+                    "        public static Func<ShotData, Args, bool> NetworkOnHitValidator;\n\n" +
+                    "        // Reports the exact projectile/raycast direction after GC2 applies spread.\n" +
+                    "        public static Action<ShotData> NetworkShotFiredExact;\n\n" +
+                    "        // Compatibility notification retained for integrations built against the previous patch.\n" +
                     "        public static Action<ShotData, Args> NetworkHitDetected;\n" +
+                    "        // Reports native GC2 defense/reaction before damage-bearing OnHit instructions.\n" +
+                    "        public static Action<ShotData, Args, BlockType, ReactionOutput, float> NetworkOnHitResolved;\n" +
                     "        // [GC2_NETWORK_PATCH_END]";
 
                 if (!TryReplaceWithFlexibleWhitespace(ref content, lastShotData, patchedLastShotData))
                 {
-                    Debug.LogError("[GC2 Networking] Could not add NetworkHitDetected hook in ShooterWeapon.cs.");
+                    Debug.LogError("[GC2 Networking] Could not add NetworkOnHitValidator hook in ShooterWeapon.cs.");
                     return false;
                 }
             }
 
-            if (!content.Contains("NetworkHitDetected = null"))
+            if (!content.Contains("NetworkOnHitResolved = null"))
             {
                 const string resetAnchor =
                     "        private static void RuntimeInitializeOnLoad()\n" +
@@ -621,17 +654,80 @@ namespace GameCreator.Runtime.Shooter
                     "        {\n" +
                     "            LastShotData = default;\n" +
                     "            // [GC2_NETWORK_PATCH] Clear networking hit callbacks on domain reload.\n" +
+                    "            NetworkOnHitValidator = null;\n" +
+                    "            NetworkShotFiredExact = null;\n" +
                     "            NetworkHitDetected = null;\n" +
+                    "            NetworkOnHitResolved = null;\n" +
                     "            // [GC2_NETWORK_PATCH_END]";
 
                 if (!TryReplaceWithFlexibleWhitespace(ref content, resetAnchor, patchedResetAnchor))
                 {
-                    Debug.LogError("[GC2 Networking] Could not add NetworkHitDetected reset in ShooterWeapon.cs.");
+                    Debug.LogError("[GC2 Networking] Could not add networking hit callback reset in ShooterWeapon.cs.");
                     return false;
                 }
             }
 
-            if (!content.Contains("NetworkHitDetected?.Invoke"))
+            if (!content.Contains("NetworkShotFiredExact"))
+            {
+                const string validatorAnchor =
+                    "        public static Func<ShotData, Args, bool> NetworkOnHitValidator;";
+                const string patchedValidatorAnchor =
+                    "        public static Func<ShotData, Args, bool> NetworkOnHitValidator;\n\n" +
+                    "        // Reports the exact projectile/raycast direction after GC2 applies spread.\n" +
+                    "        public static Action<ShotData> NetworkShotFiredExact;";
+
+                if (!TryReplaceWithFlexibleWhitespace(
+                        ref content,
+                        validatorAnchor,
+                        patchedValidatorAnchor))
+                {
+                    Debug.LogError("[GC2 Networking] Could not add exact Shooter shot hook in ShooterWeapon.cs.");
+                    return false;
+                }
+            }
+
+            if (!content.Contains("NetworkShotFiredExact = null"))
+            {
+                const string validatorResetAnchor = "            NetworkOnHitValidator = null;";
+                const string patchedValidatorResetAnchor =
+                    "            NetworkOnHitValidator = null;\n" +
+                    "            NetworkShotFiredExact = null;";
+
+                if (!TryReplaceWithFlexibleWhitespace(
+                        ref content,
+                        validatorResetAnchor,
+                        patchedValidatorResetAnchor))
+                {
+                    Debug.LogError("[GC2 Networking] Could not reset exact Shooter shot hook in ShooterWeapon.cs.");
+                    return false;
+                }
+            }
+
+            if (!content.Contains("NetworkShotFiredExact?.Invoke(data)"))
+            {
+                const string onShootAnchor =
+                    "        internal void OnShoot(ShotData data, Args args)\n" +
+                    "        {\n" +
+                    "            LastShotData = data;";
+                const string patchedOnShootAnchor =
+                    "        internal void OnShoot(ShotData data, Args args)\n" +
+                    "        {\n" +
+                    "            LastShotData = data;\n" +
+                    "            // [GC2_NETWORK_PATCH] Report the exact shot before the projectile can report hits.\n" +
+                    "            NetworkShotFiredExact?.Invoke(data);\n" +
+                    "            // [GC2_NETWORK_PATCH_END]";
+
+                if (!TryReplaceWithFlexibleWhitespace(
+                        ref content,
+                        onShootAnchor,
+                        patchedOnShootAnchor))
+                {
+                    Debug.LogError("[GC2 Networking] Could not invoke exact Shooter shot hook in ShooterWeapon.cs.");
+                    return false;
+                }
+            }
+
+            if (!content.Contains("BlockType networkBlockType"))
             {
                 const string onHitAnchor =
                     "        internal void OnHit(ShotData data, Args args)\n" +
@@ -641,13 +737,125 @@ namespace GameCreator.Runtime.Shooter
                     "        internal void OnHit(ShotData data, Args args)\n" +
                     "        {\n" +
                     "            LastShotData = data;\n" +
-                    "            // [GC2_NETWORK_PATCH] Forward hit claims to networking validation before GC2 side effects.\n" +
+                    "            // [GC2_NETWORK_PATCH] Cancel unauthoritative native hit side effects.\n" +
+                    "            if (NetworkOnHitValidator != null && !NetworkOnHitValidator.Invoke(data, args)) return;\n" +
+                    "            // Compatibility notification runs only after cancellable validation allows the hit.\n" +
                     "            NetworkHitDetected?.Invoke(data, args);\n" +
+                    "            BlockType networkBlockType = BlockType.None;\n" +
+                    "            ReactionOutput networkReactionOutput = ReactionOutput.None;\n" +
+                    "            float networkReactionPower = float.NaN;\n" +
                     "            // [GC2_NETWORK_PATCH_END]";
 
                 if (!TryReplaceWithFlexibleWhitespace(ref content, onHitAnchor, patchedOnHitAnchor))
                 {
-                    Debug.LogError("[GC2 Networking] Could not inject NetworkHitDetected invocation in ShooterWeapon.cs.");
+                    Debug.LogError("[GC2 Networking] Could not inject cancellable hit validation in ShooterWeapon.cs.");
+                    return false;
+                }
+            }
+
+            if (!content.Contains("networkBlockType = shieldOutput.Type"))
+            {
+                const string shieldOutputAnchor =
+                    "                        out ShieldOutput shieldOutput\n" +
+                    "                    );";
+                const string patchedShieldOutputAnchor =
+                    "                        out ShieldOutput shieldOutput\n" +
+                    "                    );\n" +
+                    "                    // [GC2_NETWORK_PATCH] Capture the exact native shield outcome once.\n" +
+                    "                    networkBlockType = shieldOutput.Type;\n" +
+                    "                    // [GC2_NETWORK_PATCH_END]";
+
+                if (!TryReplaceWithFlexibleWhitespace(ref content, shieldOutputAnchor, patchedShieldOutputAnchor))
+                {
+                    Debug.LogError("[GC2 Networking] Could not capture Shooter native shield output in ShooterWeapon.cs.");
+                    return false;
+                }
+            }
+
+            if (!content.Contains("ReactionOutput networkReactionOutput"))
+            {
+                const string blockTypeAnchor =
+                    "            BlockType networkBlockType = BlockType.None;";
+                const string patchedBlockTypeAnchor =
+                    "            BlockType networkBlockType = BlockType.None;\n" +
+                    "            ReactionOutput networkReactionOutput = ReactionOutput.None;";
+
+                if (!TryReplaceWithFlexibleWhitespace(ref content, blockTypeAnchor, patchedBlockTypeAnchor))
+                {
+                    Debug.LogError("[GC2 Networking] Could not initialize Shooter native reaction output in ShooterWeapon.cs.");
+                    return false;
+                }
+            }
+
+            if (!content.Contains("float networkReactionPower"))
+            {
+                const string reactionOutputAnchor =
+                    "            ReactionOutput networkReactionOutput = ReactionOutput.None;";
+                const string patchedReactionOutputAnchor =
+                    "            ReactionOutput networkReactionOutput = ReactionOutput.None;\n" +
+                    "            float networkReactionPower = float.NaN;";
+
+                if (!TryReplaceWithFlexibleWhitespace(
+                        ref content,
+                        reactionOutputAnchor,
+                        patchedReactionOutputAnchor))
+                {
+                    Debug.LogError("[GC2 Networking] Could not initialize Shooter native reaction power in ShooterWeapon.cs.");
+                    return false;
+                }
+            }
+
+            if (!content.Contains("networkReactionPower = reactionInput.Power"))
+            {
+                const string reactionInputAnchor =
+                    "                    ReactionInput reactionInput = new ReactionInput(\n" +
+                    "                        target.transform.InverseTransformDirection(data.ShootDirection).normalized,\n" +
+                    "                        (float) data.Weapon.Fire.Power(args)\n" +
+                    "                    );";
+                const string patchedReactionInputAnchor =
+                    "                    ReactionInput reactionInput = new ReactionInput(\n" +
+                    "                        target.transform.InverseTransformDirection(data.ShootDirection).normalized,\n" +
+                    "                        (float) data.Weapon.Fire.Power(args)\n" +
+                    "                    );\n" +
+                    "                    // [GC2_NETWORK_PATCH] Preserve the exact power evaluated by the native reaction.\n" +
+                    "                    networkReactionPower = reactionInput.Power;\n" +
+                    "                    // [GC2_NETWORK_PATCH_END]";
+
+                if (!TryReplaceWithFlexibleWhitespace(
+                        ref content,
+                        reactionInputAnchor,
+                        patchedReactionInputAnchor))
+                {
+                    Debug.LogError("[GC2 Networking] Could not capture Shooter native reaction power in ShooterWeapon.cs.");
+                    return false;
+                }
+            }
+
+            if (!content.Contains("networkReactionOutput = target.Combat.GetHitReaction"))
+            {
+                const string reactionAnchor = "_ = target.Combat.GetHitReaction(";
+                const string patchedReactionAnchor =
+                    "networkReactionOutput = target.Combat.GetHitReaction(";
+
+                if (!TryReplaceWithFlexibleWhitespace(ref content, reactionAnchor, patchedReactionAnchor))
+                {
+                    Debug.LogError("[GC2 Networking] Could not capture Shooter native reaction output in ShooterWeapon.cs.");
+                    return false;
+                }
+            }
+
+            if (!content.Contains("NetworkOnHitResolved?.Invoke(data, args, networkBlockType, networkReactionOutput, networkReactionPower)"))
+            {
+                const string onHitCompleteAnchor = "            _ = this.m_OnHit.Run(args);";
+                const string patchedOnHitCompleteAnchor =
+                    "            // [GC2_NETWORK_PATCH] Publish native defense/reaction before damage instructions can disable the target.\n" +
+                    "            NetworkOnHitResolved?.Invoke(data, args, networkBlockType, networkReactionOutput, networkReactionPower);\n" +
+                    "            // [GC2_NETWORK_PATCH_END]\n" +
+                    "            _ = this.m_OnHit.Run(args);";
+
+                if (!TryReplaceWithFlexibleWhitespace(ref content, onHitCompleteAnchor, patchedOnHitCompleteAnchor))
+                {
+                    Debug.LogError("[GC2 Networking] Could not publish Shooter native shield output in ShooterWeapon.cs.");
                     return false;
                 }
             }
@@ -750,13 +958,67 @@ namespace GameCreator.Runtime.Shooter
 
         private static void NormalizeShooterWeaponHookSections(ref string content)
         {
+            // Upgrade previous three/four-argument result callbacks in place when an
+            // unmarked/customized source file is encountered. Marker-backed legacy patches are
+            // stripped by PrepareContentForPatch and regenerated below.
+            TryReplaceWithFlexibleWhitespace(
+                ref content,
+                "public static Action<ShotData, Args, BlockType> NetworkOnHitResolved;",
+                "public static Action<ShotData, Args, BlockType, ReactionOutput, float> NetworkOnHitResolved;");
+            TryReplaceWithFlexibleWhitespace(
+                ref content,
+                "public static System.Action<ShotData, Args, BlockType> NetworkOnHitResolved;",
+                "public static System.Action<ShotData, Args, BlockType, ReactionOutput, float> NetworkOnHitResolved;");
+            TryReplaceWithFlexibleWhitespace(
+                ref content,
+                "public static Action<ShotData, Args, BlockType, ReactionOutput> NetworkOnHitResolved;",
+                "public static Action<ShotData, Args, BlockType, ReactionOutput, float> NetworkOnHitResolved;");
+            TryReplaceWithFlexibleWhitespace(
+                ref content,
+                "public static System.Action<ShotData, Args, BlockType, ReactionOutput> NetworkOnHitResolved;",
+                "public static System.Action<ShotData, Args, BlockType, ReactionOutput, float> NetworkOnHitResolved;");
+
             TryReplaceWithFlexibleWhitespace(
                 ref content,
                 "        public static ShotData LastShotData { get; private set; }\n" +
                 "        public static Action<ShotData, Args> NetworkHitDetected;",
                 "        public static ShotData LastShotData { get; private set; }\n\n" +
+                "        // [GC2_NETWORK_PATCH] Cancellable networking validation runs before native hit side effects.\n" +
+                "        public static Func<ShotData, Args, bool> NetworkOnHitValidator;\n\n" +
+                "        // Compatibility notification retained for integrations built against the previous patch.\n" +
+                "        public static Action<ShotData, Args> NetworkHitDetected;\n" +
+                "        // Reports native GC2 defense/reaction before damage-bearing OnHit instructions.\n" +
+                "        public static Action<ShotData, Args, BlockType, ReactionOutput, float> NetworkOnHitResolved;\n" +
+                "        // [GC2_NETWORK_PATCH_END]");
+
+            TryReplaceWithFlexibleWhitespace(
+                ref content,
+                "        public static ShotData LastShotData { get; private set; }\n\n" +
                 "        // [GC2_NETWORK_PATCH] Reports Shooter hit data to networking validation.\n" +
                 "        public static Action<ShotData, Args> NetworkHitDetected;\n" +
+                "        // [GC2_NETWORK_PATCH_END]",
+                "        public static ShotData LastShotData { get; private set; }\n\n" +
+                "        // [GC2_NETWORK_PATCH] Cancellable networking validation runs before native hit side effects.\n" +
+                "        public static Func<ShotData, Args, bool> NetworkOnHitValidator;\n\n" +
+                "        // Compatibility notification retained for integrations built against the previous patch.\n" +
+                "        public static Action<ShotData, Args> NetworkHitDetected;\n" +
+                "        // Reports native GC2 defense/reaction before damage-bearing OnHit instructions.\n" +
+                "        public static Action<ShotData, Args, BlockType, ReactionOutput, float> NetworkOnHitResolved;\n" +
+                "        // [GC2_NETWORK_PATCH_END]");
+
+            TryReplaceWithFlexibleWhitespace(
+                ref content,
+                "        // [GC2_NETWORK_PATCH] Cancellable networking validation runs before native hit side effects.\n" +
+                "        public static Func<ShotData, Args, bool> NetworkOnHitValidator;\n\n" +
+                "        // Compatibility notification retained for integrations built against the previous patch.\n" +
+                "        public static Action<ShotData, Args> NetworkHitDetected;\n" +
+                "        // [GC2_NETWORK_PATCH_END]",
+                "        // [GC2_NETWORK_PATCH] Cancellable networking validation runs before native hit side effects.\n" +
+                "        public static Func<ShotData, Args, bool> NetworkOnHitValidator;\n\n" +
+                "        // Compatibility notification retained for integrations built against the previous patch.\n" +
+                "        public static Action<ShotData, Args> NetworkHitDetected;\n" +
+                "        // Reports native GC2 defense/reaction before damage-bearing OnHit instructions.\n" +
+                "        public static Action<ShotData, Args, BlockType, ReactionOutput, float> NetworkOnHitResolved;\n" +
                 "        // [GC2_NETWORK_PATCH_END]");
 
             TryReplaceWithFlexibleWhitespace(
@@ -765,7 +1027,34 @@ namespace GameCreator.Runtime.Shooter
                 "            NetworkHitDetected = null;",
                 "            LastShotData = default;\n" +
                 "            // [GC2_NETWORK_PATCH] Clear networking hit callbacks on domain reload.\n" +
+                "            NetworkOnHitValidator = null;\n" +
                 "            NetworkHitDetected = null;\n" +
+                "            NetworkOnHitResolved = null;\n" +
+                "            // [GC2_NETWORK_PATCH_END]");
+
+            TryReplaceWithFlexibleWhitespace(
+                ref content,
+                "            LastShotData = default;\n" +
+                "            // [GC2_NETWORK_PATCH] Clear networking hit callbacks on domain reload.\n" +
+                "            NetworkHitDetected = null;\n" +
+                "            // [GC2_NETWORK_PATCH_END]",
+                "            LastShotData = default;\n" +
+                "            // [GC2_NETWORK_PATCH] Clear networking hit callbacks on domain reload.\n" +
+                "            NetworkOnHitValidator = null;\n" +
+                "            NetworkHitDetected = null;\n" +
+                "            NetworkOnHitResolved = null;\n" +
+                "            // [GC2_NETWORK_PATCH_END]");
+
+            TryReplaceWithFlexibleWhitespace(
+                ref content,
+                "            // [GC2_NETWORK_PATCH] Clear networking hit callbacks on domain reload.\n" +
+                "            NetworkOnHitValidator = null;\n" +
+                "            NetworkHitDetected = null;\n" +
+                "            // [GC2_NETWORK_PATCH_END]",
+                "            // [GC2_NETWORK_PATCH] Clear networking hit callbacks on domain reload.\n" +
+                "            NetworkOnHitValidator = null;\n" +
+                "            NetworkHitDetected = null;\n" +
+                "            NetworkOnHitResolved = null;\n" +
                 "            // [GC2_NETWORK_PATCH_END]");
 
             TryReplaceWithFlexibleWhitespace(
@@ -773,9 +1062,91 @@ namespace GameCreator.Runtime.Shooter
                 "            LastShotData = data;\n" +
                 "            NetworkHitDetected?.Invoke(data, args);",
                 "            LastShotData = data;\n" +
+                "            // [GC2_NETWORK_PATCH] Cancel unauthoritative native hit side effects.\n" +
+                "            if (NetworkOnHitValidator != null && !NetworkOnHitValidator.Invoke(data, args)) return;\n" +
+                "            // Compatibility notification runs only after cancellable validation allows the hit.\n" +
+                "            NetworkHitDetected?.Invoke(data, args);\n" +
+                "            BlockType networkBlockType = BlockType.None;\n" +
+                "            ReactionOutput networkReactionOutput = ReactionOutput.None;\n" +
+                "            float networkReactionPower = float.NaN;\n" +
+                "            // [GC2_NETWORK_PATCH_END]");
+
+            TryReplaceWithFlexibleWhitespace(
+                ref content,
+                "            LastShotData = data;\n" +
                 "            // [GC2_NETWORK_PATCH] Forward hit claims to networking validation before GC2 side effects.\n" +
                 "            NetworkHitDetected?.Invoke(data, args);\n" +
+                "            // [GC2_NETWORK_PATCH_END]",
+                "            LastShotData = data;\n" +
+                "            // [GC2_NETWORK_PATCH] Cancel unauthoritative native hit side effects.\n" +
+                "            if (NetworkOnHitValidator != null && !NetworkOnHitValidator.Invoke(data, args)) return;\n" +
+                "            // Compatibility notification runs only after cancellable validation allows the hit.\n" +
+                "            NetworkHitDetected?.Invoke(data, args);\n" +
+                "            BlockType networkBlockType = BlockType.None;\n" +
+                "            ReactionOutput networkReactionOutput = ReactionOutput.None;\n" +
+                "            float networkReactionPower = float.NaN;\n" +
                 "            // [GC2_NETWORK_PATCH_END]");
+
+            TryReplaceWithFlexibleWhitespace(
+                ref content,
+                "            // [GC2_NETWORK_PATCH] Cancel unauthoritative native hit side effects.\n" +
+                "            if (NetworkOnHitValidator != null && !NetworkOnHitValidator.Invoke(data, args)) return;\n" +
+                "            // Compatibility notification runs only after cancellable validation allows the hit.\n" +
+                "            NetworkHitDetected?.Invoke(data, args);\n" +
+                "            // [GC2_NETWORK_PATCH_END]",
+                "            // [GC2_NETWORK_PATCH] Cancel unauthoritative native hit side effects.\n" +
+                "            if (NetworkOnHitValidator != null && !NetworkOnHitValidator.Invoke(data, args)) return;\n" +
+                "            // Compatibility notification runs only after cancellable validation allows the hit.\n" +
+                "            NetworkHitDetected?.Invoke(data, args);\n" +
+                "            BlockType networkBlockType = BlockType.None;\n" +
+                "            ReactionOutput networkReactionOutput = ReactionOutput.None;\n" +
+                "            float networkReactionPower = float.NaN;\n" +
+                "            // [GC2_NETWORK_PATCH_END]");
+
+            TryReplaceWithFlexibleWhitespace(
+                ref content,
+                "            BlockType networkBlockType = BlockType.None;\n" +
+                "            // [GC2_NETWORK_PATCH_END]",
+                "            BlockType networkBlockType = BlockType.None;\n" +
+                "            ReactionOutput networkReactionOutput = ReactionOutput.None;\n" +
+                "            float networkReactionPower = float.NaN;\n" +
+                "            // [GC2_NETWORK_PATCH_END]");
+
+            TryReplaceWithFlexibleWhitespace(
+                ref content,
+                "            BlockType networkBlockType = BlockType.None;\n" +
+                "            ReactionOutput networkReactionOutput = ReactionOutput.None;\n" +
+                "            // [GC2_NETWORK_PATCH_END]",
+                "            BlockType networkBlockType = BlockType.None;\n" +
+                "            ReactionOutput networkReactionOutput = ReactionOutput.None;\n" +
+                "            float networkReactionPower = float.NaN;\n" +
+                "            // [GC2_NETWORK_PATCH_END]");
+
+            TryReplaceWithFlexibleWhitespace(
+                ref content,
+                "_ = target.Combat.GetHitReaction(",
+                "networkReactionOutput = target.Combat.GetHitReaction(");
+
+            TryReplaceWithFlexibleWhitespace(
+                ref content,
+                "NetworkOnHitResolved?.Invoke(data, args, networkBlockType);",
+                "NetworkOnHitResolved?.Invoke(data, args, networkBlockType, networkReactionOutput, networkReactionPower);");
+
+            TryReplaceWithFlexibleWhitespace(
+                ref content,
+                "NetworkOnHitResolved?.Invoke(data, args, networkBlockType, networkReactionOutput);",
+                "NetworkOnHitResolved?.Invoke(data, args, networkBlockType, networkReactionOutput, networkReactionPower);");
+
+            TryReplaceWithFlexibleWhitespace(
+                ref content,
+                "            _ = this.m_OnHit.Run(args);\n" +
+                "            // [GC2_NETWORK_PATCH] Publish the native result and reaction timing after authored hit processing.\n" +
+                "            NetworkOnHitResolved?.Invoke(data, args, networkBlockType, networkReactionOutput, networkReactionPower);\n" +
+                "            // [GC2_NETWORK_PATCH_END]",
+                "            // [GC2_NETWORK_PATCH] Publish native defense/reaction before damage instructions can disable the target.\n" +
+                "            NetworkOnHitResolved?.Invoke(data, args, networkBlockType, networkReactionOutput, networkReactionPower);\n" +
+                "            // [GC2_NETWORK_PATCH_END]\n" +
+                "            _ = this.m_OnHit.Run(args);");
         }
 
         private static void NormalizeAimHookSections(ref string content)
@@ -839,19 +1210,19 @@ namespace GameCreator.Runtime.Shooter
 
             const string staticHooks = @"
         // [GC2_NETWORK_PATCH] Static hooks for server-authoritative networking
-        
+
         /// <summary>Validates if a shot should proceed locally.</summary>
         public static Func<WeaponData, bool> NetworkShootValidator;
-        
+
         /// <summary>Called when a shot is fired (for network sync).</summary>
         public static Action<WeaponData, Vector3, Vector3, float> NetworkShotFired;
-        
+
         /// <summary>Called when a projectile hits something (for damage validation).</summary>
         public static Action<WeaponData, GameObject, Vector3, Vector3> NetworkProjectileHit;
-        
+
         /// <summary>Returns true if networking hooks are active.</summary>
         public static bool IsNetworkingActive => NetworkShootValidator != null;
-        
+
         // [GC2_NETWORK_PATCH_END]
 ";
 
@@ -890,22 +1261,22 @@ namespace GameCreator.Runtime.Shooter
 
             const string staticHooks = @"
         // [GC2_NETWORK_PATCH] Static hooks for server-authoritative networking
-        
+
         /// <summary>Validates if pulling trigger should proceed locally.</summary>
         public static Func<ShooterStance, ShooterWeapon, bool> NetworkPullTriggerValidator;
-        
+
         /// <summary>Validates if releasing trigger should proceed locally.</summary>
         public static Func<ShooterStance, ShooterWeapon, bool> NetworkReleaseTriggerValidator;
-        
+
         /// <summary>Validates if reload should proceed locally.</summary>
         public static Func<ShooterStance, ShooterWeapon, bool> NetworkReloadValidator;
-        
+
         /// <summary>Called when a shot is fired (for network sync).</summary>
         public static Action<ShooterStance, ShooterWeapon, Vector3, Vector3> NetworkShotFired;
-        
+
         /// <summary>Returns true if networking hooks are active.</summary>
         public static bool IsNetworkingActive => NetworkPullTriggerValidator != null;
-        
+
         // [GC2_NETWORK_PATCH_END]
 ";
 
@@ -950,7 +1321,7 @@ namespace GameCreator.Runtime.Shooter
             }
 
             string validationBlock = $@"
-            
+
             // [GC2_NETWORK_PATCH] Server authority check
             if ({validatorFieldName} != null && !{validatorFieldName}.Invoke(this, {weaponVariable}))
             {{
@@ -1172,7 +1543,7 @@ namespace GameCreator.Runtime.Shooter
                 return; // Network will handle this
             }
             // [GC2_NETWORK_PATCH_END]
-            
+
 ";
 
             content = content.Insert(bodyStart + anchor.Index, validationBlock);
@@ -1299,7 +1670,7 @@ namespace GameCreator.Runtime.Shooter
 
             return false;
         }
-        
+
         private bool PatchEditorFile(string relativePath, string content)
         {
             // Fix obsolete API: EditorUtility.InstanceIDToObject(...) -> EditorUtility.EntityIdToObject(...)

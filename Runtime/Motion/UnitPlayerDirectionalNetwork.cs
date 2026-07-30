@@ -33,7 +33,7 @@ namespace Arawn.GameCreator2.Networking
         [Header("Network Settings")]
         [Tooltip("Mirrors local input into GC2 Motion.MoveDirection so facing and animation units can read steering intent. Actual movement still uses the network driver.")]
         [SerializeField] private bool m_UpdateMotionDirection = true;
-        
+
         // MEMBERS: -------------------------------------------------------------------------------
 
         [NonSerialized] private Vector2 m_CurrentInput;
@@ -66,13 +66,13 @@ namespace Arawn.GameCreator2.Networking
         public override void OnStartup(Character character)
         {
             base.OnStartup(character);
-            
+
             this.m_InputMove.OnStartup();
             this.m_InputJump.OnStartup();
-            
+
             // Register jump event
             this.m_InputJump.RegisterPerform(OnJumpPerformed);
-            
+
             // Try to find a network prediction input sink.
             m_InputSink = character.Driver as INetworkDirectionalInputSink;
             m_NetworkCharacter = character.GetComponent<NetworkCharacter>();
@@ -81,9 +81,9 @@ namespace Arawn.GameCreator2.Networking
         public override void OnDispose(Character character)
         {
             base.OnDispose(character);
-            
+
             this.m_InputJump.ForgetPerform(OnJumpPerformed);
-            
+
             this.m_InputMove.OnDispose();
             this.m_InputJump.OnDispose();
         }
@@ -108,7 +108,7 @@ namespace Arawn.GameCreator2.Networking
             base.OnUpdate();
             this.m_InputMove.OnUpdate();
             this.m_InputJump.OnUpdate();
-            
+
             if (this.Character == null) return;
             if (!this.Character.IsPlayer && !TryRestoreLocalNetworkPlayerFlag())
             {
@@ -145,32 +145,33 @@ namespace Arawn.GameCreator2.Networking
 
                 return;
             }
-            
+
             // Capture raw input
             m_CurrentInput = this.m_IsControllable
                 ? m_InputMove.Read()
                 : Vector2.zero;
-            
+
             // Clamp magnitude to prevent cheating with modified input
             if (m_CurrentInput.sqrMagnitude > 1f)
             {
                 m_CurrentInput = m_CurrentInput.normalized;
             }
-            
+
             // Calculate input direction for GC2 compatibility
             this.InputDirection = GetMoveDirection(m_CurrentInput);
             SetMotionDirection(this.InputDirection);
-            
+            LogFocusedTraversalInput();
+
             OnInputCaptured?.Invoke(m_CurrentInput, m_JumpPressed);
             TryConsumeJumpExternally();
-            
+
             // Feed input to network driver if available
             RefreshNetworkDriver();
             if (m_InputSink != null)
             {
                 Transform camTransform = GetCameraTransform();
                 m_InputSink.ProcessDirectionalInput(m_CurrentInput, camTransform, m_JumpPressed && !m_JumpConsumed);
-                
+
                 // Consume jump after sending
                 if (m_JumpPressed)
                 {
@@ -179,7 +180,52 @@ namespace Arawn.GameCreator2.Networking
                 }
             }
         }
-        
+
+        private void LogFocusedTraversalInput()
+        {
+            if (this.Character == null ||
+                !NetworkTraversalClimbDiagnostics.IsFocused(this.Character.gameObject))
+            {
+                return;
+            }
+
+            m_NetworkCharacter ??= this.Character.GetComponent<NetworkCharacter>();
+            uint networkId = m_NetworkCharacter != null ? m_NetworkCharacter.NetworkId : 0;
+            string role = m_NetworkCharacter != null
+                ? m_NetworkCharacter.CurrentRole.ToString()
+                : "Local";
+            Vector3 playerWorld = this.Character.Player?.InputDirection ?? Vector3.zero;
+            Vector3 playerLocal = this.Character.Player?.LocalInputDirection ?? Vector3.zero;
+            Vector3 motionMove = this.Character.Motion?.MoveDirection ?? Vector3.zero;
+            Vector3 driverWorld = this.Character.Driver?.WorldMoveDirection ?? Vector3.zero;
+            Vector3 driverLocal = this.Character.Driver?.LocalMoveDirection ?? Vector3.zero;
+            string signature =
+                $"{AxisSign(m_CurrentInput.x)},{AxisSign(m_CurrentInput.y)}:" +
+                $"{AxisSign(playerLocal.x)},{AxisSign(playerLocal.y)},{AxisSign(playerLocal.z)}:" +
+                $"{m_JumpPressed}:{m_IsInputEnabled}:{this.m_IsControllable}";
+            bool changed = NetworkTraversalClimbDiagnostics.HasChanged(
+                $"player-input:{this.Character.GetInstanceID()}",
+                signature);
+
+            NetworkTraversalClimbDiagnostics.Log(
+                changed ? "InputChange" : "Input",
+                $"actor={networkId} role={role} raw={NetworkTraversalClimbDiagnostics.Vector(m_CurrentInput)} " +
+                $"unitInput={NetworkTraversalClimbDiagnostics.Vector(this.InputDirection)} " +
+                $"playerWorld={NetworkTraversalClimbDiagnostics.Vector(playerWorld)} " +
+                $"playerLocal={NetworkTraversalClimbDiagnostics.Vector(playerLocal)} " +
+                $"motionMove={NetworkTraversalClimbDiagnostics.Vector(motionMove)} " +
+                $"driverWorld={NetworkTraversalClimbDiagnostics.Vector(driverWorld)} " +
+                $"driverLocal={NetworkTraversalClimbDiagnostics.Vector(driverLocal)} " +
+                $"jump={m_JumpPressed} enabled={m_IsInputEnabled} controllable={this.m_IsControllable}",
+                this.Character,
+                changed ? null : $"player-input:{this.Character.GetInstanceID()}");
+        }
+
+        private static int AxisSign(float value)
+        {
+            return value > 0.05f ? 1 : value < -0.05f ? -1 : 0;
+        }
+
         private void OnJumpPerformed()
         {
             if (m_IsInputEnabled &&
@@ -191,7 +237,7 @@ namespace Arawn.GameCreator2.Networking
                 m_JumpConsumed = false;
             }
         }
-        
+
         private Vector3 GetMoveDirection(Vector2 input)
         {
             Vector3 direction = new Vector3(input.x, 0f, input.y);
@@ -200,11 +246,11 @@ namespace Arawn.GameCreator2.Networking
             Quaternion cameraRotation = camera != null
                 ? Quaternion.Euler(0f, camera.rotation.eulerAngles.y, 0f)
                 : Quaternion.identity;
-            
+
             Vector3 moveDirection = cameraRotation * direction;
             moveDirection.y = 0f;
             moveDirection.Normalize();
-            
+
             return moveDirection * direction.magnitude;
         }
 
@@ -216,7 +262,7 @@ namespace Arawn.GameCreator2.Networking
         public void SetInputEnabled(bool enabled)
         {
             m_IsInputEnabled = enabled;
-            
+
             if (!enabled)
             {
                 m_CurrentInput = Vector2.zero;
@@ -233,7 +279,7 @@ namespace Arawn.GameCreator2.Networking
         {
             m_CurrentInput = moveInput;
             m_JumpPressed = jump;
-            
+
             if (m_CurrentInput.sqrMagnitude > 1f)
             {
                 m_CurrentInput = m_CurrentInput.normalized;
@@ -241,10 +287,10 @@ namespace Arawn.GameCreator2.Networking
 
             this.InputDirection = GetMoveDirection(m_CurrentInput);
             SetMotionDirection(this.InputDirection);
-            
+
             OnInputCaptured?.Invoke(m_CurrentInput, m_JumpPressed);
             TryConsumeJumpExternally();
-            
+
             RefreshNetworkDriver();
             if (m_InputSink != null)
             {
@@ -338,10 +384,15 @@ namespace Arawn.GameCreator2.Networking
 
             if (!consumed) return false;
 
-            Debug.Log(
-                $"[TraversalConnectionDebug][NetworkDirectionalInput] jump consumed externally " +
-                $"character='{(this.Character != null ? this.Character.name : "null")}' " +
-                $"input=({m_CurrentInput.x:F3},{m_CurrentInput.y:F3})");
+            if (this.Character != null &&
+                NetworkTraversalClimbDiagnostics.IsFocused(this.Character.gameObject))
+            {
+                NetworkTraversalClimbDiagnostics.Log(
+                    "JumpInput",
+                    $"operation=consumed-externally character='{this.Character.name}' " +
+                    $"input={NetworkTraversalClimbDiagnostics.Vector(m_CurrentInput)}",
+                    this.Character);
+            }
 
             m_JumpConsumed = true;
             m_JumpPressed = false;

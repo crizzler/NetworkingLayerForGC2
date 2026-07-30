@@ -1,0 +1,15 @@
+fileFormatVersion: 2
+guid: f6aebcf79b09805bbad50d00749e348b
+NativeFormatImporter:
+  externalObjects: {}
+  mainObjectFileID: 11400000
+  userData:
+  assetBundleName:
+  assetBundleVariant:
+AssetOrigin:
+  serializedVersion: 1
+  productId: 379492
+  packageName: Multiplayer Integration for Game Creator 2 with PurrNet
+  packageVersion: 1.5.0
+  assetPath: Assets/Arawn/NetworkingLayerForGC2/Generated/PurrNetSceneSessionProfile.asset
+  uploadId: 935232

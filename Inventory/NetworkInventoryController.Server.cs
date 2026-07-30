@@ -12,7 +12,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
     // ════════════════════════════════════════════════════════════════════════════════════════════
     // SERVER-SIDE — Request processing, broadcasting, and helper methods
     // ════════════════════════════════════════════════════════════════════════════════════════════
-    
+
     public partial class NetworkInventoryController
     {
         private static readonly FieldInfo s_RuntimeItemIdField = typeof(RuntimeItem)
@@ -34,9 +34,9 @@ namespace Arawn.GameCreator2.Networking.Inventory
         // ════════════════════════════════════════════════════════════════════════════════════════
         // SERVER-SIDE: PROCESS REQUESTS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         #region Server Processing
-        
+
         /// <summary>
         /// [Server] Process content add request.
         /// </summary>
@@ -51,7 +51,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
                     RejectionReason = InventoryRejectionReason.NotAuthorized
                 };
             }
-            
+
             // Client-originated arbitrary runtime payloads are not allowed.
             if (request.ItemHash == 0)
             {
@@ -74,19 +74,23 @@ namespace Arawn.GameCreator2.Networking.Inventory
             }
 
             RuntimeItem runtimeItem = new RuntimeItem(item);
-            
-            // Try to add
+
             Vector2Int resultPosition;
-            if (request.Position.x >= 0 && request.Position.y >= 0)
+            using (EnterNetworkMutationScope())
             {
-                bool success = m_Bag.Content.Add(runtimeItem, request.Position, request.AllowStack);
-                resultPosition = success ? request.Position : TBagContent.INVALID;
+                // This semantic request owns its authoritative broadcast. Suppress the primitive
+                // GC2 EventAdd route so it cannot emit a second direct-add broadcast.
+                if (request.Position.x >= 0 && request.Position.y >= 0)
+                {
+                    bool success = m_Bag.Content.Add(runtimeItem, request.Position, request.AllowStack);
+                    resultPosition = success ? request.Position : TBagContent.INVALID;
+                }
+                else
+                {
+                    resultPosition = m_Bag.Content.Add(runtimeItem, request.AllowStack);
+                }
             }
-            else
-            {
-                resultPosition = m_Bag.Content.Add(runtimeItem, request.AllowStack);
-            }
-            
+
             if (resultPosition == TBagContent.INVALID)
             {
                 return new NetworkContentAddResponse
@@ -96,22 +100,25 @@ namespace Arawn.GameCreator2.Networking.Inventory
                     RejectionReason = InventoryRejectionReason.InsufficientSpace
                 };
             }
-            
+
             // Update map
             TrackRuntimeItemRecursive(runtimeItem);
-            
+            uint stateVersion = GetAuthoritativeStateVersion();
+
             // Broadcast
             var broadcast = new NetworkItemAddedBroadcast
             {
                 BagNetworkId = NetworkId,
                 Item = ConvertToNetworkItem(runtimeItem),
                 Position = resultPosition,
-                StackCount = m_Bag.Content.GetContent(resultPosition)?.Count ?? 1
+                StackCount = m_Bag.Content.GetContent(resultPosition)?.Count ?? 1,
+                StateVersion = stateVersion
             };
-            
+
             NetworkInventoryManager.Instance?.BroadcastItemAdded(broadcast);
             OnItemAdded?.Invoke(broadcast);
-            
+            CacheCurrentSyncState();
+
             return new NetworkContentAddResponse
             {
                 RequestId = request.RequestId,
@@ -119,10 +126,11 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 RejectionReason = InventoryRejectionReason.None,
                 ResultPosition = resultPosition,
                 AssignedRuntimeId = runtimeItem.RuntimeID.Hash,
-                AssignedRuntimeIdString = runtimeItem.RuntimeID.String
+                AssignedRuntimeIdString = runtimeItem.RuntimeID.String,
+                StateVersion = stateVersion
             };
         }
-        
+
         /// <summary>
         /// [Server] Process content remove request.
         /// </summary>
@@ -137,31 +145,36 @@ namespace Arawn.GameCreator2.Networking.Inventory
                     RejectionReason = InventoryRejectionReason.NotAuthorized
                 };
             }
-            
+
             RuntimeItem removed;
             Vector2Int position;
-            
-            if (request.UsePosition)
+
+            using (EnterNetworkMutationScope())
             {
-                position = request.Position;
-                removed = m_Bag.Content.Remove(position);
-            }
-            else
-            {
-                if (!m_RuntimeItemMap.TryGetValue(request.RuntimeIdHash, out var runtimeItem))
+                // This semantic request owns its authoritative broadcast. Suppress the primitive
+                // GC2 EventRemove route so it cannot emit a second direct-remove broadcast.
+                if (request.UsePosition)
                 {
-                    return new NetworkContentRemoveResponse
-                    {
-                        RequestId = request.RequestId,
-                        Authorized = false,
-                        RejectionReason = InventoryRejectionReason.RuntimeItemNotFound
-                    };
+                    position = request.Position;
+                    removed = m_Bag.Content.Remove(position);
                 }
-                
-                position = m_Bag.Content.FindPosition(runtimeItem.RuntimeID);
-                removed = m_Bag.Content.Remove(runtimeItem);
+                else
+                {
+                    if (!m_RuntimeItemMap.TryGetValue(request.RuntimeIdHash, out var runtimeItem))
+                    {
+                        return new NetworkContentRemoveResponse
+                        {
+                            RequestId = request.RequestId,
+                            Authorized = false,
+                            RejectionReason = InventoryRejectionReason.RuntimeItemNotFound
+                        };
+                    }
+
+                    position = m_Bag.Content.FindPosition(runtimeItem.RuntimeID);
+                    removed = m_Bag.Content.Remove(runtimeItem);
+                }
             }
-            
+
             if (removed == null)
             {
                 return new NetworkContentRemoveResponse
@@ -171,9 +184,10 @@ namespace Arawn.GameCreator2.Networking.Inventory
                     RejectionReason = InventoryRejectionReason.RuntimeItemNotFound
                 };
             }
-            
+
             UntrackRuntimeItemRecursive(removed);
-            
+            uint stateVersion = GetAuthoritativeStateVersion();
+
             // Broadcast
             var cell = m_Bag.Content.GetContent(position);
             var removeBroadcast = new NetworkItemRemovedBroadcast
@@ -181,21 +195,24 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 BagNetworkId = NetworkId,
                 RuntimeIdHash = removed.RuntimeID.Hash,
                 Position = position,
-                RemainingStackCount = cell?.Count ?? 0
+                RemainingStackCount = cell?.Count ?? 0,
+                StateVersion = stateVersion
             };
-            
+
             NetworkInventoryManager.Instance?.BroadcastItemRemoved(removeBroadcast);
             OnItemRemoved?.Invoke(removeBroadcast);
-            
+            CacheCurrentSyncState();
+
             return new NetworkContentRemoveResponse
             {
                 RequestId = request.RequestId,
                 Authorized = true,
                 RejectionReason = InventoryRejectionReason.None,
-                RemovedItem = ConvertToNetworkItem(removed)
+                RemovedItem = ConvertToNetworkItem(removed),
+                StateVersion = stateVersion
             };
         }
-        
+
         /// <summary>
         /// [Server] Process content move request.
         /// </summary>
@@ -210,7 +227,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
                     RejectionReason = InventoryRejectionReason.NotAuthorized
                 };
             }
-            
+
             if (!m_Bag.Content.CanMove(request.FromPosition, request.ToPosition, request.AllowStack))
             {
                 return new NetworkContentMoveResponse
@@ -220,12 +237,12 @@ namespace Arawn.GameCreator2.Networking.Inventory
                     RejectionReason = InventoryRejectionReason.InvalidPosition
                 };
             }
-            
+
             var moveCell = m_Bag.Content.GetContent(request.FromPosition);
             long runtimeIdHash = moveCell?.RootRuntimeItemID.Hash ?? 0;
-            
+
             bool moveSuccess = m_Bag.Content.Move(request.FromPosition, request.ToPosition, request.AllowStack);
-            
+
             if (!moveSuccess)
             {
                 return new NetworkContentMoveResponse
@@ -235,28 +252,32 @@ namespace Arawn.GameCreator2.Networking.Inventory
                     RejectionReason = InventoryRejectionReason.InvalidOperation
                 };
             }
-            
+            uint stateVersion = GetAuthoritativeStateVersion();
+
             // Broadcast
             var moveBroadcast = new NetworkItemMovedBroadcast
             {
                 BagNetworkId = NetworkId,
                 RuntimeIdHash = runtimeIdHash,
                 FromPosition = request.FromPosition,
-                ToPosition = request.ToPosition
+                ToPosition = request.ToPosition,
+                StateVersion = stateVersion
             };
-            
+
             NetworkInventoryManager.Instance?.BroadcastItemMoved(moveBroadcast);
             OnItemMoved?.Invoke(moveBroadcast);
-            
+            CacheCurrentSyncState();
+
             return new NetworkContentMoveResponse
             {
                 RequestId = request.RequestId,
                 Authorized = true,
                 RejectionReason = InventoryRejectionReason.None,
-                FinalPosition = request.ToPosition
+                FinalPosition = request.ToPosition,
+                StateVersion = stateVersion
             };
         }
-        
+
         /// <summary>
         /// [Server] Process content use request.
         /// </summary>
@@ -271,48 +292,57 @@ namespace Arawn.GameCreator2.Networking.Inventory
                     RejectionReason = InventoryRejectionReason.NotAuthorized
                 };
             }
-            
+
             bool useSuccess;
             bool wasConsumed = false;
-            
-            if (request.UsePosition)
+            long usedRuntimeIdHash = request.RuntimeIdHash;
+            RuntimeItem usedRuntimeItem = null;
+
+            using (EnterNetworkMutationScope())
             {
-                var useCell = m_Bag.Content.GetContent(request.Position);
-                if (useCell == null || useCell.Available)
+                // EventUse is a primitive notification for a native operation. This semantic
+                // request emits the one authoritative NetworkItemUsedBroadcast below.
+                if (request.UsePosition)
                 {
-                    return new NetworkContentUseResponse
+                    var useCell = m_Bag.Content.GetContent(request.Position);
+                    if (useCell == null || useCell.Available)
                     {
-                        RequestId = request.RequestId,
-                        Authorized = false,
-                        RejectionReason = InventoryRejectionReason.RuntimeItemNotFound
-                    };
+                        return new NetworkContentUseResponse
+                        {
+                            RequestId = request.RequestId,
+                            Authorized = false,
+                            RejectionReason = InventoryRejectionReason.RuntimeItemNotFound
+                        };
+                    }
+
+                    usedRuntimeItem = useCell.RootRuntimeItem;
+                    usedRuntimeIdHash = usedRuntimeItem.RuntimeID.Hash;
+                    wasConsumed = usedRuntimeItem.Item.Usage.ConsumeWhenUse;
+                    useSuccess = m_Bag.Content.Use(request.Position);
                 }
-                
-                var useItem = useCell.RootRuntimeItem;
-                wasConsumed = useItem.Item.Usage.ConsumeWhenUse;
-                useSuccess = m_Bag.Content.Use(request.Position);
+                else
+                {
+                    if (!m_RuntimeItemMap.TryGetValue(request.RuntimeIdHash, out var useItem))
+                    {
+                        return new NetworkContentUseResponse
+                        {
+                            RequestId = request.RequestId,
+                            Authorized = false,
+                            RejectionReason = InventoryRejectionReason.RuntimeItemNotFound
+                        };
+                    }
+
+                    usedRuntimeItem = useItem;
+                    wasConsumed = useItem.Item.Usage.ConsumeWhenUse;
+                    useSuccess = m_Bag.Content.Use(useItem);
+                }
             }
-            else
+
+            if (useSuccess && wasConsumed && usedRuntimeItem != null)
             {
-                if (!m_RuntimeItemMap.TryGetValue(request.RuntimeIdHash, out var useItem))
-                {
-                    return new NetworkContentUseResponse
-                    {
-                        RequestId = request.RequestId,
-                        Authorized = false,
-                        RejectionReason = InventoryRejectionReason.RuntimeItemNotFound
-                    };
-                }
-                
-                wasConsumed = useItem.Item.Usage.ConsumeWhenUse;
-                useSuccess = m_Bag.Content.Use(useItem);
-                
-                if (useSuccess && wasConsumed)
-                {
-                    UntrackRuntimeItemRecursive(useItem);
-                }
+                UntrackRuntimeItemRecursive(usedRuntimeItem);
             }
-            
+
             if (!useSuccess)
             {
                 return new NetworkContentUseResponse
@@ -322,27 +352,38 @@ namespace Arawn.GameCreator2.Networking.Inventory
                     RejectionReason = InventoryRejectionReason.CannotUse
                 };
             }
-            
+            uint stateVersion = GetAuthoritativeStateVersion();
+            uint transientUseToken = request.CorrelationId != 0
+                ? request.CorrelationId
+                : NetworkCorrelation.Compose(NetworkId, request.RequestId);
+            if (transientUseToken == 0) transientUseToken = 1u;
+
             // Broadcast
             var useBroadcast = new NetworkItemUsedBroadcast
             {
                 BagNetworkId = NetworkId,
-                RuntimeIdHash = request.RuntimeIdHash,
-                WasConsumed = wasConsumed
+                RuntimeIdHash = usedRuntimeIdHash,
+                WasConsumed = wasConsumed,
+                // Non-consuming Use is an event, not a bag mutation. Its StateVersion wire slot
+                // carries the request correlation token so repeated uses at one bag revision are
+                // neither collapsed nor delivered twice. Consuming Use keeps normal revision use.
+                StateVersion = wasConsumed ? stateVersion : transientUseToken
             };
-            
+
             NetworkInventoryManager.Instance?.BroadcastItemUsed(useBroadcast);
             OnItemUsed?.Invoke(useBroadcast);
-            
+            CacheCurrentSyncState();
+
             return new NetworkContentUseResponse
             {
                 RequestId = request.RequestId,
                 Authorized = true,
                 RejectionReason = InventoryRejectionReason.None,
-                WasConsumed = wasConsumed
+                WasConsumed = wasConsumed,
+                StateVersion = stateVersion
             };
         }
-        
+
         /// <summary>
         /// [Server] Process content drop request.
         /// </summary>
@@ -362,7 +403,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
                     RejectionReason = InventoryRejectionReason.NotAuthorized
                 };
             }
-            
+
             if (!m_RuntimeItemMap.TryGetValue(request.RuntimeIdHash, out var dropItem))
             {
                 LogPickupWarning(
@@ -375,7 +416,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
                     RejectionReason = InventoryRejectionReason.RuntimeItemNotFound
                 };
             }
-            
+
             if (!dropItem.Item.CanDrop)
             {
                 LogPickupWarning(
@@ -401,7 +442,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
             {
                 m_IsApplyingNetworkState = false;
             }
-            
+
             if (dropped == null)
             {
                 LogPickupWarning(
@@ -416,13 +457,15 @@ namespace Arawn.GameCreator2.Networking.Inventory
             }
 
             UntrackRuntimeItemRecursive(dropItem);
+            uint stateVersion = GetAuthoritativeStateVersion();
 
             var removeBroadcast = new NetworkItemRemovedBroadcast
             {
                 BagNetworkId = NetworkId,
                 RuntimeIdHash = request.RuntimeIdHash,
                 Position = sourcePosition,
-                RemainingStackCount = m_Bag.Content.GetContent(sourcePosition)?.Count ?? 0
+                RemainingStackCount = m_Bag.Content.GetContent(sourcePosition)?.Count ?? 0,
+                StateVersion = stateVersion
             };
 
             NetworkInventoryManager.Instance?.BroadcastItemRemoved(removeBroadcast);
@@ -442,13 +485,14 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 $"{name}: drop accepted req={request.RequestId} item={DescribeNetworkItem(droppedItem)} sourcePosition={sourcePosition} dropPosition={request.DropPosition} instance={(dropped != null ? dropped.name : "null")}",
                 this);
             CacheCurrentSyncState();
-            
+
             return new NetworkContentDropResponse
             {
                 RequestId = request.RequestId,
                 Authorized = true,
                 RejectionReason = InventoryRejectionReason.None,
-                DroppedCount = 1
+                DroppedCount = 1,
+                StateVersion = stateVersion
             };
         }
 
@@ -502,53 +546,61 @@ namespace Arawn.GameCreator2.Networking.Inventory
             }
 
             Vector2Int sourcePosition = m_Bag.Content.FindPosition(runtimeItem.RuntimeID);
-            RuntimeItem removed = m_Bag.Content.Remove(runtimeItem);
-            if (removed == null)
+            int requestedAmount = Mathf.Max(1, request.Amount);
+            Cell sourceCell = m_Bag.Content.GetContent(sourcePosition);
+            requestedAmount = Mathf.Min(requestedAmount, sourceCell?.Count ?? 1);
+            var transferred = new List<RuntimeItem>(requestedAmount);
+            Vector2Int finalPosition = TBagContent.INVALID;
+
+            using (EnterNetworkMutationScope())
+            using (destination.EnterNetworkMutationScope())
             {
-                LogPickupWarning(
-                    $"{name}: transfer rejected GC2 Content.Remove returned null req={request.RequestId} item={DescribeRuntimeItem(runtimeItem)}",
-                    this);
-                return new NetworkTransferResponse
+                for (int index = 0; index < requestedAmount; index++)
                 {
-                    RequestId = request.RequestId,
-                    Authorized = false,
-                    RejectionReason = InventoryRejectionReason.RuntimeItemNotFound
-                };
-            }
+                    RuntimeItem next = index == 0
+                        ? runtimeItem
+                        : m_Bag.Content.GetContent(sourcePosition)?.Peek();
+                    RuntimeItem removed = next != null ? m_Bag.Content.Remove(next) : null;
+                    if (removed == null) break;
 
-            UntrackRuntimeItemRecursive(removed);
+                    Vector2Int placed;
+                    if (request.DestinationPosition.x >= 0 && request.DestinationPosition.y >= 0)
+                    {
+                        bool added = destination.m_Bag.Content.Add(
+                            removed, request.DestinationPosition, request.AllowStack);
+                        placed = added ? request.DestinationPosition : TBagContent.INVALID;
+                    }
+                    else if (finalPosition != TBagContent.INVALID && request.AllowStack)
+                    {
+                        bool added = destination.m_Bag.Content.Add(removed, finalPosition, true);
+                        placed = added ? finalPosition : TBagContent.INVALID;
+                    }
+                    else
+                    {
+                        placed = destination.m_Bag.Content.Add(removed, request.AllowStack);
+                    }
 
-            Vector2Int finalPosition;
-            if (request.DestinationPosition.x >= 0 && request.DestinationPosition.y >= 0)
-            {
-                bool added = destination.m_Bag.Content.Add(
-                    removed,
-                    request.DestinationPosition,
-                    request.AllowStack);
-                finalPosition = added ? request.DestinationPosition : TBagContent.INVALID;
-            }
-            else
-            {
-                finalPosition = destination.m_Bag.Content.Add(removed, request.AllowStack);
-            }
+                    if (placed == TBagContent.INVALID)
+                    {
+                        m_Bag.Content.Add(removed, sourcePosition, true);
+                        for (int rollback = transferred.Count - 1; rollback >= 0; rollback--)
+                        {
+                            RuntimeItem moved = destination.m_Bag.Content.Remove(transferred[rollback]);
+                            if (moved != null) m_Bag.Content.Add(moved, sourcePosition, true);
+                        }
+                        transferred.Clear();
+                        break;
+                    }
 
-            if (finalPosition == TBagContent.INVALID)
-            {
-                LogPickupWarning(
-                    $"{name}: transfer rejected destination has insufficient space req={request.RequestId} item={DescribeRuntimeItem(removed)} destinationBag={destination.NetworkId} requested={request.DestinationPosition}",
-                    this);
-
-                if (sourcePosition.x >= 0 && sourcePosition.y >= 0)
-                {
-                    m_Bag.Content.Add(removed, sourcePosition, true);
+                    finalPosition = placed;
+                    transferred.Add(removed);
                 }
-                else
-                {
-                    m_Bag.Content.Add(removed, true);
-                }
+            }
 
-                TrackRuntimeItemRecursive(removed);
-
+            if (transferred.Count != requestedAmount)
+            {
+                RebuildRuntimeItemMap();
+                destination.RebuildRuntimeItemMap();
                 return new NetworkTransferResponse
                 {
                     RequestId = request.RequestId,
@@ -557,7 +609,12 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 };
             }
 
-            destination.TrackRuntimeItemRecursive(removed);
+            for (int i = 0; i < transferred.Count; i++)
+            {
+                UntrackRuntimeItemRecursive(transferred[i]);
+                destination.TrackRuntimeItemRecursive(transferred[i]);
+            }
+            uint sourceStateVersion = GetAuthoritativeStateVersion();
             CacheCurrentSyncState();
             destination.CacheCurrentSyncState();
 
@@ -568,8 +625,18 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 manager.BroadcastFullSnapshot(destination.GetFullSnapshot());
             }
 
+            // The response is routed to ActorNetworkId. Report that controller's revision rather
+            // than always returning the source Bag revision (for example, a player looting a world
+            // chest is the destination actor). A response revision from another Bag can never be
+            // satisfied by the actor controller and otherwise causes a false timeout/resync.
+            uint actorStateVersion = request.ActorNetworkId == NetworkId
+                ? sourceStateVersion
+                : request.ActorNetworkId == destination.NetworkId
+                    ? destination.CurrentAuthoritativeStateVersion
+                    : 0u;
+
             LogPickupDebug(
-                $"{name}: transfer accepted req={request.RequestId} item={DescribeRuntimeItem(removed)} sourcePosition={sourcePosition} destinationBag={destination.NetworkId} finalPosition={finalPosition}",
+                $"{name}: transfer accepted req={request.RequestId} item={DescribeRuntimeItem(transferred[0])} amount={transferred.Count} sourcePosition={sourcePosition} destinationBag={destination.NetworkId} finalPosition={finalPosition}",
                 this);
 
             return new NetworkTransferResponse
@@ -577,7 +644,8 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 RequestId = request.RequestId,
                 Authorized = true,
                 RejectionReason = InventoryRejectionReason.None,
-                FinalPosition = finalPosition
+                FinalPosition = finalPosition,
+                StateVersion = actorStateVersion
             };
         }
 
@@ -593,7 +661,8 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 BagNetworkId = NetworkId,
                 RuntimeIdHash = runtimeIdHash,
                 Position = TBagContent.INVALID,
-                RemainingStackCount = 0
+                RemainingStackCount = 0,
+                StateVersion = GetAuthoritativeStateVersion()
             };
 
             manager.BroadcastItemRemoved(removeBroadcast);
@@ -649,6 +718,21 @@ namespace Arawn.GameCreator2.Networking.Inventory
                     RequestId = request.RequestId,
                     Authorized = false,
                     RejectionReason = InventoryRejectionReason.RuntimeItemNotFound
+                };
+            }
+
+            NetworkInventoryManager inventoryManager = NetworkInventoryManager.Instance;
+            if (inventoryManager == null ||
+                !inventoryManager.IsWithinWorldInteractionRange(this, droppedWorldItem.Position))
+            {
+                LogPickupWarning(
+                    $"{name}: pickup rejected out of range req={request.RequestId} runtime={request.RuntimeIdHash} picker={transform.position} drop={droppedWorldItem.Position} maxDistance={(inventoryManager != null ? inventoryManager.MaxWorldInteractionDistance : 0f)}",
+                    this);
+                return new NetworkPickupResponse
+                {
+                    RequestId = request.RequestId,
+                    Authorized = false,
+                    RejectionReason = InventoryRejectionReason.NotAuthorized
                 };
             }
 
@@ -713,6 +797,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
 
             s_ServerDroppedWorldItems.Remove(request.RuntimeIdHash);
             TrackRuntimeItemRecursive(runtimeItem);
+            uint stateVersion = GetAuthoritativeStateVersion();
 
             NetworkInventoryManager manager = NetworkInventoryManager.Instance;
             if (manager != null)
@@ -722,7 +807,8 @@ namespace Arawn.GameCreator2.Networking.Inventory
                     BagNetworkId = NetworkId,
                     Item = ConvertToNetworkItem(runtimeItem),
                     Position = finalPosition,
-                    StackCount = m_Bag.Content.GetContent(finalPosition)?.Count ?? 1
+                    StackCount = m_Bag.Content.GetContent(finalPosition)?.Count ?? 1,
+                    StateVersion = stateVersion
                 };
 
                 manager.BroadcastItemAdded(addBroadcast);
@@ -752,13 +838,14 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 Authorized = true,
                 RejectionReason = InventoryRejectionReason.None,
                 PickedUpItem = ConvertToNetworkItem(runtimeItem),
-                PlacedPosition = finalPosition
+                PlacedPosition = finalPosition,
+                StateVersion = stateVersion
             };
         }
 
-        private void BroadcastServerPickupFromDroppedItemIfNeeded(RuntimeItem item)
+        private bool BroadcastServerPickupFromDroppedItemIfNeeded(RuntimeItem item)
         {
-            if (!m_IsServer || item == null) return;
+            if (!m_IsServer || item == null) return false;
             long removedDropRuntimeHash = item.RuntimeID.Hash;
             if (!TryTakeServerDroppedWorldItem(removedDropRuntimeHash, out ServerDroppedWorldItem droppedWorldItem))
             {
@@ -771,7 +858,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
                     LogPickupDebug(
                         $"{name}: server local add is not a remembered dropped item={DescribeRuntimeItem(item)} bag={NetworkId} knownDropCount={s_ServerDroppedWorldItems.Count}",
                         this);
-                    return;
+                    return false;
                 }
 
                 LogPickupDebug(
@@ -780,10 +867,11 @@ namespace Arawn.GameCreator2.Networking.Inventory
             }
 
             TrackRuntimeItemRecursive(item);
+            uint stateVersion = GetAuthoritativeStateVersion();
 
             Vector2Int position = m_Bag.Content.FindPosition(item.RuntimeID);
             NetworkInventoryManager manager = NetworkInventoryManager.Instance;
-            if (manager == null) return;
+            if (manager == null) return false;
 
             var addBroadcast = new NetworkItemAddedBroadcast
             {
@@ -792,7 +880,8 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 Position = position,
                 StackCount = position != TBagContent.INVALID
                     ? m_Bag.Content.GetContent(position)?.Count ?? 1
-                    : 1
+                    : 1,
+                StateVersion = stateVersion
             };
 
             manager.BroadcastItemAdded(addBroadcast);
@@ -809,6 +898,43 @@ namespace Arawn.GameCreator2.Networking.Inventory
             LogPickupDebug(
                 $"{name}: server local pickup broadcast item={DescribeRuntimeItem(item)} removedDropRuntime={removedDropRuntimeHash} sourceBag={droppedWorldItem.SourceBagNetworkId} destinationBag={NetworkId} destroyedServerDropInstance={destroyedLocalDrop}",
                 this);
+            CacheCurrentSyncState();
+            return true;
+        }
+
+        private void BroadcastServerDirectAdd(RuntimeItem item)
+        {
+            if (!m_IsServer || item == null) return;
+            Vector2Int position = m_Bag.Content.FindPosition(item.RuntimeID);
+            if (position == TBagContent.INVALID) return;
+
+            TrackRuntimeItemRecursive(item);
+            var broadcast = new NetworkItemAddedBroadcast
+            {
+                BagNetworkId = NetworkId,
+                Item = ConvertToNetworkItem(item),
+                Position = position,
+                StackCount = m_Bag.Content.GetContent(position)?.Count ?? 1,
+                StateVersion = GetAuthoritativeStateVersion()
+            };
+            NetworkInventoryManager.Instance?.BroadcastItemAdded(broadcast);
+            OnItemAdded?.Invoke(broadcast);
+            CacheCurrentSyncState();
+        }
+
+        private void BroadcastServerDirectRemove(RuntimeItem item)
+        {
+            if (!m_IsServer || item == null) return;
+            var broadcast = new NetworkItemRemovedBroadcast
+            {
+                BagNetworkId = NetworkId,
+                RuntimeIdHash = item.RuntimeID.Hash,
+                Position = TBagContent.INVALID,
+                RemainingStackCount = 0,
+                StateVersion = GetAuthoritativeStateVersion()
+            };
+            NetworkInventoryManager.Instance?.BroadcastItemRemoved(broadcast);
+            OnItemRemoved?.Invoke(broadcast);
             CacheCurrentSyncState();
         }
 
@@ -924,7 +1050,8 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 ParentRuntimeIdHash = parent.RuntimeID.Hash,
                 SocketHash = socketId.Hash,
                 HasAttachment = true,
-                Attachment = ConvertToNetworkItem(attachment)
+                Attachment = ConvertToNetworkItem(attachment),
+                StateVersion = GetAuthoritativeStateVersion()
             };
 
             NetworkInventoryManager.Instance?.BroadcastSocketChange(broadcast);
@@ -939,7 +1066,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
             NetworkInventoryManager.Instance?.BroadcastFullSnapshot(GetFullSnapshot());
             CacheCurrentSyncState();
         }
-        
+
         /// <summary>
         /// [Server] Process equipment request.
         /// </summary>
@@ -954,10 +1081,10 @@ namespace Arawn.GameCreator2.Networking.Inventory
                     RejectionReason = InventoryRejectionReason.NotAuthorized
                 };
             }
-            
+
             bool equipSuccess = false;
             int equippedIndex = -1;
-            
+
             switch (request.Action)
             {
                 case EquipmentAction.Equip:
@@ -973,7 +1100,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
                             RejectionReason = InventoryRejectionReason.RuntimeItemNotFound
                         };
                     }
-                    
+
                     if (request.Action == EquipmentAction.EquipToIndex)
                     {
                         equipSuccess = await m_Bag.Equipment.EquipToIndex(equipItem, request.SlotOrIndex);
@@ -989,21 +1116,22 @@ namespace Arawn.GameCreator2.Networking.Inventory
                         equipSuccess = await m_Bag.Equipment.Equip(equipItem);
                         equippedIndex = m_Bag.Equipment.GetEquippedIndex(equipItem);
                     }
-                    
+
                     if (equipSuccess)
                     {
                         var equipBroadcast = new NetworkItemEquippedBroadcast
                         {
                             BagNetworkId = NetworkId,
                             RuntimeIdHash = request.RuntimeIdHash,
-                            EquipmentIndex = equippedIndex
+                            EquipmentIndex = equippedIndex,
+                            StateVersion = GetAuthoritativeStateVersion()
                         };
                         NetworkInventoryManager.Instance?.BroadcastItemEquipped(equipBroadcast);
                         OnItemEquipped?.Invoke(equipBroadcast);
                     }
                     break;
                 }
-                
+
                 case EquipmentAction.Unequip:
                 {
                     if (!m_RuntimeItemMap.TryGetValue(request.RuntimeIdHash, out var unequipItem))
@@ -1015,39 +1143,41 @@ namespace Arawn.GameCreator2.Networking.Inventory
                             RejectionReason = InventoryRejectionReason.RuntimeItemNotFound
                         };
                     }
-                    
+
                     equippedIndex = m_Bag.Equipment.GetEquippedIndex(unequipItem);
                     equipSuccess = await m_Bag.Equipment.Unequip(unequipItem);
-                    
+
                     if (equipSuccess)
                     {
                         var unequipBroadcast = new NetworkItemUnequippedBroadcast
                         {
                             BagNetworkId = NetworkId,
                             RuntimeIdHash = request.RuntimeIdHash,
-                            EquipmentIndex = equippedIndex
+                            EquipmentIndex = equippedIndex,
+                            StateVersion = GetAuthoritativeStateVersion()
                         };
                         NetworkInventoryManager.Instance?.BroadcastItemUnequipped(unequipBroadcast);
                         OnItemUnequipped?.Invoke(unequipBroadcast);
                     }
                     break;
                 }
-                
+
                 case EquipmentAction.UnequipFromIndex:
                 {
                     var slotId = m_Bag.Equipment.GetSlotRootRuntimeItemID(request.SlotOrIndex);
                     long runtimeIdHash = slotId.Hash;
-                    
+
                     equipSuccess = await m_Bag.Equipment.UnequipFromIndex(request.SlotOrIndex);
                     equippedIndex = request.SlotOrIndex;
-                    
+
                     if (equipSuccess)
                     {
                         var unequipIdxBroadcast = new NetworkItemUnequippedBroadcast
                         {
                             BagNetworkId = NetworkId,
                             RuntimeIdHash = runtimeIdHash,
-                            EquipmentIndex = equippedIndex
+                            EquipmentIndex = equippedIndex,
+                            StateVersion = GetAuthoritativeStateVersion()
                         };
                         NetworkInventoryManager.Instance?.BroadcastItemUnequipped(unequipIdxBroadcast);
                         OnItemUnequipped?.Invoke(unequipIdxBroadcast);
@@ -1055,16 +1185,19 @@ namespace Arawn.GameCreator2.Networking.Inventory
                     break;
                 }
             }
-            
+
+            if (equipSuccess) CacheCurrentSyncState();
+
             return new NetworkEquipmentResponse
             {
                 RequestId = request.RequestId,
                 Authorized = equipSuccess,
                 RejectionReason = equipSuccess ? InventoryRejectionReason.None : InventoryRejectionReason.CannotEquip,
-                EquippedIndex = equippedIndex
+                EquippedIndex = equippedIndex,
+                StateVersion = equipSuccess ? GetAuthoritativeStateVersion() : 0u
             };
         }
-        
+
         /// <summary>
         /// [Server] Process socket request.
         /// </summary>
@@ -1079,7 +1212,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
                     RejectionReason = InventoryRejectionReason.NotAuthorized
                 };
             }
-            
+
             if (!m_RuntimeItemMap.TryGetValue(request.ParentRuntimeIdHash, out var parentItem))
             {
                 return new NetworkSocketResponse
@@ -1089,7 +1222,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
                     RejectionReason = InventoryRejectionReason.RuntimeItemNotFound
                 };
             }
-            
+
             bool socketSuccess = false;
             NetworkRuntimeItem detachedItem = default;
             NetworkRuntimeItem attachedItem = default;
@@ -1110,49 +1243,18 @@ namespace Arawn.GameCreator2.Networking.Inventory
 
                 usedSocketHash = socketId.Hash;
             }
-            
-            switch (request.Action)
-            {
-                case SocketAction.Attach:
-                case SocketAction.AttachToSocket:
-                {
-                    if (!m_RuntimeItemMap.TryGetValue(request.AttachmentRuntimeIdHash, out var attachment))
-                    {
-                        return new NetworkSocketResponse
-                        {
-                            RequestId = request.RequestId,
-                            Authorized = false,
-                            RejectionReason = InventoryRejectionReason.RuntimeItemNotFound
-                        };
-                    }
-                    
-                    if (request.Action == SocketAction.AttachToSocket)
-                    {
-                        socketSuccess = m_Bag.Equipment.AttachTo(parentItem, attachment, socketId);
-                    }
-                    else
-                    {
-                        socketSuccess = m_Bag.Equipment.AttachTo(parentItem, attachment);
-                    }
 
-                    if (socketSuccess)
-                    {
-                        attachedItem = ConvertToNetworkItem(attachment);
-                    }
-                    break;
-                }
-                
-                case SocketAction.Detach:
-                case SocketAction.DetachFromSocket:
+            // Suppress native socket/equipment callbacks and the attachment's raw Remove while
+            // the server commits this one semantic operation. The explicit broadcast below is
+            // therefore the only authoritative socket message.
+            using (EnterNetworkMutationScope())
+            {
+                switch (request.Action)
                 {
-                    RuntimeItem detached;
-                    if (request.Action == SocketAction.DetachFromSocket)
+                    case SocketAction.Attach:
+                    case SocketAction.AttachToSocket:
                     {
-                        detached = m_Bag.Equipment.DetachFrom(parentItem, socketId);
-                    }
-                    else
-                    {
-                        if (!m_RuntimeItemMap.TryGetValue(request.AttachmentRuntimeIdHash, out var detachAttachment))
+                        if (!m_RuntimeItemMap.TryGetValue(request.AttachmentRuntimeIdHash, out var attachment))
                         {
                             return new NetworkSocketResponse
                             {
@@ -1161,18 +1263,55 @@ namespace Arawn.GameCreator2.Networking.Inventory
                                 RejectionReason = InventoryRejectionReason.RuntimeItemNotFound
                             };
                         }
-                        detached = m_Bag.Equipment.DetachFrom(parentItem, detachAttachment);
+
+                        if (request.Action == SocketAction.AttachToSocket)
+                        {
+                            socketSuccess = m_Bag.Equipment.AttachTo(parentItem, attachment, socketId);
+                        }
+                        else
+                        {
+                            socketSuccess = m_Bag.Equipment.AttachTo(parentItem, attachment);
+                        }
+
+                        if (socketSuccess)
+                        {
+                            attachedItem = ConvertToNetworkItem(attachment);
+                        }
+                        break;
                     }
-                    
-                    socketSuccess = detached != null;
-                    if (socketSuccess)
+
+                    case SocketAction.Detach:
+                    case SocketAction.DetachFromSocket:
                     {
-                        detachedItem = ConvertToNetworkItem(detached);
+                        RuntimeItem detached;
+                        if (request.Action == SocketAction.DetachFromSocket)
+                        {
+                            detached = m_Bag.Equipment.DetachFrom(parentItem, socketId);
+                        }
+                        else
+                        {
+                            if (!m_RuntimeItemMap.TryGetValue(request.AttachmentRuntimeIdHash, out var detachAttachment))
+                            {
+                                return new NetworkSocketResponse
+                                {
+                                    RequestId = request.RequestId,
+                                    Authorized = false,
+                                    RejectionReason = InventoryRejectionReason.RuntimeItemNotFound
+                                };
+                            }
+                            detached = m_Bag.Equipment.DetachFrom(parentItem, detachAttachment);
+                        }
+
+                        socketSuccess = detached != null;
+                        if (socketSuccess)
+                        {
+                            detachedItem = ConvertToNetworkItem(detached);
+                        }
+                        break;
                     }
-                    break;
                 }
             }
-            
+
             if (socketSuccess)
             {
                 var socketBroadcast = new NetworkSocketChangeBroadcast
@@ -1181,22 +1320,25 @@ namespace Arawn.GameCreator2.Networking.Inventory
                     ParentRuntimeIdHash = request.ParentRuntimeIdHash,
                     SocketHash = usedSocketHash,
                     HasAttachment = request.Action == SocketAction.Attach || request.Action == SocketAction.AttachToSocket,
-                    Attachment = attachedItem
+                    Attachment = attachedItem,
+                    StateVersion = GetAuthoritativeStateVersion()
                 };
                 NetworkInventoryManager.Instance?.BroadcastSocketChange(socketBroadcast);
                 OnSocketChanged?.Invoke(socketBroadcast);
+                CacheCurrentSyncState();
             }
-            
+
             return new NetworkSocketResponse
             {
                 RequestId = request.RequestId,
                 Authorized = socketSuccess,
                 RejectionReason = socketSuccess ? InventoryRejectionReason.None : InventoryRejectionReason.CannotAttach,
                 UsedSocketHash = usedSocketHash,
-                DetachedItem = detachedItem
+                DetachedItem = detachedItem,
+                StateVersion = socketSuccess ? GetAuthoritativeStateVersion() : 0u
             };
         }
-        
+
         /// <summary>
         /// [Server] Process wealth request.
         /// </summary>
@@ -1211,7 +1353,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
                     RejectionReason = InventoryRejectionReason.NotAuthorized
                 };
             }
-            
+
             if (!TryResolveCurrencyId(request.CurrencyHash, request.CurrencyIdString, out IdString currencyId))
             {
                 return new NetworkWealthResponse
@@ -1223,21 +1365,46 @@ namespace Arawn.GameCreator2.Networking.Inventory
             }
 
             int oldValue = m_Bag.Wealth.Get(currencyId);
-            int newValue;
-            
+            int requestedValue;
+
             switch (request.Action)
             {
                 case WealthAction.Set:
-                    m_Bag.Wealth.Set(currencyId, request.Value);
-                    newValue = request.Value;
+                    if (request.Value < 0)
+                    {
+                        return new NetworkWealthResponse
+                        {
+                            RequestId = request.RequestId,
+                            Authorized = false,
+                            RejectionReason = InventoryRejectionReason.InvalidOperation
+                        };
+                    }
+                    requestedValue = request.Value;
                     break;
-                    
+
                 case WealthAction.Add:
-                    m_Bag.Wealth.Add(currencyId, request.Value);
-                    newValue = oldValue + request.Value;
+                    if (request.Value <= 0 || (long)oldValue + request.Value > int.MaxValue)
+                    {
+                        return new NetworkWealthResponse
+                        {
+                            RequestId = request.RequestId,
+                            Authorized = false,
+                            RejectionReason = InventoryRejectionReason.InvalidOperation
+                        };
+                    }
+                    requestedValue = oldValue + request.Value;
                     break;
-                    
+
                 case WealthAction.Subtract:
+                    if (request.Value <= 0)
+                    {
+                        return new NetworkWealthResponse
+                        {
+                            RequestId = request.RequestId,
+                            Authorized = false,
+                            RejectionReason = InventoryRejectionReason.InvalidOperation
+                        };
+                    }
                     if (oldValue < request.Value)
                     {
                         return new NetworkWealthResponse
@@ -1247,10 +1414,9 @@ namespace Arawn.GameCreator2.Networking.Inventory
                             RejectionReason = InventoryRejectionReason.InsufficientFunds
                         };
                     }
-                    m_Bag.Wealth.Subtract(currencyId, request.Value);
-                    newValue = oldValue - request.Value;
+                    requestedValue = oldValue - request.Value;
                     break;
-                    
+
                 default:
                     return new NetworkWealthResponse
                     {
@@ -1259,40 +1425,65 @@ namespace Arawn.GameCreator2.Networking.Inventory
                         RejectionReason = InventoryRejectionReason.InvalidOperation
                     };
             }
-            
+
+            using (EnterNetworkMutationScope())
+            {
+                m_Bag.Wealth.Set(currencyId, requestedValue);
+            }
+
+            // Treat the GC2 bag as the source of truth. Custom inventory implementations may
+            // clamp or otherwise normalize values, so responses and broadcasts must describe the
+            // actual post-mutation balance rather than client-supplied arithmetic.
+            int newValue = m_Bag.Wealth.Get(currencyId);
+
             // Broadcast
             var wealthBroadcast = new NetworkWealthChangeBroadcast
             {
                 BagNetworkId = NetworkId,
                 CurrencyHash = request.CurrencyHash,
                 NewValue = newValue,
-                Change = newValue - oldValue
+                Change = newValue - oldValue,
+                StateVersion = GetAuthoritativeStateVersion()
             };
             NetworkInventoryManager.Instance?.BroadcastWealthChange(wealthBroadcast);
             OnWealthChanged?.Invoke(wealthBroadcast);
-            
+            CacheCurrentSyncState();
+
             return new NetworkWealthResponse
             {
                 RequestId = request.RequestId,
                 Authorized = true,
                 RejectionReason = InventoryRejectionReason.None,
                 NewValue = newValue,
-                OldValue = oldValue
+                OldValue = oldValue,
+                StateVersion = GetAuthoritativeStateVersion()
             };
         }
-        
+
         #endregion
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // BROADCAST RECEIVERS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         #region Broadcast Receivers
-        
+
         public void ReceiveItemAddedBroadcast(NetworkItemAddedBroadcast broadcast)
         {
             if (m_IsServer) return;
+            EnqueueStateApplication(() =>
+            {
+                ApplyItemAddedBroadcast(broadcast);
+                return Task.CompletedTask;
+            });
+        }
 
+        private void ApplyItemAddedBroadcast(NetworkItemAddedBroadcast broadcast)
+        {
+            if (m_IsServer) return;
+            if (!TryAcceptMutationVersion(broadcast.StateVersion)) return;
+
+            bool converged = false;
             m_IsApplyingNetworkState = true;
             try
             {
@@ -1329,91 +1520,159 @@ namespace Arawn.GameCreator2.Networking.Inventory
                     LogPickupDebug(
                         $"{name}: item add broadcast skipped duplicate bag={broadcast.BagNetworkId} item={DescribeNetworkItem(broadcast.Item)} position={broadcast.Position}",
                         this);
-                    return;
-                }
-
-                // Reconstruct and apply
-                var runtimeItem = ReconstructRuntimeItem(broadcast.Item);
-                if (runtimeItem != null)
-                {
-                    bool addedAtPosition = m_Bag.Content.Add(runtimeItem, broadcast.Position, true);
-                    TrackRuntimeItemRecursive(runtimeItem);
-                    LogPickupDebug(
-                        $"{name}: item add broadcast applied bag={broadcast.BagNetworkId} item={DescribeRuntimeItem(runtimeItem)} requestedPosition={broadcast.Position} addedAtPosition={addedAtPosition} tracked={m_RuntimeItemMap.ContainsKey(runtimeItem.RuntimeID.Hash)}",
-                        this);
+                    converged = true;
                 }
                 else
                 {
-                    LogPickupWarning(
-                        $"{name}: item add broadcast failed reconstruct bag={broadcast.BagNetworkId} item={DescribeNetworkItem(broadcast.Item)}",
-                        this);
+                    // Reconstruct and apply
+                    var runtimeItem = ReconstructRuntimeItem(broadcast.Item);
+                    if (runtimeItem != null)
+                    {
+                        bool addedAtPosition = m_Bag.Content.Add(runtimeItem, broadcast.Position, true);
+                        if (addedAtPosition) TrackRuntimeItemRecursive(runtimeItem);
+                        converged = addedAtPosition;
+                        LogPickupDebug(
+                            $"{name}: item add broadcast applied bag={broadcast.BagNetworkId} item={DescribeRuntimeItem(runtimeItem)} requestedPosition={broadcast.Position} addedAtPosition={addedAtPosition} tracked={m_RuntimeItemMap.ContainsKey(runtimeItem.RuntimeID.Hash)}",
+                            this);
+                    }
+                    else
+                    {
+                        LogPickupWarning(
+                            $"{name}: item add broadcast failed reconstruct bag={broadcast.BagNetworkId} item={DescribeNetworkItem(broadcast.Item)}",
+                            this);
+                    }
                 }
             }
             finally
             {
                 m_IsApplyingNetworkState = false;
             }
-            
+
+            if (!FinishMutationVersion(broadcast.StateVersion, converged, "item add")) return;
             OnItemAdded?.Invoke(broadcast);
         }
-        
+
         public void ReceiveItemRemovedBroadcast(NetworkItemRemovedBroadcast broadcast)
         {
             if (m_IsServer) return;
+            EnqueueStateApplication(() =>
+            {
+                ApplyItemRemovedBroadcast(broadcast);
+                return Task.CompletedTask;
+            });
+        }
 
+        private void ApplyItemRemovedBroadcast(NetworkItemRemovedBroadcast broadcast)
+        {
+            if (m_IsServer) return;
+            if (!TryAcceptMutationVersion(broadcast.StateVersion)) return;
+
+            bool converged = true;
             m_IsApplyingNetworkState = true;
             try
             {
                 if (m_RuntimeItemMap.TryGetValue(broadcast.RuntimeIdHash, out var runtimeItem))
                 {
-                    m_Bag.Content.Remove(runtimeItem);
-                    UntrackRuntimeItemRecursive(runtimeItem);
+                    RuntimeItem removed = m_Bag.Content.Remove(runtimeItem);
+                    converged = removed != null;
+                    if (removed != null) UntrackRuntimeItemRecursive(removed);
                 }
             }
             finally
             {
                 m_IsApplyingNetworkState = false;
             }
-            
+            if (!FinishMutationVersion(broadcast.StateVersion, converged, "item remove")) return;
             OnItemRemoved?.Invoke(broadcast);
         }
-        
+
         public void ReceiveItemMovedBroadcast(NetworkItemMovedBroadcast broadcast)
         {
             if (m_IsServer) return;
+            EnqueueStateApplication(() =>
+            {
+                ApplyItemMovedBroadcast(broadcast);
+                return Task.CompletedTask;
+            });
+        }
 
+        private void ApplyItemMovedBroadcast(NetworkItemMovedBroadcast broadcast)
+        {
+            if (m_IsServer) return;
+            if (!TryAcceptMutationVersion(broadcast.StateVersion)) return;
+
+            bool converged;
             m_IsApplyingNetworkState = true;
             try
             {
-                m_Bag.Content.Move(broadcast.FromPosition, broadcast.ToPosition, true);
+                converged = broadcast.FromPosition == broadcast.ToPosition ||
+                            m_Bag.Content.Move(broadcast.FromPosition, broadcast.ToPosition, true);
             }
             finally
             {
                 m_IsApplyingNetworkState = false;
             }
-
+            if (!FinishMutationVersion(broadcast.StateVersion, converged, "item move")) return;
             OnItemMoved?.Invoke(broadcast);
         }
-        
+
         public void ReceiveItemUsedBroadcast(NetworkItemUsedBroadcast broadcast)
         {
             if (m_IsServer) return;
+            EnqueueStateApplication(() =>
+            {
+                ApplyItemUsedBroadcast(broadcast);
+                return Task.CompletedTask;
+            });
+        }
 
+        private void ApplyItemUsedBroadcast(NetworkItemUsedBroadcast broadcast)
+        {
+            if (m_IsServer) return;
+            if (!broadcast.WasConsumed)
+            {
+                if (!TryAcceptTransientUseEvent(broadcast)) return;
+                OnItemUsed?.Invoke(broadcast);
+                return;
+            }
+
+            if (!TryAcceptMutationVersion(broadcast.StateVersion)) return;
+
+            bool converged = true;
             m_IsApplyingNetworkState = true;
             try
             {
                 if (broadcast.WasConsumed && m_RuntimeItemMap.TryGetValue(broadcast.RuntimeIdHash, out var runtimeItem))
                 {
-                    m_Bag.Content.Remove(runtimeItem);
-                    UntrackRuntimeItemRecursive(runtimeItem);
+                    RuntimeItem removed = m_Bag.Content.Remove(runtimeItem);
+                    converged = removed != null;
+                    if (removed != null) UntrackRuntimeItemRecursive(removed);
                 }
             }
             finally
             {
                 m_IsApplyingNetworkState = false;
             }
-            
+            if (!FinishMutationVersion(broadcast.StateVersion, converged, "item use")) return;
             OnItemUsed?.Invoke(broadcast);
+        }
+
+        private bool TryAcceptTransientUseEvent(NetworkItemUsedBroadcast broadcast)
+        {
+            // A zero token can only come from an older peer. Preserve compatibility by delivering
+            // it, but exact deduplication requires matching v3 peers and a non-zero correlation.
+            if (broadcast.StateVersion == 0) return true;
+
+            var key = new TransientUseEventKey(broadcast.RuntimeIdHash, broadcast.StateVersion);
+            if (!m_ReceivedTransientUseEvents.Add(key)) return false;
+
+            m_ReceivedTransientUseEventOrder.Enqueue(key);
+            while (m_ReceivedTransientUseEventOrder.Count > MAX_RECEIVED_TRANSIENT_USE_EVENTS)
+            {
+                m_ReceivedTransientUseEvents.Remove(m_ReceivedTransientUseEventOrder.Dequeue());
+            }
+
+            return true;
         }
 
         public void ReceiveItemDroppedBroadcast(NetworkItemDroppedBroadcast broadcast)
@@ -1464,94 +1723,146 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 $"{name}: dropped item remove broadcast sourceBag={broadcast.SourceBagNetworkId} runtime={broadcast.RuntimeIdHash} destroyed={destroyed} destroyedRuntime={destroyedRuntimeIdHash} position={broadcast.Position}",
                 this);
         }
-        
+
         public void ReceiveItemEquippedBroadcast(NetworkItemEquippedBroadcast broadcast)
         {
             if (m_IsServer) return;
+            EnqueueStateApplication(() => ApplyItemEquippedBroadcastAsync(broadcast));
+        }
 
-            m_IsApplyingNetworkState = true;
+        private async Task ApplyItemEquippedBroadcastAsync(NetworkItemEquippedBroadcast broadcast)
+        {
+            if (m_IsServer) return;
+            if (!TryAcceptMutationVersion(broadcast.StateVersion)) return;
+
+            bool converged = false;
+            IDisposable mutationScope = EnterNetworkMutationScope();
             try
             {
                 if (m_RuntimeItemMap.TryGetValue(broadcast.RuntimeIdHash, out var runtimeItem))
                 {
-                    _ = m_Bag.Equipment.EquipToIndex(runtimeItem, broadcast.EquipmentIndex);
+                    IdString equippedId = m_Bag.Equipment.GetSlotRootRuntimeItemID(
+                        broadcast.EquipmentIndex);
+                    converged = equippedId.Hash == broadcast.RuntimeIdHash ||
+                                await m_Bag.Equipment.EquipToIndex(
+                                    runtimeItem,
+                                    broadcast.EquipmentIndex);
                 }
+            }
+            catch (Exception exception)
+            {
+                Debug.LogException(exception, this);
             }
             finally
             {
-                m_IsApplyingNetworkState = false;
+                mutationScope.Dispose();
             }
-            
+
+            if (!FinishMutationVersion(broadcast.StateVersion, converged, "item equip")) return;
             OnItemEquipped?.Invoke(broadcast);
         }
-        
+
         public void ReceiveItemUnequippedBroadcast(NetworkItemUnequippedBroadcast broadcast)
         {
             if (m_IsServer) return;
+            EnqueueStateApplication(() => ApplyItemUnequippedBroadcastAsync(broadcast));
+        }
 
-            m_IsApplyingNetworkState = true;
+        private async Task ApplyItemUnequippedBroadcastAsync(NetworkItemUnequippedBroadcast broadcast)
+        {
+            if (m_IsServer) return;
+            if (!TryAcceptMutationVersion(broadcast.StateVersion)) return;
+
+            bool converged = false;
+            IDisposable mutationScope = EnterNetworkMutationScope();
             try
             {
-                _ = m_Bag.Equipment.UnequipFromIndex(broadcast.EquipmentIndex);
+                IdString equippedId = m_Bag.Equipment.GetSlotRootRuntimeItemID(
+                    broadcast.EquipmentIndex);
+                converged = string.IsNullOrEmpty(equippedId.String) ||
+                            await m_Bag.Equipment.UnequipFromIndex(
+                                broadcast.EquipmentIndex);
+            }
+            catch (Exception exception)
+            {
+                Debug.LogException(exception, this);
             }
             finally
             {
-                m_IsApplyingNetworkState = false;
+                mutationScope.Dispose();
             }
 
+            if (!FinishMutationVersion(broadcast.StateVersion, converged, "item unequip")) return;
             OnItemUnequipped?.Invoke(broadcast);
         }
-        
+
         public void ReceiveSocketChangeBroadcast(NetworkSocketChangeBroadcast broadcast)
         {
             if (m_IsServer) return;
+            EnqueueStateApplication(() =>
+            {
+                ApplySocketChangeBroadcast(broadcast);
+                return Task.CompletedTask;
+            });
+        }
 
+        private void ApplySocketChangeBroadcast(NetworkSocketChangeBroadcast broadcast)
+        {
+            if (m_IsServer) return;
+            if (!TryAcceptMutationVersion(broadcast.StateVersion)) return;
+
+            bool converged = false;
             m_IsApplyingNetworkState = true;
             try
             {
                 if (!m_RuntimeItemMap.TryGetValue(broadcast.ParentRuntimeIdHash, out RuntimeItem parentItem))
                 {
-                    OnSocketChanged?.Invoke(broadcast);
-                    return;
+                    converged = false;
                 }
-
-                if (!TryResolveRuntimeSocketId(parentItem, broadcast.SocketHash, null, out IdString socketId) ||
-                    !parentItem.Sockets.TryGetValue(socketId, out RuntimeSocket socket))
+                else if (!TryResolveRuntimeSocketId(parentItem, broadcast.SocketHash, null, out IdString socketId) ||
+                         !parentItem.Sockets.TryGetValue(socketId, out RuntimeSocket socket))
                 {
-                    OnSocketChanged?.Invoke(broadcast);
-                    return;
+                    converged = false;
                 }
-
-                RuntimeItem previousAttachment = socket.Attachment;
-                RuntimeItem nextAttachment = null;
-                if (broadcast.HasAttachment)
+                else
                 {
-                    RuntimeItem attachment = ReconstructRuntimeItem(broadcast.Attachment);
-                    if (attachment != null)
+                    RuntimeItem previousAttachment = socket.Attachment;
+                    RuntimeItem nextAttachment = null;
+                    if (broadcast.HasAttachment)
                     {
-                        if (m_Bag.Content.Contains(attachment))
+                        RuntimeItem attachment = null;
+                        if (broadcast.Attachment.RuntimeIdHash != 0)
                         {
-                            m_Bag.Content.Remove(attachment);
+                            m_RuntimeItemMap.TryGetValue(
+                                broadcast.Attachment.RuntimeIdHash,
+                                out attachment);
                         }
 
-                        if (s_RuntimeSocketAttachmentField != null)
+                        attachment ??= ReconstructRuntimeItem(broadcast.Attachment);
+                        if (attachment != null && s_RuntimeSocketAttachmentField != null)
                         {
+                            if (m_Bag.Content.Contains(attachment))
+                            {
+                                m_Bag.Content.Remove(attachment);
+                            }
+
                             s_RuntimeSocketAttachmentField.SetValue(socket, attachment);
+                            TrackRuntimeItemRecursive(attachment);
+                            nextAttachment = attachment;
+                            converged = true;
                         }
-
-                        TrackRuntimeItemRecursive(attachment);
-                        nextAttachment = attachment;
                     }
-                }
-                else if (s_RuntimeSocketAttachmentField != null)
-                {
-                    s_RuntimeSocketAttachmentField.SetValue(socket, null);
-                }
+                    else if (s_RuntimeSocketAttachmentField != null)
+                    {
+                        s_RuntimeSocketAttachmentField.SetValue(socket, null);
+                        converged = true;
+                    }
 
-                if (previousAttachment != null &&
-                    (nextAttachment == null || previousAttachment.RuntimeID.Hash != nextAttachment.RuntimeID.Hash))
-                {
-                    UntrackRuntimeItemRecursive(previousAttachment);
+                    if (previousAttachment != null &&
+                        (nextAttachment == null || previousAttachment.RuntimeID.Hash != nextAttachment.RuntimeID.Hash))
+                    {
+                        UntrackRuntimeItemRecursive(previousAttachment);
+                    }
                 }
             }
             finally
@@ -1559,30 +1870,104 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 m_IsApplyingNetworkState = false;
             }
 
+            if (!FinishMutationVersion(broadcast.StateVersion, converged, "socket change")) return;
             OnSocketChanged?.Invoke(broadcast);
         }
-        
+
         public void ReceiveWealthChangeBroadcast(NetworkWealthChangeBroadcast broadcast)
         {
             if (m_IsServer) return;
+            EnqueueStateApplication(() =>
+            {
+                ApplyWealthChangeBroadcast(broadcast);
+                return Task.CompletedTask;
+            });
+        }
 
+        private void ApplyWealthChangeBroadcast(NetworkWealthChangeBroadcast broadcast)
+        {
+            if (m_IsServer) return;
+            if (!TryAcceptMutationVersion(broadcast.StateVersion)) return;
+
+            bool converged = false;
             m_IsApplyingNetworkState = true;
             try
             {
                 if (TryResolveCurrencyIdByHash(broadcast.CurrencyHash, out IdString currencyId))
                 {
-                    m_Bag.Wealth.Set(currencyId, broadcast.NewValue);
+                    if (m_Bag.Wealth.Get(currencyId) != broadcast.NewValue)
+                    {
+                        m_Bag.Wealth.Set(currencyId, broadcast.NewValue);
+                    }
+                    converged = m_Bag.Wealth.Get(currencyId) == broadcast.NewValue;
                 }
             }
             finally
             {
                 m_IsApplyingNetworkState = false;
             }
-            
+
+            if (!FinishMutationVersion(broadcast.StateVersion, converged, "wealth change")) return;
             OnWealthChanged?.Invoke(broadcast);
         }
-        
+
+        public void ReceivePropertyChangeBroadcast(NetworkPropertyChangeBroadcast broadcast)
+        {
+            if (m_IsServer) return;
+            EnqueueStateApplication(() =>
+            {
+                ApplyPropertyChangeBroadcast(broadcast);
+                return Task.CompletedTask;
+            });
+        }
+
+        private void ApplyPropertyChangeBroadcast(NetworkPropertyChangeBroadcast broadcast)
+        {
+            if (m_IsServer) return;
+            if (!TryAcceptMutationVersion(broadcast.StateVersion)) return;
+
+            bool converged = false;
+            m_IsApplyingNetworkState = true;
+            try
+            {
+                if (!m_RuntimeItemMap.TryGetValue(broadcast.RuntimeIdHash, out RuntimeItem runtimeItem) ||
+                    !TryResolveRuntimePropertyId(runtimeItem, broadcast.PropertyHash, null, out IdString propertyId) ||
+                    !runtimeItem.Properties.TryGetValue(propertyId, out RuntimeProperty runtimeProperty))
+                {
+                    converged = false;
+                }
+                else
+                {
+                    if (!runtimeProperty.Number.Equals(broadcast.NewNumber))
+                    {
+                        runtimeProperty.Number = broadcast.NewNumber;
+                    }
+                    if (!string.Equals(runtimeProperty.Text, broadcast.NewText, StringComparison.Ordinal))
+                    {
+                        runtimeProperty.Text = broadcast.NewText;
+                    }
+                    converged = runtimeProperty.Number.Equals(broadcast.NewNumber) &&
+                                string.Equals(
+                                    runtimeProperty.Text,
+                                    broadcast.NewText,
+                                    StringComparison.Ordinal);
+                }
+            }
+            finally
+            {
+                m_IsApplyingNetworkState = false;
+            }
+
+            FinishMutationVersion(broadcast.StateVersion, converged, "property change");
+        }
+
         public void ReceiveFullSnapshot(NetworkInventorySnapshot snapshot)
+        {
+            if (m_IsServer) return;
+            EnqueueStateApplication(() => ApplyFullSnapshotMessageAsync(snapshot));
+        }
+
+        private async Task ApplyFullSnapshotMessageAsync(NetworkInventorySnapshot snapshot)
         {
             if (m_IsServer) return;
 
@@ -1591,15 +1976,22 @@ namespace Arawn.GameCreator2.Networking.Inventory
                 return;
             }
 
-            m_IsApplyingNetworkState = true;
+            if (IsStaleStateVersion(snapshot.StateVersion)) return;
+
+            IDisposable mutationScope = EnterNetworkMutationScope();
             try
             {
-                ApplyFullSnapshot(snapshot);
+                await ApplyFullSnapshot(snapshot);
             }
             finally
             {
-                m_IsApplyingNetworkState = false;
+                mutationScope.Dispose();
             }
+
+            RecordAppliedStateVersion(snapshot.StateVersion);
+            m_FullSnapshotApplyCount = m_FullSnapshotApplyCount == uint.MaxValue
+                ? 1u
+                : m_FullSnapshotApplyCount + 1u;
 
             if (m_LogAllChanges)
             {
@@ -1610,17 +2002,25 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public void ReceiveDelta(NetworkInventoryDelta delta)
         {
             if (m_IsServer) return;
+            EnqueueStateApplication(() => ApplyDeltaMessageAsync(delta));
+        }
+
+        private async Task ApplyDeltaMessageAsync(NetworkInventoryDelta delta)
+        {
+            if (m_IsServer) return;
 
             if (delta.BagNetworkId != 0 && delta.BagNetworkId != NetworkId)
             {
                 return;
             }
 
+            if (!TryAcceptMutationVersion(delta.StateVersion)) return;
+
             const uint maskCells = 1u << 0;
             const uint maskEquipment = 1u << 1;
             const uint maskWealth = 1u << 2;
 
-            m_IsApplyingNetworkState = true;
+            IDisposable mutationScope = EnterNetworkMutationScope();
             try
             {
                 if ((delta.ChangeMask & maskCells) != 0 && delta.ChangedCells != null)
@@ -1630,7 +2030,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
 
                 if ((delta.ChangeMask & maskEquipment) != 0 && delta.ChangedEquipment != null)
                 {
-                    ApplyEquipmentDelta(delta.ChangedEquipment);
+                    await ApplyEquipmentDelta(delta.ChangedEquipment);
                 }
 
                 if ((delta.ChangeMask & maskWealth) != 0 && delta.ChangedWealth != null)
@@ -1640,10 +2040,11 @@ namespace Arawn.GameCreator2.Networking.Inventory
             }
             finally
             {
-                m_IsApplyingNetworkState = false;
+                mutationScope.Dispose();
             }
 
             CacheCurrentSyncState();
+            RecordAppliedStateVersion(delta.StateVersion);
 
             if (m_LogAllChanges)
             {
@@ -1654,7 +2055,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
                     $"wealth={delta.ChangedWealth?.Length ?? 0}");
             }
         }
-        
+
         #endregion
     }
 }

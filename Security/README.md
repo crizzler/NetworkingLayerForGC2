@@ -55,13 +55,13 @@ public class MyNetworkManager : MonoBehaviour
     private void Start()
     {
         var security = GetComponent<NetworkSecurityManager>();
-        
+
         // Initialize on server
         security.Initialize(
-            isServer: true, 
+            isServer: true,
             getServerTime: () => Time.time
         );
-        
+
         // Set up kick handler
         security.KickClient = (clientId, reason) =>
         {
@@ -91,17 +91,17 @@ In the Inspector on NetworkSecurityManager:
 ```csharp
 // In your server-side request processor:
 public NetworkStatModifyResponse ProcessStatModifyRequest(
-    NetworkStatModifyRequest request, 
+    NetworkStatModifyRequest request,
     uint clientNetworkId)
 {
     // Validate using SecurityIntegration
     uint correlationId = NetworkCorrelation.Compose(request.ActorNetworkId, request.RequestId);
     if (!SecurityIntegration.ValidateStatsRequest(
-        clientNetworkId, 
+        clientNetworkId,
         request.ActorNetworkId,
         correlationId,
         "StatModify",
-        request.StatHash, 
+        request.StatHash,
         request.Value))
     {
         return new NetworkStatModifyResponse
@@ -111,7 +111,7 @@ public NetworkStatModifyResponse ProcessStatModifyRequest(
             RejectionReason = StatRejectionReason.SecurityViolation
         };
     }
-    
+
     // Continue with normal processing...
 }
 ```

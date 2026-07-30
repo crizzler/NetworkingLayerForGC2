@@ -1,5 +1,6 @@
 #if GC2_TRAVERSAL
 using System;
+using UnityEngine;
 
 namespace Arawn.GameCreator2.Networking.Traversal
 {
@@ -26,7 +27,69 @@ namespace Arawn.GameCreator2.Networking.Traversal
         InvalidAction = 6,
         InvalidState = 7,
         IdentityMismatch = 8,
-        Exception = 9
+        Exception = 9,
+        RouteUnavailable = 10,
+        ControllerNotReady = 11,
+        StartNotAcknowledged = 12,
+        StaleState = 13,
+        UnsupportedPredictionBackend = 14,
+        PatchRequired = 15,
+        RuntimeNotReady = 16,
+        UnresolvedMotion = 17,
+        UnusableMotion = 18,
+        StartTimeout = 19
+    }
+
+    /// <summary>
+    /// Describes whether an owner traversal request can reach the authoritative server.
+    /// A route must explicitly report Ready; unknown or partially initialized routes fail closed.
+    /// </summary>
+    public enum TraversalRouteStatus : byte
+    {
+        Unknown = 0,
+        Ready = 1,
+        ManagerUnavailable = 2,
+        TransportUnavailable = 3,
+        ClientNotRunning = 4,
+        ServerNotRunning = 5,
+        LocalPlayerNotReady = 6,
+        ControllerNotReady = 7,
+        PatchRequired = 8,
+        UnsupportedPredictionBackend = 9
+    }
+
+    /// <summary>
+    /// Identifies which active traversal state is safe to reconstruct from a persistent snapshot.
+    /// Traverse links are transient; interactive traverses can be restored for late joiners.
+    /// </summary>
+    public enum TraversalSnapshotKind : byte
+    {
+        None = 0,
+        ActiveLink = 1,
+        ActiveInteractive = 2
+    }
+
+    public static class NetworkTraversalVersion
+    {
+        /// <summary>
+        /// Wrap-safe monotonic version comparison. Version zero is reserved for unversioned state.
+        /// </summary>
+        public static bool IsNewer(uint candidate, uint baseline)
+        {
+            if (candidate == baseline || candidate == 0) return false;
+            if (baseline == 0) return true;
+            return unchecked((int)(candidate - baseline)) > 0;
+        }
+    }
+
+    /// <summary>
+    /// Optional override for focused climb diagnostics. Enable this temporarily when a capture
+    /// is needed. The channel only focuses characters while they use Free Climb or Ledge Climb
+    /// and rate-limits continuous telemetry.
+    /// </summary>
+    public static class NetworkTraversalDebug
+    {
+        public static bool ForceClimbDiagnostics = false;
     }
 
     [Serializable]
@@ -77,6 +140,7 @@ namespace Arawn.GameCreator2.Networking.Traversal
         public uint ArgsTargetNetworkId;
 
         public bool IsTraversing;
+        public uint StateVersion;
         public string Error;
     }
 
@@ -103,6 +167,7 @@ namespace Arawn.GameCreator2.Networking.Traversal
 
         public bool IsTraversing;
         public float ServerTime;
+        public uint StateVersion;
     }
 
     [Serializable]
@@ -114,6 +179,12 @@ namespace Arawn.GameCreator2.Networking.Traversal
         public bool IsTraversing;
         public int TraverseHash;
         public string TraverseIdString;
+
+        public uint StateVersion;
+        public TraversalSnapshotKind Kind;
+        public bool HasRelativePose;
+        public Vector3 RelativePosition;
+        public Quaternion RelativeRotation;
     }
 }
 #endif

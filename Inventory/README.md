@@ -1,371 +1,202 @@
-# GC2 Inventory Network Integration
+# GC2 Inventory Networking
 
-Server-authoritative inventory networking for Game Creator 2 Inventory module. Designed for competitive multiplayer with cheat prevention.
+This module adds server-authoritative synchronization for Game Creator 2 Inventory. It supports
+player and world Bags, complete runtime Item properties and sockets, native Grid/List operations,
+merchant and crafting transactions, scene pickups, runtime PurrNet pickups, and late join.
 
-## Features
+Inventory protocol and snapshot layouts changed with the 3.0 repair. The server and every client
+must use the same Networking Layer package version.
 
-### Server Authority
-- **Content Operations**: Add, Remove, Move, Use, Drop items validated server-side
-- **Equipment System**: Equip/Unequip with server validation
-- **Socket Operations**: Attach/Detach items from sockets
-- **Wealth Management**: Currency Add/Subtract/Set with server authority
-- **Merchant Transactions**: Buy/Sell validated server-side
-- **Crafting Operations**: Craft/Dismantle with ingredient verification
-- **Transfer System**: Bag-to-bag transfers with validation
+## Required setup
 
-### Anti-Cheat Protection
-- Item duplication prevention
-- Gold/currency exploit prevention
-- Illegal crafting blocked
-- Equipment slot validation
-- Socket compatibility checks
-- Rate limiting per client
+1. Open `Game Creator > Networking Layer > Patches > Inventory > Patch (Server Authority)`.
+2. Confirm the status is **Patched**, **Backups Available**, and `3.0.0-inventory`.
 
-## PurrNet Scene Setup Wizard
+   The v3 networking assembly consumes an interception ABI injected by this patch. Applying the
+   patch defines `GC2_NETWORK_INVENTORY_PATCHED`; unpatching removes that symbol and conditionally
+   excludes Inventory networking, its PurrNet bridge, editor tools, and tests before Unity reloads.
+   This lets pristine GC2 Inventory compile and work offline without shipping modified third-party
+   source. Reapply the patch before opening or building a networked Inventory scene.
 
-For PurrNet projects, enable **Inventory** on the PurrNet wizard Modules page. The wizard creates/reuses `NetworkInventoryManager` and `PurrNetInventoryTransportBridge`.
+3. Add one `NetworkInventoryManager` and one transport bridge to the session root. The PurrNet
+   Scene Setup Wizard creates and connects both.
+4. Add one `NetworkInventoryController` beside each networked `Bag` and `NetworkCharacter`.
+   The PurrNet wizard adds it to the selected player prefab.
+5. For PurrNet, keep all Inventory channels on `ReliableOrdered`.
 
-When a Player Prefab is assigned on the Scene page and prefab preparation is enabled, selecting Inventory adds `NetworkInventoryController` to that prefab. Keep one controller per networked Bag owner; scene/NPC inventories can still be configured manually when they are not part of the player prefab.
+The patch installs semantic interception points in GC2 Inventory 2.8.x. Native Add, Remove,
+Move/stack, Split, transfer, Use, Drop, Wealth, merchant, crafting, dismantling, combine, and the
+`Inventory > Bags > Add Item` instruction then enter the authoritative request flow. Do not ship a
+networked Inventory scene with an old or missing patch.
 
-## Architecture
+## Authority rules
 
-```
-NetworkInventoryManager (Singleton)
-    ├── Transport Delegates (wire to your networking)
-    ├── Controller Registry
-    └── Request Routing
+| Origin | Result |
+|---|---|
+| Offline/unmanaged Bag | GC2 runs normally |
+| Server or host | Operation runs locally once and broadcasts the confirmed revision |
+| Owning client | One semantic request is sent; local mutation waits for server confirmation |
+| Remote proxy | Mutation is rejected |
 
-NetworkInventoryController (Per-Bag)
-    ├── Request Methods (Client)
-    ├── Process Methods (Server)
-    ├── Broadcast Receivers (Client)
-    └── RuntimeItem Tracking
-```
+Composite operations run inside a nestable authoritative-apply scope. For example, a Move that
+internally removes and adds items still produces one network operation, not three requests.
 
-## Component Placement
+## Add Item, rewards, and client requests
 
-- Add exactly one `NetworkInventoryManager` to a persistent scene object (network bootstrap/root).
-- Add one `NetworkInventoryController` on each networked player/NPC GameObject that owns a GC2 `Bag`.
-- The controller should live on the same GameObject as `Bag` and `NetworkCharacter`.
-- Register controllers with the manager using `NetworkCharacter.NetworkId` when the entity is spawned/ready.
+An `InstructionInventoryAddItem` on an owning client now waits for its authoritative response. The
+next instruction runs only after the confirmed revision has been applied locally. If the server
+rejects the grant, the instruction fails and later instructions do not run. This prevents a pickup's
+`Destroy Self` instruction from running after a rejected claim.
 
-## Quick Start
+Generic client-created items are denied by default. This is intentional: a client must not be able
+to grant itself any registered Item simply by running Add Item. Choose one of these patterns:
 
-### 1. Setup Manager
-
-Add `NetworkInventoryManager` to a persistent scene object:
-
-```csharp
-// On server
-NetworkInventoryManager.Instance.IsServer = true;
-
-// Wire transport delegates (example with any networking solution)
-NetworkInventoryManager.Instance.OnSendContentAddRequest = SendToServerMethod;
-NetworkInventoryManager.Instance.OnBroadcastItemAdded = BroadcastToClientsMethod;
-// ... wire all needed delegates
-```
-
-### 2. Setup Per-Bag Controller
-
-Add `NetworkInventoryController` alongside each `Bag` component:
+- **Server-authored reward:** validate quest completion, combat reward, or an admin action on the
+  server and call `TryServerGrantItem`.
+- **Runtime Item reward:** construct or load the complete runtime payload on the server and call
+  `TryServerGrantRuntimeItem`. Client-supplied runtime payloads are never trusted.
+- **Validated client request:** set `NetworkInventoryManager.CustomAddValidator` and validate the
+  request's actor, `Source`, `SourceHash`, range, prerequisite, cost, and one-time state.
+- **Trusted co-op compatibility:** enable `AllowUnvalidatedOwnedClientAdds` only when clients are
+  intentionally trusted. The wizard displays a security warning while it is enabled.
 
 ```csharp
-// During spawn/initialize (after NetworkCharacter has a valid NetworkId)
-var networkCharacter = GetComponent<NetworkCharacter>();
-var controller = GetComponent<NetworkInventoryController>();
-
-controller.Initialize(isServer, isLocalClient);
-if (NetworkInventoryManager.Instance != null)
+NetworkInventoryManager.Instance.CustomAddValidator = (request, senderClientId) =>
 {
-    NetworkInventoryManager.Instance.RegisterController(networkCharacter.NetworkId, controller);
-}
+    bool validQuestReward =
+        request.Source == InventoryModificationSource.Quest &&
+        QuestService.ServerCanClaim(senderClientId, request.SourceHash);
 
-// During despawn/cleanup
-if (NetworkInventoryManager.Instance != null)
-{
-    NetworkInventoryManager.Instance.UnregisterController(networkCharacter.NetworkId);
-}
-```
-
-### 3. Client Operations
-
-Instead of calling Bag methods directly, use controller requests:
-
-```csharp
-// OLD (don't use in multiplayer):
-// bag.Content.Add(item, true);
-
-// NEW (server-authoritative):
-controller.RequestAddItem(itemIdHash, 1);
-
-// With callback
-controller.RequestAddItem(itemIdHash, 1, OnAddResult);
-
-void OnAddResult(NetworkContentAddResponse response)
-{
-    if (response.Authorized)
-        Debug.Log($"Added item: {response.RuntimeIdString}");
-    else
-        Debug.Log($"Rejected: {response.RejectionReason}");
-}
-```
-
-## Operations Reference
-
-### Content Operations
-
-| Operation | Client Request | Server Validates |
-|-----------|----------------|------------------|
-| Add | `RequestAddItem(hash, count)` | Space, stacking rules |
-| Remove | `RequestRemoveItem(runtimeId, count)` | Item exists, count valid |
-| Move | `RequestMoveItem(from, to)` | Valid indices, space |
-| Use | `RequestUseItem(runtimeId)` | Item exists, usable |
-| Drop | `RequestDropItem(runtimeId, count, pos)` | Item exists, count valid |
-
-### Equipment Operations
-
-| Operation | Client Request | Server Validates |
-|-----------|----------------|------------------|
-| Equip | `RequestEquip(runtimeId)` | Item exists, compatible |
-| Unequip | `RequestUnequip(runtimeId)` | Item equipped |
-| UnequipFromIndex | `RequestUnequipFromIndex(index)` | Index valid, item equipped |
-
-### Socket Operations
-
-| Operation | Client Request | Server Validates |
-|-----------|----------------|------------------|
-| Attach | `RequestAttachToSocket(parentId, childId, slot)` | Items exist, compatible |
-| Detach | `RequestDetachFromSocket(parentId, childId, slot)` | Items attached |
-
-### Wealth Operations
-
-| Operation | Client Request | Server Validates |
-|-----------|----------------|------------------|
-| Add Currency | `RequestWealthModify(Add, currency, amount)` | Server-only typically |
-| Subtract | `RequestWealthModify(Subtract, currency, amount)` | Sufficient funds |
-| Set | `RequestWealthModify(Set, currency, amount)` | Server-only typically |
-
-## Network Types
-
-### Core Structures
-
-```csharp
-// Network representation of RuntimeItem
-NetworkRuntimeItem
-{
-    ItemHash,           // Item definition hash
-    RuntimeIdHash,      // Unique instance hash
-    RuntimeIdString,    // String for reconstruction
-    Properties[],       // Serialized properties
-    Sockets[]          // Nested items in sockets
-}
-
-// Inventory cell
-NetworkCell
-{
-    CellIndex,
-    Stack[]            // Items in this cell
-}
-
-// Full inventory state
-NetworkInventorySnapshot
-{
-    BagNetworkId,
-    Cells[],
-    EquippedItems[],
-    Wealth[]
-}
-```
-
-### Request/Response Pattern
-
-All operations follow request-response pattern:
-
-```csharp
-// Client sends request
-NetworkContentAddRequest
-{
-    RequestId,          // Unique request ID
-    TargetBagNetworkId, // Which bag
-    ItemIdHash,         // What item
-    Amount,             // How many
-    Source             // Modification source
-}
-
-// Server responds
-NetworkContentAddResponse
-{
-    RequestId,          // Matching request
-    Authorized,         // Was it allowed
-    RejectionReason,    // Why rejected
-    ResultingItem       // The created item (if authorized)
-}
-```
-
-## Custom Validation
-
-Extend validation with custom logic:
-
-```csharp
-// Example: Prevent adding items during combat
-NetworkInventoryManager.Instance.CustomAddValidator = (request, clientId) =>
-{
-    if (IsInCombat(clientId))
-        return (false, InventoryRejectionReason.ConditionFailed);
-    return (true, InventoryRejectionReason.None);
-};
-
-// Example: Custom merchant restrictions
-NetworkInventoryManager.Instance.CustomMerchantValidator = (request, clientId) =>
-{
-    if (!IsNearMerchant(clientId, request.MerchantNetworkId))
-        return (false, InventoryRejectionReason.OutOfRange);
-    return (true, InventoryRejectionReason.None);
+    return validQuestReward
+        ? (true, InventoryRejectionReason.None)
+        : (false, InventoryRejectionReason.NotAuthorized);
 };
 ```
 
-## Transport Integration Examples
-
-### Netcode for GameObjects (optional example)
-This sample follows NGO 2.10 unified RPC API (`[Rpc]`, `RpcParams`, `RpcTarget`).
+Trusted server code can grant an asset directly:
 
 ```csharp
-// using Unity.Netcode;
-public class InventoryNetworkBridge : NetworkBehaviour
+bool granted = controller.TryServerGrantItem(
+    rewardItem,
+    TBagContent.INVALID,
+    allowStack: true,
+    InventoryModificationSource.Quest,
+    questIdHash);
+```
+
+For code that genuinely starts on the owning client, await the response instead of predicting the
+mutation:
+
+```csharp
+NetworkContentAddResponse response = await controller.RequestAddItemAsync(
+    item,
+    TBagContent.INVALID,
+    allowStack: true,
+    InventoryModificationSource.Quest,
+    questIdHash);
+
+if (!response.Authorized)
 {
-    void Start()
-    {
-        var manager = NetworkInventoryManager.Instance;
-        
-        // Client → Server
-        manager.OnSendContentAddRequest = (req) => AddItemRequestRpc(req);
-        manager.OnSendEquipmentRequest = (req) => EquipmentRequestRpc(req);
-        
-        // Server → Client
-        manager.OnBroadcastItemAdded = (bc) => BroadcastItemAddedRpc(bc);
-        manager.OnSendSnapshotToClient = SendSnapshotToClient;
-    }
-    
-    [Rpc(SendTo.Server, InvokePermission = RpcInvokePermission.Everyone)]
-    void AddItemRequestRpc(NetworkContentAddRequest request, RpcParams rpcParams = default)
-    {
-        NetworkInventoryManager.Instance.ReceiveContentAddRequest(request, rpcParams.Receive.SenderClientId);
-    }
-    
-    [Rpc(SendTo.Server, InvokePermission = RpcInvokePermission.Everyone)]
-    void EquipmentRequestRpc(NetworkEquipmentRequest request, RpcParams rpcParams = default)
-    {
-        _ = NetworkInventoryManager.Instance.ReceiveEquipmentRequest(request, rpcParams.Receive.SenderClientId);
-    }
-
-    [Rpc(SendTo.ClientsAndHost)]
-    void BroadcastItemAddedRpc(NetworkItemAddedBroadcast broadcast)
-    {
-        if (!IsServer) // Avoid double-processing on host
-            NetworkInventoryManager.Instance.ReceiveItemAddedBroadcast(broadcast);
-    }
-
-    [Rpc(SendTo.SpecifiedInParams)]
-    void SendSnapshotRpc(NetworkInventorySnapshot snapshot, RpcParams rpcParams = default)
-    {
-        if (!IsServer)
-            NetworkInventoryManager.Instance.ReceiveFullSnapshot(snapshot);
-    }
-
-    void SendSnapshotToClient(ulong clientId, NetworkInventorySnapshot snapshot)
-    {
-        SendSnapshotRpc(snapshot, RpcTarget.Single(clientId, RpcTargetUse.Temp));
-    }
+    Debug.LogWarning($"Inventory request rejected: {response.RejectionReason}");
 }
 ```
 
-### FishNet
+## Native bag organization
+
+The normal GC2 Inventory UI remains the supported interface. Dragging between cells, merging
+stacks, splitting a stack, transferring between Bags, using an Item, dropping it, buying/selling,
+crafting, dismantling, and combining are intercepted at their native entry points. An owning
+client does not need a separate visual-scripting instruction for each operation.
+
+The server validates ownership and operation-specific state, commits atomically, and returns a
+versioned result. Project-specific rules belong in `CustomRemoveValidator`,
+`CustomMerchantValidator`, and `CustomCraftingValidator`.
 
 ```csharp
-public class InventoryNetworkBridge : NetworkBehaviour
+NetworkInventoryManager.Instance.CustomMerchantValidator = (request, senderClientId) =>
 {
-    public override void OnStartNetwork()
-    {
-        var manager = NetworkInventoryManager.Instance;
-        
-        manager.OnSendContentAddRequest = (req) => AddItemServer(req);
-        manager.OnBroadcastItemAdded = (bc) => ItemAddedObservers(bc);
-    }
-    
-    [ServerRpc]
-    void AddItemServer(NetworkContentAddRequest request)
-    {
-        var clientId = Owner.ClientId;
-        NetworkInventoryManager.Instance.ReceiveContentAddRequest(request, (ulong)clientId);
-    }
-    
-    [ObserversRpc]
-    void ItemAddedObservers(NetworkItemAddedBroadcast broadcast)
-    {
-        if (!IsServerInitialized)
-            NetworkInventoryManager.Instance.ReceiveItemAddedBroadcast(broadcast);
-    }
-}
+    return MerchantRules.ServerValidate(senderClientId, request)
+        ? (true, InventoryRejectionReason.None)
+        : (false, InventoryRejectionReason.NotAuthorized);
+};
 ```
 
-## Best Practices
+## Static scene pickups
 
-### DO:
-- ✅ Always use request methods for player inventory changes
-- ✅ Handle rejection callbacks gracefully
-- ✅ Implement custom validators for game-specific rules
-- ✅ Use snapshots for late-joining players
-- ✅ Log rejections for debugging potential exploits
+Add `NetworkInventoryPickupSource` to the root of a scene pickup and configure:
 
-### DON'T:
-- ❌ Call Bag methods directly on client for authoritative data
-- ❌ Trust client-reported item counts
-- ❌ Skip server validation for "trusted" operations
-- ❌ Broadcast sensitive inventory data to non-owners
+- a stable, unique Pickup ID;
+- the fixed Item asset resolved by the server;
+- maximum interaction distance;
+- optional line-of-sight validation;
+- whether renderers and colliders are hidden after consumption.
 
-## Events
+The server reserves the pickup atomically, validates ownership/range/capacity/availability, grants
+the Item once, then broadcasts consumed state. Two clients racing for one pickup produce one
+winner, and a late joiner receives the consumed-state snapshot.
 
-The controller fires events for UI updates:
+The PurrNet wizard converts stock `_Template_Pickup_Item` scene instances when their Add Item
+instruction resolves to a fixed Item. You can also run:
 
-```csharp
-controller.OnItemAdded += (item) => RefreshInventoryUI();
-controller.OnItemRemoved += (runtimeId) => RefreshInventoryUI();
-controller.OnWealthChanged += (currency, newAmount) => UpdateGoldDisplay(newAmount);
-controller.OnEquipmentChanged += () => RefreshEquipmentUI();
-```
+`Game Creator > Networking Layer > Inventory > Convert Stock Scene Pickups`
 
-## Rejection Reasons
+Then run **Validate Open Scenes** from the same menu. Duplicate IDs and unresolved Items are
+release-blocking errors. An automatically derived hierarchy ID is safe only while every peer loads
+an identical scene hierarchy; serialized IDs are preferred.
 
-| Reason | Description |
-|--------|-------------|
-| `None` | No rejection |
-| `BagNotFound` | Target bag doesn't exist |
-| `ItemNotFound` | Referenced item not found |
-| `BagFull` | No space in inventory |
-| `InsufficientFunds` | Not enough currency |
-| `InsufficientAmount` | Not enough items |
-| `ConditionFailed` | Custom condition failed |
-| `InvalidOperation` | Operation not supported |
-| `NotOwner` | Client doesn't own this bag |
-| `OutOfRange` | Target too far away |
-| `Cooldown` | Operation on cooldown |
-| `EquipmentSlotFull` | Equipment slot occupied |
-| `IncompatibleSocket` | Socket doesn't accept item |
+## Runtime PurrNet pickups
 
-## Files
+An interactive pickup created at runtime must be a registered server-spawned PurrNet prefab. Add:
 
-| File | Purpose |
-|------|---------|
-| `NetworkInventoryTypes.cs` | All network data structures |
-| `NetworkInventoryController.cs` | Per-bag inventory network management |
-| `NetworkInventoryManager.cs` | Global singleton, transport routing |
+- `NetworkIdentity`;
+- `NetworkInventoryPickupSource`;
+- `PurrNetInventoryRuntimePickupIdentityAdapter`.
+
+Assign the adapter as the pickup source's Runtime Identity. The bridge maps the spawned identity to
+the Inventory request, and a successful server claim despawns that identity for every peer. Do not
+use the scene-path ID of an arbitrary runtime `GameObject`.
+
+The existing dropped-runtime-item path is also server validated and range checked.
+
+## Stable synchronization and UI behavior
+
+Every Bag has a monotonically increasing `StateVersion`. Full snapshots remain enabled as recovery,
+but reconciliation is structural rather than destructive:
+
+- identical state raises no Add/Remove events;
+- moved stacks reuse their existing `RuntimeItem` objects;
+- property and socket changes update objects in place;
+- only genuinely added, removed, or irreconcilable entries are rebuilt;
+- stale/duplicate revisions are ignored and gaps request a targeted resync.
+
+This preserves Inventory UI selection and the selected `RuntimeItem` reference, so periodic sync
+does not flicker an Item or clear its description panel. There is no session-profile interval that
+needs to be reduced to hide a rebuild.
+
+Snapshots contain the complete ordered stack, runtime IDs, runtime properties, sockets, equipment,
+and wealth. Persistent messages received before a controller registers are bounded and replayed in
+version order; a newer snapshot replaces obsolete queued state.
+
+## Diagnostics and security
+
+Enable Inventory network diagnostics on the manager/bridge only while troubleshooting. Normal
+pickup success traces are gated. Missing routes, duplicate pickup IDs, protocol mismatches, and
+security failures remain rate-limited warnings.
+
+Recommended release checks:
+
+- unvalidated client Add is rejected without appearing and disappearing;
+- a validated Add and a trusted server grant persist exactly once;
+- drag/stack/Split/transfer persists for host and connected clients;
+- selection survives periodic full snapshots;
+- distinct runtime properties and sockets remain distinct;
+- two clients racing for a pickup produce one winner;
+- merchant/crafting/combine and late join restore the same revision;
+- all peers use the same package version.
 
 ## Dependencies
 
 - Game Creator 2 Core
-- Game Creator 2 Inventory Module
-- Unity 2021.3+
-
-## Define Symbol
-
-This module requires `GC2_INVENTORY` define symbol, which is automatically set via Version Defines when `com.gamecreator.inventory` package is present.
+- Game Creator 2 Inventory 2.8.x
+- a Networking Layer transport integration, such as PurrNet
+- `GC2_INVENTORY` define (provided by the Inventory assembly version define)

@@ -13,7 +13,7 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
         // ════════════════════════════════════════════════════════════════════════════════════════
         // PATCHER REGISTRY
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         private static readonly Dictionary<string, GC2PatcherBase> s_Patchers = new()
         {
             { "Core", new CorePatcher() },
@@ -27,12 +27,12 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
             { "ShooterSight", new ShooterSightPatcher() },
             { "Shooter", new ShooterPatcher() }
         };
-        
+
         /// <summary>
         /// Get all registered patchers.
         /// </summary>
         public static IEnumerable<GC2PatcherBase> GetAllPatchers() => s_Patchers.Values;
-        
+
         /// <summary>
         /// Get a specific patcher by module name.
         /// </summary>
@@ -40,11 +40,11 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
         {
             return s_Patchers.TryGetValue(moduleName, out var patcher) ? patcher : null;
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // STATUS WINDOW
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         [MenuItem("Game Creator/Networking Layer/Patches/Status Overview...", false, 50)]
         public static void ShowStatusWindow()
         {
@@ -56,56 +56,56 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
         {
             ApplyAllInstalledPatches(showDialogs: true);
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // CORE MENU ITEMS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         [MenuItem("Game Creator/Networking Layer/Patches/Core/Patch (Server Authority)", false, 90)]
         public static void PatchCore() => ApplyPatch("Core");
-        
+
         [MenuItem("Game Creator/Networking Layer/Patches/Core/Unpatch", false, 91)]
         public static void UnpatchCore() => RemovePatch("Core");
-        
+
         [MenuItem("Game Creator/Networking Layer/Patches/Core/Check Status", false, 92)]
         public static void CheckCoreStatus() => ShowStatus("Core");
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // ABILITIES MENU ITEMS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         [MenuItem("Game Creator/Networking Layer/Patches/Abilities/Patch (Server Authority)", false, 100)]
         public static void PatchAbilities() => ApplyPatch("Abilities");
-        
+
         [MenuItem("Game Creator/Networking Layer/Patches/Abilities/Unpatch", false, 101)]
         public static void UnpatchAbilities() => RemovePatch("Abilities");
-        
+
         [MenuItem("Game Creator/Networking Layer/Patches/Abilities/Check Status", false, 102)]
         public static void CheckAbilitiesStatus() => ShowStatus("Abilities");
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // STATS MENU ITEMS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         [MenuItem("Game Creator/Networking Layer/Patches/Stats/Patch (Server Authority)", false, 110)]
         public static void PatchStats() => ApplyPatch("Stats");
-        
+
         [MenuItem("Game Creator/Networking Layer/Patches/Stats/Unpatch", false, 111)]
         public static void UnpatchStats() => RemovePatch("Stats");
-        
+
         [MenuItem("Game Creator/Networking Layer/Patches/Stats/Check Status", false, 112)]
         public static void CheckStatsStatus() => ShowStatus("Stats");
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // INVENTORY MENU ITEMS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         [MenuItem("Game Creator/Networking Layer/Patches/Inventory/Patch (Server Authority)", false, 120)]
         public static void PatchInventory() => ApplyPatch("Inventory");
-        
+
         [MenuItem("Game Creator/Networking Layer/Patches/Inventory/Unpatch", false, 121)]
         public static void UnpatchInventory() => RemovePatch("Inventory");
-        
+
         [MenuItem("Game Creator/Networking Layer/Patches/Inventory/Check Status", false, 122)]
         public static void CheckInventoryStatus() => ShowStatus("Inventory");
 
@@ -147,30 +147,30 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
 
         [MenuItem("Game Creator/Networking Layer/Patches/Traversal/Check Status", false, 135)]
         public static void CheckTraversalStatus() => ShowStatus("Traversal");
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // MELEE MENU ITEMS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         [MenuItem("Game Creator/Networking Layer/Patches/Melee/Patch (Server Authority)", false, 130)]
         public static void PatchMelee() => ApplyPatch("Melee");
-        
+
         [MenuItem("Game Creator/Networking Layer/Patches/Melee/Unpatch", false, 131)]
         public static void UnpatchMelee() => RemovePatch("Melee");
-        
+
         [MenuItem("Game Creator/Networking Layer/Patches/Melee/Check Status", false, 132)]
         public static void CheckMeleeStatus() => ShowStatus("Melee");
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // SHOOTER MENU ITEMS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         [MenuItem("Game Creator/Networking Layer/Patches/Shooter/Patch (Server Authority)", false, 140)]
         public static void PatchShooter() => ApplyPatch("Shooter");
-        
+
         [MenuItem("Game Creator/Networking Layer/Patches/Shooter/Unpatch", false, 141)]
         public static void UnpatchShooter() => RemovePatch("Shooter");
-        
+
         [MenuItem("Game Creator/Networking Layer/Patches/Shooter/Check Status", false, 142)]
         public static void CheckShooterStatus() => ShowStatus("Shooter");
 
@@ -182,11 +182,11 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
 
         [MenuItem("Game Creator/Networking Layer/Patches/Shooter Sight/Check Status", false, 145)]
         public static void CheckShooterSightStatus() => ShowStatus("ShooterSight");
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // COMMON OPERATIONS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         private static void ApplyPatch(string moduleName)
         {
             var patcher = GetPatcher(moduleName);
@@ -195,7 +195,7 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                 EditorUtility.DisplayDialog("Error", $"Patcher for {moduleName} not found.", "OK");
                 return;
             }
-            
+
             if (!patcher.ValidateFilesExist())
             {
                 EditorUtility.DisplayDialog(
@@ -221,7 +221,7 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                     return;
                 }
             }
-            
+
             if (patcher.IsPatched())
             {
                 EditorUtility.DisplayDialog(
@@ -231,10 +231,15 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                     "OK");
                 return;
             }
-            
+
             bool isRequiredSightPatch = moduleName == "ShooterSight";
+            bool isRequiredInventoryPatch = moduleName == "Inventory";
             string menuModuleName = isRequiredSightPatch ? "Shooter Sight" : moduleName;
-            string patchKindText = isRequiredSightPatch
+            string patchKindText = isRequiredInventoryPatch
+                ? "This patch is REQUIRED to compile and enable server-authoritative Inventory networking. " +
+                  "Pristine GC2 Inventory remains available while it is removed, but Networking Layer " +
+                  "Inventory assemblies are conditionally disabled."
+                : isRequiredSightPatch
                 ? "This patch is REQUIRED for safe networked GC2 Shooter sight transitions in the PurrNet demo/setup."
                 : "This patch is OPTIONAL. Without it, the networking solution uses\n" +
                   "interception-based validation which is less secure but doesn't\n" +
@@ -257,11 +262,11 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                 "Do you want to continue?",
                 "Apply Patch",
                 "Cancel");
-            
+
             if (!confirm) return;
-            
+
             bool success = patcher.ApplyPatch();
-            
+
             if (success)
             {
                 EditorUtility.DisplayDialog(
@@ -415,7 +420,7 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
 
             return string.Join("\n", lines);
         }
-        
+
         private static void RemovePatch(string moduleName)
         {
             var patcher = GetPatcher(moduleName);
@@ -448,14 +453,17 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                 "Do you want to continue?",
                 "Restore Original",
                 "Cancel");
-            
+
             if (!confirm) return;
-            
+
             bool success = patcher.RemovePatch();
-            
+
             if (success)
             {
-                string successTail = moduleName == "ShooterSight"
+                string successTail = moduleName == "Inventory"
+                    ? "Pristine GC2 Inventory remains available. Server-authoritative Networking Layer " +
+                      "Inventory assemblies are disabled until patch 3.0.0-inventory is applied again."
+                    : moduleName == "ShooterSight"
                     ? "Remote shooter sight transitions can again execute local Sight OnEnter/OnExit instructions until the hook is re-applied."
                     : "The networking solution will now use interception-based validation.";
 
@@ -474,7 +482,7 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                     "OK");
             }
         }
-        
+
         private static void ShowStatus(string moduleName)
         {
             var patcher = GetPatcher(moduleName);
@@ -483,13 +491,13 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                 EditorUtility.DisplayDialog("Error", $"Patcher for {moduleName} not found.", "OK");
                 return;
             }
-            
+
             var status = patcher.GetStatus();
-            
+
             string installed = status.IsInstalled ? "✓ Installed" : "✗ Not Found";
             string patched = status.IsPatched ? "✓ PATCHED" : "○ Not Patched";
             string backups = status.HasBackups ? "✓ Available" : "○ None";
-            
+
             EditorUtility.DisplayDialog(
                 $"{status.DisplayName} Patch Status",
                 $"Package: {installed}\n" +
@@ -498,11 +506,13 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                 $"Patch Version: {status.PatchVersion}\n\n" +
                 (status.IsPatched
                     ? "Server-authoritative networking hooks are active."
-                    : "Using interception-based validation."),
+                    : moduleName == "Inventory"
+                        ? "Inventory networking assemblies are disabled until the required patch is applied."
+                        : "Using interception-based validation."),
                 "OK");
         }
     }
-    
+
     /// <summary>
     /// Editor window showing status of all patches.
     /// </summary>
@@ -515,7 +525,7 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
         private double m_NextStatusRefreshTime;
 
         private const double STATUS_REFRESH_INTERVAL_SECONDS = 1.0d;
-        
+
         public static void ShowWindow()
         {
             var window = GetWindow<PatchStatusWindow>("GC2 Patch Status");
@@ -532,19 +542,19 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
         {
             RefreshStatuses(force: true);
         }
-        
+
         private void OnGUI()
         {
             EditorGUILayout.Space(10);
             EditorGUILayout.LabelField("Game Creator 2 Networking Patches", EditorStyles.boldLabel);
             EditorGUILayout.Space(5);
-            
+
             EditorGUILayout.HelpBox(
                 "These optional patches add server-authoritative hooks directly into GC2 source code. " +
                 "This provides enhanced security but modifies third-party code.\n\n" +
                 "Without patches, the networking solution uses interception-based validation.",
                 MessageType.Info);
-            
+
             EditorGUILayout.Space(10);
 
             if (m_IsOperationRunning)
@@ -554,9 +564,9 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                     MessageType.Info);
                 EditorGUILayout.Space(6);
             }
-            
+
             m_ScrollPosition = EditorGUILayout.BeginScrollView(m_ScrollPosition);
-            
+
             foreach (var patcher in GC2PatchManager.GetAllPatchers())
             {
                 if (!m_StatusCache.TryGetValue(patcher.ModuleName, out PatchStatus status))
@@ -568,11 +578,11 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                 DrawModuleStatus(patcher.ModuleName, status);
                 EditorGUILayout.Space(5);
             }
-            
+
             EditorGUILayout.EndScrollView();
-            
+
             EditorGUILayout.Space(10);
-            
+
             EditorGUILayout.BeginHorizontal();
             GUI.enabled = !m_IsOperationRunning && HasPatchableInstalledModules();
             if (GUILayout.Button("Patch All Installed", GUILayout.Height(25)))
@@ -675,57 +685,57 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
 
             return false;
         }
-        
+
         private void DrawModuleStatus(string moduleName, PatchStatus status)
         {
             EditorGUILayout.BeginVertical(EditorStyles.helpBox);
-            
+
             EditorGUILayout.BeginHorizontal();
-            
+
             // Status icon
             string icon = !status.IsInstalled ? "⚠" : (status.IsPatched ? "✓" : "○");
             Color color = !status.IsInstalled ? Color.yellow : (status.IsPatched ? Color.green : Color.gray);
-            
+
             var oldColor = GUI.color;
             GUI.color = color;
             EditorGUILayout.LabelField(icon, GUILayout.Width(20));
             GUI.color = oldColor;
-            
+
             // Module name
             EditorGUILayout.LabelField(status.DisplayName, EditorStyles.boldLabel);
-            
+
             GUILayout.FlexibleSpace();
-            
+
             // Status text
             string statusText = !status.IsInstalled ? "Not Installed" : (status.IsPatched ? "Patched" : "Not Patched");
             EditorGUILayout.LabelField(statusText, GUILayout.Width(100));
-            
+
             EditorGUILayout.EndHorizontal();
-            
+
             if (status.IsInstalled)
             {
                 EditorGUILayout.BeginHorizontal();
                 GUILayout.Space(25);
-                
+
                 GUI.enabled = !status.IsPatched && !m_IsOperationRunning;
                 if (GUILayout.Button("Patch", GUILayout.Width(80)))
                 {
                     QueuePatchOperation(moduleName, applyPatch: true);
                     GUIUtility.ExitGUI();
                 }
-                
+
                 GUI.enabled = status.IsPatched && !m_IsOperationRunning;
                 if (GUILayout.Button("Unpatch", GUILayout.Width(80)))
                 {
                     QueuePatchOperation(moduleName, applyPatch: false);
                     GUIUtility.ExitGUI();
                 }
-                
+
                 GUI.enabled = true;
-                
+
                 EditorGUILayout.EndHorizontal();
             }
-            
+
             EditorGUILayout.EndVertical();
         }
     }

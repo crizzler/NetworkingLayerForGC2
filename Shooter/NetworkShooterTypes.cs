@@ -1,4 +1,7 @@
 using System;
+using GameCreator.Runtime.Characters;
+using GameCreator.Runtime.Common;
+using GameCreator.Runtime.Shooter;
 using UnityEngine;
 
 namespace Arawn.GameCreator2.Networking.Shooter
@@ -8,16 +11,135 @@ namespace Arawn.GameCreator2.Networking.Shooter
         // Temporary global troubleshooting switch. Keep disabled in production so
         // each manager/controller/bridge can honor its serialized diagnostics setting.
         public static bool ForceDiagnostics = false;
+
+        // Temporary focused trace for the environment-Rigidbody regression. This is
+        // intentionally enabled until host and connected-client captures confirm the
+        // entire native-hit -> validation -> PurrNet -> confirmed-impulse chain.
+        public static bool ForcePhysicsDiagnostics = true;
+
+        public static void LogPhysics(
+            string stage,
+            string message,
+            UnityEngine.Object context = null)
+        {
+            if (!ForcePhysicsDiagnostics) return;
+
+            string output =
+                $"[NetworkShooterPhysicsDebug][{stage}] frame={Time.frameCount} " +
+                $"time={Time.unscaledTime:F3} {message}";
+
+            if (context != null) Debug.Log(output, context);
+            else Debug.Log(output);
+        }
+    }
+
+    /// <summary>
+    /// Complete server-side context for an authoritative Shooter reaction.
+    /// Damage application is deliberately separate: handling damage does not handle this reaction.
+    /// </summary>
+    public sealed class NetworkShooterReactionContext
+    {
+        public const float DefaultOwnerMotionWindowSeconds = 1f;
+        public const float OwnerMotionWindowGraceSeconds = 0.15f;
+        public const float MaximumOwnerMotionWindowSeconds = 5f;
+
+        private const float MINIMUM_REACTION_SPEED = 0.01f;
+
+        public NetworkShooterHitRequest Request { get; }
+        public float Damage { get; }
+        public ShooterWeapon Weapon { get; }
+        public Character Attacker { get; }
+        public Character Target { get; }
+        public Vector3 WorldDirection { get; }
+        public NetworkBlockResult BlockResult { get; }
+        public ReactionInput ReactionInput { get; }
+        public Args Args { get; }
+
+        /// <summary>
+        /// Duration for which owner-authored reaction/root-motion samples remain authoritative.
+        /// Custom reaction delegates should update this from their actual ReactionOutput.
+        /// </summary>
+        public float OwnerMotionWindowSeconds { get; private set; } =
+            DefaultOwnerMotionWindowSeconds;
+
+        public NetworkShooterReactionContext(
+            NetworkShooterHitRequest request,
+            float damage,
+            ShooterWeapon weapon,
+            Character attacker,
+            Character target,
+            Vector3 worldDirection,
+            NetworkBlockResult blockResult,
+            ReactionInput reactionInput,
+            Args args)
+        {
+            Request = request;
+            Damage = damage;
+            Weapon = weapon;
+            Attacker = attacker;
+            Target = target;
+            WorldDirection = worldDirection;
+            BlockResult = blockResult;
+            ReactionInput = reactionInput;
+            Args = args;
+        }
+
+        public void SetReactionOutput(ReactionOutput output)
+        {
+            OwnerMotionWindowSeconds = CalculateOwnerMotionWindow(output);
+        }
+
+        public void SetOwnerMotionWindow(float durationSeconds)
+        {
+            if (float.IsNaN(durationSeconds) || float.IsInfinity(durationSeconds))
+            {
+                OwnerMotionWindowSeconds = DefaultOwnerMotionWindowSeconds;
+                return;
+            }
+
+            OwnerMotionWindowSeconds = Mathf.Clamp(
+                durationSeconds,
+                0f,
+                MaximumOwnerMotionWindowSeconds);
+        }
+
+        public static float CalculateOwnerMotionWindow(ReactionOutput output)
+        {
+            if (output.Length <= 0f ||
+                float.IsNaN(output.Length) ||
+                float.IsInfinity(output.Length))
+            {
+                return DefaultOwnerMotionWindowSeconds;
+            }
+
+            if (float.IsNaN(output.Speed) ||
+                float.IsInfinity(output.Speed) ||
+                Mathf.Abs(output.Speed) <= MINIMUM_REACTION_SPEED)
+            {
+                return DefaultOwnerMotionWindowSeconds;
+            }
+
+            double speed = Math.Abs((double) output.Speed);
+            double duration = output.Length / speed + OwnerMotionWindowGraceSeconds;
+
+            if (double.IsNaN(duration)) return DefaultOwnerMotionWindowSeconds;
+            if (double.IsPositiveInfinity(duration) || duration >= MaximumOwnerMotionWindowSeconds)
+            {
+                return MaximumOwnerMotionWindowSeconds;
+            }
+
+            return Mathf.Clamp((float) duration, 0f, MaximumOwnerMotionWindowSeconds);
+        }
     }
 
     /// <summary>
     /// Network-optimized data types for GC2 Shooter synchronization.
     /// </summary>
-    /// 
+    ///
     // ════════════════════════════════════════════════════════════════════════════════════════════
     // NETWORK SHOT REQUEST
     // ════════════════════════════════════════════════════════════════════════════════════════════
-    
+
     /// <summary>
     /// Compact shot request sent from client to server. (~40 bytes)
     /// Contains all data needed to validate and replicate a shot.
@@ -29,39 +151,39 @@ namespace Arawn.GameCreator2.Networking.Shooter
         public ushort RequestId;
         public uint ActorNetworkId;
         public uint CorrelationId;
-        
+
         /// <summary>Client timestamp when shot was fired.</summary>
         public float ClientTimestamp;
-        
+
         /// <summary>Network ID of the shooter.</summary>
         public uint ShooterNetworkId;
-        
+
         /// <summary>Muzzle position when shot was fired.</summary>
         public Vector3 MuzzlePosition;
-        
+
         /// <summary>Shot direction (with spread already applied).</summary>
         public Vector3 ShotDirection;
-        
+
         /// <summary>Hash of the weapon used.</summary>
         public int WeaponHash;
-        
+
         /// <summary>Hash of the sight used.</summary>
         public int SightHash;
-        
+
         /// <summary>Charge ratio for charged weapons (0-1).</summary>
         public float ChargeRatio;
-        
+
         /// <summary>Shot index for multi-projectile weapons (shotguns).</summary>
         public byte ProjectileIndex;
-        
+
         /// <summary>Total projectiles in this shot.</summary>
         public byte TotalProjectiles;
     }
-    
+
     // ════════════════════════════════════════════════════════════════════════════════════════════
     // NETWORK HIT REQUEST
     // ════════════════════════════════════════════════════════════════════════════════════════════
-    
+
     /// <summary>
     /// Hit request sent when a shot hits something. (~36 bytes)
     /// Sent after shot validation for each hit detected.
@@ -77,42 +199,42 @@ namespace Arawn.GameCreator2.Networking.Shooter
 
         public uint ActorNetworkId;
         public uint CorrelationId;
-        
+
         /// <summary>Client timestamp when hit was detected.</summary>
         public float ClientTimestamp;
-        
+
         /// <summary>Network ID of the shooter.</summary>
         public uint ShooterNetworkId;
-        
+
         /// <summary>Network ID of the target (0 if environment).</summary>
         public uint TargetNetworkId;
-        
+
         /// <summary>Hit point in world space.</summary>
         public Vector3 HitPoint;
-        
+
         /// <summary>Hit normal for effects.</summary>
         public Vector3 HitNormal;
-        
+
         /// <summary>Distance from muzzle to hit.</summary>
         public float Distance;
-        
+
         /// <summary>Hash of the weapon used.</summary>
         public int WeaponHash;
-        
+
         /// <summary>Pierce index (0 = first hit, 1+ = pierced).</summary>
         public byte PierceIndex;
-        
+
         /// <summary>Whether this hit a character (vs environment).</summary>
         public bool IsCharacterHit;
 
         /// <summary>Network shooter impact prop id for deterministic environment motion.</summary>
         public uint ImpactPropNetworkId;
     }
-    
+
     // ════════════════════════════════════════════════════════════════════════════════════════════
     // NETWORK SHOT RESPONSE
     // ════════════════════════════════════════════════════════════════════════════════════════════
-    
+
     /// <summary>
     /// Server response to a shot request. (~6 bytes)
     /// </summary>
@@ -123,17 +245,17 @@ namespace Arawn.GameCreator2.Networking.Shooter
         public ushort RequestId;
         public uint ActorNetworkId;
         public uint CorrelationId;
-        
+
         /// <summary>Whether the shot was validated.</summary>
         public bool Validated;
-        
+
         /// <summary>Rejection reason if not validated.</summary>
         public ShotRejectionReason RejectionReason;
-        
+
         /// <summary>Ammo count after shot (for sync).</summary>
         public ushort AmmoRemaining;
     }
-    
+
     /// <summary>
     /// Server response to a hit request. (~8 bytes)
     /// </summary>
@@ -144,20 +266,20 @@ namespace Arawn.GameCreator2.Networking.Shooter
         public ushort RequestId;
         public uint ActorNetworkId;
         public uint CorrelationId;
-        
+
         /// <summary>Whether the hit was validated.</summary>
         public bool Validated;
-        
+
         /// <summary>Rejection reason if not validated.</summary>
         public HitRejectionReason RejectionReason;
-        
+
         /// <summary>Server-calculated damage.</summary>
         public float Damage;
-        
+
         /// <summary>Block result.</summary>
         public NetworkBlockResult BlockResult;
     }
-    
+
     /// <summary>
     /// Reasons a shot can be rejected.
     /// </summary>
@@ -175,7 +297,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
         RateLimitExceeded = 9,
         CheatSuspected = 10,
     }
-    
+
     /// <summary>
     /// Reasons a hit can be rejected.
     /// </summary>
@@ -195,8 +317,9 @@ namespace Arawn.GameCreator2.Networking.Shooter
         InvalidTrajectory = 11,
         InvalidPosition = 12,
         CheatSuspected = 13,
+        TargetDead = 14,
     }
-    
+
     /// <summary>
     /// Network block result types.
     /// </summary>
@@ -205,13 +328,19 @@ namespace Arawn.GameCreator2.Networking.Shooter
         None = 0,
         Blocked = 1,
         Parried = 2,
-        BlockBroken = 3
+        BlockBroken = 3,
+
+        /// <summary>
+        /// A broken native post-hit hook prevented the server from observing the authored outcome.
+        /// Clients suppress reaction reconstruction rather than guessing and playing a wrong reaction.
+        /// </summary>
+        UnresolvedNative = byte.MaxValue
     }
-    
+
     // ════════════════════════════════════════════════════════════════════════════════════════════
     // NETWORK SHOT BROADCAST
     // ════════════════════════════════════════════════════════════════════════════════════════════
-    
+
     /// <summary>
     /// Broadcast to all clients when a shot is fired. (~32 bytes)
     /// Used to replicate muzzle flash, tracer, and sound.
@@ -221,26 +350,26 @@ namespace Arawn.GameCreator2.Networking.Shooter
     {
         /// <summary>Network ID of the shooter.</summary>
         public uint ShooterNetworkId;
-        
+
         /// <summary>Muzzle position.</summary>
         public Vector3 MuzzlePosition;
-        
+
         /// <summary>Shot direction.</summary>
         public Vector3 ShotDirection;
-        
+
         /// <summary>Weapon hash for effects lookup.</summary>
         public int WeaponHash;
-        
+
         /// <summary>Sight hash.</summary>
         public int SightHash;
-        
+
         /// <summary>Final hit point (for tracer endpoint).</summary>
         public Vector3 HitPoint;
-        
+
         /// <summary>Whether the shot hit something.</summary>
         public bool DidHit;
     }
-    
+
     /// <summary>
     /// Broadcast to all clients when a hit is confirmed. (~28 bytes)
     /// </summary>
@@ -249,22 +378,28 @@ namespace Arawn.GameCreator2.Networking.Shooter
     {
         /// <summary>Network ID of the shooter.</summary>
         public uint ShooterNetworkId;
-        
+
         /// <summary>Network ID of the target.</summary>
         public uint TargetNetworkId;
-        
+
         /// <summary>Hit point for effects.</summary>
         public Vector3 HitPoint;
-        
+
         /// <summary>Hit normal for effects orientation.</summary>
         public Vector3 HitNormal;
-        
+
         /// <summary>Weapon hash for effects lookup.</summary>
         public int WeaponHash;
-        
+
         /// <summary>Block result.</summary>
         public byte BlockResult;
-        
+
+        /// <summary>
+        /// Server-evaluated power used by the authoritative target reaction. Clients must use
+        /// this value instead of re-evaluating the weapon property against local state.
+        /// </summary>
+        public float ReactionPower;
+
         /// <summary>Material hash for impact sound.</summary>
         public int MaterialHash;
 
@@ -320,11 +455,11 @@ namespace Arawn.GameCreator2.Networking.Shooter
         public float Duration;
         public float ImpactStrength;
     }
-    
+
     // ════════════════════════════════════════════════════════════════════════════════════════════
     // NETWORK WEAPON STATE
     // ════════════════════════════════════════════════════════════════════════════════════════════
-    
+
     /// <summary>
     /// Compact weapon state for synchronization. (~20 bytes)
     /// </summary>
@@ -333,13 +468,13 @@ namespace Arawn.GameCreator2.Networking.Shooter
     {
         /// <summary>Hash of the equipped weapon (0 if none).</summary>
         public int WeaponHash;
-        
+
         /// <summary>Current sight hash.</summary>
         public int SightHash;
-        
+
         /// <summary>Ammo in magazine.</summary>
         public ushort AmmoInMagazine;
-        
+
         /// <summary>Weapon state flags.</summary>
         public byte StateFlags;
 
@@ -348,19 +483,19 @@ namespace Arawn.GameCreator2.Networking.Shooter
 
         /// <summary>Shooter lean spring decay/speed.</summary>
         public float LeanDecay;
-        
+
         public const byte FLAG_IS_RELOADING = 0x01;
         public const byte FLAG_IS_JAMMED = 0x02;
         public const byte FLAG_IS_AIMING = 0x04;
         public const byte FLAG_IS_SHOOTING = 0x08;
         public const byte FLAG_IS_CHARGING = 0x10;
-        
+
         public bool IsReloading => (StateFlags & FLAG_IS_RELOADING) != 0;
         public bool IsJammed => (StateFlags & FLAG_IS_JAMMED) != 0;
         public bool IsAiming => (StateFlags & FLAG_IS_AIMING) != 0;
         public bool IsShooting => (StateFlags & FLAG_IS_SHOOTING) != 0;
         public bool IsCharging => (StateFlags & FLAG_IS_CHARGING) != 0;
-        
+
         public static NetworkWeaponState None => new NetworkWeaponState
         {
             WeaponHash = 0,
@@ -371,11 +506,11 @@ namespace Arawn.GameCreator2.Networking.Shooter
             LeanDecay = 0f
         };
     }
-    
+
     // ════════════════════════════════════════════════════════════════════════════════════════════
     // NETWORK RELOAD
     // ════════════════════════════════════════════════════════════════════════════════════════════
-    
+
     /// <summary>
     /// Reload request sent from client to server. (~16 bytes)
     /// </summary>
@@ -386,17 +521,17 @@ namespace Arawn.GameCreator2.Networking.Shooter
         public ushort RequestId;
         public uint ActorNetworkId;
         public uint CorrelationId;
-        
+
         /// <summary>Network ID of the character reloading.</summary>
         public uint CharacterNetworkId;
-        
+
         /// <summary>Hash of the weapon to reload.</summary>
         public int WeaponHash;
-        
+
         /// <summary>Client timestamp.</summary>
         public float ClientTimestamp;
     }
-    
+
     /// <summary>
     /// Server response to a reload request. (~6 bytes)
     /// </summary>
@@ -407,20 +542,20 @@ namespace Arawn.GameCreator2.Networking.Shooter
         public ushort RequestId;
         public uint ActorNetworkId;
         public uint CorrelationId;
-        
+
         /// <summary>Whether the reload was validated.</summary>
         public bool Validated;
-        
+
         /// <summary>Rejection reason if not validated.</summary>
         public ReloadRejectionReason RejectionReason;
-        
+
         /// <summary>Time when quick reload window starts (normalized 0-1).</summary>
         public byte QuickReloadWindowStart;
-        
+
         /// <summary>Time when quick reload window ends (normalized 0-1).</summary>
         public byte QuickReloadWindowEnd;
     }
-    
+
     /// <summary>
     /// Quick reload request sent when player attempts quick reload. (~12 bytes)
     /// </summary>
@@ -431,17 +566,17 @@ namespace Arawn.GameCreator2.Networking.Shooter
         public ushort RequestId;
         public uint ActorNetworkId;
         public uint CorrelationId;
-        
+
         /// <summary>Network ID of the character.</summary>
         public uint CharacterNetworkId;
-        
+
         /// <summary>Hash of the weapon being reloaded.</summary>
         public int WeaponHash;
-        
+
         /// <summary>Normalized time (0-1) when quick reload was attempted.</summary>
         public float AttemptTime;
     }
-    
+
     /// <summary>
     /// Reload broadcast to all clients. (~16 bytes)
     /// </summary>
@@ -450,17 +585,17 @@ namespace Arawn.GameCreator2.Networking.Shooter
     {
         /// <summary>Network ID of the character reloading.</summary>
         public uint CharacterNetworkId;
-        
+
         /// <summary>Hash of the weapon being reloaded.</summary>
         public int WeaponHash;
-        
+
         /// <summary>New ammo count after reload.</summary>
         public ushort NewAmmoCount;
-        
+
         /// <summary>Reload event type.</summary>
         public ReloadEventType EventType;
     }
-    
+
     /// <summary>
     /// Types of reload events.
     /// </summary>
@@ -479,7 +614,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
         /// <summary>Partial reload (one round loaded).</summary>
         PartialReload = 5
     }
-    
+
     /// <summary>
     /// Reasons a reload can be rejected.
     /// </summary>
@@ -496,11 +631,11 @@ namespace Arawn.GameCreator2.Networking.Shooter
         RateLimitExceeded = 8,
         CheatSuspected = 9
     }
-    
+
     // ════════════════════════════════════════════════════════════════════════════════════════════
     // NETWORK JAM / FIX
     // ════════════════════════════════════════════════════════════════════════════════════════════
-    
+
     /// <summary>
     /// Jam broadcast from server when weapon jams. (~8 bytes)
     /// Server decides when weapons jam (random chance on fire).
@@ -510,11 +645,11 @@ namespace Arawn.GameCreator2.Networking.Shooter
     {
         /// <summary>Network ID of the character whose weapon jammed.</summary>
         public uint CharacterNetworkId;
-        
+
         /// <summary>Hash of the weapon that jammed.</summary>
         public int WeaponHash;
     }
-    
+
     /// <summary>
     /// Request to fix a jammed weapon. (~12 bytes)
     /// </summary>
@@ -525,17 +660,17 @@ namespace Arawn.GameCreator2.Networking.Shooter
         public ushort RequestId;
         public uint ActorNetworkId;
         public uint CorrelationId;
-        
+
         /// <summary>Network ID of the character.</summary>
         public uint CharacterNetworkId;
-        
+
         /// <summary>Hash of the jammed weapon.</summary>
         public int WeaponHash;
-        
+
         /// <summary>Client timestamp.</summary>
         public float ClientTimestamp;
     }
-    
+
     /// <summary>
     /// Server response to fix jam request. (~4 bytes)
     /// </summary>
@@ -546,14 +681,14 @@ namespace Arawn.GameCreator2.Networking.Shooter
         public ushort RequestId;
         public uint ActorNetworkId;
         public uint CorrelationId;
-        
+
         /// <summary>Whether the fix was validated.</summary>
         public bool Validated;
-        
+
         /// <summary>Rejection reason if not validated.</summary>
         public FixJamRejectionReason RejectionReason;
     }
-    
+
     /// <summary>
     /// Broadcast when jam fix completes or fails. (~10 bytes)
     /// </summary>
@@ -562,14 +697,14 @@ namespace Arawn.GameCreator2.Networking.Shooter
     {
         /// <summary>Network ID of the character.</summary>
         public uint CharacterNetworkId;
-        
+
         /// <summary>Hash of the weapon.</summary>
         public int WeaponHash;
-        
+
         /// <summary>Whether the fix succeeded.</summary>
         public bool Success;
     }
-    
+
     /// <summary>
     /// Reasons a fix jam can be rejected.
     /// </summary>
@@ -584,11 +719,11 @@ namespace Arawn.GameCreator2.Networking.Shooter
         RateLimitExceeded = 6,
         CheatSuspected = 7
     }
-    
+
     // ════════════════════════════════════════════════════════════════════════════════════════════
     // NETWORK CHARGE STATE
     // ════════════════════════════════════════════════════════════════════════════════════════════
-    
+
     /// <summary>
     /// Request to start charging a weapon. (~12 bytes)
     /// For charge-type weapons (railgun, bow, etc.).
@@ -600,17 +735,17 @@ namespace Arawn.GameCreator2.Networking.Shooter
         public ushort RequestId;
         public uint ActorNetworkId;
         public uint CorrelationId;
-        
+
         /// <summary>Network ID of the character.</summary>
         public uint CharacterNetworkId;
-        
+
         /// <summary>Hash of the weapon being charged.</summary>
         public int WeaponHash;
-        
+
         /// <summary>Client timestamp when charge started.</summary>
         public float ClientTimestamp;
     }
-    
+
     /// <summary>
     /// Server response to charge start request. (~4 bytes)
     /// </summary>
@@ -621,14 +756,14 @@ namespace Arawn.GameCreator2.Networking.Shooter
         public ushort RequestId;
         public uint ActorNetworkId;
         public uint CorrelationId;
-        
+
         /// <summary>Whether the charge was validated.</summary>
         public bool Validated;
-        
+
         /// <summary>Rejection reason if not validated.</summary>
         public ChargeRejectionReason RejectionReason;
     }
-    
+
     /// <summary>
     /// Request to cancel a charge. (~12 bytes)
     /// </summary>
@@ -639,17 +774,17 @@ namespace Arawn.GameCreator2.Networking.Shooter
         public ushort RequestId;
         public uint ActorNetworkId;
         public uint CorrelationId;
-        
+
         /// <summary>Network ID of the character.</summary>
         public uint CharacterNetworkId;
-        
+
         /// <summary>Hash of the weapon.</summary>
         public int WeaponHash;
-        
+
         /// <summary>Client timestamp when cancelled.</summary>
         public float ClientTimestamp;
     }
-    
+
     /// <summary>
     /// Charge state broadcast for sync. (~12 bytes)
     /// Sent periodically while charging and on state changes.
@@ -659,17 +794,17 @@ namespace Arawn.GameCreator2.Networking.Shooter
     {
         /// <summary>Network ID of the character.</summary>
         public uint CharacterNetworkId;
-        
+
         /// <summary>Hash of the weapon being charged.</summary>
         public int WeaponHash;
-        
+
         /// <summary>Current charge ratio (0-1 compressed to byte).</summary>
         public byte ChargeRatio;
-        
+
         /// <summary>Charge event type.</summary>
         public ChargeEventType EventType;
     }
-    
+
     /// <summary>
     /// Types of charge events.
     /// </summary>
@@ -686,7 +821,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
         /// <summary>Auto-release triggered (max charge reached).</summary>
         AutoReleased = 4
     }
-    
+
     /// <summary>
     /// Reasons a charge can be rejected.
     /// </summary>
@@ -704,11 +839,11 @@ namespace Arawn.GameCreator2.Networking.Shooter
         InvalidState = 9,
         CheatSuspected = 10
     }
-    
+
     // ════════════════════════════════════════════════════════════════════════════════════════════
     // NETWORK SIGHT SWITCH
     // ════════════════════════════════════════════════════════════════════════════════════════════
-    
+
     /// <summary>
     /// Request to switch weapon sight/scope. (~12 bytes)
     /// </summary>
@@ -719,20 +854,20 @@ namespace Arawn.GameCreator2.Networking.Shooter
         public ushort RequestId;
         public uint ActorNetworkId;
         public uint CorrelationId;
-        
+
         /// <summary>Network ID of the character.</summary>
         public uint CharacterNetworkId;
-        
+
         /// <summary>Hash of the weapon.</summary>
         public int WeaponHash;
-        
+
         /// <summary>Hash of the new sight to switch to.</summary>
         public int NewSightHash;
-        
+
         /// <summary>Client timestamp.</summary>
         public float ClientTimestamp;
     }
-    
+
     /// <summary>
     /// Server response to sight switch request. (~4 bytes)
     /// </summary>
@@ -743,14 +878,14 @@ namespace Arawn.GameCreator2.Networking.Shooter
         public ushort RequestId;
         public uint ActorNetworkId;
         public uint CorrelationId;
-        
+
         /// <summary>Whether the switch was validated.</summary>
         public bool Validated;
-        
+
         /// <summary>Rejection reason if not validated.</summary>
         public SightSwitchRejectionReason RejectionReason;
     }
-    
+
     /// <summary>
     /// Broadcast when sight is switched. (~12 bytes)
     /// </summary>
@@ -759,14 +894,14 @@ namespace Arawn.GameCreator2.Networking.Shooter
     {
         /// <summary>Network ID of the character.</summary>
         public uint CharacterNetworkId;
-        
+
         /// <summary>Hash of the weapon.</summary>
         public int WeaponHash;
-        
+
         /// <summary>Hash of the new active sight.</summary>
         public int NewSightHash;
     }
-    
+
     /// <summary>
     /// Reasons a sight switch can be rejected.
     /// </summary>
@@ -783,11 +918,11 @@ namespace Arawn.GameCreator2.Networking.Shooter
         RateLimitExceeded = 8,
         CheatSuspected = 9
     }
-    
+
     // ════════════════════════════════════════════════════════════════════════════════════════════
     // NETWORK AIM STATE
     // ════════════════════════════════════════════════════════════════════════════════════════════
-    
+
     /// <summary>
     /// Compact aim state for synchronization. (~16 bytes)
     /// </summary>
@@ -796,37 +931,37 @@ namespace Arawn.GameCreator2.Networking.Shooter
     {
         /// <summary>Aim point in world space.</summary>
         public Vector3 AimPoint;
-        
+
         /// <summary>Current accuracy (0 = perfect, 1 = worst).</summary>
         public byte Accuracy;
-        
+
         /// <summary>Whether actively aiming down sights.</summary>
         public bool IsAiming;
-        
+
         /// <summary>Compressed aim direction (2 bytes for yaw/pitch).</summary>
         public ushort CompressedDirection;
-        
+
         /// <summary>Compress a direction to 2 bytes.</summary>
         public static ushort CompressDirection(Vector3 direction)
         {
             float yaw = Mathf.Atan2(direction.x, direction.z) * Mathf.Rad2Deg;
             float pitch = Mathf.Asin(direction.y) * Mathf.Rad2Deg;
-            
+
             byte yawByte = (byte)((yaw + 180f) / 360f * 255f);
             byte pitchByte = (byte)((pitch + 90f) / 180f * 255f);
-            
+
             return (ushort)((yawByte << 8) | pitchByte);
         }
-        
+
         /// <summary>Decompress direction from 2 bytes.</summary>
         public static Vector3 DecompressDirection(ushort compressed)
         {
             byte yawByte = (byte)(compressed >> 8);
             byte pitchByte = (byte)(compressed & 0xFF);
-            
+
             float yaw = (yawByte / 255f * 360f) - 180f;
             float pitch = (pitchByte / 255f * 180f) - 90f;
-            
+
             float cosPitch = Mathf.Cos(pitch * Mathf.Deg2Rad);
             return new Vector3(
                 Mathf.Sin(yaw * Mathf.Deg2Rad) * cosPitch,

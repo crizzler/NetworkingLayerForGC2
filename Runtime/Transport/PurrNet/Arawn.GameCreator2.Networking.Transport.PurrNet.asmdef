@@ -1,0 +1,19 @@
+{
+    "name": "Arawn.GameCreator2.Networking.Transport.PurrNet",
+    "rootNamespace": "Arawn.GameCreator2.Networking.Transport.PurrNet",
+    "references": [
+        "Arawn.GameCreator2.Networking",
+        "PurrNet.Runtime",
+        "GameCreator.Runtime.Core",
+        "UnityEngine.UI"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

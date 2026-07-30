@@ -1,0 +1,30 @@
+{
+    "name": "Arawn.GameCreator2.Networking.Inventory.Transport.PurrNet",
+    "rootNamespace": "Arawn.GameCreator2.Networking.Inventory.Transport.PurrNet",
+    "references": [
+        "Arawn.GameCreator2.Networking",
+        "Arawn.GameCreator2.Networking.Inventory",
+        "Arawn.GameCreator2.Networking.Transport.PurrNet",
+        "PurrNet.Runtime",
+        "GameCreator.Runtime.Core",
+        "GameCreator.Runtime.Inventory"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [
+        "GC2_INVENTORY",
+        "GC2_NETWORK_INVENTORY_PATCHED"
+    ],
+    "versionDefines": [
+        {
+            "name": "com.gamecreator.inventory",
+            "expression": "",
+            "define": "GC2_INVENTORY"
+        }
+    ],
+    "noEngineReferences": false
+}

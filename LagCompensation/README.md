@@ -17,9 +17,15 @@ Lag Compensation provides server-authoritative hit validation through position h
 
 ## PurrNet Setup
 
-The PurrNet Scene Setup Wizard does not expose Lag Compensation as a separate module checkbox. It creates the combat managers and bridges that use lag compensation during server validation, while lag compensation history is still configured through `LagCompensationBootstrap` or direct `LagCompensationManager.Initialize(...)`.
+`PurrNetTransportBridge` automatically ensures a `LagCompensationBootstrap`, starts it
+with the server/host lifecycle, and records history with PurrNet's synchronized server
+clock. `NetworkCharacter` registers its server-side `CharacterLagCompensation` adapter
+when its authoritative role and network ID are ready. No separate demo-scene component
+is required.
 
-For Shooter, Melee, and Abilities sessions, add `LagCompensationBootstrap` to a persistent server/host object when you need rewind validation for custom entities. Characters can use `CharacterLagCompensation` to register their body bounds and hit zones.
+Add a bootstrap manually only for another transport or when custom entities need a
+different history configuration. In that case, use the same synchronized server-time
+domain for both combat request timestamps and history samples.
 
 ## Quick Start
 
@@ -72,7 +78,7 @@ void OnDespawn()
 // In your network tick loop
 void FixedUpdate()
 {
-    var timestamp = new NetworkTimestamp(NetworkTime.ServerTime);
+    var timestamp = NetworkTimestamp.FromServerTime(NetworkTime.ServerTime);
     LagCompensationManager.Instance.RecordFrame(timestamp);
 }
 ```
@@ -81,16 +87,16 @@ void FixedUpdate()
 
 ```csharp
 [ServerRpc]
-void OnShootServerRpc(Vector3 origin, Vector3 direction, 
+void OnShootServerRpc(Vector3 origin, Vector3 direction,
     float clientTime, ServerRpcParams rpcParams = default)
 {
     var timestamp = new NetworkTimestamp(clientTime);
-    
+
     // Perform lag-compensated raycast
     var hits = HitValidationUtility.RaycastAll(
         origin, direction, 100f, timestamp
     );
-    
+
     foreach (var hit in hits)
     {
         if (hit.isValid)
@@ -123,10 +129,11 @@ The bootstrap will:
 - Call `RecordFrame()` every `FixedUpdate` on the server
 - Dispose the manager on `OnDestroy`
 
-> **Important:** Without initialization, `CharacterLagCompensation.Register()`
-> silently skips registration when `ServerOnly` is true (the default), because it
-> checks `LagCompensationManager.IsInitialized` first. Without `RecordFrame()`,
-> the history buffer stays empty and hit validation cannot rewind time.
+> **Important:** Without initialization, server-role configuration, a non-zero network
+> ID, and `RecordFrame()`, an entity has no rewind history and authoritative combat
+> validation must reject it. `CharacterLagCompensation` now retries registration after
+> startup-order changes and reports duplicate-ID invariants instead of creating an empty
+> manager implicitly.
 
 ## API Reference
 
@@ -171,15 +178,15 @@ List<HitValidationResult> OverlapBoxAll(center, halfExtents, orientation, timest
 List<HitValidationResult> OverlapConeAll(origin, direction, angle, maxDistance, timestamp);
 
 // Validate hitscan weapon
-HitValidationResult ValidateHitscan(shooterNetworkId, origin, direction, 
+HitValidationResult ValidateHitscan(shooterNetworkId, origin, direction,
     maxDistance, clientTimestamp);
 
 // Validate projectile hit
-HitValidationResult ValidateProjectileHit(shooterNetworkId, targetNetworkId, 
+HitValidationResult ValidateProjectileHit(shooterNetworkId, targetNetworkId,
     hitPoint, projectileSpawnTime, hitTime, projectileSpeed);
 
 // Validate melee swing
-List<HitValidationResult> ValidateMeleeSwing(attackerNetworkId, swingOrigin, 
+List<HitValidationResult> ValidateMeleeSwing(attackerNetworkId, swingOrigin,
     swingDirection, swingArc, swingRange, clientTimestamp);
 ```
 

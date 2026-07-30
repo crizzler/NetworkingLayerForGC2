@@ -1,0 +1,29 @@
+{
+    "name": "Arawn.GameCreator2.Networking.Shooter.Transport.PurrNet",
+    "rootNamespace": "Arawn.GameCreator2.Networking.Shooter.Transport.PurrNet",
+    "references": [
+        "Arawn.GameCreator2.Networking",
+        "Arawn.GameCreator2.Networking.Shooter",
+        "Arawn.GameCreator2.Networking.Transport.PurrNet",
+        "PurrNet.Runtime",
+        "GameCreator.Runtime.Core",
+        "GameCreator.Runtime.Shooter"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [
+        "GC2_SHOOTER"
+    ],
+    "versionDefines": [
+        {
+            "name": "com.gamecreator.shooter",
+            "expression": "",
+            "define": "GC2_SHOOTER"
+        }
+    ],
+    "noEngineReferences": false
+}

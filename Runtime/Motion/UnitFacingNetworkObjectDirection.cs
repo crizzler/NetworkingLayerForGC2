@@ -273,11 +273,16 @@ namespace Arawn.GameCreator2.Networking
                 Vector3.up
             );
 
-            Transform.rotation = Quaternion.Lerp(
+            // Keep the physics representation synchronized with facing. A direct Transform
+            // assignment here runs after Driver.OnUpdate; with auto-sync disabled it can make a
+            // CharacterController disappear from the overlap queries used by Melee and Shooter.
+            Quaternion rotation = Quaternion.Lerp(
                 targetRotation,
                 sourceRotation * Character.Animim.RootMotionDeltaRotation,
                 Character.RootMotionRotation
             );
+
+            Character.Driver.SetRotation(rotation);
         }
 
         // STRING: --------------------------------------------------------------------------------

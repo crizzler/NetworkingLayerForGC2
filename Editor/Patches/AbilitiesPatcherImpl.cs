@@ -12,13 +12,13 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
         public override string ModuleName => "Abilities";
         public override string PatchVersion => "2.1.0-abilities";
         public override string DisplayName => "Abilities (DaimahouGames)";
-        
+
         public override string PatchDescription =>
             "This will modify the DaimahouGames Abilities source code to add\n" +
             "server-authoritative networking hooks.\n\n" +
             "Caster.Cast() will check for network authority before executing.\n" +
             "Learn/UnLearn methods will have network hooks.";
-        
+
         protected override string[] FilesToPatch => new[]
         {
             "Plugins/DaimahouGames/Packages/Abilities/Runtime/Pawns/Features/Caster.cs"
@@ -57,7 +57,7 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
 
             return base.GetRequiredPatchTokenCounts(relativePath);
         }
-        
+
         protected override bool PatchFile(string relativePath)
         {
             string content = ReadFile(relativePath);
@@ -65,7 +65,7 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
             ExistingPatchState existingPatchState = PrepareContentForPatch(relativePath, ref content);
             if (existingPatchState == ExistingPatchState.SkipAlreadyPatched) return true;
             if (existingPatchState == ExistingPatchState.Failed) return false;
-            
+
             // Add patch marker and network hooks after usings
             string originalUsings = @"using System;
 	using System.Collections.Generic;
@@ -104,7 +104,7 @@ namespace DaimahouGames.Runtime.Abilities
             {
                 return false;
             }
-            
+
             // Add static network authority hooks after class declaration (regex anchor for source variants).
             if (!content.Contains("NetworkCastValidator"))
             {
@@ -119,35 +119,35 @@ namespace DaimahouGames.Runtime.Abilities
 
                 string staticHooks = @"
         // [GC2_NETWORK_PATCH] Static hooks for server-authoritative networking
-        
+
         /// <summary>When set, validates if a cast should proceed locally.</summary>
         public static Func<Caster, Ability, ExtendedArgs, bool> NetworkCastValidator;
-        
+
         /// <summary>When set, validates if learn should proceed locally.</summary>
         public static Func<Caster, Ability, int, bool> NetworkLearnValidator;
-        
+
         /// <summary>When set, validates if unlearn should proceed locally.</summary>
         public static Func<Caster, Ability, bool> NetworkUnLearnValidator;
-        
+
         /// <summary>Called after a cast completes.</summary>
         public static Action<Caster, Ability, bool> NetworkCastCompleted;
-        
+
         /// <summary>Returns true if networking hooks are active.</summary>
         public static bool IsNetworkingActive => NetworkCastValidator != null;
-        
+
         // [GC2_NETWORK_PATCH_END]
 ";
                 int insertIndex = casterClassMatch.Index + casterClassMatch.Length;
                 content = content.Insert(insertIndex, staticHooks);
             }
-            
+
             // Patch the Cast method
             string originalCast = @"        public async Task<bool> Cast(Ability ability, ExtendedArgs args)
         {
             if (!CanCancel()) return false;
 
             CastAbilityMessage.Send(ability);
-            
+
             args.ChangeSelf(GameObject);
             args.Set(new AbiltySource(GameObject));
             args.Set(GetRuntimeAbility(ability));
@@ -157,11 +157,11 @@ namespace DaimahouGames.Runtime.Abilities
             await m_CastState.WaitUntilComplete();
             return success;
         }";
-            
+
             string patchedCast = @"        public async Task<bool> Cast(Ability ability, ExtendedArgs args)
         {
             if (!CanCancel()) return false;
-            
+
             // [GC2_NETWORK_PATCH] Server authority check
             if (NetworkCastValidator != null && !NetworkCastValidator.Invoke(this, ability, args))
             {
@@ -170,7 +170,7 @@ namespace DaimahouGames.Runtime.Abilities
             // [GC2_NETWORK_PATCH_END]
 
             CastAbilityMessage.Send(ability);
-            
+
             args.ChangeSelf(GameObject);
             args.Set(new AbiltySource(GameObject));
             args.Set(GetRuntimeAbility(ability));
@@ -178,11 +178,11 @@ namespace DaimahouGames.Runtime.Abilities
             var success = m_CastState.TryEnter(args);
 
             await m_CastState.WaitUntilComplete();
-            
+
             // [GC2_NETWORK_PATCH] Notify completion
             NetworkCastCompleted?.Invoke(this, ability, success);
             // [GC2_NETWORK_PATCH_END]
-            
+
             return success;
         }";
 
@@ -194,7 +194,7 @@ namespace DaimahouGames.Runtime.Abilities
             {
                 return false;
             }
-            
+
             // Patch Learn method
             string originalLearn = @"        public void Learn(Ability ability, int slot)
         {
@@ -205,13 +205,13 @@ namespace DaimahouGames.Runtime.Abilities
             m_AbilitySlots[slot] = new KnownAbility(ability);
             LearnAbilityMessage.Send(ability);
         }";
-            
+
             string patchedLearn = @"        public void Learn(Ability ability, int slot)
         {
             if (ability == null) return;
             if (slot < 0 || slot >= m_AbilitySlots.Count) return;
             if (this.m_AbilitySlots[slot].Ability == ability) return;
-            
+
             // [GC2_NETWORK_PATCH] Server authority check
             if (NetworkLearnValidator != null && !NetworkLearnValidator.Invoke(this, ability, slot))
             {
@@ -222,7 +222,7 @@ namespace DaimahouGames.Runtime.Abilities
             m_AbilitySlots[slot] = new KnownAbility(ability);
             LearnAbilityMessage.Send(ability);
         }
-        
+
         // [GC2_NETWORK_PATCH] Server-side direct learn (bypasses validation)
         public void LearnDirect(Ability ability, int slot)
         {
@@ -241,7 +241,7 @@ namespace DaimahouGames.Runtime.Abilities
             {
                 return false;
             }
-            
+
             // Patch UnLearn method
             string originalUnLearn = @"        public void UnLearn(Ability ability)
         {
@@ -249,33 +249,33 @@ namespace DaimahouGames.Runtime.Abilities
 
             var slot = this.m_AbilitySlots.FindIndex(x => x.Ability == ability);
             if (slot < 0) return;
-            
+
             if (this.m_AbilitySlots[slot].Ability != ability) return;
-            
+
             this.m_AbilitySlots[slot] = KnownAbility.None;
             UnLearnAbilityMessage.Send(ability);
         }";
-            
+
             string patchedUnLearn = @"        public void UnLearn(Ability ability)
         {
             if (ability == null) return;
 
             var slot = this.m_AbilitySlots.FindIndex(x => x.Ability == ability);
             if (slot < 0) return;
-            
+
             if (this.m_AbilitySlots[slot].Ability != ability) return;
-            
+
             // [GC2_NETWORK_PATCH] Server authority check
             if (NetworkUnLearnValidator != null && !NetworkUnLearnValidator.Invoke(this, ability))
             {
                 return; // Network will handle this
             }
             // [GC2_NETWORK_PATCH_END]
-            
+
             this.m_AbilitySlots[slot] = KnownAbility.None;
             UnLearnAbilityMessage.Send(ability);
         }
-        
+
         // [GC2_NETWORK_PATCH] Server-side direct unlearn (bypasses validation)
         public void UnLearnDirect(Ability ability)
         {
@@ -295,10 +295,10 @@ namespace DaimahouGames.Runtime.Abilities
             {
                 return false;
             }
-            
+
             WriteFile(relativePath, content);
             Debug.Log($"[GC2 Networking] Successfully patched {relativePath}");
-            
+
             return true;
         }
     }

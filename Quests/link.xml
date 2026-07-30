@@ -1,0 +1,5 @@
+<linker>
+  <assembly fullname="GameCreator.Runtime.Quests">
+    <type fullname="GameCreator.Runtime.Quests.QuestsList" preserve="all" />
+  </assembly>
+</linker>

@@ -10,7 +10,7 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
     public class TraversalPatcher : GC2PatcherBase
     {
         public override string ModuleName => "Traversal";
-        public override string PatchVersion => "2.2.0-traversal";
+        public override string PatchVersion => "2.6.0-traversal";
         public override string DisplayName => "Traversal (Game Creator 2)";
 
         public override string PatchDescription =>
@@ -18,7 +18,8 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
             "server-authoritative networking hooks.\n\n" +
             "TraverseLink.Run, TraverseInteractive.Enter, MotionInteractive edge\n" +
             "connections, and TraversalStance action APIs will be validated\n" +
-            "through network hooks before local execution.";
+            "through network hooks before local execution. TraversalStance also\n" +
+            "receives presentation-only snapshot restore/clear entry points.";
 
         protected override string[] FilesToPatch => new[]
         {
@@ -40,12 +41,12 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
         {
             if (relativePath.EndsWith("TraverseLink.cs"))
             {
-                return new[] { "NetworkRunValidator" };
+                return new[] { "NetworkRunValidator", "token.IsCancelled" };
             }
 
             if (relativePath.EndsWith("TraverseInteractive.cs"))
             {
-                return new[] { "NetworkEnterValidator" };
+                return new[] { "NetworkEnterValidator", "token.IsCancelled" };
             }
 
             if (relativePath.EndsWith("MotionInteractive.cs"))
@@ -53,7 +54,8 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                 return new[]
                 {
                     "NetworkEdgeConnectionResolver",
-                    "NetworkConnectionSkipTransitionResolver"
+                    "NetworkConnectionSkipTransitionResolver",
+                    "NetworkResumeInteractiveSnapshot"
                 };
             }
 
@@ -67,6 +69,12 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                     "NetworkTryActionValidator",
                     "NetworkTryStateEnterValidator",
                     "NetworkTryStateExitValidator",
+                    "NetworkRestoreInteractiveSnapshot",
+                    "NetworkClearSnapshot",
+                    "NetworkSnapshotToken",
+                    "NetworkInvalidatePendingEnter",
+                    "m_NetworkEnterSequence",
+                    "networkEnterSequence != this.m_NetworkEnterSequence",
                     "token != this.m_CurrentToken"
                 };
             }
@@ -80,7 +88,8 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
             {
                 return new Dictionary<string, int>
                 {
-                    { "NetworkRunValidator.Invoke", 1 }
+                    { "NetworkRunValidator.Invoke", 1 },
+                    { "token.IsCancelled", 1 }
                 };
             }
 
@@ -88,7 +97,8 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
             {
                 return new Dictionary<string, int>
                 {
-                    { "NetworkEnterValidator.Invoke", 1 }
+                    { "NetworkEnterValidator.Invoke", 1 },
+                    { "token.IsCancelled", 1 }
                 };
             }
 
@@ -96,8 +106,12 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
             {
                 return new Dictionary<string, int>
                 {
-                    { "NetworkEdgeConnectionResolver?.Invoke", 2 },
-                    { "NetworkConnectionSkipTransitionResolver.Invoke", 1 }
+                    { "NetworkEdgeConnectionResolver.Invoke", 2 },
+                    { "NetworkEdgeConnectionResolver != null", 2 },
+                    { "Traverse networkConnection = NetworkEdgeConnectionResolver.Invoke", 2 },
+                    { "return networkConnection;", 2 },
+                    { "NetworkConnectionSkipTransitionResolver.Invoke", 1 },
+                    { "NetworkResumeInteractiveSnapshot", 1 }
                 };
             }
 
@@ -110,11 +124,36 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                     { "NetworkTryJumpValidator.Invoke", 1 },
                     { "NetworkTryActionValidator.Invoke", 1 },
                     { "NetworkTryStateEnterValidator.Invoke", 1 },
-                    { "NetworkTryStateExitValidator.Invoke", 1 }
+                    { "NetworkTryStateExitValidator.Invoke", 1 },
+                    { "NetworkRestoreInteractiveSnapshot", 1 },
+                    { "NetworkClearSnapshot", 1 },
+                    { "NetworkSnapshotToken", 1 },
+                    { "NetworkInvalidatePendingEnter", 1 },
+                    { "networkEnterSequence != this.m_NetworkEnterSequence", 1 }
                 };
             }
 
             return base.GetRequiredPatchTokenCounts(relativePath);
+        }
+
+        protected override Dictionary<string, int> GetRequiredPatchRegexTokenCounts(string relativePath)
+        {
+            if (relativePath.EndsWith("MotionInteractive.cs"))
+            {
+                return new Dictionary<string, int>
+                {
+                    {
+                        @"PushingOutA\s*\(.*?Traverse\s+networkConnection\s*=\s*NetworkEdgeConnectionResolver\.Invoke\s*\(.*?false\s*\)\s*;\s*if\s*\(\s*networkConnection\s*!=\s*null\s*\)\s*\{\s*return\s+networkConnection\s*;\s*\}.*?else\s+if\s*\(\s*traverseInteractive\.ContinueA",
+                        1
+                    },
+                    {
+                        @"PushingOutB\s*\(.*?Traverse\s+networkConnection\s*=\s*NetworkEdgeConnectionResolver\.Invoke\s*\(.*?true\s*\)\s*;\s*if\s*\(\s*networkConnection\s*!=\s*null\s*\)\s*\{\s*return\s+networkConnection\s*;\s*\}.*?else\s+if\s*\(\s*traverseInteractive\.ContinueB",
+                        1
+                    }
+                };
+            }
+
+            return base.GetRequiredPatchRegexTokenCounts(relativePath);
         }
 
         protected override bool PatchFile(string relativePath)
@@ -186,6 +225,24 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                 return LogPatchFailure("TraverseLink.Run", failureReason);
             }
 
+            if (!TryInsertAfterMethodAnchors(
+                    ref content,
+                    "Run",
+                    "token.IsCancelled",
+                    @"
+
+            // [GC2_NETWORK_PATCH] A newer traversal may supersede this start while OnTraverseEnter yields
+            if (token == null || token.IsCancelled)
+            {
+                return;
+            }
+            // [GC2_NETWORK_PATCH_END]",
+                    out failureReason,
+                    @"TraversalToken\s+token\s*=\s*await\s+traversal\.OnTraverseEnter\s*\(\s*this\s*\)\s*;"))
+            {
+                return LogPatchFailure("TraverseLink.Run stale-start guard", failureReason);
+            }
+
             if (!EnsurePatchMarkerBeforeNamespace(ref content, "GameCreator.Runtime.Traversal"))
             {
                 return false;
@@ -234,6 +291,24 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                 return LogPatchFailure("TraverseInteractive.Enter", failureReason);
             }
 
+            if (!TryInsertAfterMethodAnchors(
+                    ref content,
+                    "Enter",
+                    "token.IsCancelled",
+                    @"
+
+            // [GC2_NETWORK_PATCH] A newer traversal may supersede this start while OnTraverseEnter yields
+            if (token == null || token.IsCancelled)
+            {
+                return;
+            }
+            // [GC2_NETWORK_PATCH_END]",
+                    out failureReason,
+                    @"TraversalToken\s+token\s*=\s*await\s+traversal\.OnTraverseEnter\s*\(\s*this\s*\)\s*;"))
+            {
+                return LogPatchFailure("TraverseInteractive.Enter stale-start guard", failureReason);
+            }
+
             if (!EnsurePatchMarkerBeforeNamespace(ref content, "GameCreator.Runtime.Traversal"))
             {
                 return false;
@@ -260,6 +335,47 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
             NetworkEdgeConnectionResolver != null ||
             NetworkConnectionSkipTransitionResolver != null;
 
+        // Presentation-safe owner resume for a persistent interactive snapshot. This deliberately
+        // skips m_OnStart/m_OnFinish and Traverse OnEnter/OnExit gameplay instruction lists.
+        public async Task<bool> NetworkResumeInteractiveSnapshot(
+            TraverseInteractive traverse,
+            Character character,
+            TraversalToken token)
+        {
+            if (traverse == null || character == null || token == null || token.IsCancelled)
+            {
+                return false;
+            }
+
+            Args args = new Args(traverse.gameObject, character.gameObject);
+            character.Motion.MoveToDirection(Vector3.zero, Space.World, 0);
+            character.Motion.MoveToDirection(Vector3.zero, Space.World, MOVE_DIRECTION_KEY);
+            character.Driver.SetGravityInfluence(GRAVITY_KEY, this.Gravity);
+            character.Driver.ResetVerticalVelocity();
+            character.Driver.UpdateKinematics = false;
+
+            Traverse nextTraverse = null;
+            try
+            {
+                nextTraverse = await this.OnUpdate(
+                    character,
+                    InteractiveTransitionData.None,
+                    token,
+                    args);
+            }
+            finally
+            {
+                if (character != null)
+                {
+                    character.Motion.StopToDirection(MOVE_DIRECTION_KEY);
+                    character.Driver.RemoveGravityInfluence(GRAVITY_KEY);
+                    character.Driver.UpdateKinematics = true;
+                }
+            }
+
+            return nextTraverse == null && !token.IsCancelled;
+        }
+
         // [GC2_NETWORK_PATCH_END]
 ",
                     out string failureReason))
@@ -282,24 +398,31 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                 return LogPatchFailure("MotionInteractive.Enter ChangeTo transition routing", failureReason);
             }
 
-            if (!TryInsertAfterRegexInMethod(
+            if (!TryReplaceRegexInMethod(
                     ref content,
                     "OnUpdate",
                     null,
                     @"(?m)^[ \t]*if\s*\(\s*traverseInteractive\.ContinueA\s*!=\s*null\s*\)\s*\{.*?^[ \t]*return\s+traverseInteractive\.ContinueA\s*;\s*^[ \t]*\}",
-                    @"
-
-                    // [GC2_NETWORK_PATCH] Resolve configured edge connections through the network layer instead of auto-traversing locally
-                    Traverse networkConnection = NetworkEdgeConnectionResolver?.Invoke(
-                        this,
-                        traverseInteractive,
-                        character,
-                        currentLocalPosition,
-                        swizzleLocalInput,
-                        false);
-                    if (networkConnection != null)
+                    @"                    // [GC2_NETWORK_PATCH] Route ContinueA and configured edge connections before
+                    // GC2 can auto-transition. A null network result keeps a network character on
+                    // the current traversal while its authoritative request is in flight.
+                    if (NetworkEdgeConnectionResolver != null)
                     {
-                        return networkConnection;
+                        Traverse networkConnection = NetworkEdgeConnectionResolver.Invoke(
+                            this,
+                            traverseInteractive,
+                            character,
+                            currentLocalPosition,
+                            swizzleLocalInput,
+                            false);
+                        if (networkConnection != null)
+                        {
+                            return networkConnection;
+                        }
+                    }
+                    else if (traverseInteractive.ContinueA != null)
+                    {
+                        return traverseInteractive.ContinueA;
                     }
                     // [GC2_NETWORK_PATCH_END]",
                     out failureReason))
@@ -307,24 +430,30 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                 return LogPatchFailure("MotionInteractive edge A connection resolver", failureReason);
             }
 
-            if (!TryInsertAfterRegexInMethod(
+            if (!TryReplaceRegexInMethod(
                     ref content,
                     "OnUpdate",
                     null,
                     @"(?m)^[ \t]*if\s*\(\s*traverseInteractive\.ContinueB\s*!=\s*null\s*\)\s*\{.*?^[ \t]*return\s+traverseInteractive\.ContinueB\s*;\s*^[ \t]*\}",
-                    @"
-
-                    // [GC2_NETWORK_PATCH] Resolve configured edge connections through the network layer instead of auto-traversing locally
-                    Traverse networkConnection = NetworkEdgeConnectionResolver?.Invoke(
-                        this,
-                        traverseInteractive,
-                        character,
-                        currentLocalPosition,
-                        swizzleLocalInput,
-                        true);
-                    if (networkConnection != null)
+                    @"                    // [GC2_NETWORK_PATCH] Route ContinueB and configured edge connections before
+                    // GC2 can auto-transition. See the edge A branch above.
+                    if (NetworkEdgeConnectionResolver != null)
                     {
-                        return networkConnection;
+                        Traverse networkConnection = NetworkEdgeConnectionResolver.Invoke(
+                            this,
+                            traverseInteractive,
+                            character,
+                            currentLocalPosition,
+                            swizzleLocalInput,
+                            true);
+                        if (networkConnection != null)
+                        {
+                            return networkConnection;
+                        }
+                    }
+                    else if (traverseInteractive.ContinueB != null)
+                    {
+                        return traverseInteractive.ContinueB;
                     }
                     // [GC2_NETWORK_PATCH_END]",
                     out failureReason))
@@ -358,6 +487,15 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
         public static System.Func<TraversalStance, IdString, bool> NetworkTryStateEnterValidator;
         public static System.Func<TraversalStance, bool> NetworkTryStateExitValidator;
 
+        [NonSerialized] private uint m_NetworkEnterSequence;
+        public TraversalToken NetworkSnapshotToken => this.m_CurrentToken;
+
+        public void NetworkInvalidatePendingEnter()
+        {
+            this.m_NetworkEnterSequence = unchecked(this.m_NetworkEnterSequence + 1u);
+            if (this.m_NetworkEnterSequence == 0) this.m_NetworkEnterSequence = 1;
+        }
+
         public static bool IsNetworkingActive =>
             NetworkTryCancelValidator != null ||
             NetworkForceCancelValidator != null ||
@@ -365,6 +503,53 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
             NetworkTryActionValidator != null ||
             NetworkTryStateEnterValidator != null ||
             NetworkTryStateExitValidator != null;
+
+        // Presentation-only late-join reconstruction. These methods deliberately do not invoke
+        // Traverse.OnEnter/OnExit or MotionInteractive m_OnStart/m_OnFinish instruction lists.
+        public bool NetworkRestoreInteractiveSnapshot(
+            TraverseInteractive traverse,
+            Vector3 relativePosition)
+        {
+            if (traverse == null || this.Character == null) return false;
+
+            if (this.m_CurrentToken != null)
+            {
+                this.m_CurrentToken.IsCancelled = true;
+            }
+
+            this.m_NetworkEnterSequence = unchecked(this.m_NetworkEnterSequence + 1u);
+            if (this.m_NetworkEnterSequence == 0) this.m_NetworkEnterSequence = 1;
+
+            this.Traverse = traverse;
+            this.RelativePosition = relativePosition;
+            this.InInteractiveTransition = false;
+            this.AllowMovement = false;
+            this.m_CurrentToken = new TraversalToken();
+            this.m_CurrentStateId = IdString.EMPTY;
+            this.EventMotionEnter?.Invoke();
+            return true;
+        }
+
+        public bool NetworkClearSnapshot()
+        {
+            if (this.Traverse == null && this.m_CurrentToken == null) return false;
+
+            if (this.m_CurrentToken != null)
+            {
+                this.m_CurrentToken.IsCancelled = true;
+            }
+
+            this.m_NetworkEnterSequence = unchecked(this.m_NetworkEnterSequence + 1u);
+            if (this.m_NetworkEnterSequence == 0) this.m_NetworkEnterSequence = 1;
+
+            this.EventMotionExit?.Invoke();
+            this.m_CurrentStateId = IdString.EMPTY;
+            this.Traverse = null;
+            this.m_CurrentToken = null;
+            this.InInteractiveTransition = false;
+            this.AllowMovement = true;
+            return true;
+        }
 
         // [GC2_NETWORK_PATCH_END]
 ",
@@ -490,6 +675,42 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                     @"if\s*\(\s*this\.m_CurrentStateId\s*==\s*IdString\.EMPTY\s*\)\s*return\s*;"))
             {
                 return LogPatchFailure("TraversalStance.TryStateExit", failureReason);
+            }
+
+            if (!TryInsertAtMethodStart(
+                    ref content,
+                    "OnTraverseEnter",
+                    "uint networkEnterSequence",
+                    @"
+            // [GC2_NETWORK_PATCH] Invalidate a yielded start when a newer traversal starts first
+            uint networkEnterSequence = unchecked(++this.m_NetworkEnterSequence);
+            if (networkEnterSequence == 0)
+            {
+                networkEnterSequence = unchecked(++this.m_NetworkEnterSequence);
+            }
+            // [GC2_NETWORK_PATCH_END]
+",
+                    out failureReason))
+            {
+                return LogPatchFailure("TraversalStance.OnTraverseEnter generation", failureReason);
+            }
+
+            if (!TryInsertAfterRegexInMethod(
+                    ref content,
+                    "OnTraverseEnter",
+                    "networkEnterSequence != this.m_NetworkEnterSequence",
+                    @"(?s)if\s*\(\s*this\.ForceCancel\s*\(\s*\)\s*\)\s*\{.*?await\s+Task\.Yield\s*\(\s*\)\s*;.*?\}",
+                    @"
+
+            // [GC2_NETWORK_PATCH] Do not let an older yielded start overwrite the newer traversal
+            if (networkEnterSequence != this.m_NetworkEnterSequence)
+            {
+                return new TraversalToken { IsCancelled = true };
+            }
+            // [GC2_NETWORK_PATCH_END]",
+                    out failureReason))
+            {
+                return LogPatchFailure("TraversalStance.OnTraverseEnter stale-start guard", failureReason);
             }
 
             if (!TryInsertAtMethodStart(

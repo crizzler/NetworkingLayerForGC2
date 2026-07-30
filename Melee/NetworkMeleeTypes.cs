@@ -15,17 +15,17 @@ namespace Arawn.GameCreator2.Networking.Melee
         public static bool ForceSkillDiagnostics = false;
         public static bool ForcePacketDiagnostics = false;
         public static bool ForceInputLockDiagnostics = false;
-        public static bool ForceReactionDiagnostics = true;
+        public static bool ForceReactionDiagnostics = false;
     }
 
     /// <summary>
     /// Network-optimized data types for GC2 Melee synchronization.
     /// </summary>
-    /// 
+    ///
     // ════════════════════════════════════════════════════════════════════════════════════════════
     // NETWORK MELEE HIT REQUEST
     // ════════════════════════════════════════════════════════════════════════════════════════════
-    
+
     /// <summary>
     /// Compact hit request sent from client to server. (~30 bytes)
     /// </summary>
@@ -36,39 +36,46 @@ namespace Arawn.GameCreator2.Networking.Melee
         public ushort RequestId;
         public uint ActorNetworkId;
         public uint CorrelationId;
-        
+
+        /// <summary>
+        /// Correlation ID of the server-approved skill operation that produced this hit.
+        /// A value of zero is retained only for legacy trusted-server callers; current client
+        /// and server-originated strikes both carry a per-attack operation token.
+        /// </summary>
+        public uint AttackCorrelationId;
+
         /// <summary>Client timestamp when hit was detected.</summary>
         public float ClientTimestamp;
-        
+
         /// <summary>Network ID of the attacker.</summary>
         public uint AttackerNetworkId;
-        
+
         /// <summary>Network ID of the target.</summary>
         public uint TargetNetworkId;
-        
+
         /// <summary>Hit point (compressed world position).</summary>
         public Vector3 HitPoint;
-        
+
         /// <summary>Strike direction in the target's local space, matching GC2 ReactionInput/ShieldInput.</summary>
         public Vector3 StrikeDirection;
-        
+
         /// <summary>Hash of the skill being used.</summary>
         public int SkillHash;
-        
+
         /// <summary>Hash of the weapon being used.</summary>
         public int WeaponHash;
-        
+
         /// <summary>Combo node ID (for combo validation).</summary>
         public int ComboNodeId;
-        
+
         /// <summary>Current phase of the attack.</summary>
         public byte AttackPhase;
     }
-    
+
     // ════════════════════════════════════════════════════════════════════════════════════════════
     // NETWORK MELEE HIT RESPONSE
     // ════════════════════════════════════════════════════════════════════════════════════════════
-    
+
     /// <summary>
     /// Server response to a hit request. (~8 bytes)
     /// </summary>
@@ -79,20 +86,20 @@ namespace Arawn.GameCreator2.Networking.Melee
         public ushort RequestId;
         public uint ActorNetworkId;
         public uint CorrelationId;
-        
+
         /// <summary>Whether the hit was validated.</summary>
         public bool Validated;
-        
+
         /// <summary>Rejection reason if not validated.</summary>
         public MeleeHitRejectionReason RejectionReason;
-        
+
         /// <summary>Server-calculated damage (if validated).</summary>
         public float Damage;
-        
+
         /// <summary>Whether poise was broken.</summary>
         public bool PoiseBroken;
     }
-    
+
     /// <summary>
     /// Reasons a melee hit can be rejected.
     /// </summary>
@@ -110,12 +117,13 @@ namespace Arawn.GameCreator2.Networking.Melee
         AlreadyHit = 9,
         TimestampTooOld = 10,
         CheatSuspected = 11,
+        TargetNotReady = 12,
     }
-    
+
     // ════════════════════════════════════════════════════════════════════════════════════════════
     // NETWORK MELEE HIT BROADCAST
     // ════════════════════════════════════════════════════════════════════════════════════════════
-    
+
     /// <summary>
     /// Broadcast to all clients when a hit is confirmed. (~24 bytes)
     /// </summary>
@@ -124,30 +132,30 @@ namespace Arawn.GameCreator2.Networking.Melee
     {
         /// <summary>Network ID of the attacker.</summary>
         public uint AttackerNetworkId;
-        
+
         /// <summary>Network ID of the target.</summary>
         public uint TargetNetworkId;
-        
+
         /// <summary>Hit point for effects.</summary>
         public Vector3 HitPoint;
-        
+
         /// <summary>Strike direction for effects.</summary>
         public Vector3 StrikeDirection;
-        
+
         /// <summary>Skill hash for looking up effects.</summary>
         public int SkillHash;
-        
+
         /// <summary>Block type result.</summary>
         public byte BlockResult;
-        
+
         /// <summary>Whether poise was broken.</summary>
         public bool PoiseBroken;
     }
-    
+
     // ════════════════════════════════════════════════════════════════════════════════════════════
     // NETWORK ATTACK STATE
     // ════════════════════════════════════════════════════════════════════════════════════════════
-    
+
     /// <summary>
     /// Compact attack state for synchronization. (~12 bytes)
     /// </summary>
@@ -156,19 +164,19 @@ namespace Arawn.GameCreator2.Networking.Melee
     {
         /// <summary>Hash of the current skill.</summary>
         public int SkillHash;
-        
+
         /// <summary>Hash of the equipped weapon.</summary>
         public int WeaponHash;
-        
+
         /// <summary>Current opaque GC2 combo node ID.</summary>
-        public short ComboNodeId;
-        
+        public int ComboNodeId;
+
         /// <summary>Current attack phase.</summary>
         public byte Phase;
-        
+
         /// <summary>Normalized time within current phase (0-255 maps to 0-1).</summary>
         public byte PhaseProgress;
-        
+
         public static NetworkAttackState None => new NetworkAttackState
         {
             SkillHash = 0,
@@ -177,7 +185,7 @@ namespace Arawn.GameCreator2.Networking.Melee
             Phase = 0,
             PhaseProgress = 0
         };
-        
+
 #if GC2_MELEE
         public static NetworkAttackState FromPhase(MeleePhase phase)
         {
@@ -186,15 +194,15 @@ namespace Arawn.GameCreator2.Networking.Melee
                 Phase = (byte)phase,
             };
         }
-        
+
         public MeleePhase GetMeleePhase() => (MeleePhase)Phase;
 #endif
     }
-    
+
     // ════════════════════════════════════════════════════════════════════════════════════════════
     // NETWORK SKILL REQUEST
     // ════════════════════════════════════════════════════════════════════════════════════════════
-    
+
     /// <summary>
     /// Request to play a skill (sent by clients to server).
     /// </summary>
@@ -206,32 +214,46 @@ namespace Arawn.GameCreator2.Networking.Melee
         public uint ActorNetworkId;
         public uint CorrelationId;
 
+        /// <summary>
+        /// Synchronized server-clock time at which GC2 consumed the input and selected this
+        /// combo node. This keeps combo-transition validation on the owner's authored timeline
+        /// instead of extending it by packet latency.
+        /// </summary>
+        public float ClientTimestamp;
+
         /// <summary>Network ID of the target (0 if none).</summary>
         public uint TargetNetworkId;
-        
+
         /// <summary>Hash of the skill to play.</summary>
         public int SkillHash;
-        
+
         /// <summary>Hash of the weapon to use.</summary>
         public int WeaponHash;
 
         /// <summary>Client-observed opaque GC2 combo node id.</summary>
-        public short ComboNodeId;
-        
+        public int ComboNodeId;
+
+        /// <summary>
+        /// Combo node GC2 was executing immediately before it selected
+        /// <see cref="ComboNodeId"/>. <see cref="ComboTree.NODE_INVALID"/> identifies a fresh
+        /// root operation.
+        /// </summary>
+        public int PreviousComboNodeId;
+
         /// <summary>Input key used.</summary>
         public byte InputKey;
-        
+
         /// <summary>Whether this is a charge release.</summary>
         public bool IsChargeRelease;
-        
+
         /// <summary>Charge duration (if charge release).</summary>
         public float ChargeDuration;
     }
-    
+
     // ════════════════════════════════════════════════════════════════════════════════════════════
     // BLOCK STATE
     // ════════════════════════════════════════════════════════════════════════════════════════════
-    
+
     /// <summary>
     /// Network block result types.
     /// </summary>
@@ -244,6 +266,49 @@ namespace Arawn.GameCreator2.Networking.Melee
     }
 
 #if GC2_MELEE
+    /// <summary>
+    /// Server-only context used to apply the authored GC2 reaction for a validated melee hit.
+    /// Damage and reaction handling are deliberately independent: handling damage never marks
+    /// this context as handled.
+    /// </summary>
+    public sealed class NetworkMeleeReactionContext
+    {
+        public NetworkMeleeHitRequest Request { get; }
+        public NetworkBlockResult BlockResult { get; }
+        public float Damage { get; }
+        public Character Attacker { get; }
+        public Character Target { get; }
+        public Skill Skill { get; }
+        public ReactionInput Input { get; }
+
+        /// <summary>True after the target actually enters GC2's Reaction phase.</summary>
+        public bool ReactionStarted { get; internal set; }
+
+        /// <summary>
+        /// True when an attacking target crossed its poise gate and entered Reaction.
+        /// This is an observed result, not the old damage-based heuristic.
+        /// </summary>
+        public bool PoiseBroken { get; internal set; }
+
+        public NetworkMeleeReactionContext(
+            NetworkMeleeHitRequest request,
+            NetworkBlockResult blockResult,
+            float damage,
+            Character attacker,
+            Character target,
+            Skill skill,
+            ReactionInput input)
+        {
+            Request = request;
+            BlockResult = blockResult;
+            Damage = damage;
+            Attacker = attacker;
+            Target = target;
+            Skill = skill;
+            Input = input;
+        }
+    }
+
     /// <summary>
     /// Inspector-authored, presentation-only effects for a network-confirmed melee hit.
     /// These effects are instantiated locally and never execute a Skill's gameplay pipeline.
@@ -303,11 +368,11 @@ namespace Arawn.GameCreator2.Networking.Melee
         }
     }
 #endif
-    
+
     // ════════════════════════════════════════════════════════════════════════════════════════════
     // WEAPON STATE
     // ════════════════════════════════════════════════════════════════════════════════════════════
-    
+
     /// <summary>
     /// Compact melee weapon state. (~8 bytes)
     /// </summary>
@@ -316,17 +381,17 @@ namespace Arawn.GameCreator2.Networking.Melee
     {
         /// <summary>Hash of the equipped melee weapon (0 if none).</summary>
         public int WeaponHash;
-        
+
         /// <summary>Current shield state flags.</summary>
         public byte ShieldFlags;
-        
+
         /// <summary>Block/parry timing (0-255 normalized).</summary>
         public byte BlockTiming;
-        
+
         public const byte SHIELD_RAISED = 0x01;
         public const byte SHIELD_PARRY_WINDOW = 0x02;
         public const byte SHIELD_BROKEN = 0x04;
-        
+
         public bool IsShieldRaised => (ShieldFlags & SHIELD_RAISED) != 0;
         public bool InParryWindow => (ShieldFlags & SHIELD_PARRY_WINDOW) != 0;
         public bool IsShieldBroken => (ShieldFlags & SHIELD_BROKEN) != 0;
@@ -368,11 +433,20 @@ namespace Arawn.GameCreator2.Networking.Melee
             };
         }
     }
-    
+
     // ════════════════════════════════════════════════════════════════════════════════════════════
     // REACTION STATE
     // ════════════════════════════════════════════════════════════════════════════════════════════
-    
+
+    public enum NetworkReactionPlaybackKind : byte
+    {
+        /// <summary>Enter GC2's MeleeStance Reaction phase (normal hits and SyncReaction).</summary>
+        Stance = 0,
+
+        /// <summary>Run the authored Reaction directly, matching TShieldResponse semantics.</summary>
+        DirectShield = 1
+    }
+
     /// <summary>
     /// Network reaction broadcast. (~17 bytes)
     /// </summary>
@@ -381,26 +455,38 @@ namespace Arawn.GameCreator2.Networking.Melee
     {
         /// <summary>Network ID of the character reacting.</summary>
         public uint CharacterNetworkId;
-        
+
         /// <summary>Network ID of the character who caused the reaction (attacker).</summary>
         public uint FromNetworkId;
-        
+
+        /// <summary>
+        /// Monotonically increasing server event identity for this reacting character.
+        /// This distinguishes a real second hit from a duplicate delivery while the first
+        /// reaction animation is still active.
+        /// </summary>
+        public uint Sequence;
+
         /// <summary>Hash of the reaction to play.</summary>
         public int ReactionHash;
-        
+
+        /// <summary>Whether playback enters MeleeStance or mirrors a direct shield response.</summary>
+        public NetworkReactionPlaybackKind PlaybackKind;
+
         /// <summary>Reaction horizontal yaw (compressed: 0-255 maps to -180 to 180 degrees).</summary>
         public byte Direction;
 
         /// <summary>Reaction vertical component (compressed: 0-255 maps to -1 to 1).</summary>
         public byte DirectionY;
-        
+
         /// <summary>Reaction power (compressed: 0-255 maps to 0-10 power).</summary>
         public byte Power;
-        
+
         /// <summary>Convert direction horizontal yaw to compressed byte.</summary>
         public static byte CompressDirection(Vector3 direction)
         {
-            if (direction.sqrMagnitude < 0.001f) return 128; // Forward
+            // 0/0 is reserved for GC2's authored MeleeDirection.None. It must remain zero:
+            // substituting forward changes shield selection and reaction animation semantics.
+            if (direction.sqrMagnitude < 0.001f) return 0;
             float angle = Mathf.Atan2(direction.x, direction.z) * Mathf.Rad2Deg;
             return (byte)Mathf.RoundToInt((angle + 180f) / 360f * 255f);
         }
@@ -408,34 +494,35 @@ namespace Arawn.GameCreator2.Networking.Melee
         /// <summary>Convert direction vertical component to compressed byte.</summary>
         public static byte CompressDirectionY(Vector3 direction)
         {
-            if (direction.sqrMagnitude < 0.001f) return 128;
+            if (direction.sqrMagnitude < 0.001f) return 0;
             float y = Mathf.Clamp(direction.normalized.y, -1f, 1f);
             return (byte)Mathf.Clamp(Mathf.RoundToInt((y + 1f) * 0.5f * 255f), 0, 255);
         }
-        
+
         /// <summary>Decompress direction bytes to normalized vector.</summary>
         public Vector3 GetDirection()
         {
+            if (Direction == 0 && DirectionY == 0) return Vector3.zero;
             float angle = (Direction / 255f * 360f - 180f) * Mathf.Deg2Rad;
             float y = Mathf.Clamp(DirectionY / 255f * 2f - 1f, -1f, 1f);
             float horizontal = Mathf.Sqrt(Mathf.Max(0f, 1f - y * y));
             return new Vector3(Mathf.Sin(angle) * horizontal, y, Mathf.Cos(angle) * horizontal);
         }
-        
+
         /// <summary>Compress power (0-10 range) to byte.</summary>
         public static byte CompressPower(float power)
         {
             return (byte)Mathf.Clamp(Mathf.RoundToInt(power / 10f * 255f), 0, 255);
         }
-        
+
         /// <summary>Decompress power byte to float.</summary>
         public float GetPower() => Power / 255f * 10f;
     }
-    
+
     // ════════════════════════════════════════════════════════════════════════════════════════════
     // BLOCK/SHIELD REQUEST
     // ════════════════════════════════════════════════════════════════════════════════════════════
-    
+
     /// <summary>
     /// Block action types for request.
     /// </summary>
@@ -444,7 +531,7 @@ namespace Arawn.GameCreator2.Networking.Melee
         Raise = 0,
         Lower = 1
     }
-    
+
     /// <summary>
     /// Client request to raise/lower block. (~8 bytes)
     /// </summary>
@@ -455,17 +542,17 @@ namespace Arawn.GameCreator2.Networking.Melee
         public ushort RequestId;
         public uint ActorNetworkId;
         public uint CorrelationId;
-        
+
         /// <summary>Client timestamp when block was requested.</summary>
         public float ClientTimestamp;
-        
+
         /// <summary>Action: raise or lower guard.</summary>
         public NetworkBlockAction Action;
-        
+
         /// <summary>Hash of the shield being used (from weapon).</summary>
         public int ShieldHash;
     }
-    
+
     /// <summary>
     /// Reasons a block request can be rejected.
     /// </summary>
@@ -478,7 +565,7 @@ namespace Arawn.GameCreator2.Networking.Melee
         InvalidState = 4,
         CheatSuspected = 5
     }
-    
+
     /// <summary>
     /// Server response to block request. (~4 bytes)
     /// </summary>
@@ -489,17 +576,17 @@ namespace Arawn.GameCreator2.Networking.Melee
         public ushort RequestId;
         public uint ActorNetworkId;
         public uint CorrelationId;
-        
+
         /// <summary>Whether the block was validated.</summary>
         public bool Validated;
-        
+
         /// <summary>Rejection reason if not validated.</summary>
         public BlockRejectionReason RejectionReason;
-        
+
         /// <summary>Server-authoritative block start time (for parry window sync).</summary>
         public float ServerBlockStartTime;
     }
-    
+
     /// <summary>
     /// Broadcast block state change to all clients. (~12 bytes)
     /// </summary>
@@ -508,21 +595,21 @@ namespace Arawn.GameCreator2.Networking.Melee
     {
         /// <summary>Network ID of the character.</summary>
         public uint CharacterNetworkId;
-        
+
         /// <summary>Action that occurred.</summary>
         public NetworkBlockAction Action;
-        
+
         /// <summary>Server timestamp of the action (for parry window calculation).</summary>
         public float ServerTimestamp;
-        
+
         /// <summary>Shield hash for animation lookup.</summary>
         public int ShieldHash;
     }
-    
+
     // ════════════════════════════════════════════════════════════════════════════════════════════
     // SKILL EXECUTION REQUEST/RESPONSE
     // ════════════════════════════════════════════════════════════════════════════════════════════
-    
+
     /// <summary>
     /// Reasons a skill request can be rejected.
     /// </summary>
@@ -539,7 +626,7 @@ namespace Arawn.GameCreator2.Networking.Melee
         ChargeNotValid = 8,
         CheatSuspected = 9
     }
-    
+
     /// <summary>
     /// Server response to skill request. (~6 bytes)
     /// </summary>
@@ -550,17 +637,17 @@ namespace Arawn.GameCreator2.Networking.Melee
         public ushort RequestId;
         public uint ActorNetworkId;
         public uint CorrelationId;
-        
+
         /// <summary>Whether the skill was validated.</summary>
         public bool Validated;
-        
+
         /// <summary>Rejection reason if not validated.</summary>
         public SkillRejectionReason RejectionReason;
-        
+
         /// <summary>Server-assigned combo node ID.</summary>
-        public short ComboNodeId;
+        public int ComboNodeId;
     }
-    
+
     /// <summary>
     /// Broadcast skill execution to all clients. (~20 bytes)
     /// </summary>
@@ -569,33 +656,33 @@ namespace Arawn.GameCreator2.Networking.Melee
     {
         /// <summary>Network ID of the character executing skill.</summary>
         public uint CharacterNetworkId;
-        
+
         /// <summary>Network ID of the target (0 if none).</summary>
         public uint TargetNetworkId;
-        
+
         /// <summary>Hash of the skill being executed.</summary>
         public int SkillHash;
-        
+
         /// <summary>Hash of the weapon being used.</summary>
         public int WeaponHash;
-        
+
         /// <summary>Combo node ID for combo tracking.</summary>
-        public short ComboNodeId;
-        
+        public int ComboNodeId;
+
         /// <summary>Server timestamp when skill started.</summary>
         public float ServerTimestamp;
-        
+
         /// <summary>Whether this was a charged attack.</summary>
         public bool IsCharged;
-        
+
         /// <summary>Charge level (0-255 normalized, 0 = uncharged).</summary>
         public byte ChargeLevel;
     }
-    
+
     // ════════════════════════════════════════════════════════════════════════════════════════════
     // CHARGE STATE
     // ════════════════════════════════════════════════════════════════════════════════════════════
-    
+
     /// <summary>
     /// Compact charge state for tracking charge attacks. (~12 bytes)
     /// </summary>
@@ -604,19 +691,19 @@ namespace Arawn.GameCreator2.Networking.Melee
     {
         /// <summary>Whether currently charging.</summary>
         public bool IsCharging;
-        
+
         /// <summary>Input key being held.</summary>
         public byte InputKey;
-        
+
         /// <summary>Hash of skill being charged.</summary>
         public int ChargeSkillHash;
-        
+
         /// <summary>Server timestamp when charge started.</summary>
         public float ChargeStartTime;
-        
+
         /// <summary>Combo node ID for the charge.</summary>
-        public short ChargeComboNodeId;
-        
+        public int ChargeComboNodeId;
+
         public static NetworkChargeState None => new NetworkChargeState
         {
             IsCharging = false,
@@ -626,7 +713,7 @@ namespace Arawn.GameCreator2.Networking.Melee
             ChargeComboNodeId = -1
         };
     }
-    
+
     /// <summary>
     /// Request to start charging (sent by clients). (~10 bytes)
     /// </summary>
@@ -637,17 +724,17 @@ namespace Arawn.GameCreator2.Networking.Melee
         public ushort RequestId;
         public uint ActorNetworkId;
         public uint CorrelationId;
-        
+
         /// <summary>Client timestamp when charge started.</summary>
         public float ClientTimestamp;
-        
+
         /// <summary>Input key being held.</summary>
         public byte InputKey;
-        
+
         /// <summary>Hash of weapon being used.</summary>
         public int WeaponHash;
     }
-    
+
     /// <summary>
     /// Server response to charge request. (~6 bytes)
     /// </summary>
@@ -658,17 +745,17 @@ namespace Arawn.GameCreator2.Networking.Melee
         public ushort RequestId;
         public uint ActorNetworkId;
         public uint CorrelationId;
-        
+
         /// <summary>Whether charge was validated.</summary>
         public bool Validated;
-        
+
         /// <summary>Server timestamp when charge started (for timing sync).</summary>
         public float ServerChargeStartTime;
-        
+
         /// <summary>Hash of skill that will be charged.</summary>
         public int ChargeSkillHash;
     }
-    
+
     /// <summary>
     /// Broadcast charge state change. (~12 bytes)
     /// </summary>
@@ -677,21 +764,21 @@ namespace Arawn.GameCreator2.Networking.Melee
     {
         /// <summary>Network ID of the character.</summary>
         public uint CharacterNetworkId;
-        
+
         /// <summary>Whether charge started or ended.</summary>
         public bool ChargeStarted;
-        
+
         /// <summary>Hash of skill being charged.</summary>
         public int ChargeSkillHash;
-        
+
         /// <summary>Server timestamp.</summary>
         public float ServerTimestamp;
     }
-    
+
     // ════════════════════════════════════════════════════════════════════════════════════════════
     // BLOCK OUTCOME (for hit processing)
     // ════════════════════════════════════════════════════════════════════════════════════════════
-    
+
     /// <summary>
     /// Result of server-side block evaluation during hit processing.
     /// </summary>
@@ -700,16 +787,16 @@ namespace Arawn.GameCreator2.Networking.Melee
     {
         /// <summary>The block outcome.</summary>
         public NetworkBlockResult Result;
-        
+
         /// <summary>Remaining defense after block (if blocked).</summary>
         public float RemainingDefense;
-        
+
         /// <summary>Whether the defender should play a reaction.</summary>
         public bool TriggerReaction;
-        
+
         /// <summary>Hash of reaction to play (0 if none).</summary>
         public int ReactionHash;
-        
+
         public static BlockEvaluationResult NoBlock => new BlockEvaluationResult
         {
             Result = NetworkBlockResult.None,
@@ -717,7 +804,7 @@ namespace Arawn.GameCreator2.Networking.Melee
             TriggerReaction = true,
             ReactionHash = 0
         };
-        
+
         public static BlockEvaluationResult Blocked(float remainingDefense) => new BlockEvaluationResult
         {
             Result = NetworkBlockResult.Blocked,
@@ -725,7 +812,7 @@ namespace Arawn.GameCreator2.Networking.Melee
             TriggerReaction = false,
             ReactionHash = 0
         };
-        
+
         public static BlockEvaluationResult Parried => new BlockEvaluationResult
         {
             Result = NetworkBlockResult.Parried,
@@ -733,12 +820,14 @@ namespace Arawn.GameCreator2.Networking.Melee
             TriggerReaction = false,
             ReactionHash = 0
         };
-        
+
         public static BlockEvaluationResult BlockBroken => new BlockEvaluationResult
         {
             Result = NetworkBlockResult.BlockBroken,
             RemainingDefense = 0f,
-            TriggerReaction = true,
+            // Native GC2 runs only the shield's authored break response when a shield exists.
+            // TShieldResponse reports that exact reaction through the source patch.
+            TriggerReaction = false,
             ReactionHash = 0
         };
     }

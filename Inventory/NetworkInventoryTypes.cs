@@ -7,7 +7,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
     // ════════════════════════════════════════════════════════════════════════════════════════════
     // ENUMS
     // ════════════════════════════════════════════════════════════════════════════════════════════
-    
+
     /// <summary>
     /// Types of inventory content operations.
     /// </summary>
@@ -22,7 +22,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
         Drop = 6,
         Sort = 7
     }
-    
+
     /// <summary>
     /// Types of equipment operations.
     /// </summary>
@@ -34,7 +34,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
         Unequip = 3,
         UnequipFromIndex = 4
     }
-    
+
     /// <summary>
     /// Types of socket operations.
     /// </summary>
@@ -45,7 +45,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
         Detach = 2,
         DetachFromSocket = 3
     }
-    
+
     /// <summary>
     /// Types of wealth operations.
     /// </summary>
@@ -55,7 +55,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
         Add = 1,
         Subtract = 2
     }
-    
+
     /// <summary>
     /// Types of merchant operations.
     /// </summary>
@@ -64,7 +64,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
         BuyFromMerchant = 0,
         SellToMerchant = 1
     }
-    
+
     /// <summary>
     /// Types of crafting operations.
     /// </summary>
@@ -74,7 +74,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
         Dismantle = 1,
         Combine = 2
     }
-    
+
     /// <summary>
     /// Reasons for inventory operation rejection.
     /// </summary>
@@ -113,7 +113,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
         InternalError = 30,
         RequestTimeout = 31
     }
-    
+
     /// <summary>
     /// Source of inventory modification (for auditing/validation).
     /// </summary>
@@ -130,11 +130,11 @@ namespace Arawn.GameCreator2.Networking.Inventory
         StatusEffect = 8,
         Admin = 9
     }
-    
+
     // ════════════════════════════════════════════════════════════════════════════════════════════
     // NETWORK RUNTIME ITEM REPRESENTATION
     // ════════════════════════════════════════════════════════════════════════════════════════════
-    
+
     /// <summary>
     /// Minimal network representation of a RuntimeProperty.
     /// ~16 bytes
@@ -146,7 +146,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public string PropertyIdString; // Variable - Deterministic property ID
         public float Number;          // 4 bytes
         public string Text;           // Variable (null for most properties)
-        
+
         public static NetworkRuntimeProperty FromProperty(int hash, float number, string text)
         {
             return new NetworkRuntimeProperty
@@ -157,7 +157,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
             };
         }
     }
-    
+
     /// <summary>
     /// Minimal network representation of a RuntimeSocket.
     /// ~12 bytes without attachment
@@ -170,7 +170,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public bool HasAttachment;                 // 1 byte
         public NetworkRuntimeItem Attachment;     // Variable (null if no attachment)
     }
-    
+
     /// <summary>
     /// Network representation of a RuntimeItem.
     /// This is the core data structure for syncing items.
@@ -184,7 +184,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public string RuntimeIdString;             // Variable - Full RuntimeID string for reconstruction
         public NetworkRuntimeProperty[] Properties; // Variable
         public NetworkRuntimeSocket[] Sockets;     // Variable
-        
+
         /// <summary>
         /// Estimated serialization size in bytes.
         /// </summary>
@@ -201,7 +201,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
             }
         }
     }
-    
+
     /// <summary>
     /// Network representation of a Cell (inventory slot with stacked items).
     /// </summary>
@@ -214,12 +214,13 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public NetworkRuntimeItem RootItem;        // Variable - The root item of the stack
         public long[] StackedRuntimeIds;           // Variable - RuntimeIDs of stacked items
         public string[] StackedRuntimeIdStrings;   // Variable - RuntimeID strings of stacked items
+        public NetworkRuntimeItem[] StackedItems;  // Variable - Complete payloads for stacked items
     }
-    
+
     // ════════════════════════════════════════════════════════════════════════════════════════════
     // CONTENT REQUESTS / RESPONSES
     // ════════════════════════════════════════════════════════════════════════════════════════════
-    
+
     /// <summary>
     /// Request to add item to bag content.
     /// ~40 bytes + item data
@@ -239,7 +240,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public InventoryModificationSource Source; // 1 byte
         public int SourceHash;                     // 4 bytes
     }
-    
+
     /// <summary>
     /// Response to content add request.
     /// ~24 bytes
@@ -255,8 +256,9 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public Vector2Int ResultPosition;          // 8 bytes - Where item was placed
         public long AssignedRuntimeId;             // 8 bytes - Server-assigned RuntimeID hash
         public string AssignedRuntimeIdString;     // Variable
+        public uint StateVersion;
     }
-    
+
     /// <summary>
     /// Request to remove item from bag.
     /// ~24 bytes
@@ -273,7 +275,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public bool UsePosition;                   // 1 byte - Whether to use position instead of RuntimeID
         public InventoryModificationSource Source; // 1 byte
     }
-    
+
     /// <summary>
     /// Response to content remove request.
     /// ~20 bytes
@@ -287,8 +289,9 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public bool Authorized;                    // 1 byte
         public InventoryRejectionReason RejectionReason; // 1 byte
         public NetworkRuntimeItem RemovedItem;     // Variable - The item that was removed
+        public uint StateVersion;
     }
-    
+
     /// <summary>
     /// Request to move item within bag.
     /// ~24 bytes
@@ -304,7 +307,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public Vector2Int ToPosition;              // 8 bytes
         public bool AllowStack;                    // 1 byte
     }
-    
+
     /// <summary>
     /// Response to content move request.
     /// ~8 bytes
@@ -318,8 +321,9 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public bool Authorized;                    // 1 byte
         public InventoryRejectionReason RejectionReason; // 1 byte
         public Vector2Int FinalPosition;           // 8 bytes
+        public uint StateVersion;
     }
-    
+
     /// <summary>
     /// Request to use an item.
     /// ~20 bytes
@@ -335,7 +339,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public Vector2Int Position;                // 8 bytes - Alternative to RuntimeID
         public bool UsePosition;                   // 1 byte
     }
-    
+
     /// <summary>
     /// Response to use request.
     /// ~8 bytes
@@ -349,8 +353,9 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public bool Authorized;                    // 1 byte
         public InventoryRejectionReason RejectionReason; // 1 byte
         public bool WasConsumed;                   // 1 byte
+        public uint StateVersion;
     }
-    
+
     /// <summary>
     /// Request to drop an item.
     /// ~32 bytes
@@ -366,7 +371,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public Vector3 DropPosition;               // 12 bytes
         public int MaxAmount;                      // 4 bytes - For dropping from stack
     }
-    
+
     /// <summary>
     /// Response to drop request.
     /// ~8 bytes
@@ -380,13 +385,14 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public bool Authorized;                    // 1 byte
         public InventoryRejectionReason RejectionReason; // 1 byte
         public int DroppedCount;                   // 4 bytes
+        public uint StateVersion;
         // Prop spawning handled separately via NetworkObject spawn
     }
-    
+
     // ════════════════════════════════════════════════════════════════════════════════════════════
     // EQUIPMENT REQUESTS / RESPONSES
     // ════════════════════════════════════════════════════════════════════════════════════════════
-    
+
     /// <summary>
     /// Request to equip/unequip item.
     /// ~20 bytes
@@ -402,7 +408,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public EquipmentAction Action;             // 1 byte
         public int SlotOrIndex;                    // 4 bytes - Slot number or equipment index
     }
-    
+
     /// <summary>
     /// Response to equipment request.
     /// ~8 bytes
@@ -416,12 +422,13 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public bool Authorized;                    // 1 byte
         public InventoryRejectionReason RejectionReason; // 1 byte
         public int EquippedIndex;                  // 4 bytes - Final equipment index
+        public uint StateVersion;
     }
-    
+
     // ════════════════════════════════════════════════════════════════════════════════════════════
     // SOCKET REQUESTS / RESPONSES
     // ════════════════════════════════════════════════════════════════════════════════════════════
-    
+
     /// <summary>
     /// Request to attach/detach socket.
     /// ~28 bytes
@@ -439,7 +446,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public string SocketIdString;              // Variable - Deterministic socket ID string
         public SocketAction Action;                // 1 byte
     }
-    
+
     /// <summary>
     /// Response to socket request.
     /// ~16 bytes
@@ -454,12 +461,13 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public InventoryRejectionReason RejectionReason; // 1 byte
         public int UsedSocketHash;                 // 4 bytes - Which socket was used
         public NetworkRuntimeItem DetachedItem;    // Variable - If detaching
+        public uint StateVersion;
     }
-    
+
     // ════════════════════════════════════════════════════════════════════════════════════════════
     // WEALTH REQUESTS / RESPONSES
     // ════════════════════════════════════════════════════════════════════════════════════════════
-    
+
     /// <summary>
     /// Request to modify wealth.
     /// ~20 bytes
@@ -478,7 +486,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public InventoryModificationSource Source; // 1 byte
         public int SourceHash;                     // 4 bytes
     }
-    
+
     /// <summary>
     /// Response to wealth request.
     /// ~12 bytes
@@ -493,12 +501,13 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public InventoryRejectionReason RejectionReason; // 1 byte
         public int NewValue;                       // 4 bytes
         public int OldValue;                       // 4 bytes
+        public uint StateVersion;
     }
-    
+
     // ════════════════════════════════════════════════════════════════════════════════════════════
     // MERCHANT REQUESTS / RESPONSES
     // ════════════════════════════════════════════════════════════════════════════════════════════
-    
+
     /// <summary>
     /// Request to buy/sell from merchant.
     /// ~24 bytes
@@ -515,7 +524,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public MerchantAction Action;              // 1 byte
         public int Amount;                         // 4 bytes - For stacked purchases
     }
-    
+
     /// <summary>
     /// Response to merchant request.
     /// ~16 bytes
@@ -531,12 +540,13 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public int TotalPrice;                     // 4 bytes
         public int NewClientWealth;                // 4 bytes
         public int NewMerchantWealth;              // 4 bytes
+        public uint StateVersion;
     }
-    
+
     // ════════════════════════════════════════════════════════════════════════════════════════════
     // CRAFTING REQUESTS / RESPONSES
     // ════════════════════════════════════════════════════════════════════════════════════════════
-    
+
     /// <summary>
     /// Request to craft/dismantle.
     /// ~20 bytes
@@ -553,8 +563,9 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public string ItemIdString;                // Variable - Deterministic crafted item ID string
         public long RuntimeIdHash;                 // 8 bytes - RuntimeItem to dismantle (for Dismantle)
         public CraftingAction Action;              // 1 byte
+        public float Chance;                       // Dismantle return chance
     }
-    
+
     /// <summary>
     /// Response to crafting request.
     /// ~12 bytes + created item
@@ -569,12 +580,13 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public InventoryRejectionReason RejectionReason; // 1 byte
         public NetworkRuntimeItem CreatedItem;     // Variable - The crafted item
         public NetworkRuntimeItem[] ReturnedItems; // Variable - Dismantle returns
+        public uint StateVersion;
     }
-    
+
     // ════════════════════════════════════════════════════════════════════════════════════════════
     // BROADCASTS
     // ════════════════════════════════════════════════════════════════════════════════════════════
-    
+
     /// <summary>
     /// Broadcast when item is added to bag.
     /// </summary>
@@ -585,8 +597,9 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public NetworkRuntimeItem Item;
         public Vector2Int Position;
         public int StackCount;
+        public uint StateVersion;
     }
-    
+
     /// <summary>
     /// Broadcast when item is removed from bag.
     /// </summary>
@@ -597,6 +610,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public long RuntimeIdHash;
         public Vector2Int Position;
         public int RemainingStackCount;
+        public uint StateVersion;
     }
 
     /// <summary>
@@ -620,7 +634,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public long RuntimeIdHash;
         public Vector3 Position;
     }
-    
+
     /// <summary>
     /// Broadcast when item is moved within bag.
     /// </summary>
@@ -631,8 +645,9 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public long RuntimeIdHash;
         public Vector2Int FromPosition;
         public Vector2Int ToPosition;
+        public uint StateVersion;
     }
-    
+
     /// <summary>
     /// Broadcast when item is used.
     /// </summary>
@@ -642,8 +657,11 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public uint BagNetworkId;
         public long RuntimeIdHash;
         public bool WasConsumed;
+        // Bag state revision when consumed. For non-consuming transient uses this wire-compatible
+        // slot carries the originating request correlation token for exact-once delivery.
+        public uint StateVersion;
     }
-    
+
     /// <summary>
     /// Broadcast when item is equipped.
     /// </summary>
@@ -653,8 +671,9 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public uint BagNetworkId;
         public long RuntimeIdHash;
         public int EquipmentIndex;
+        public uint StateVersion;
     }
-    
+
     /// <summary>
     /// Broadcast when item is unequipped.
     /// </summary>
@@ -664,8 +683,9 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public uint BagNetworkId;
         public long RuntimeIdHash;
         public int EquipmentIndex;
+        public uint StateVersion;
     }
-    
+
     /// <summary>
     /// Broadcast when socket attachment changes.
     /// </summary>
@@ -677,8 +697,9 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public int SocketHash;
         public bool HasAttachment;
         public NetworkRuntimeItem Attachment;      // If attached
+        public uint StateVersion;
     }
-    
+
     /// <summary>
     /// Broadcast when wealth changes.
     /// </summary>
@@ -689,8 +710,9 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public int CurrencyHash;
         public int NewValue;
         public int Change;
+        public uint StateVersion;
     }
-    
+
     /// <summary>
     /// Broadcast when property value changes.
     /// </summary>
@@ -702,12 +724,13 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public int PropertyHash;
         public float NewNumber;
         public string NewText;
+        public uint StateVersion;
     }
-    
+
     // ════════════════════════════════════════════════════════════════════════════════════════════
     // FULL STATE SYNC
     // ════════════════════════════════════════════════════════════════════════════════════════════
-    
+
     /// <summary>
     /// Full inventory snapshot for initial sync or reconnection.
     /// </summary>
@@ -715,6 +738,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
     public struct NetworkInventorySnapshot
     {
         public uint BagNetworkId;
+        public uint StateVersion;
         public float Timestamp;
         public int BagType;                        // Grid vs List
         public Vector2Int BagSize;                 // For grid bags
@@ -723,7 +747,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public NetworkEquipmentSlot[] Equipment;   // All equipment slots
         public NetworkWealthEntry[] Wealth;        // All currencies
     }
-    
+
     /// <summary>
     /// Equipment slot state for snapshot.
     /// </summary>
@@ -735,7 +759,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public bool IsOccupied;
         public long EquippedRuntimeIdHash;
     }
-    
+
     /// <summary>
     /// Wealth entry for snapshot.
     /// </summary>
@@ -745,7 +769,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public int CurrencyHash;
         public int Amount;
     }
-    
+
     /// <summary>
     /// Delta update for efficient sync.
     /// </summary>
@@ -753,17 +777,18 @@ namespace Arawn.GameCreator2.Networking.Inventory
     public struct NetworkInventoryDelta
     {
         public uint BagNetworkId;
+        public uint StateVersion;
         public float Timestamp;
         public uint ChangeMask;                    // Bit flags for what changed
         public NetworkCell[] ChangedCells;
         public NetworkEquipmentSlot[] ChangedEquipment;
         public NetworkWealthEntry[] ChangedWealth;
     }
-    
+
     // ════════════════════════════════════════════════════════════════════════════════════════════
     // TRANSFER BETWEEN BAGS
     // ════════════════════════════════════════════════════════════════════════════════════════════
-    
+
     /// <summary>
     /// Request to transfer item between two bags (trade, loot, etc.).
     /// </summary>
@@ -778,9 +803,10 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public long RuntimeIdHash;
         public Vector2Int DestinationPosition;     // (-1,-1) for auto
         public bool AllowStack;
+        public int Amount;
         public InventoryModificationSource Source;
     }
-    
+
     /// <summary>
     /// Response to transfer request.
     /// </summary>
@@ -793,12 +819,13 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public bool Authorized;
         public InventoryRejectionReason RejectionReason;
         public Vector2Int FinalPosition;
+        public uint StateVersion;
     }
-    
+
     // ════════════════════════════════════════════════════════════════════════════════════════════
     // LOOT / PICKUP
     // ════════════════════════════════════════════════════════════════════════════════════════════
-    
+
     /// <summary>
     /// Request to pick up a dropped Prop.
     /// </summary>
@@ -814,7 +841,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public long RuntimeIdHash;                 // Runtime item represented by the dropped prop
         public Vector2Int DestinationPosition;
     }
-    
+
     /// <summary>
     /// Response to pickup request.
     /// </summary>
@@ -828,12 +855,13 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public InventoryRejectionReason RejectionReason;
         public NetworkRuntimeItem PickedUpItem;
         public Vector2Int PlacedPosition;
+        public uint StateVersion;
     }
-    
+
     // ════════════════════════════════════════════════════════════════════════════════════════════
     // COMBINE (Two items into one)
     // ════════════════════════════════════════════════════════════════════════════════════════════
-    
+
     /// <summary>
     /// Request to combine two items (if crafting.AllowToCombine).
     /// </summary>
@@ -847,7 +875,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public Vector2Int PositionA;
         public Vector2Int PositionB;
     }
-    
+
     /// <summary>
     /// Response to combine request.
     /// </summary>
@@ -861,6 +889,89 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public InventoryRejectionReason RejectionReason;
         public NetworkRuntimeItem ResultItem;
         public Vector2Int ResultPosition;
+        public uint StateVersion;
+    }
+
+    // ════════════════════════════════════════════════════════════════════════════════════════════
+    // SPLIT / RESYNC / PERSISTENT PICKUPS (Inventory protocol v3)
+    // ════════════════════════════════════════════════════════════════════════════════════════════
+
+    [Serializable]
+    public struct NetworkContentSplitRequest
+    {
+        public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
+        public uint TargetBagNetworkId;
+        public Vector2Int SourcePosition;
+        public int Amount;
+    }
+
+    [Serializable]
+    public struct NetworkContentSplitResponse
+    {
+        public ushort RequestId;
+        public uint ActorNetworkId;
+        public uint CorrelationId;
+        public bool Authorized;
+        public InventoryRejectionReason RejectionReason;
+        public uint StateVersion;
+        public Vector2Int SourcePosition;
+        public Vector2Int ResultPosition;
+    }
+
+    [Serializable]
+    public struct NetworkItemSplitBroadcast
+    {
+        public uint BagNetworkId;
+        public uint StateVersion;
+        public Vector2Int SourcePosition;
+        public Vector2Int ResultPosition;
+        public NetworkCell SourceCell;
+        public NetworkCell ResultCell;
+    }
+
+    /// <summary>Requests a targeted authoritative snapshot after a revision gap or queue overflow.</summary>
+    [Serializable]
+    public struct NetworkInventoryResyncRequest
+    {
+        public uint ActorNetworkId;
+        public uint CorrelationId;
+        public uint BagNetworkId;
+        public uint LastAppliedStateVersion;
+    }
+
+    [Serializable]
+    public struct NetworkPickupState
+    {
+        public uint PickupId;
+        public bool Consumed;
+        public uint ConsumedByActorNetworkId;
+        public uint StateVersion;
+    }
+
+    [Serializable]
+    public struct NetworkPickupStateBroadcast
+    {
+        public NetworkPickupState State;
+    }
+
+    [Serializable]
+    public struct NetworkPickupStateSnapshot
+    {
+        public float Timestamp;
+        public NetworkPickupState[] Pickups;
+    }
+
+    /// <summary>
+    /// Transport adapter implemented by runtime-spawned pickup identities. The Inventory layer
+    /// never stores a transport-specific NetworkIdentity reference.
+    /// </summary>
+    public interface INetworkInventoryRuntimePickupIdentity
+    {
+        uint NetworkPickupId { get; }
+        bool IsSpawned { get; }
+        bool TryServerConsume();
     }
 }
 #endif

@@ -2,12 +2,15 @@
 
 Server-authoritative networking for Game Creator 2 Core character features.
 
+For the local UI, cosmetic effect, attached prop, and network-object decision
+guide, see [Spawning Prefabs and UI in Multiplayer](../Documentation/spawning-prefabs-and-ui-in-multiplayer.md).
+
 ## Features Covered
 
 | Feature | Request/Response | Broadcast | Server Direct |
 |---------|-----------------|-----------|---------------|
 | **Ragdoll** | ✅ `NetworkRagdollRequest/Response` | ✅ `NetworkRagdollBroadcast` | ✅ `ServerStartRagdoll()` |
-| **Props** | ✅ `NetworkPropRequest/Response` | ✅ `NetworkPropBroadcast` | - |
+| **Props** | ✅ `NetworkPropRequest/Response` | ✅ `NetworkPropBroadcast` | ✅ attach, exact detach, detach all |
 | **Invincibility** | ✅ `NetworkInvincibilityRequest/Response` | ✅ `NetworkInvincibilityBroadcast` | ✅ `ServerSetInvincibility()` |
 | **Poise** | ✅ `NetworkPoiseRequest/Response` | ✅ `NetworkPoiseBroadcast` | ✅ `ServerDamagePoise()`, `ServerResetPoise()` |
 | **Busy Limbs** | ✅ `NetworkBusyRequest/Response` | ✅ `NetworkBusyBroadcast` | - |
@@ -18,7 +21,7 @@ Server-authoritative networking for Game Creator 2 Core character features.
 ## PurrNet Scene Setup Wizard
 
 For PurrNet projects, open `Game Creator > Networking Layer > PurrNet Scene Setup Wizard`.
-Core, Variables, Animation, and Motion are always included. The wizard creates/reuses `NetworkSecurityManager`, `NetworkCoreManager`, `NetworkAnimationManager`, `NetworkMotionManager`, `NetworkVariableManager`, `PurrNetTransportBridge`, `PurrNetVariableTransportBridge`, and `PurrNetAnimationMotionTransportBridge`.
+Core, Variables, Animation, and Motion are always included. The wizard creates/reuses `NetworkSecurityManager`, `NetworkCoreManager`, `NetworkAnimationManager`, `NetworkMotionManager`, `NetworkVariableManager`, `PurrNetTransportBridge`, `PurrNetCoreTransportBridge`, `PurrNetVariableTransportBridge`, and `PurrNetAnimationMotionTransportBridge`.
 
 If a Player Prefab is assigned on the Scene page and prefab preparation is enabled, the wizard adds `NetworkIdentity`, `NetworkCharacter`, `PurrNetNetworkCharacterAuto`, network-ready GC2 character units, optional local-variable sync, and optional pre-registered Network Dash/Gesture clips.
 
@@ -168,7 +171,7 @@ NetworkCoreManager.Instance.ServerDamagePoise(
 void OnNetworkMessage(byte messageType, uint senderId, byte[] data)
 {
     var manager = NetworkCoreManager.Instance;
-    
+
     switch (messageType)
     {
         // Server receives
@@ -176,18 +179,18 @@ void OnNetworkMessage(byte messageType, uint senderId, byte[] data)
             var ragdollReq = Deserialize<NetworkRagdollRequest>(data);
             manager.ReceiveRagdollRequest(senderId, ragdollReq);
             break;
-            
+
         // Client receives
         case NetworkCoreManager.MessageTypes.RagdollResponse:
             var ragdollResp = Deserialize<NetworkRagdollResponse>(data);
             manager.ReceiveRagdollResponse(ragdollResp);
             break;
-            
+
         case NetworkCoreManager.MessageTypes.RagdollBroadcast:
             var ragdollBc = Deserialize<NetworkRagdollBroadcast>(data);
             manager.ReceiveRagdollBroadcast(ragdollBc);
             break;
-            
+
         // Add cases for every enabled core message type (Prop/Invincibility/Poise/Busy/Interaction/CoreStateSync).
     }
 }
@@ -200,7 +203,7 @@ In addition to the Core features above, the networking layer also syncs GC2 anim
 - `Character.States`
 - `Character.Gestures`
 
-This uses `UnitAnimimNetworkController` on `NetworkCharacter` (owner drives commands, remotes apply).  
+This uses `UnitAnimimNetworkController` on `NetworkCharacter` (owner drives commands, remotes apply).
 Common API surface:
 
 - `SetState(...)`

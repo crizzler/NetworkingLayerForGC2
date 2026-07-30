@@ -4,14 +4,23 @@ This module adds server-authoritative networking for **Game Creator 2 Traversal*
 
 Compile symbol: `GC2_TRAVERSAL` (auto-enabled when `com.gamecreator.traversal` is present).
 
-## Authority Modes
+## Required Authority Patch
 
-- Coop and most production flows: interception mode is usually enough, no source patch required.
-- Strict competitive-grade authority: apply the optional Traversal patcher so direct traversal calls are validated before local execution.
+The Traversal source patch is mandatory for networked Characters. The transport
+fails closed when its hooks are absent so a missing controller or route cannot
+silently fall through to local-only GC2 traversal.
 
 Patch menu:
 
 - `Game Creator > Networking Layer > Patches > Traversal > Patch (Server Authority)`
+
+The PurrNet setup wizard applies and validates the compatible patch. It also
+reports an actionable error after a GC2 Traversal update changes the expected
+source signatures. Characters without `NetworkCharacter` remain ordinary local
+GC2 Characters and do not require a network route. Patch `2.6.0-traversal`
+also rejects superseded starts after an async GC2 yield, routes authored
+`ContinueA`/`ContinueB` edges before native transitions, and supplies the
+presentation-safe local-owner snapshot motion loop.
 
 ## Components
 
@@ -23,14 +32,12 @@ Patch menu:
 
 For PurrNet projects, enable **Traversal** on the PurrNet wizard Modules page. The wizard creates/reuses `NetworkTraversalManager` and `PurrNetTraversalTransportBridge`.
 
+Traversal currently requires the Networking Layer's **Built-in** movement
+backend. The wizard rejects Traversal with PurrDiction because its adapters do
+not yet implement `INetworkOwnerMotionAuthority`; allowing reconciliation to
+run without that capability can overwrite traversal-driven poses.
+
 When a Player Prefab is assigned on the Scene page and prefab preparation is enabled, selecting Traversal adds `NetworkTraversalController` to that prefab.
-
-One-click climb reference scene:
-
-- `Game Creator > Networking Layer > Demos > Create PurrNet Climb Demo Scene`
-- Copies `Example_4_Climb` into the PurrNet demo folder.
-- Removes the original standalone sample player, then adds PurrNet, the traversal manager/bridge, a traversal-ready network player prefab, spawn points, and demo host/join UI.
-- Use this scene to verify free-climb (`TraverseInteractive`) and ledge-climb (`TraverseLink`) behavior before wiring a customer project.
 
 ## Transport Wiring
 
@@ -41,6 +48,12 @@ Wire the manager delegates to your transport layer:
 - `OnBroadcastTraversalChange`
 - `OnBroadcastFullSnapshot`
 - `OnSendSnapshotToClient`
+- `OnResolveRequestRouteStatusForActor` (validate the exact requesting NetworkId)
+
+The older parameterless `OnResolveRequestRouteStatus` delegate remains as a
+one-cycle compatibility fallback for custom transports. New transports should
+always use the actor-aware delegate; traversal input is transient and is never
+held for a later controller scan.
 
 Then route inbound packets to:
 
@@ -60,12 +73,25 @@ Then route inbound packets to:
 - `TryStateEnter`
 - `TryStateExit`
 
-## Interception Fallback
+## Ordering, Start Acknowledgement, and Snapshots
 
-`NetworkTraversalController` listens to traversal stance enter/exit signals and forwards owner-originated traversal transitions as network requests.
-This keeps common coop traversal flows working without immediate graph rewrites.
+Every accepted server state carries a monotonic `StateVersion`. Older responses,
+broadcasts, and snapshots are ignored, and state received before controller
+registration is retained in a bounded readiness cache. Resolution failures do
+not consume the version: the latest persistent snapshot is retried, while
+unresolved transient starts expire after two seconds. A server start is not
+accepted merely because an async GC2 method returned: its matching motion-enter
+event must arrive within one second. Otherwise the request is rejected with
+`StartTimeout`, the late start is cancelled, and a snapshot reconciles clients.
 
-For strictest competitive behavior, combine explicit `Request*` APIs with the Traversal patcher.
+`TraverseLink` motion is transient and is never replayed to a late joiner. An
+active `TraverseInteractive` is persistent: the targeted snapshot restores its
+stable identity and relative pose through the patched presentation-only stance
+entry point. That path does not invoke Traverse enter/exit instructions or
+Motion start/finish instruction lists. Remote proxies keep a presentation shell;
+the local owner resumes the interactive movement loop without replaying those
+gameplay lists. The server accepts owner-driven traversal poses only during the
+correlated traversal window and closes that window on exit or timeout.
 
 ## Initialization
 
@@ -75,6 +101,10 @@ For strictest competitive behavior, combine explicit `Request*` APIs with the Tr
    - `controller.Initialize(isServer, isLocalClient);`
 
 The controller auto-registers itself with `NetworkTraversalManager` when it has a valid `NetworkCharacter.NetworkId`.
+
+All peers must use the same Networking Layer version. `StateVersion`, snapshot
+kind, and relative-pose fields changed the Traversal wire layout and are not
+mixed-version compatible.
 
 ## Security
 

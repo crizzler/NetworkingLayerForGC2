@@ -1,0 +1,22 @@
+{
+    "name": "Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction",
+    "rootNamespace": "Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction",
+    "references": [
+        "Arawn.GameCreator2.Networking",
+        "Arawn.GameCreator2.Networking.Transport.PurrNet",
+        "PurrNet.Runtime",
+        "PurrNet.Prediction",
+        "GameCreator.Runtime.Core"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [
+        "ARAWN_GC2_PURRDICTION"
+    ],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

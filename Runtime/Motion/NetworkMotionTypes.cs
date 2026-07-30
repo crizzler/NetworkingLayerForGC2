@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using UnityEngine;
 
 namespace Arawn.GameCreator2.Networking
@@ -14,31 +15,31 @@ namespace Arawn.GameCreator2.Networking
         // Speed and rotation (half precision would be 4 bytes, using shorts for 4 bytes)
         public ushort linearSpeed;      // 0-655.35 m/s with 0.01 precision
         public ushort angularSpeed;     // 0-6553.5 deg/s with 0.1 precision
-        
+
         // Physics
         public short gravityUp;         // -327.67 to 327.67 with 0.01 precision
         public short gravityDown;       // -327.67 to 327.67 with 0.01 precision
         public short terminalVelocity;  // -327.67 to 327.67 with 0.01 precision
-        
+
         // Jump
         public ushort jumpForce;        // 0-655.35 with 0.01 precision
         public byte jumpCooldownMs;     // 0-2.55s with 0.01 precision
         public byte airJumps;           // 0-255
-        
+
         // Dash
         public byte dashSuccession;     // 0-255
         public byte dashCooldownMs;     // 0-2.55s with 0.01 precision (stored as centiseconds)
-        
+
         // Flags: CanJump(1), DashInAir(2), UseAcceleration(4)
         public byte flags;
-        
+
         // Sequence for change detection
         public byte configVersion;
-        
+
         public const byte FLAG_CAN_JUMP = 1;
         public const byte FLAG_DASH_IN_AIR = 2;
         public const byte FLAG_USE_ACCELERATION = 4;
-        
+
         /// <summary>
         /// Creates a compressed motion config from values.
         /// </summary>
@@ -62,7 +63,7 @@ namespace Arawn.GameCreator2.Networking
             if (canJump) flags |= FLAG_CAN_JUMP;
             if (dashInAir) flags |= FLAG_DASH_IN_AIR;
             if (useAcceleration) flags |= FLAG_USE_ACCELERATION;
-            
+
             return new NetworkMotionConfig
             {
                 linearSpeed = (ushort)Mathf.Clamp(linearSpeed * 100f, 0f, 65535f),
@@ -79,7 +80,7 @@ namespace Arawn.GameCreator2.Networking
                 configVersion = version
             };
         }
-        
+
         public float GetLinearSpeed() => linearSpeed / 100f;
         public float GetAngularSpeed() => angularSpeed / 10f;
         public float GetGravityUp() => gravityUp / 100f;
@@ -88,11 +89,11 @@ namespace Arawn.GameCreator2.Networking
         public float GetJumpForce() => jumpForce / 100f;
         public float GetJumpCooldown() => jumpCooldownMs / 100f;
         public float GetDashCooldown() => dashCooldownMs / 100f;
-        
+
         public bool CanJump => (flags & FLAG_CAN_JUMP) != 0;
         public bool DashInAir => (flags & FLAG_DASH_IN_AIR) != 0;
         public bool UseAcceleration => (flags & FLAG_USE_ACCELERATION) != 0;
-        
+
         public bool Equals(NetworkMotionConfig other)
         {
             return linearSpeed == other.linearSpeed &&
@@ -102,13 +103,13 @@ namespace Arawn.GameCreator2.Networking
                    jumpForce == other.jumpForce &&
                    flags == other.flags;
         }
-        
+
         public override int GetHashCode()
         {
             return HashCode.Combine(linearSpeed, angularSpeed, gravityUp, gravityDown, jumpForce, flags);
         }
     }
-    
+
     /// <summary>
     /// Network command types for motion actions.
     /// </summary>
@@ -127,7 +128,7 @@ namespace Arawn.GameCreator2.Networking
         FollowTarget = 10,
         StopFollow = 11
     }
-    
+
     /// <summary>
     /// Compressed motion command for network transmission.
     /// Used for MoveToDirection, MoveToPosition, Dash, Teleport, etc.
@@ -139,23 +140,23 @@ namespace Arawn.GameCreator2.Networking
         public NetworkMotionCommandType commandType;
         public byte priority;
         public ushort sequenceNumber;
-        
+
         // Position/Direction data (12 bytes)
         public int dataX;   // Position X or Direction X (fixed point * 100)
         public int dataY;   // Position Y or Direction Y (fixed point * 100)
         public int dataZ;   // Position Z or Direction Z (fixed point * 100)
-        
+
         // Additional parameters
         public ushort param1;  // Speed, Force, Duration, etc.
         public ushort param2;  // StopDistance, Fade, etc.
         public ushort param3;  // Gravity or future command-specific scalar
         public uint targetNetworkId; // Follow target NetworkCharacter id, when applicable
-        
+
         /// <summary>
         /// Create a MoveToDirection command.
         /// </summary>
         public static NetworkMotionCommand CreateMoveToDirection(
-            Vector3 velocity, 
+            Vector3 velocity,
             bool isWorldSpace,
             int priority,
             ushort sequence)
@@ -172,7 +173,7 @@ namespace Arawn.GameCreator2.Networking
                 param2 = 0
             };
         }
-        
+
         /// <summary>
         /// Create a StopDirection command.
         /// </summary>
@@ -185,12 +186,12 @@ namespace Arawn.GameCreator2.Networking
                 sequenceNumber = sequence
             };
         }
-        
+
         /// <summary>
         /// Create a MoveToPosition command.
         /// </summary>
         public static NetworkMotionCommand CreateMoveToPosition(
-            Vector3 position, 
+            Vector3 position,
             float stopDistance,
             int priority,
             ushort sequence)
@@ -245,7 +246,7 @@ namespace Arawn.GameCreator2.Networking
                 sequenceNumber = sequence
             };
         }
-        
+
         /// <summary>
         /// Create a Dash command (transient movement).
         /// </summary>
@@ -266,19 +267,20 @@ namespace Arawn.GameCreator2.Networking
                 dataZ = Mathf.RoundToInt(direction.z * 1000f),
                 param1 = (ushort)Mathf.Clamp(speed * 10f, 0f, 65535f),
                 // Pack duration and fade into param2 (8 bits each, 0-2.55s)
-                param2 = (ushort)(((byte)Mathf.Clamp(duration * 100f, 0f, 255f) << 8) | 
+                param2 = (ushort)(((byte)Mathf.Clamp(duration * 100f, 0f, 255f) << 8) |
                                   (byte)Mathf.Clamp(fade * 100f, 0f, 255f)),
                 param3 = (ushort)Mathf.Clamp(gravity * 100f, 0f, 65535f)
             };
         }
-        
+
         /// <summary>
         /// Create a Teleport command.
         /// </summary>
         public static NetworkMotionCommand CreateTeleport(
             Vector3 position,
             float rotationY,
-            ushort sequence)
+            ushort sequence,
+            bool resetVerticalVelocity = false)
         {
             return new NetworkMotionCommand
             {
@@ -288,10 +290,10 @@ namespace Arawn.GameCreator2.Networking
                 dataY = Mathf.RoundToInt(position.y * 100f),
                 dataZ = Mathf.RoundToInt(position.z * 100f),
                 param1 = (ushort)(Mathf.Repeat(rotationY, 360f) / 360f * 65535f),
-                param2 = 0
+                param2 = resetVerticalVelocity ? (ushort)1 : (ushort)0
             };
         }
-        
+
         /// <summary>
         /// Create a Jump command.
         /// </summary>
@@ -305,7 +307,7 @@ namespace Arawn.GameCreator2.Networking
                 param2 = 0
             };
         }
-        
+
         // Decompression helpers
         public Vector3 GetPosition() => new Vector3(dataX / 100f, dataY / 100f, dataZ / 100f);
         public Vector3 GetDirection() => new Vector3(dataX / 1000f, dataY / 1000f, dataZ / 1000f);
@@ -316,11 +318,12 @@ namespace Arawn.GameCreator2.Networking
         public float GetFade() => (param2 & 0xFF) / 100f;
         public float GetGravity() => param3 / 100f;
         public float GetRotationY() => param1 / 65535f * 360f;
+        public bool ShouldResetVerticalVelocity() => (param2 & 1) != 0;
         public float GetJumpForce() => param1 / 100f;
         public float GetFollowMinRadius() => param1 / 100f;
         public float GetFollowMaxRadius() => param2 / 100f;
         public bool IsWorldSpace() => param1 == 1;
-        
+
         public bool Equals(NetworkMotionCommand other)
         {
             return commandType == other.commandType &&
@@ -333,7 +336,7 @@ namespace Arawn.GameCreator2.Networking
                    param3 == other.param3 &&
                    targetNetworkId == other.targetNetworkId;
         }
-        
+
         public override int GetHashCode()
         {
             HashCode hash = new HashCode();
@@ -349,7 +352,7 @@ namespace Arawn.GameCreator2.Networking
             return hash.ToHashCode();
         }
     }
-    
+
     /// <summary>
     /// Result of a motion command validation on the server.
     /// </summary>
@@ -359,12 +362,12 @@ namespace Arawn.GameCreator2.Networking
         public ushort commandSequence;
         public bool approved;
         public byte rejectionReason;
-        
+
         // If approved with modification, the corrected values
         public int correctedX;
         public int correctedY;
         public int correctedZ;
-        
+
         public const byte REJECT_NONE = 0;
         public const byte REJECT_COOLDOWN = 1;
         public const byte REJECT_INVALID_POSITION = 2;
@@ -372,7 +375,7 @@ namespace Arawn.GameCreator2.Networking
         public const byte REJECT_BLOCKED = 4;
         public const byte REJECT_NOT_ALLOWED = 5;
         public const byte REJECT_TIMEOUT = 6;
-        
+
         public static NetworkMotionResult Approved(ushort sequence)
         {
             return new NetworkMotionResult
@@ -382,7 +385,7 @@ namespace Arawn.GameCreator2.Networking
                 rejectionReason = REJECT_NONE
             };
         }
-        
+
         public static NetworkMotionResult ApprovedWithCorrection(ushort sequence, Vector3 correctedPosition)
         {
             return new NetworkMotionResult
@@ -395,7 +398,7 @@ namespace Arawn.GameCreator2.Networking
                 correctedZ = Mathf.RoundToInt(correctedPosition.z * 100f)
             };
         }
-        
+
         public static NetworkMotionResult Rejected(ushort sequence, byte reason)
         {
             return new NetworkMotionResult
@@ -405,11 +408,118 @@ namespace Arawn.GameCreator2.Networking
                 rejectionReason = reason
             };
         }
-        
+
         public Vector3 GetCorrectedPosition() => new Vector3(
-            correctedX / 100f, 
-            correctedY / 100f, 
+            correctedX / 100f,
+            correctedY / 100f,
             correctedZ / 100f
         );
     }
+
+    /// <summary>
+    /// Temporary, focused diagnostic channel shared by the transport-independent movement
+    /// drivers and the optional Traversal module. It intentionally contains no Traversal
+    /// assembly references.
+    /// </summary>
+    public static class NetworkTraversalClimbDiagnostics
+    {
+        public const string Prefix = "[TraversalClimbDebug]";
+        public const float SampleInterval = 0.1f;
+
+        private static readonly Dictionary<string, float> s_LastSamples = new(128);
+        private static readonly Dictionary<string, string> s_LastValues = new(64);
+        private static readonly HashSet<int> s_FocusedCharacters = new();
+        private static readonly HashSet<uint> s_FocusedNetworkIds = new();
+
+        private static int s_ActiveManagerCount;
+
+        public static bool Enabled => s_ActiveManagerCount > 0;
+
+        public static void SetManagerActive(bool active)
+        {
+            s_ActiveManagerCount = Mathf.Max(0, s_ActiveManagerCount + (active ? 1 : -1));
+            if (s_ActiveManagerCount != 0) return;
+
+            s_LastSamples.Clear();
+            s_LastValues.Clear();
+            s_FocusedCharacters.Clear();
+            s_FocusedNetworkIds.Clear();
+        }
+
+        public static void SetCharacterFocus(GameObject character, uint networkId, bool focused)
+        {
+            if (character != null)
+            {
+                if (focused) s_FocusedCharacters.Add(character.GetInstanceID());
+                else s_FocusedCharacters.Remove(character.GetInstanceID());
+            }
+
+            if (networkId == 0) return;
+            if (focused) s_FocusedNetworkIds.Add(networkId);
+            else s_FocusedNetworkIds.Remove(networkId);
+        }
+
+        public static bool IsFocused(GameObject character)
+        {
+            return Enabled && character != null &&
+                   s_FocusedCharacters.Contains(character.GetInstanceID());
+        }
+
+        public static bool IsFocused(uint networkId)
+        {
+            return Enabled && networkId != 0 && s_FocusedNetworkIds.Contains(networkId);
+        }
+
+        public static bool ShouldSample(string key, float interval = SampleInterval)
+        {
+            if (!Enabled) return false;
+
+            float now = Time.realtimeSinceStartup;
+            if (s_LastSamples.TryGetValue(key, out float previous) && now - previous < interval)
+            {
+                return false;
+            }
+
+            s_LastSamples[key] = now;
+            return true;
+        }
+
+        public static bool HasChanged(string key, string value)
+        {
+            value ??= string.Empty;
+            if (s_LastValues.TryGetValue(key, out string previous) && previous == value)
+            {
+                return false;
+            }
+
+            s_LastValues[key] = value;
+            return true;
+        }
+
+        public static void Log(
+            string stage,
+            string message,
+            UnityEngine.Object context = null,
+            string sampleKey = null,
+            float interval = SampleInterval)
+        {
+            if (!Enabled) return;
+            if (!string.IsNullOrEmpty(sampleKey) && !ShouldSample(sampleKey, interval)) return;
+
+            string line =
+                $"{Prefix}[{stage}] frame={Time.frameCount} rt={Time.realtimeSinceStartup:F3} {message}";
+            Debug.LogFormat(LogType.Log, LogOption.NoStacktrace, context, "{0}", line);
+        }
+
+        public static string Vector(Vector3 value)
+        {
+            return $"({value.x:F3},{value.y:F3},{value.z:F3})";
+        }
+
+        public static string Vector(Vector2 value)
+        {
+            return $"({value.x:F3},{value.y:F3})";
+        }
+    }
+
 }

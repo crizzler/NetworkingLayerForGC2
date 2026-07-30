@@ -21,34 +21,34 @@ namespace Arawn.GameCreator2.Networking
         // EXPOSED MEMBERS: -----------------------------------------------------------------------
 
         [SerializeField] private InputPropertyValueVector2 m_InputMove = InputValueVector2MotionPrimary.Create();
-        
+
         [Header("Network Settings")]
         [Tooltip("Minimum input change to trigger network send")]
         [SerializeField] private float m_InputDeadzone = 0.1f;
-        
+
         [Tooltip("Maximum input updates per second")]
         [SerializeField] private float m_MaxUpdateRate = 30f;
 
         // MEMBERS: -------------------------------------------------------------------------------
-        
+
         [NonSerialized] private Vector2 m_CurrentInput;
         [NonSerialized] private Vector2 m_LastSentInput;
         [NonSerialized] private float m_LastSendTime;
         [NonSerialized] private bool m_IsInputEnabled = true;
-        
+
         // Network
         [NonSerialized] private UnitDriverNetworkClient m_NetworkDriver;
         [NonSerialized] private ushort m_InputSequence;
 
         // PROPERTIES: ----------------------------------------------------------------------------
-        
+
         /// <summary>
         /// Force tank facing unit for proper rotation handling.
         /// </summary>
         public override Type ForceFacing => typeof(UnitFacingTank);
-        
+
         public Vector2 RawInput => m_CurrentInput;
-        
+
         public bool IsInputEnabled
         {
             get => m_IsInputEnabled;
@@ -56,7 +56,7 @@ namespace Arawn.GameCreator2.Networking
         }
 
         // EVENTS: --------------------------------------------------------------------------------
-        
+
         /// <summary>
         /// Fired when tank input changes significantly.
         /// X = rotation (left/right), Y = movement (forward/back)
@@ -69,7 +69,7 @@ namespace Arawn.GameCreator2.Networking
         {
             base.OnStartup(character);
             this.m_InputMove.OnStartup();
-            
+
             // Try to find network driver
             m_NetworkDriver = character.Driver as UnitDriverNetworkClient;
         }
@@ -99,7 +99,7 @@ namespace Arawn.GameCreator2.Networking
             this.m_InputMove.OnUpdate();
 
             this.InputDirection = Vector3.zero;
-            
+
             if (!this.Character.IsPlayer) return;
             if (!m_IsInputEnabled)
             {
@@ -121,31 +121,31 @@ namespace Arawn.GameCreator2.Networking
                 m_NetworkDriver?.ProcessLocalInput(Vector2.zero, this.Transform, false);
                 return;
             }
-            
+
             // Capture raw input
-            m_CurrentInput = this.m_IsControllable 
+            m_CurrentInput = this.m_IsControllable
                 ? this.m_InputMove.Read()
                 : Vector2.zero;
-            
+
             // Clamp magnitude
             if (m_CurrentInput.sqrMagnitude > 1f)
             {
                 m_CurrentInput = m_CurrentInput.normalized;
             }
-            
+
             // Apply deadzone
             if (Mathf.Abs(m_CurrentInput.x) < m_InputDeadzone) m_CurrentInput.x = 0;
             if (Mathf.Abs(m_CurrentInput.y) < m_InputDeadzone) m_CurrentInput.y = 0;
-            
+
             // Calculate move direction (tank style - relative to character facing)
             this.InputDirection = GetMoveDirection(m_CurrentInput);
-            
+
             // Check if we should send to network
             if (ShouldSendInput())
             {
                 SendInputToNetwork();
             }
-            
+
             // Feed to network driver for prediction
             RefreshNetworkDriver();
             if (m_NetworkDriver != null)
@@ -155,31 +155,31 @@ namespace Arawn.GameCreator2.Networking
                 m_NetworkDriver.ProcessLocalInput(m_CurrentInput, this.Transform, false);
             }
         }
-        
+
         private bool ShouldSendInput()
         {
             // Rate limiting
             float timeSinceLastSend = Time.time - m_LastSendTime;
             if (timeSinceLastSend < 1f / m_MaxUpdateRate) return false;
-            
+
             // Input change threshold
             float inputDelta = Vector2.Distance(m_CurrentInput, m_LastSentInput);
-            
+
             // Always send if input went to zero or from zero
             bool wasZero = m_LastSentInput.sqrMagnitude < 0.01f;
             bool isZero = m_CurrentInput.sqrMagnitude < 0.01f;
-            
+
             if (wasZero != isZero) return true;
-            
+
             return inputDelta >= m_InputDeadzone;
         }
-        
+
         private void SendInputToNetwork()
         {
             m_InputSequence++;
             m_LastSendTime = Time.time;
             m_LastSentInput = m_CurrentInput;
-            
+
             var input = NetworkTankInput.Create(m_CurrentInput, m_InputSequence);
             OnSendInput?.Invoke(input);
         }
@@ -198,9 +198,9 @@ namespace Arawn.GameCreator2.Networking
 
             return moveDirection * direction.magnitude;
         }
-        
+
         // PUBLIC METHODS: ------------------------------------------------------------------------
-        
+
         /// <summary>
         /// Inject input programmatically (for AI, replay, etc.)
         /// </summary>
@@ -209,7 +209,7 @@ namespace Arawn.GameCreator2.Networking
             if (!m_IsInputEnabled) return;
             m_CurrentInput = input.sqrMagnitude > 1f ? input.normalized : input;
         }
-        
+
         /// <summary>
         /// Connect to network driver after initialization.
         /// </summary>
@@ -229,11 +229,11 @@ namespace Arawn.GameCreator2.Networking
 
         public override string ToString() => "Network Tank";
     }
-    
+
     // ========================================================================================
     // NETWORK DATA STRUCTURES
     // ========================================================================================
-    
+
     /// <summary>
     /// Compressed tank input (5 bytes).
     /// Rotation and movement packed efficiently.
@@ -243,18 +243,18 @@ namespace Arawn.GameCreator2.Networking
     {
         /// <summary>Rotation input (-1 to 1) quantized to sbyte.</summary>
         public sbyte RotationQuantized;
-        
+
         /// <summary>Movement input (-1 to 1) quantized to sbyte.</summary>
         public sbyte MovementQuantized;
-        
+
         /// <summary>Flags: bit 0 = is stopping</summary>
         public byte Flags;
-        
+
         /// <summary>Input sequence for ordering.</summary>
         public ushort Sequence;
-        
+
         private const byte FLAG_STOPPING = 1;
-        
+
         /// <summary>
         /// Create from raw input.
         /// X = rotation (left/right), Y = movement (forward/back)
@@ -269,7 +269,7 @@ namespace Arawn.GameCreator2.Networking
                 Sequence = sequence
             };
         }
-        
+
         /// <summary>
         /// Create stop input.
         /// </summary>
@@ -283,38 +283,38 @@ namespace Arawn.GameCreator2.Networking
                 Sequence = sequence
             };
         }
-        
+
         /// <summary>
         /// Get rotation value (-1 to 1).
         /// </summary>
         public float GetRotation() => RotationQuantized / 127f;
-        
+
         /// <summary>
         /// Get movement value (-1 to 1).
         /// </summary>
         public float GetMovement() => MovementQuantized / 127f;
-        
+
         /// <summary>
         /// Get as Vector2 (X = rotation, Y = movement).
         /// </summary>
         public Vector2 GetInput() => new Vector2(GetRotation(), GetMovement());
-        
+
         /// <summary>
         /// Whether this is a stop input.
         /// </summary>
         public bool IsStopping => (Flags & FLAG_STOPPING) != 0;
-        
+
         public bool Equals(NetworkTankInput other)
         {
-            return RotationQuantized == other.RotationQuantized && 
+            return RotationQuantized == other.RotationQuantized &&
                    MovementQuantized == other.MovementQuantized &&
                    Sequence == other.Sequence;
         }
-        
+
         public override bool Equals(object obj) => obj is NetworkTankInput other && Equals(other);
         public override int GetHashCode() => HashCode.Combine(RotationQuantized, MovementQuantized, Sequence);
     }
-    
+
     /// <summary>
     /// Server-side tank input validator.
     /// Validates rotation rates and movement speeds.
@@ -323,13 +323,13 @@ namespace Arawn.GameCreator2.Networking
     {
         private readonly float m_MaxRotationRate;
         private readonly float m_MaxSpeed;
-        
+
         private float m_LastRotation;
         private float m_LastValidationTime;
         private int m_ViolationCount;
-        
+
         public int ViolationCount => m_ViolationCount;
-        
+
         /// <summary>
         /// Create validator with limits.
         /// </summary>
@@ -340,7 +340,7 @@ namespace Arawn.GameCreator2.Networking
             m_MaxRotationRate = maxRotationRate;
             m_MaxSpeed = maxSpeed;
         }
-        
+
         /// <summary>
         /// Validate tank input and clamp if necessary.
         /// </summary>
@@ -352,27 +352,27 @@ namespace Arawn.GameCreator2.Networking
         {
             validated = input;
             bool wasValid = true;
-            
+
             float deltaTime = Time.time - m_LastValidationTime;
             m_LastValidationTime = Time.time;
-            
+
             if (deltaTime <= 0) return true;
-            
+
             // Validate rotation rate
             float rotation = input.GetRotation();
             float maxRotationThisFrame = m_MaxRotationRate * deltaTime / 180f; // Normalized to -1,1
-            
+
             if (Mathf.Abs(rotation) > maxRotationThisFrame * 1.1f) // 10% tolerance
             {
                 rotation = Mathf.Clamp(rotation, -maxRotationThisFrame, maxRotationThisFrame);
                 validated = NetworkTankInput.Create(
-                    new Vector2(rotation, input.GetMovement()), 
+                    new Vector2(rotation, input.GetMovement()),
                     input.Sequence
                 );
                 wasValid = false;
                 m_ViolationCount++;
             }
-            
+
             // Validate movement magnitude
             float movement = input.GetMovement();
             if (Mathf.Abs(movement) > 1.1f)
@@ -385,11 +385,11 @@ namespace Arawn.GameCreator2.Networking
                 wasValid = false;
                 m_ViolationCount++;
             }
-            
+
             m_LastRotation = currentRotation;
             return wasValid;
         }
-        
+
         /// <summary>
         /// Reset violation count.
         /// </summary>

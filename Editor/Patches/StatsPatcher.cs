@@ -11,14 +11,14 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
         public override string ModuleName => "Stats";
         public override string PatchVersion => "2.1.0-stats";
         public override string DisplayName => "Stats (Game Creator 2)";
-        
+
         public override string PatchDescription =>
             "This will modify the Game Creator 2 Stats source code to add\n" +
             "server-authoritative networking hooks.\n\n" +
             "RuntimeStatData.Base setter will have network validation.\n" +
             "AddModifier/RemoveModifier/ClearModifiers will have network hooks.\n" +
             "RuntimeAttributeData.Value setter will have network validation.";
-        
+
         protected override string[] FilesToPatch => new[]
         {
             "Plugins/GameCreator/Packages/Stats/Runtime/Classes/Traits/Stats/RuntimeStatData.cs",
@@ -78,7 +78,7 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
 
             return base.GetRequiredPatchTokenCounts(relativePath);
         }
-        
+
         protected override bool PatchFile(string relativePath)
         {
             string content = ReadFile(relativePath);
@@ -86,7 +86,7 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
             ExistingPatchState existingPatchState = PrepareContentForPatch(relativePath, ref content);
             if (existingPatchState == ExistingPatchState.SkipAlreadyPatched) return true;
             if (existingPatchState == ExistingPatchState.Failed) return false;
-            
+
             if (relativePath.EndsWith("RuntimeStatData.cs"))
             {
                 return PatchRuntimeStatData(relativePath, content);
@@ -95,10 +95,10 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
             {
                 return PatchRuntimeAttributeData(relativePath, content);
             }
-            
+
             return false;
         }
-        
+
         private bool PatchRuntimeStatData(string relativePath, string content)
         {
             // Add using statements and patch marker
@@ -125,22 +125,22 @@ namespace GameCreator.Runtime.Stats
     public class RuntimeStatData
     {
         // [GC2_NETWORK_PATCH] Static hooks for server-authoritative networking
-        
+
         /// <summary>Validates if a base value change should proceed locally.</summary>
         public static Func<RuntimeStatData, double, bool> NetworkBaseValidator;
-        
+
         /// <summary>Validates if adding a modifier should proceed locally.</summary>
         public static Func<RuntimeStatData, ModifierType, double, bool> NetworkAddModifierValidator;
-        
+
         /// <summary>Validates if removing a modifier should proceed locally.</summary>
         public static Func<RuntimeStatData, ModifierType, double, bool> NetworkRemoveModifierValidator;
-        
+
         /// <summary>Validates if clearing modifiers should proceed locally.</summary>
         public static Func<RuntimeStatData, bool> NetworkClearModifiersValidator;
-        
+
         /// <summary>Returns true if networking hooks are active.</summary>
         public static bool IsNetworkingActive => NetworkBaseValidator != null;
-        
+
         // [GC2_NETWORK_PATCH_END]
 ";
 
@@ -152,7 +152,7 @@ namespace GameCreator.Runtime.Stats
             {
                 return false;
             }
-            
+
             // Patch the Base property setter
             string originalBaseSetter = @"        public double Base
         {
@@ -167,14 +167,14 @@ namespace GameCreator.Runtime.Stats
                 this.EventChange?.Invoke(this.m_Stat.ID, this.Value - prevValue);
             }
         }";
-            
+
             string patchedBaseSetter = @"        public double Base
         {
             get => this.m_Base;
             set
             {
                 if (Math.Abs(this.m_Base - value) < float.Epsilon) return;
-                
+
                 // [GC2_NETWORK_PATCH] Server authority check
                 if (NetworkBaseValidator != null && !NetworkBaseValidator.Invoke(this, value))
                 {
@@ -197,7 +197,7 @@ namespace GameCreator.Runtime.Stats
             {
                 return false;
             }
-            
+
             // Patch AddModifier method
             string originalAddModifier = @"        public void AddModifier(ModifierType type, double value)
         {
@@ -207,10 +207,10 @@ namespace GameCreator.Runtime.Stats
                 case ModifierType.Percent: this.m_Modifiers.AddPercentage(value); break;
                 default: throw new ArgumentOutOfRangeException(nameof(type), type, null);
             }
-            
+
             this.EventChange?.Invoke(this.m_Stat.ID, 0f);
         }";
-            
+
             string patchedAddModifier = @"        public void AddModifier(ModifierType type, double value)
         {
             // [GC2_NETWORK_PATCH] Server authority check
@@ -219,17 +219,17 @@ namespace GameCreator.Runtime.Stats
                 return; // Network will handle this
             }
             // [GC2_NETWORK_PATCH_END]
-            
+
             switch (type)
             {
                 case ModifierType.Constant: this.m_Modifiers.AddConstant(value); break;
                 case ModifierType.Percent: this.m_Modifiers.AddPercentage(value); break;
                 default: throw new ArgumentOutOfRangeException(nameof(type), type, null);
             }
-            
+
             this.EventChange?.Invoke(this.m_Stat.ID, 0f);
         }
-        
+
         // [GC2_NETWORK_PATCH] Server-side direct add (bypasses validation)
         public void AddModifierDirect(ModifierType type, double value)
         {
@@ -251,7 +251,7 @@ namespace GameCreator.Runtime.Stats
             {
                 return false;
             }
-            
+
             // Patch RemoveModifier method
             string originalRemoveModifier = @"        public bool RemoveModifier(ModifierType type, double value)
         {
@@ -261,11 +261,11 @@ namespace GameCreator.Runtime.Stats
                 ModifierType.Percent => this.m_Modifiers.RemovePercentage(value),
                 _ => throw new ArgumentOutOfRangeException(nameof(type), type, null)
             };
-            
+
             if (success) this.EventChange?.Invoke(this.m_Stat.ID, 0f);
             return success;
         }";
-            
+
             string patchedRemoveModifier = @"        public bool RemoveModifier(ModifierType type, double value)
         {
             // [GC2_NETWORK_PATCH] Server authority check
@@ -274,18 +274,18 @@ namespace GameCreator.Runtime.Stats
                 return false; // Network will handle this
             }
             // [GC2_NETWORK_PATCH_END]
-            
+
             bool success = type switch
             {
                 ModifierType.Constant => this.m_Modifiers.RemoveConstant(value),
                 ModifierType.Percent => this.m_Modifiers.RemovePercentage(value),
                 _ => throw new ArgumentOutOfRangeException(nameof(type), type, null)
             };
-            
+
             if (success) this.EventChange?.Invoke(this.m_Stat.ID, 0f);
             return success;
         }
-        
+
         // [GC2_NETWORK_PATCH] Server-side direct remove (bypasses validation)
         public bool RemoveModifierDirect(ModifierType type, double value)
         {
@@ -308,7 +308,7 @@ namespace GameCreator.Runtime.Stats
             {
                 return false;
             }
-            
+
             // Patch ClearModifiers method
             string originalClearModifiers = @"        public void ClearModifiers()
         {
@@ -318,7 +318,7 @@ namespace GameCreator.Runtime.Stats
                 this.EventChange?.Invoke(this.m_Stat.ID, 0f);
             }
         }";
-            
+
             string patchedClearModifiers = @"        public void ClearModifiers()
         {
             if (this.m_Modifiers.Count > 0)
@@ -329,12 +329,12 @@ namespace GameCreator.Runtime.Stats
                     return; // Network will handle this
                 }
                 // [GC2_NETWORK_PATCH_END]
-                
+
                 this.m_Modifiers.Clear();
                 this.EventChange?.Invoke(this.m_Stat.ID, 0f);
             }
         }
-        
+
         // [GC2_NETWORK_PATCH] Server-side direct clear (bypasses validation)
         public void ClearModifiersDirect()
         {
@@ -354,7 +354,7 @@ namespace GameCreator.Runtime.Stats
             {
                 return false;
             }
-            
+
             // Add SetBaseDirect method before internal methods
             string originalInternalMethod = @"        // INTERNAL METHODS: ----------------------------------------------------------------------
 
@@ -362,7 +362,7 @@ namespace GameCreator.Runtime.Stats
         {
             this.m_Base = value;
         }";
-            
+
             string patchedInternalMethod = @"        // [GC2_NETWORK_PATCH] Server-side direct base setter (bypasses validation)
         public void SetBaseDirect(double value)
         {
@@ -372,7 +372,7 @@ namespace GameCreator.Runtime.Stats
             this.EventChange?.Invoke(this.m_Stat.ID, this.Value - prevValue);
         }
         // [GC2_NETWORK_PATCH_END]
-        
+
         // INTERNAL METHODS: ----------------------------------------------------------------------
 
         internal void SetBaseWithoutNotify(double value)
@@ -388,12 +388,12 @@ namespace GameCreator.Runtime.Stats
             {
                 return false;
             }
-            
+
             WriteFile(relativePath, content);
             Debug.Log($"[GC2 Networking] Patched {relativePath}");
             return true;
         }
-        
+
         private bool PatchRuntimeAttributeData(string relativePath, string content)
         {
             // Add using statements and patch marker
@@ -433,7 +433,7 @@ namespace GameCreator.Runtime.Stats
             {
                 return false;
             }
-            
+
             // Patch the Value property - exact pattern from actual file
             string originalValueProperty = @"        public double Value
         {
@@ -448,7 +448,7 @@ namespace GameCreator.Runtime.Stats
                 this.EventChange?.Invoke(this.m_Attribute.ID, newValue - oldValue);
             }
         }";
-            
+
             string patchedValueProperty = @"        public double Value
         {
             get => this.m_Value;
@@ -457,7 +457,7 @@ namespace GameCreator.Runtime.Stats
                 double oldValue = this.Value;
                 double newValue = Math.Clamp(value, this.MinValue, this.MaxValue);
                 if (Math.Abs(this.m_Value - newValue) < float.Epsilon) return;
-                
+
                 // [GC2_NETWORK_PATCH] Server authority check
                 if (NetworkValueValidator != null && !NetworkValueValidator.Invoke(this, newValue))
                 {
@@ -469,7 +469,7 @@ namespace GameCreator.Runtime.Stats
                 this.EventChange?.Invoke(this.m_Attribute.ID, newValue - oldValue);
             }
         }
-        
+
         // [GC2_NETWORK_PATCH] Server-side direct value setter (bypasses validation)
         public void SetValueDirect(double value)
         {
@@ -489,7 +489,7 @@ namespace GameCreator.Runtime.Stats
             {
                 return false;
             }
-            
+
             WriteFile(relativePath, content);
             Debug.Log($"[GC2 Networking] Patched {relativePath}");
             return true;

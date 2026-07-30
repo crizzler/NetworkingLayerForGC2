@@ -4,6 +4,9 @@ using System.Reflection;
 using System.Threading;
 using Arawn.GameCreator2.Networking;
 using Arawn.GameCreator2.Networking.Security;
+using Arawn.NetworkingCore;
+using Arawn.NetworkingCore.LagCompensation;
+using UnityEngine;
 
 namespace Arawn.GameCreator2.Networking.Tests
 {
@@ -16,6 +19,7 @@ namespace Arawn.GameCreator2.Networking.Tests
         [SetUp]
         public void SetUp()
         {
+            DisposeLagCompensationManager();
             SecurityIntegration.ClearModuleServerContexts();
             NetworkCorrelation.ResetComposeState();
         }
@@ -23,8 +27,26 @@ namespace Arawn.GameCreator2.Networking.Tests
         [TearDown]
         public void TearDown()
         {
+            DisposeLagCompensationManager();
             SecurityIntegration.ClearModuleServerContexts();
             NetworkCorrelation.ResetComposeState();
+        }
+
+        private static void DisposeLagCompensationManager()
+        {
+            if (LagCompensationManager.TryGetInitialized(out LagCompensationManager manager))
+            {
+                manager.Dispose();
+            }
+        }
+
+        private static void InvokeUnityMessage(object target, string methodName)
+        {
+            MethodInfo method = target.GetType().GetMethod(
+                methodName,
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.That(method, Is.Not.Null, $"Missing Unity message {methodName}");
+            method.Invoke(target, null);
         }
 
         private static UnityEngine.GameObject EnsureSecurityManagerForServerTests()
@@ -94,14 +116,14 @@ namespace Arawn.GameCreator2.Networking.Tests
         // ════════════════════════════════════════════════════════════════════════════════════════
         // STABLE HASH UTILITY
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         [Test]
         public void StableHash_NullOrEmpty_ReturnsZero()
         {
             Assert.AreEqual(0, StableHashUtility.GetStableHash((string)null));
             Assert.AreEqual(0, StableHashUtility.GetStableHash(""));
         }
-        
+
         [Test]
         public void StableHash_Deterministic_SameInputSameOutput()
         {
@@ -109,7 +131,7 @@ namespace Arawn.GameCreator2.Networking.Tests
             int hash2 = StableHashUtility.GetStableHash("TestAbility");
             Assert.AreEqual(hash1, hash2);
         }
-        
+
         [Test]
         public void StableHash_DifferentInputs_DifferentOutputs()
         {
@@ -117,14 +139,14 @@ namespace Arawn.GameCreator2.Networking.Tests
             int hashB = StableHashUtility.GetStableHash("AbilityB");
             Assert.AreNotEqual(hashA, hashB);
         }
-        
+
         [Test]
         public void StableHash_SingleChar_NonZero()
         {
             Assert.AreNotEqual(0, StableHashUtility.GetStableHash("a"));
             Assert.AreNotEqual(0, StableHashUtility.GetStableHash("Z"));
         }
-        
+
         [Test]
         public void StableHash_KnownFnv1a_MatchesExpected()
         {
@@ -135,7 +157,7 @@ namespace Arawn.GameCreator2.Networking.Tests
             int hashA = StableHashUtility.GetStableHash("a");
             Assert.AreEqual(unchecked((int)0xe40c292cu), hashA);
         }
-        
+
         [Test]
         public void StableHash_OrderMatters()
         {
@@ -143,191 +165,191 @@ namespace Arawn.GameCreator2.Networking.Tests
             int hashBA = StableHashUtility.GetStableHash("BA");
             Assert.AreNotEqual(hashAB, hashBA);
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // NETWORK CHARACTER STATE — BOOL PACKING
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         [Test]
         public void CharacterState_PackUnpack_AllFalse()
         {
             var state = new NetworkCharacterState { isDead = false, isPlayer = false };
             byte packed = state.ToPacked();
             Assert.AreEqual(0x00, packed);
-            
+
             var unpacked = NetworkCharacterState.FromPacked(packed);
             Assert.IsFalse(unpacked.isDead);
             Assert.IsFalse(unpacked.isPlayer);
         }
-        
+
         [Test]
         public void CharacterState_PackUnpack_DeadOnly()
         {
             var state = new NetworkCharacterState { isDead = true, isPlayer = false };
             byte packed = state.ToPacked();
             Assert.AreEqual(0x01, packed);
-            
+
             var unpacked = NetworkCharacterState.FromPacked(packed);
             Assert.IsTrue(unpacked.isDead);
             Assert.IsFalse(unpacked.isPlayer);
         }
-        
+
         [Test]
         public void CharacterState_PackUnpack_PlayerOnly()
         {
             var state = new NetworkCharacterState { isDead = false, isPlayer = true };
             byte packed = state.ToPacked();
             Assert.AreEqual(0x02, packed);
-            
+
             var unpacked = NetworkCharacterState.FromPacked(packed);
             Assert.IsFalse(unpacked.isDead);
             Assert.IsTrue(unpacked.isPlayer);
         }
-        
+
         [Test]
         public void CharacterState_PackUnpack_AllTrue()
         {
             var state = new NetworkCharacterState { isDead = true, isPlayer = true };
             byte packed = state.ToPacked();
             Assert.AreEqual(0x03, packed);
-            
+
             var unpacked = NetworkCharacterState.FromPacked(packed);
             Assert.IsTrue(unpacked.isDead);
             Assert.IsTrue(unpacked.isPlayer);
         }
-        
+
         [Test]
         public void CharacterState_BitIndependence()
         {
             // Toggling one bit shouldn't affect the other
             var dead = NetworkCharacterState.FromPacked(0x01);
             var player = NetworkCharacterState.FromPacked(0x02);
-            
+
             Assert.IsTrue(dead.isDead);
             Assert.IsFalse(dead.isPlayer);
             Assert.IsFalse(player.isDead);
             Assert.IsTrue(player.isPlayer);
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // RATE LIMITER
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         [Test]
         public void RateLimiter_AllowsUpToMax()
         {
             var limiter = new RateLimiter(3, 1.0f);
-            
+
             Assert.IsTrue(limiter.TryRequest(1, 0f));   // 1st
             Assert.IsTrue(limiter.TryRequest(1, 0.1f)); // 2nd
             Assert.IsTrue(limiter.TryRequest(1, 0.2f)); // 3rd
         }
-        
+
         [Test]
         public void RateLimiter_BlocksAtMax()
         {
             var limiter = new RateLimiter(3, 1.0f);
-            
+
             limiter.TryRequest(1, 0f);
             limiter.TryRequest(1, 0.1f);
             limiter.TryRequest(1, 0.2f);
-            
+
             Assert.IsFalse(limiter.TryRequest(1, 0.3f)); // 4th blocked
         }
-        
+
         [Test]
         public void RateLimiter_SlidingWindow_ExpiresOldRequests()
         {
             var limiter = new RateLimiter(2, 1.0f);
-            
+
             limiter.TryRequest(1, 0f);    // t=0
             limiter.TryRequest(1, 0.5f);  // t=0.5
-            
+
             // At t=0.3, both are still in window → blocked
             Assert.IsFalse(limiter.TryRequest(1, 0.7f));
-            
+
             // At t=1.1, the t=0 request has expired → allowed
             Assert.IsTrue(limiter.TryRequest(1, 1.1f));
         }
-        
+
         [Test]
         public void RateLimiter_MultipleClients_Independent()
         {
             var limiter = new RateLimiter(1, 1.0f);
-            
+
             Assert.IsTrue(limiter.TryRequest(1, 0f));   // Client 1 uses its slot
             Assert.IsFalse(limiter.TryRequest(1, 0.1f)); // Client 1 blocked
             Assert.IsTrue(limiter.TryRequest(2, 0.1f));  // Client 2 still has its own slot
         }
-        
+
         [Test]
         public void RateLimiter_GetRequestCount_Accurate()
         {
             var limiter = new RateLimiter(5, 1.0f);
-            
+
             Assert.AreEqual(0, limiter.GetRequestCount(1, 0f));
-            
+
             limiter.TryRequest(1, 0f);
             limiter.TryRequest(1, 0.3f);
             limiter.TryRequest(1, 0.6f);
-            
+
             Assert.AreEqual(3, limiter.GetRequestCount(1, 0.9f));
-            
+
             // After window expires for the first request
             Assert.AreEqual(2, limiter.GetRequestCount(1, 1.1f));
         }
-        
+
         [Test]
         public void RateLimiter_ClearClient_ResetsState()
         {
             var limiter = new RateLimiter(1, 1.0f);
-            
+
             limiter.TryRequest(1, 0f);
             Assert.IsFalse(limiter.TryRequest(1, 0.1f));
-            
+
             limiter.ClearClient(1);
             Assert.IsTrue(limiter.TryRequest(1, 0.2f));
         }
-        
+
         [Test]
         public void RateLimiter_Clear_ResetsAllClients()
         {
             var limiter = new RateLimiter(1, 1.0f);
-            
+
             limiter.TryRequest(1, 0f);
             limiter.TryRequest(2, 0f);
-            
+
             limiter.Clear();
-            
+
             Assert.IsTrue(limiter.TryRequest(1, 0.1f));
             Assert.IsTrue(limiter.TryRequest(2, 0.1f));
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // VIOLATION TRACKER
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         [Test]
         public void ViolationTracker_BelowThreshold_ReturnsFalse()
         {
             var tracker = new ViolationTracker(3, 10f);
-            
+
             bool exceeded = tracker.RecordViolation(1, SecurityViolationType.InvalidRequest, "test", 0f);
             Assert.IsFalse(exceeded);
-            
+
             exceeded = tracker.RecordViolation(1, SecurityViolationType.InvalidRequest, "test", 0.1f);
             Assert.IsFalse(exceeded);
         }
-        
+
         [Test]
         public void ViolationTracker_AtThreshold_ReturnsTrue()
         {
             var tracker = new ViolationTracker(3, 10f);
-            
+
             tracker.RecordViolation(1, SecurityViolationType.InvalidRequest, "1", 0f);
             tracker.RecordViolation(1, SecurityViolationType.InvalidRequest, "2", 0.1f);
             bool exceeded = tracker.RecordViolation(1, SecurityViolationType.InvalidRequest, "3", 0.2f);
-            
+
             Assert.IsTrue(exceeded);
         }
 
@@ -341,89 +363,89 @@ namespace Arawn.GameCreator2.Networking.Tests
             Assert.IsTrue(tracker.RecordViolation(1, SecurityViolationType.InvalidRequest, "3", 0.2f));
             Assert.IsFalse(tracker.RecordViolation(1, SecurityViolationType.InvalidRequest, "4", 0.3f));
         }
-        
+
         [Test]
         public void ViolationTracker_OldViolations_Expire()
         {
             var tracker = new ViolationTracker(3, 1.0f);
-            
+
             tracker.RecordViolation(1, SecurityViolationType.InvalidRequest, "1", 0f);
             tracker.RecordViolation(1, SecurityViolationType.InvalidRequest, "2", 0.5f);
-            
+
             // At t=1.5, the first violation (t=0) has expired
             Assert.AreEqual(1, tracker.GetViolationCount(1, 1.5f));
         }
-        
+
         [Test]
         public void ViolationTracker_GetViolationCount_RespectsWindow()
         {
             var tracker = new ViolationTracker(10, 2.0f);
-            
+
             tracker.RecordViolation(1, SecurityViolationType.RateLimitExceeded, "a", 0f);
             tracker.RecordViolation(1, SecurityViolationType.RateLimitExceeded, "b", 1f);
             tracker.RecordViolation(1, SecurityViolationType.RateLimitExceeded, "c", 2f);
-            
+
             Assert.AreEqual(3, tracker.GetViolationCount(1, 2f));
             Assert.AreEqual(2, tracker.GetViolationCount(1, 2.5f));  // t=0 expired
             Assert.AreEqual(1, tracker.GetViolationCount(1, 3.5f));  // t=0 and t=1 expired
         }
-        
+
         [Test]
         public void ViolationTracker_BlockClient_IsBlocked()
         {
             var tracker = new ViolationTracker(3, 10f);
-            
+
             Assert.IsFalse(tracker.IsBlocked(1, 0f));
-            
+
             tracker.BlockClient(1, 5f, 0f);
             Assert.IsTrue(tracker.IsBlocked(1, 0f));
             Assert.IsTrue(tracker.IsBlocked(1, 4.9f));
         }
-        
+
         [Test]
         public void ViolationTracker_BlockExpires()
         {
             var tracker = new ViolationTracker(3, 10f);
-            
+
             tracker.BlockClient(1, 5f, 0f);
-            
+
             Assert.IsTrue(tracker.IsBlocked(1, 4.9f));
             Assert.IsFalse(tracker.IsBlocked(1, 5.0f)); // Expires at exactly 5.0
         }
-        
+
         [Test]
         public void ViolationTracker_ClearClient_RemovesViolationsAndBlock()
         {
             var tracker = new ViolationTracker(3, 10f);
-            
+
             tracker.RecordViolation(1, SecurityViolationType.InvalidRequest, "test", 0f);
             tracker.BlockClient(1, 60f, 0f);
-            
+
             Assert.IsTrue(tracker.IsBlocked(1, 1f));
             Assert.AreEqual(1, tracker.GetViolationCount(1, 1f));
-            
+
             tracker.ClearClient(1);
-            
+
             Assert.IsFalse(tracker.IsBlocked(1, 1f));
             Assert.AreEqual(0, tracker.GetViolationCount(1, 1f));
         }
-        
+
         [Test]
         public void ViolationTracker_Clear_ResetsEverything()
         {
             var tracker = new ViolationTracker(3, 10f);
-            
+
             tracker.RecordViolation(1, SecurityViolationType.InvalidRequest, "test", 0f);
             tracker.RecordViolation(2, SecurityViolationType.InvalidRequest, "test", 0f);
             tracker.BlockClient(1, 60f, 0f);
-            
+
             tracker.Clear();
-            
+
             Assert.IsFalse(tracker.IsBlocked(1, 1f));
             Assert.AreEqual(0, tracker.GetViolationCount(1, 1f));
             Assert.AreEqual(0, tracker.GetViolationCount(2, 1f));
         }
-        
+
         [Test]
         public void ViolationTracker_UnknownClient_ZeroCount()
         {
@@ -431,25 +453,25 @@ namespace Arawn.GameCreator2.Networking.Tests
             Assert.AreEqual(0, tracker.GetViolationCount(999, 0f));
             Assert.IsFalse(tracker.IsBlocked(999, 0f));
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // MOTION CONFIG — GETTER DECOMPRESSION & FLAGS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         [Test]
         public void MotionConfig_GetLinearSpeed_Decompresses()
         {
             var config = new NetworkMotionConfig { linearSpeed = 525 }; // 525 / 100 = 5.25
             Assert.AreEqual(5.25f, config.GetLinearSpeed(), 0.001f);
         }
-        
+
         [Test]
         public void MotionConfig_GetAngularSpeed_Decompresses()
         {
             var config = new NetworkMotionConfig { angularSpeed = 3600 }; // 3600 / 10 = 360.0
             Assert.AreEqual(360f, config.GetAngularSpeed(), 0.01f);
         }
-        
+
         [Test]
         public void MotionConfig_GetGravity_SignedDecompression()
         {
@@ -461,14 +483,14 @@ namespace Arawn.GameCreator2.Networking.Tests
             Assert.AreEqual(-9.81f, config.GetGravityUp(), 0.001f);
             Assert.AreEqual(20f, config.GetGravityDown(), 0.001f);
         }
-        
+
         [Test]
         public void MotionConfig_GetJumpCooldown_Decompresses()
         {
             var config = new NetworkMotionConfig { jumpCooldownMs = 150 }; // 150 / 100 = 1.5
             Assert.AreEqual(1.5f, config.GetJumpCooldown(), 0.001f);
         }
-        
+
         [Test]
         public void MotionConfig_Flags_AllCombinations()
         {
@@ -477,24 +499,24 @@ namespace Arawn.GameCreator2.Networking.Tests
             Assert.IsFalse(none.CanJump);
             Assert.IsFalse(none.DashInAir);
             Assert.IsFalse(none.UseAcceleration);
-            
+
             // All flags
             var all = new NetworkMotionConfig { flags = 0x07 };
             Assert.IsTrue(all.CanJump);
             Assert.IsTrue(all.DashInAir);
             Assert.IsTrue(all.UseAcceleration);
-            
+
             // Individual flags
             Assert.IsTrue(new NetworkMotionConfig { flags = 1 }.CanJump);
             Assert.IsFalse(new NetworkMotionConfig { flags = 1 }.DashInAir);
-            
+
             Assert.IsFalse(new NetworkMotionConfig { flags = 2 }.CanJump);
             Assert.IsTrue(new NetworkMotionConfig { flags = 2 }.DashInAir);
-            
+
             Assert.IsFalse(new NetworkMotionConfig { flags = 4 }.DashInAir);
             Assert.IsTrue(new NetworkMotionConfig { flags = 4 }.UseAcceleration);
         }
-        
+
         [Test]
         public void MotionConfig_Equals_SameValues()
         {
@@ -503,7 +525,7 @@ namespace Arawn.GameCreator2.Networking.Tests
             Assert.IsTrue(a.Equals(b));
             Assert.AreEqual(a.GetHashCode(), b.GetHashCode());
         }
-        
+
         [Test]
         public void MotionConfig_Equals_DifferentValues()
         {
@@ -511,11 +533,11 @@ namespace Arawn.GameCreator2.Networking.Tests
             var b = new NetworkMotionConfig { linearSpeed = 200 };
             Assert.IsFalse(a.Equals(b));
         }
-        
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // MOTION COMMAND — GETTER DECOMPRESSION
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         [Test]
         public void MotionCommand_GetPosition_FixedPointDecompression()
         {
@@ -525,13 +547,13 @@ namespace Arawn.GameCreator2.Networking.Tests
                 dataY = -200,   // -200 / 100 = -2.0
                 dataZ = 300     // 300 / 100 = 3.0
             };
-            
+
             var pos = cmd.GetPosition();
             Assert.AreEqual(10.5f, pos.x, 0.001f);
             Assert.AreEqual(-2f, pos.y, 0.001f);
             Assert.AreEqual(3f, pos.z, 0.001f);
         }
-        
+
         [Test]
         public void MotionCommand_GetDirection_HigherPrecision()
         {
@@ -541,51 +563,65 @@ namespace Arawn.GameCreator2.Networking.Tests
                 dataY = 0,
                 dataZ = 707
             };
-            
+
             var dir = cmd.GetDirection();
             Assert.AreEqual(0.707f, dir.x, 0.001f);
             Assert.AreEqual(0f, dir.y, 0.001f);
             Assert.AreEqual(0.707f, dir.z, 0.001f);
         }
-        
+
         [Test]
         public void MotionCommand_GetDurationAndFade_BitUnpacking()
         {
             // Duration = 1.5s → byte 150, Fade = 0.25s → byte 25
             // param2 = (150 << 8) | 25 = 38425
             var cmd = new NetworkMotionCommand { param2 = (150 << 8) | 25 };
-            
+
             Assert.AreEqual(1.5f, cmd.GetDuration(), 0.001f);
             Assert.AreEqual(0.25f, cmd.GetFade(), 0.001f);
         }
-        
+
         [Test]
         public void MotionCommand_GetRotationY_Wraps360()
         {
             // 0° → param1 = 0
             Assert.AreEqual(0f, new NetworkMotionCommand { param1 = 0 }.GetRotationY(), 0.01f);
-            
+
             // 180° → param1 = 32768
             Assert.AreEqual(180f, new NetworkMotionCommand { param1 = 32768 }.GetRotationY(), 0.1f);
-            
+
             // ~360° → param1 = 65535
             Assert.AreEqual(360f, new NetworkMotionCommand { param1 = 65535 }.GetRotationY(), 0.01f);
         }
-        
+
+        [Test]
+        public void MotionCommand_TeleportVerticalReset_IsExplicitAndBackwardCompatible()
+        {
+            NetworkMotionCommand ordinary = NetworkMotionCommand.CreateTeleport(
+                Vector3.one, 90f, 1);
+            NetworkMotionCommand reset = NetworkMotionCommand.CreateTeleport(
+                Vector3.one, 90f, 2, true);
+
+            Assert.IsFalse(ordinary.ShouldResetVerticalVelocity());
+            Assert.IsTrue(reset.ShouldResetVerticalVelocity());
+            Assert.AreEqual(0, ordinary.param2);
+            Assert.AreEqual(1, reset.param2);
+        }
+
         [Test]
         public void MotionCommand_GetJumpForce_Decompresses()
         {
             var cmd = new NetworkMotionCommand { param1 = 500 }; // 500 / 100 = 5.0
             Assert.AreEqual(5f, cmd.GetJumpForce(), 0.001f);
         }
-        
+
         [Test]
         public void MotionCommand_GetSpeed_Decompresses()
         {
             var cmd = new NetworkMotionCommand { param1 = 100 }; // 100 / 10 = 10.0
             Assert.AreEqual(10f, cmd.GetSpeed(), 0.001f);
         }
-        
+
         [Test]
         public void MotionCommand_Equals_SameValues()
         {
@@ -604,11 +640,162 @@ namespace Arawn.GameCreator2.Networking.Tests
             Assert.IsTrue(a.Equals(b));
             Assert.AreEqual(a.GetHashCode(), b.GetHashCode());
         }
-        
+
+        [Test]
+        public void NetworkMotion_MoveToArrivalDistance_MatchesGc2Minimum()
+        {
+            FieldInfo field = typeof(UnitMotionNetworkController).GetField(
+                "MOVE_TO_MINIMUM_ARRIVAL_DISTANCE",
+                BindingFlags.Static | BindingFlags.NonPublic);
+
+            Assert.That(field, Is.Not.Null);
+            Assert.That((float) field.GetRawConstantValue(), Is.EqualTo(0.15f));
+        }
+
+        [Test]
+        public void NetworkMotion_StaleNavigationCompletion_DoesNotClearNewerOperation()
+        {
+            var motion = new UnitMotionNetworkController();
+            Type operationType = typeof(UnitMotionNetworkController).GetNestedType(
+                "NavigationOperation",
+                BindingFlags.NonPublic);
+            Type kindType = typeof(UnitMotionNetworkController).GetNestedType(
+                "NavigationDriveKind",
+                BindingFlags.NonPublic);
+            MethodInfo create = typeof(UnitMotionNetworkController).GetMethod(
+                "CreateNavigationOperation",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            MethodInfo complete = typeof(UnitMotionNetworkController).GetMethod(
+                "CompleteNavigationOperation",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            FieldInfo current = typeof(UnitMotionNetworkController).GetField(
+                "m_NavigationOperation",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+
+            Assert.That(operationType, Is.Not.Null);
+            Assert.That(kindType, Is.Not.Null);
+            Assert.That(create, Is.Not.Null);
+            Assert.That(complete, Is.Not.Null);
+            Assert.That(current, Is.Not.Null);
+
+            object moveTo = create.Invoke(
+                motion,
+                new[] { Enum.Parse(kindType, "MoveToPosition") });
+            object follow = create.Invoke(
+                motion,
+                new[] { Enum.Parse(kindType, "FollowTarget") });
+
+            complete.Invoke(motion, new[] { moveTo, "stale completion" });
+            Assert.That(current.GetValue(motion), Is.SameAs(follow));
+
+            complete.Invoke(motion, new[] { follow, "current completion" });
+            Assert.That(current.GetValue(motion), Is.Null);
+        }
+
+        [Test]
+        public void NetworkMotion_MoveToLifecycleCheck_DoesNotCancelFollow()
+        {
+            var motion = new UnitMotionNetworkController();
+            Type kindType = typeof(UnitMotionNetworkController).GetNestedType(
+                "NavigationDriveKind",
+                BindingFlags.NonPublic);
+            MethodInfo create = typeof(UnitMotionNetworkController).GetMethod(
+                "CreateNavigationOperation",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            MethodInfo lifecycle = typeof(UnitMotionNetworkController).GetMethod(
+                "CompleteMoveToWhenMotionEnds",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            FieldInfo current = typeof(UnitMotionNetworkController).GetField(
+                "m_NavigationOperation",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+
+            Assert.That(kindType, Is.Not.Null);
+            Assert.That(create, Is.Not.Null);
+            Assert.That(lifecycle, Is.Not.Null);
+            Assert.That(current, Is.Not.Null);
+
+            object follow = create.Invoke(
+                motion,
+                new[] { Enum.Parse(kindType, "FollowTarget") });
+            lifecycle.Invoke(motion, null);
+
+            Assert.That(current.GetValue(motion), Is.SameAs(follow));
+        }
+
+        [Test]
+        public void NetworkMotion_AssistanceEnding_DoesNotReportMoveToFailure()
+        {
+            var motion = new UnitMotionNetworkController();
+            Type kindType = typeof(UnitMotionNetworkController).GetNestedType(
+                "NavigationDriveKind",
+                BindingFlags.NonPublic);
+            MethodInfo create = typeof(UnitMotionNetworkController).GetMethod(
+                "CreateNavigationOperation",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            MethodInfo release = typeof(UnitMotionNetworkController).GetMethod(
+                "ReleaseNavigationRoutine",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            FieldInfo current = typeof(UnitMotionNetworkController).GetField(
+                "m_NavigationOperation",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+
+            Assert.That(kindType, Is.Not.Null);
+            Assert.That(create, Is.Not.Null);
+            Assert.That(release, Is.Not.Null);
+            Assert.That(current, Is.Not.Null);
+
+            object moveTo = create.Invoke(
+                motion,
+                new[] { Enum.Parse(kindType, "MoveToPosition") });
+            release.Invoke(motion, new[] { moveTo, "arrival threshold reached" });
+
+            Assert.That(current.GetValue(motion), Is.SameAs(moveTo));
+            FieldInfo completed = moveTo.GetType().GetField(
+                "CompletionObserved",
+                BindingFlags.Instance | BindingFlags.Public);
+            Assert.That(completed, Is.Not.Null);
+            Assert.That((bool) completed.GetValue(moveTo), Is.False);
+        }
+
+        [Test]
+        public void NetworkMotion_StopNavigation_InvalidatesCurrentOperation()
+        {
+            var motion = new UnitMotionNetworkController();
+            Type kindType = typeof(UnitMotionNetworkController).GetNestedType(
+                "NavigationDriveKind",
+                BindingFlags.NonPublic);
+            MethodInfo create = typeof(UnitMotionNetworkController).GetMethod(
+                "CreateNavigationOperation",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            MethodInfo stop = typeof(UnitMotionNetworkController).GetMethod(
+                "StopNavigationRoutine",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            FieldInfo current = typeof(UnitMotionNetworkController).GetField(
+                "m_NavigationOperation",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+
+            Assert.That(kindType, Is.Not.Null);
+            Assert.That(create, Is.Not.Null);
+            Assert.That(stop, Is.Not.Null);
+            Assert.That(current, Is.Not.Null);
+
+            object operation = create.Invoke(
+                motion,
+                new[] { Enum.Parse(kindType, "MoveToPosition") });
+            stop.Invoke(motion, new object[] { "test cancellation" });
+
+            Assert.That(current.GetValue(motion), Is.Null);
+            FieldInfo completed = operation.GetType().GetField(
+                "CompletionObserved",
+                BindingFlags.Instance | BindingFlags.Public);
+            Assert.That(completed, Is.Not.Null);
+            Assert.That((bool) completed.GetValue(operation), Is.True);
+        }
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // INPUT STATE — DECOMPRESSION & FLAGS
         // ════════════════════════════════════════════════════════════════════════════════════════
-        
+
         [Test]
         public void InputState_GetInputDirection_Decompresses()
         {
@@ -617,12 +804,12 @@ namespace Arawn.GameCreator2.Networking.Tests
                 inputX = 16383,   // ~0.5
                 inputY = -32767   // ~-1.0
             };
-            
+
             var dir = state.GetInputDirection();
             Assert.AreEqual(0.5f, dir.x, 0.001f);
             Assert.AreEqual(-1f, dir.y, 0.001f);
         }
-        
+
         [Test]
         public void InputState_GetInputDirection_Zero()
         {
@@ -631,7 +818,7 @@ namespace Arawn.GameCreator2.Networking.Tests
             Assert.AreEqual(0f, dir.x, 0.001f);
             Assert.AreEqual(0f, dir.y, 0.001f);
         }
-        
+
         [Test]
         public void InputState_GetDeltaTime_FromByte()
         {
@@ -645,18 +832,18 @@ namespace Arawn.GameCreator2.Networking.Tests
             var state = new NetworkInputState { rotationY = 32768 };
             Assert.AreEqual(180f, state.GetRotationY(), 0.1f);
         }
-        
+
         [Test]
         public void InputState_HasFlag_IndividualFlags()
         {
             var state = new NetworkInputState { flags = NetworkInputState.FLAG_JUMP | NetworkInputState.FLAG_SPRINT };
-            
+
             Assert.IsTrue(state.HasFlag(NetworkInputState.FLAG_JUMP));
             Assert.IsFalse(state.HasFlag(NetworkInputState.FLAG_DASH));
             Assert.IsTrue(state.HasFlag(NetworkInputState.FLAG_SPRINT));
             Assert.IsFalse(state.HasFlag(NetworkInputState.FLAG_CROUCH));
         }
-        
+
         [Test]
         public void InputState_HasFlag_NoFlags()
         {
@@ -664,7 +851,7 @@ namespace Arawn.GameCreator2.Networking.Tests
             Assert.IsFalse(state.HasFlag(NetworkInputState.FLAG_JUMP));
             Assert.IsFalse(state.HasFlag(NetworkInputState.FLAG_DASH));
         }
-        
+
         [Test]
         public void InputState_HasFlag_AllFlags()
         {
@@ -676,7 +863,7 @@ namespace Arawn.GameCreator2.Networking.Tests
             Assert.IsTrue(state.HasFlag(NetworkInputState.FLAG_CUSTOM_1));
             Assert.IsTrue(state.HasFlag(NetworkInputState.FLAG_CUSTOM_4));
         }
-        
+
         [Test]
         public void InputState_Equals_SameValues()
         {
@@ -1354,6 +1541,91 @@ namespace Arawn.GameCreator2.Networking.Tests
         }
 
         [Test]
+        public void NetworkSecurityManager_NewServerSession_AcceptsRestartedSequence()
+        {
+            UnityEngine.GameObject securityGo = EnsureSecurityManagerForServerTests();
+            NetworkSecurityManager manager = NetworkSecurityManager.Instance;
+
+            try
+            {
+                Assert.That(manager, Is.Not.Null);
+                manager.Clear();
+                manager.Initialize(true, () => 10f);
+
+                Assert.IsTrue(manager.ValidateSequence(1, 2, 39, "Melee"));
+                Assert.IsFalse(manager.ValidateSequence(1, 2, 39, "Melee"));
+
+                manager.Initialize(false, () => 11f);
+                manager.Initialize(true, () => 12f);
+
+                Assert.IsTrue(
+                    manager.ValidateSequence(1, 2, 1, "Melee"),
+                    "A new server session must not retain the previous session's replay high-water mark.");
+            }
+            finally
+            {
+                manager?.Clear();
+                DestroySecurityManagerIfCreated(securityGo);
+            }
+        }
+
+        [Test]
+        public void NetworkSecurityManager_SameServerSession_DoesNotResetReplayTracking()
+        {
+            UnityEngine.GameObject securityGo = EnsureSecurityManagerForServerTests();
+            NetworkSecurityManager manager = NetworkSecurityManager.Instance;
+
+            try
+            {
+                Assert.That(manager, Is.Not.Null);
+                manager.Clear();
+                manager.Initialize(true, () => 20f);
+
+                Assert.IsTrue(manager.ValidateSequence(1, 2, 7, "Melee"));
+
+                // Multiple modules can ensure the same role during one live session.
+                manager.Initialize(true, () => 21f);
+                Assert.IsFalse(
+                    manager.ValidateSequence(1, 2, 7, "Melee"),
+                    "Redundant same-role initialization must not open a replay window.");
+            }
+            finally
+            {
+                manager?.Clear();
+                DestroySecurityManagerIfCreated(securityGo);
+            }
+        }
+
+        [Test]
+        public void NetworkSecurityManager_ClientDisconnect_ClearsReplayTrackingForThatClient()
+        {
+            UnityEngine.GameObject securityGo = EnsureSecurityManagerForServerTests();
+            NetworkSecurityManager manager = NetworkSecurityManager.Instance;
+
+            try
+            {
+                Assert.That(manager, Is.Not.Null);
+                manager.Clear();
+                manager.Initialize(true, () => 30f);
+
+                Assert.IsTrue(manager.ValidateSequence(7, 4, 12, "Melee"));
+                Assert.IsTrue(manager.ValidateSequence(8, 6, 12, "Melee"));
+
+                manager.OnClientDisconnected(7);
+
+                Assert.IsTrue(manager.ValidateSequence(7, 4, 1, "Melee"));
+                Assert.IsFalse(
+                    manager.ValidateSequence(8, 6, 12, "Melee"),
+                    "Disconnect cleanup must not clear another client's active replay scope.");
+            }
+            finally
+            {
+                manager?.Clear();
+                DestroySecurityManagerIfCreated(securityGo);
+            }
+        }
+
+        [Test]
         public void SecurityIntegration_ValidateCoreRequest_NullManager_ReturnsFalse()
         {
             uint correlationId = NetworkCorrelation.Compose(1001, 1);
@@ -1829,6 +2101,214 @@ namespace Arawn.GameCreator2.Networking.Tests
         }
 
         // ════════════════════════════════════════════════════════════════════════════════════════
+        // LAG COMPENSATION — ROLE AND REGISTRATION LIFECYCLE
+        // ════════════════════════════════════════════════════════════════════════════════════════
+
+        [Test]
+        public void LagCompensation_MissingManager_ConfigureAndValidateDoNotCreateManager()
+        {
+            var gameObject = new UnityEngine.GameObject("Lag Compensation Missing Manager Test");
+            try
+            {
+                CharacterLagCompensation adapter =
+                    gameObject.AddComponent<CharacterLagCompensation>();
+
+                adapter.Configure(11, true);
+
+                Assert.That(adapter.NetworkId, Is.EqualTo(11));
+                Assert.That(adapter.IsRegistered, Is.False);
+                Assert.That(LagCompensationManager.IsInitialized, Is.False);
+
+                HitValidationResult result = adapter.ValidateHit(
+                    UnityEngine.Vector3.zero,
+                    NetworkTimestamp.FromServerTime(1d));
+
+                Assert.That(result.isValid, Is.False);
+                Assert.That(result.reason, Is.EqualTo(HitRejectReason.EntityNotFound));
+                Assert.That(result.targetNetworkId, Is.EqualTo(11));
+                Assert.That(LagCompensationManager.IsInitialized, Is.False);
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(gameObject);
+            }
+        }
+
+        [Test]
+        public void LagCompensation_ServerConfigureBeforeManager_RetryRegistersAdapter()
+        {
+            var gameObject = new UnityEngine.GameObject("Lag Compensation Deferred Registration Test");
+            try
+            {
+                CharacterLagCompensation adapter =
+                    gameObject.AddComponent<CharacterLagCompensation>();
+                adapter.Configure(21, true);
+
+                Assert.That(adapter.IsRegistered, Is.False);
+
+                LagCompensationManager manager = LagCompensationManager.Initialize(
+                    new LagCompensationConfig());
+                InvokeUnityMessage(adapter, "Update");
+
+                Assert.That(adapter.IsRegistered, Is.True);
+                Assert.That(manager.IsRegistered(21), Is.True);
+                Assert.That(manager.IsRegistered(adapter), Is.True);
+                Assert.That(manager.EntityCount, Is.EqualTo(1));
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(gameObject);
+            }
+        }
+
+        [Test]
+        public void LagCompensation_NetworkIdReassignment_MovesExactRegistration()
+        {
+            var gameObject = new UnityEngine.GameObject("Lag Compensation ID Reassignment Test");
+            try
+            {
+                LagCompensationManager manager = LagCompensationManager.Initialize(
+                    new LagCompensationConfig());
+                CharacterLagCompensation adapter =
+                    gameObject.AddComponent<CharacterLagCompensation>();
+                adapter.Configure(31, true);
+
+                Assert.That(manager.IsRegistered(31), Is.True);
+                Assert.That(manager.IsRegistered(adapter), Is.True);
+
+                adapter.NetworkId = 32;
+
+                Assert.That(manager.IsRegistered(31), Is.False);
+                Assert.That(manager.IsRegistered(32), Is.True);
+                Assert.That(manager.IsRegistered(adapter), Is.True);
+                Assert.That(adapter.IsRegistered, Is.True);
+                Assert.That(manager.EntityCount, Is.EqualTo(1));
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(gameObject);
+            }
+        }
+
+        [Test]
+        public void LagCompensation_ConfigureClient_UnregistersServerAdapter()
+        {
+            var gameObject = new UnityEngine.GameObject("Lag Compensation Client Role Test");
+            try
+            {
+                LagCompensationManager manager = LagCompensationManager.Initialize(
+                    new LagCompensationConfig());
+                CharacterLagCompensation adapter =
+                    gameObject.AddComponent<CharacterLagCompensation>();
+                adapter.Configure(41, true);
+
+                Assert.That(adapter.IsRegistered, Is.True);
+                Assert.That(manager.IsRegistered(adapter), Is.True);
+
+                adapter.Configure(41, false);
+
+                Assert.That(adapter.NetworkId, Is.EqualTo(41));
+                Assert.That(adapter.IsRegistered, Is.False);
+                Assert.That(manager.IsRegistered(41), Is.False);
+                Assert.That(manager.EntityCount, Is.Zero);
+
+                InvokeUnityMessage(adapter, "Update");
+                Assert.That(adapter.IsRegistered, Is.False);
+                Assert.That(manager.EntityCount, Is.Zero);
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(gameObject);
+            }
+        }
+
+        [Test]
+        public void LagCompensation_ManagerReplacement_UpdateRebindsAdapter()
+        {
+            var gameObject = new UnityEngine.GameObject("Lag Compensation Manager Replacement Test");
+            try
+            {
+                LagCompensationManager firstManager = LagCompensationManager.Initialize(
+                    new LagCompensationConfig());
+                CharacterLagCompensation adapter =
+                    gameObject.AddComponent<CharacterLagCompensation>();
+                adapter.Configure(51, true);
+
+                Assert.That(firstManager.IsRegistered(adapter), Is.True);
+
+                LagCompensationManager replacementManager = LagCompensationManager.Initialize(
+                    new LagCompensationConfig());
+
+                Assert.That(firstManager.EntityCount, Is.Zero);
+                Assert.That(adapter.IsRegistered, Is.False);
+
+                InvokeUnityMessage(adapter, "Update");
+
+                Assert.That(adapter.IsRegistered, Is.True);
+                Assert.That(replacementManager.IsRegistered(51), Is.True);
+                Assert.That(replacementManager.IsRegistered(adapter), Is.True);
+                Assert.That(replacementManager.EntityCount, Is.EqualTo(1));
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(gameObject);
+            }
+        }
+
+        [Test]
+        public void LagCompensation_BootstrapUsesConfiguredServerClock()
+        {
+            var gameObject = new UnityEngine.GameObject("Lag Compensation Server Clock Test");
+            try
+            {
+                double serverTime = 12.5d;
+                LagCompensationBootstrap bootstrap =
+                    gameObject.AddComponent<LagCompensationBootstrap>();
+                bootstrap.GetServerTimeFunc = () => serverTime;
+
+                bootstrap.SetServerMode(true);
+
+                Assert.That(LagCompensationManager.TryGetInitialized(out LagCompensationManager manager),
+                    Is.True);
+                Assert.That(manager.LastTimestamp.serverTime, Is.EqualTo(12.5d).Within(0.0001d));
+
+                serverTime = 13.25d;
+                InvokeUnityMessage(bootstrap, "FixedUpdate");
+
+                Assert.That(manager.LastTimestamp.serverTime, Is.EqualTo(13.25d).Within(0.0001d));
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(gameObject);
+            }
+        }
+
+        [Test]
+        public void LagCompensation_BootstrapShutdownDoesNotRecreateDisposedManager()
+        {
+            var gameObject = new UnityEngine.GameObject("Lag Compensation Shutdown Test");
+            try
+            {
+                LagCompensationBootstrap bootstrap =
+                    gameObject.AddComponent<LagCompensationBootstrap>();
+                bootstrap.SetServerMode(true);
+
+                Assert.That(LagCompensationManager.TryGetInitialized(out LagCompensationManager manager),
+                    Is.True);
+                manager.Dispose();
+                Assert.That(LagCompensationManager.IsInitialized, Is.False);
+
+                bootstrap.SetServerMode(false);
+
+                Assert.That(LagCompensationManager.IsInitialized, Is.False);
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(gameObject);
+            }
+        }
+
+        // ════════════════════════════════════════════════════════════════════════════════════════
         // INTEGRATION — CORRELATION + CONTEXT PIPELINE
         // ════════════════════════════════════════════════════════════════════════════════════════
 
@@ -1991,6 +2471,218 @@ namespace Arawn.GameCreator2.Networking.Tests
 
             // The position state references which input it last processed
             Assert.AreEqual(input.sequenceNumber, posState.lastProcessedInput);
+        }
+
+        [Test]
+        public void ServerOwnerAuthorityPose_RefreshesNativeControllerForImmediatePhysicsQueries()
+        {
+            PropertyInfo autoSyncTransformsProperty = typeof(Physics).GetProperty(
+                "autoSyncTransforms",
+                BindingFlags.Public | BindingFlags.Static);
+            bool previousAutoSyncTransforms = autoSyncTransformsProperty != null &&
+                                              (bool)autoSyncTransformsProperty.GetValue(null);
+            GameObject characterObject = null;
+            object driver = null;
+            Type driverType = null;
+            Component character = null;
+
+            try
+            {
+                autoSyncTransformsProperty?.SetValue(null, false);
+
+                characterObject = new GameObject("Server Owner Pose Physics Sync Test");
+                characterObject.transform.position = new Vector3(0f, 3f, 0f);
+                Type characterType = Type.GetType(
+                    "GameCreator.Runtime.Characters.Character, GameCreator.Runtime.Core");
+                Assert.That(characterType, Is.Not.Null, "Game Creator Character type was not loaded.");
+                character = characterObject.AddComponent(characterType);
+                CharacterController controller = characterObject.GetComponent<CharacterController>();
+                if (controller == null)
+                {
+                    controller = characterObject.AddComponent<CharacterController>();
+                }
+                controller.height = 2f;
+                controller.radius = 0.2f;
+                controller.center = Vector3.zero;
+
+                driverType = Type.GetType(
+                    "Arawn.GameCreator2.Networking.UnitDriverNetworkServer, " +
+                    "Arawn.GameCreator2.Networking");
+                Assert.That(driverType, Is.Not.Null, "Server driver type was not loaded.");
+                driver = Activator.CreateInstance(driverType);
+                MethodInfo startup = driverType.GetMethod("OnStartup");
+                Assert.That(startup, Is.Not.Null);
+                startup.Invoke(driver, new object[] { character });
+
+                object busy = characterType.GetProperty("Busy")?.GetValue(character);
+                Assert.That(busy, Is.Not.Null);
+                busy.GetType().GetMethod("SetBusy")?.Invoke(busy, null);
+                driverType.GetMethod("OpenServerOwnerMotionWindow")
+                    ?.Invoke(driver, new object[] { 1f, 17u });
+
+                Physics.SyncTransforms();
+                Vector3 oldRootPosition = characterObject.transform.position;
+                Vector3 landedRootPosition = new Vector3(2f, 1f, 0f);
+                NetworkInputState input = NetworkInputState.Create(
+                    Vector2.zero,
+                    sequence: 0,
+                    deltaTime: 0.016f,
+                    rotationY: 0f,
+                    ownerAuthorityPosition: landedRootPosition);
+
+                driverType.GetMethod("QueueInput")?.Invoke(driver, new object[] { input });
+                driverType.GetMethod("ProcessInputs")?.Invoke(driver, new object[] { null });
+
+                Assert.That(
+                    Vector3.Distance(characterObject.transform.position, landedRootPosition),
+                    Is.LessThan(0.001f),
+                    "The authorized owner pose should be applied by the server driver.");
+
+                Vector3[] liftAndLandingSamples =
+                {
+                    new Vector3(2f, 2.2f, 0f),
+                    new Vector3(2f, 2.8f, 0f),
+                    new Vector3(2f, 1.9f, 0f),
+                    landedRootPosition
+                };
+                for (int i = 0; i < liftAndLandingSamples.Length; i++)
+                {
+                    NetworkInputState poseSample = NetworkInputState.Create(
+                        Vector2.zero,
+                        sequence: (ushort)(i + 1),
+                        deltaTime: 0.016f,
+                        rotationY: 0f,
+                        ownerAuthorityPosition: liftAndLandingSamples[i]);
+                    driverType.GetMethod("QueueInput")?.Invoke(driver, new object[] { poseSample });
+                    driverType.GetMethod("ProcessInputs")?.Invoke(driver, new object[] { null });
+                }
+
+                Assert.That(
+                    Vector3.Distance(characterObject.transform.position, landedRootPosition),
+                    Is.LessThan(0.001f),
+                    "Repeated launch/landing samples must converge to the final grounded pose.");
+
+                Collider[] landedHits = Physics.OverlapSphere(
+                    landedRootPosition,
+                    0.05f,
+                    Physics.AllLayers,
+                    QueryTriggerInteraction.Ignore);
+                Assert.That(
+                    Array.IndexOf(landedHits, controller),
+                    Is.GreaterThanOrEqualTo(0),
+                    "The owner-authority native Move must leave the landed controller queryable.");
+
+                FieldInfo refreshPendingField = driverType.GetField(
+                    "m_ControllerPhysicsRefreshPending",
+                    BindingFlags.Instance | BindingFlags.NonPublic);
+                FieldInfo refreshFrameField = driverType.GetField(
+                    "m_ControllerPhysicsRefreshNotBeforeFrame",
+                    BindingFlags.Instance | BindingFlags.NonPublic);
+                Assert.That(refreshPendingField, Is.Not.Null);
+                Assert.That(refreshFrameField, Is.Not.Null);
+                Assert.That(
+                    (bool)refreshPendingField.GetValue(driver),
+                    Is.False,
+                    "A real owner-authority CharacterController.Move should not leave a stale refresh pending.");
+                Assert.That(
+                    (int)driverType.GetProperty("OwnerAuthorityNativeMoveCount")?.GetValue(driver),
+                    Is.GreaterThanOrEqualTo(5),
+                    "Accepted owner-authority samples must use the native CharacterController path.");
+
+                // True teleports still use Transform + SyncTransforms. They must schedule a
+                // verified deferred repair rather than assuming that a zero Move succeeded.
+                MethodInfo applyAbsolute = driverType.GetMethod(
+                    "ApplyAbsoluteRootPosition",
+                    BindingFlags.Instance | BindingFlags.NonPublic);
+                Assert.That(applyAbsolute, Is.Not.Null);
+                applyAbsolute.Invoke(driver, new object[] { landedRootPosition });
+                Assert.That(
+                    (bool)refreshPendingField.GetValue(driver),
+                    Is.True,
+                    "An absolute Transform write must schedule a verified native proxy refresh.");
+
+                // Simulate the following driver frame without requiring an EditMode coroutine.
+                // The deferred refresh is what repairs an idle remote target after the final
+                // launch/landing owner-pose sample.
+                refreshFrameField.SetValue(driver, Time.frameCount);
+                driverType.GetMethod("OnUpdate")?.Invoke(driver, null);
+                Assert.That(
+                    (bool)refreshPendingField.GetValue(driver),
+                    Is.False,
+                    "The follow-up frame may clear the repair only after its self-query succeeds.");
+                Assert.That(
+                    (bool)driverType.GetProperty("LastControllerPhysicsRefreshQueryable")
+                        ?.GetValue(driver),
+                    Is.True,
+                    "The deferred repair must explicitly verify broadphase membership.");
+                Assert.That(
+                    (int)driverType.GetProperty("ControllerPhysicsRefreshSuccesses")
+                        ?.GetValue(driver),
+                    Is.GreaterThanOrEqualTo(1));
+
+                object motion = characterType.GetProperty("Motion")?.GetValue(character);
+                Assert.That(motion, Is.Not.Null);
+                PropertyInfo heightProperty = motion.GetType().GetProperty("Height");
+                PropertyInfo radiusProperty = motion.GetType().GetProperty("Radius");
+                Assert.That(heightProperty, Is.Not.Null);
+                Assert.That(radiusProperty, Is.Not.Null);
+                heightProperty.SetValue(motion, 1.6f);
+                radiusProperty.SetValue(motion, 0.18f);
+                driverType.GetMethod("OnUpdate")?.Invoke(driver, null);
+
+                Assert.That(controller.height, Is.EqualTo(1.6f).Within(0.0001f));
+                Assert.That(controller.radius, Is.EqualTo(0.18f).Within(0.0001f));
+                Collider[] reshapedHits = Physics.OverlapSphere(
+                    controller.bounds.center,
+                    0.05f,
+                    Physics.AllLayers,
+                    QueryTriggerInteraction.Ignore);
+                Assert.That(
+                    Array.IndexOf(reshapedHits, controller),
+                    Is.GreaterThanOrEqualTo(0),
+                    "A reaction-driven height/radius change must retain an overlap-query proxy.");
+
+                // Facing runs after Driver.OnUpdate. With auto-sync disabled, the old network
+                // facing units wrote Transform.rotation directly at this exact point and could
+                // leave the native controller unavailable to the following LateUpdate strike
+                // query. The public pre-query guard must flush/repair that late write.
+                characterObject.transform.rotation = Quaternion.Euler(0f, 67f, 0f);
+                MethodInfo ensureQueryable = driverType.GetMethod(
+                    "EnsureControllerPhysicsQueryable",
+                    BindingFlags.Instance | BindingFlags.Public);
+                Assert.That(ensureQueryable, Is.Not.Null);
+                Assert.That(
+                    (bool)ensureQueryable.Invoke(driver, null),
+                    Is.True,
+                    "A post-driver facing write must be synchronized before combat queries.");
+                Assert.That(
+                    (bool)driverType.GetProperty("ControllerPhysicsQueryableNow")
+                        ?.GetValue(driver),
+                    Is.True,
+                    "The live proxy diagnostic must confirm the controller after synchronization.");
+
+                Collider[] staleHits = Physics.OverlapSphere(
+                    oldRootPosition,
+                    0.05f,
+                    Physics.AllLayers,
+                    QueryTriggerInteraction.Ignore);
+                Assert.That(
+                    Array.IndexOf(staleHits, controller),
+                    Is.LessThan(0),
+                    "The CharacterController must not remain queryable at its pre-reaction pose.");
+            }
+            finally
+            {
+                if (driver != null && character != null)
+                {
+                    driverType
+                        ?.GetMethod("OnDispose")
+                        ?.Invoke(driver, new object[] { character });
+                }
+                if (characterObject != null) UnityEngine.Object.DestroyImmediate(characterObject);
+                autoSyncTransformsProperty?.SetValue(null, previousAutoSyncTransforms);
+                Physics.SyncTransforms();
+            }
         }
 
         [Test]

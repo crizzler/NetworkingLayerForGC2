@@ -13,13 +13,13 @@ namespace Arawn.GameCreator2.Networking
 {
     /// <summary>
     /// Network controller for synchronizing GC2's Playable Graph animation system.
-    /// 
+    ///
     /// Design Philosophy:
     /// - Animations are cosmetic, not gameplay-critical, so we use owner-authority (not server)
     /// - Local player captures animation commands and broadcasts to remotes
     /// - Remote players receive commands and apply animations locally
     /// - No server validation needed (animation cheating doesn't affect gameplay physics)
-    /// 
+    ///
     /// This controller wraps GC2's States and Gestures systems, intercepting
     /// animation calls to broadcast them over the network.
     /// </summary>
@@ -37,7 +37,7 @@ namespace Arawn.GameCreator2.Networking
         private static bool s_TriedResolveStatesLayersField;
 
         // EXPOSED MEMBERS: -----------------------------------------------------------------------
-        
+
         [Header("Configuration")]
         [SerializeField] private NetworkAnimationRegistry m_AnimationRegistry;
 
@@ -46,14 +46,14 @@ namespace Arawn.GameCreator2.Networking
                  "instruction). The same prefab is instantiated on every peer, so dropping " +
                  "the clip here guarantees every peer can play the gesture.")]
         [SerializeField] private AnimationClip[] m_PreRegisteredClips;
-        
+
         [Header("Sync Settings")]
         [Tooltip("Rate limit for state sync (commands per second)")]
         [SerializeField] private float m_MaxStateRate = 10f;
-        
+
         [Tooltip("Rate limit for gesture sync (commands per second)")]
         [SerializeField] private float m_MaxGestureRate = 20f;
-        
+
         [Tooltip("Enable animation sync (disable for NPCs that don't need remote sync)")]
         [SerializeField] private bool m_EnableSync = true;
 
@@ -62,9 +62,9 @@ namespace Arawn.GameCreator2.Networking
         [SerializeField] private bool m_LogGestureDiagnostics = false;
         [SerializeField] private float m_StateDiagnosticsSampleInterval = 0.25f;
         [SerializeField] private float m_GestureDiagnosticsSampleInterval = 0.25f;
-        
+
         // MEMBERS: -------------------------------------------------------------------------------
-        
+
         private Character m_Character;
         private bool m_IsLocalPlayer;
         private bool m_IsInitialized;
@@ -76,79 +76,79 @@ namespace Arawn.GameCreator2.Networking
         private int m_LastObservedStateCount;
         private float m_LastObservedStateChangeRealtime;
         private float m_LastObservedStateSampleRealtime;
-        
+
         // Rate limiting
         private float m_LastStateTime;
         private float m_LastGestureTime;
-        
+
         // Command queues for batching
         private Queue<NetworkStateCommand> m_PendingStateCommands;
         private Queue<NetworkGestureCommand> m_PendingGestureCommands;
         private Queue<NetworkStopStateCommand> m_PendingStopStateCommands;
         private Queue<NetworkStopGestureCommand> m_PendingStopGestureCommands;
-        
+
         // Animation lookup for remotes (maps hash to clip)
         private Dictionary<int, AnimationClip> m_ClipCache;
         private Dictionary<int, State> m_StateCache;
         private Dictionary<int, RuntimeAnimatorController> m_ControllerCache;
         private bool m_HasAutoDiscoveredClips;
-        
+
         // EVENTS: --------------------------------------------------------------------------------
-        
+
         /// <summary>
         /// Raised when a state command should be sent to the network.
         /// Subscribe to this in your network implementation.
         /// </summary>
         public event Action<NetworkStateCommand> OnStateCommandReady;
-        
+
         /// <summary>
         /// Raised when a gesture command should be sent to the network.
         /// </summary>
         public event Action<NetworkGestureCommand> OnGestureCommandReady;
-        
+
         /// <summary>
         /// Raised when a stop state command should be sent.
         /// </summary>
         public event Action<NetworkStopStateCommand> OnStopStateCommandReady;
-        
+
         /// <summary>
         /// Raised when a stop gesture command should be sent.
         /// </summary>
         public event Action<NetworkStopGestureCommand> OnStopGestureCommandReady;
-        
+
         // PROPERTIES: ----------------------------------------------------------------------------
-        
+
         public Character Character => m_Character;
         public bool IsLocalPlayer => m_IsLocalPlayer;
         public bool IsInitialized => m_IsInitialized;
         public bool IsSyncEnabled => m_EnableSync;
         public NetworkAnimationRegistry Registry => m_AnimationRegistry;
-        
+
         public void SetSyncEnabled(bool enabled)
         {
             m_EnableSync = enabled;
         }
-        
+
         public void SetRateLimits(float stateRate, float gestureRate)
         {
             m_MaxStateRate = Mathf.Max(1f, stateRate);
             m_MaxGestureRate = Mathf.Max(1f, gestureRate);
         }
-        
+
         // INITIALIZATION: ------------------------------------------------------------------------
-        
+
         public void Initialize(Character character, bool isLocalPlayer)
         {
             if (m_IsInitialized) return;
-            
+
             m_Character = character;
             m_IsLocalPlayer = isLocalPlayer;
-            
+
             m_PendingStateCommands = new Queue<NetworkStateCommand>();
             m_PendingGestureCommands = new Queue<NetworkGestureCommand>();
             m_PendingStopStateCommands = new Queue<NetworkStopStateCommand>();
             m_PendingStopGestureCommands = new Queue<NetworkStopGestureCommand>();
-            
+
             m_ClipCache = new Dictionary<int, AnimationClip>();
             m_StateCache = new Dictionary<int, State>();
             m_ControllerCache = new Dictionary<int, RuntimeAnimatorController>();
@@ -164,7 +164,7 @@ namespace Arawn.GameCreator2.Networking
             }
 
             DiscoverAnimationClipsFromCharacter();
-	            
+
             m_IsInitialized = true;
             LogDash($"initialized character={character.name} local={m_IsLocalPlayer} sync={m_EnableSync}");
         }
@@ -191,11 +191,11 @@ namespace Arawn.GameCreator2.Networking
                 RegisterClipIfNew(clip);
             }
         }
-        
+
         // PUBLIC API - LOCAL PLAYER: -------------------------------------------------------------
         // Call these methods instead of directly calling Character.States/Gestures
         // They will apply locally AND broadcast to network
-        
+
         /// <summary>
         /// Set an animation state on a layer and broadcast to network.
         /// Use this instead of Character.States.SetState() for networked animations.
@@ -213,7 +213,7 @@ namespace Arawn.GameCreator2.Networking
                 LogStateDiagnostics("SetState(clip) skipped: clip is null");
                 return;
             }
-            
+
             try
             {
                 RegisterClip(clip);
@@ -260,7 +260,7 @@ namespace Arawn.GameCreator2.Networking
                 Debug.LogError($"[NetworkAnimim] SetState(clip) failed: {ex.Message}\n{ex.StackTrace}");
             }
         }
-        
+
         /// <summary>
         /// Set a State asset on a layer and broadcast to network.
         /// </summary>
@@ -276,7 +276,7 @@ namespace Arawn.GameCreator2.Networking
                 LogStateDiagnostics("SetState(asset) skipped: state is null");
                 return;
             }
-            
+
             try
             {
                 RegisterState(state);
@@ -377,7 +377,7 @@ namespace Arawn.GameCreator2.Networking
                 Debug.LogError($"[NetworkAnimim] SetState(controller) failed: {ex.Message}\n{ex.StackTrace}");
             }
         }
-        
+
         /// <summary>
         /// Stop a state layer and broadcast to network.
         /// </summary>
@@ -388,10 +388,10 @@ namespace Arawn.GameCreator2.Networking
             LogStateDiagnostics(
                 $"StopState requested local={m_IsLocalPlayer} layer={layer} delay={delay:F3} " +
                 $"transitionOut={transitionOut:F3} {FormatCharacterTime()}");
-            
+
             // Apply locally
             m_Character?.States?.Stop(layer, delay, transitionOut);
-            
+
             // Broadcast if local player
             if (m_IsLocalPlayer)
             {
@@ -399,7 +399,7 @@ namespace Arawn.GameCreator2.Networking
                 OnStopStateCommandReady?.Invoke(command);
             }
         }
-        
+
         /// <summary>
         /// Play a gesture animation and broadcast to network.
         /// Use this instead of Character.Gestures.CrossFade() for networked animations.
@@ -428,7 +428,7 @@ namespace Arawn.GameCreator2.Networking
                 LogDash("PlayGesture skipped: clip is null");
                 return;
             }
-            
+
             try
             {
                 LogGestureDiagnostics(
@@ -503,7 +503,7 @@ namespace Arawn.GameCreator2.Networking
                 Debug.LogError($"[NetworkAnimim] PlayGesture failed: {ex.Message}\n{ex.StackTrace}");
             }
         }
-        
+
         /// <summary>
         /// Stop all gestures and broadcast to network.
         /// </summary>
@@ -515,10 +515,10 @@ namespace Arawn.GameCreator2.Networking
                 $"StopGestures requested local={m_IsLocalPlayer} delay={delay:F3} " +
                 $"transitionOut={transitionOut:F3} gesturesPlaying={m_Character?.Gestures?.IsPlaying ?? false} " +
                 $"weight={m_Character?.Gestures?.CurrentWeight ?? 0f:F3} {FormatCharacterTime()}");
-            
+
             // Apply locally
             m_Character?.Gestures?.Stop(delay, transitionOut);
-            
+
             // Broadcast if local player
             if (m_IsLocalPlayer)
             {
@@ -526,7 +526,7 @@ namespace Arawn.GameCreator2.Networking
                 OnStopGestureCommandReady?.Invoke(command);
             }
         }
-        
+
         /// <summary>
         /// Stop a specific gesture and broadcast to network.
         /// </summary>
@@ -540,10 +540,10 @@ namespace Arawn.GameCreator2.Networking
                 $"delay={delay:F3} transitionOut={transitionOut:F3} " +
                 $"gesturesPlaying={m_Character?.Gestures?.IsPlaying ?? false} " +
                 $"weight={m_Character?.Gestures?.CurrentWeight ?? 0f:F3} {FormatCharacterTime()}");
-            
+
             // Apply locally
             m_Character?.Gestures?.Stop(clip, delay, transitionOut);
-            
+
             // Broadcast if local player
             if (m_IsLocalPlayer)
             {
@@ -552,10 +552,10 @@ namespace Arawn.GameCreator2.Networking
                 OnStopGestureCommandReady?.Invoke(command);
             }
         }
-        
+
         // PUBLIC API - REMOTE PLAYERS: -----------------------------------------------------------
         // Network implementation calls these to apply received commands
-        
+
         /// <summary>
         /// Apply a received state command from a remote player.
         /// Call this from your network receive handler.
@@ -585,12 +585,12 @@ namespace Arawn.GameCreator2.Networking
                 LogStateDiagnostics($"ApplyState skipped: Character.States is null {FormatCommand(command)}");
                 return;
             }
-            
+
             try
             {
                 var config = command.ToConfigState();
                 LogStateDiagnostics($"ApplyState received {FormatCommand(command)} {FormatCharacterTime()}");
-                
+
                 switch (command.StateType)
                 {
                     case NetworkStateType.AnimationClip:
@@ -611,7 +611,7 @@ namespace Arawn.GameCreator2.Networking
                                 $"localCache={m_ClipCache.Count} globalCache={s_GlobalClipCache.Count}");
                         }
                         break;
-                        
+
                     case NetworkStateType.StateAsset:
                         if (TryGetState(command.AnimationId, out var state))
                         {
@@ -631,7 +631,7 @@ namespace Arawn.GameCreator2.Networking
                                 $"localCache={m_StateCache.Count} globalCache={s_GlobalStateCache.Count}");
                         }
                         break;
-                        
+
                     case NetworkStateType.RuntimeController:
                         if (TryGetRuntimeController(command.AnimationId, out var controller))
                         {
@@ -657,7 +657,7 @@ namespace Arawn.GameCreator2.Networking
                 Debug.LogError($"[NetworkAnimim] ApplyStateCommand failed: {ex.Message}\n{ex.StackTrace}");
             }
         }
-        
+
         /// <summary>
         /// Apply a received gesture command from a remote player.
         /// </summary>
@@ -686,7 +686,7 @@ namespace Arawn.GameCreator2.Networking
                 LogDash($"ApplyGesture skipped: Character.Gestures is null clipHash={command.ClipHash}");
                 return;
             }
-            
+
             try
             {
                 LogGestureDiagnostics(
@@ -731,7 +731,7 @@ namespace Arawn.GameCreator2.Networking
                 Debug.LogError($"[NetworkAnimim] ApplyGestureCommand failed: {ex.Message}\n{ex.StackTrace}");
             }
         }
-        
+
         /// <summary>
         /// Apply a received stop state command.
         /// </summary>
@@ -743,7 +743,7 @@ namespace Arawn.GameCreator2.Networking
                 $"transitionOut={command.GetTransitionOut():F3} {FormatCharacterTime()}");
             m_Character?.States?.Stop(command.Layer, command.GetDelay(), command.GetTransitionOut());
         }
-        
+
         /// <summary>
         /// Apply a received stop gesture command.
         /// </summary>
@@ -756,7 +756,7 @@ namespace Arawn.GameCreator2.Networking
                 $"delay={command.GetDelay():F3} transitionOut={command.GetTransitionOut():F3} " +
                 $"gesturesPlaying={m_Character?.Gestures?.IsPlaying ?? false} " +
                 $"weight={m_Character?.Gestures?.CurrentWeight ?? 0f:F3} {FormatCharacterTime()}");
-            
+
             if (command.ClipHash == 0)
             {
                 m_Character?.Gestures?.Stop(command.GetDelay(), command.GetTransitionOut());
@@ -766,9 +766,9 @@ namespace Arawn.GameCreator2.Networking
                 m_Character?.Gestures?.Stop(clip, command.GetDelay(), command.GetTransitionOut());
             }
         }
-        
+
         // CACHE MANAGEMENT: ----------------------------------------------------------------------
-        
+
         /// <summary>
         /// Register an animation clip so remotes can look it up by hash.
         /// Call this during initialization for all networked animations.
@@ -777,7 +777,7 @@ namespace Arawn.GameCreator2.Networking
         {
             RegisterClipIfNew(clip);
         }
-        
+
         /// <summary>
         /// Register a State asset so remotes can look it up by hash.
         /// </summary>
@@ -799,7 +799,7 @@ namespace Arawn.GameCreator2.Networking
             m_ControllerCache[hash] = controller;
             s_GlobalControllerCache[hash] = controller;
         }
-        
+
         /// <summary>
         /// Register multiple clips at once.
         /// </summary>
@@ -810,7 +810,7 @@ namespace Arawn.GameCreator2.Networking
                 RegisterClip(clip);
             }
         }
-        
+
         /// <summary>
         /// Register multiple states at once.
         /// </summary>
@@ -832,19 +832,19 @@ namespace Arawn.GameCreator2.Networking
                 RegisterRuntimeController(controller);
             }
         }
-        
+
         // PRIVATE METHODS: -----------------------------------------------------------------------
-        
+
         private bool CanSendState()
         {
             return Time.time - m_LastStateTime >= 1f / m_MaxStateRate;
         }
-        
+
         private bool CanSendGesture()
         {
             return Time.time - m_LastGestureTime >= 1f / m_MaxGestureRate;
         }
-        
+
         private bool TryGetClip(int hash, out AnimationClip clip)
         {
             // Try local cache first
@@ -852,9 +852,9 @@ namespace Arawn.GameCreator2.Networking
             {
                 return clip != null;
             }
-	            
+
             // Try registry
-            if (m_AnimationRegistry != null && 
+            if (m_AnimationRegistry != null &&
                 m_AnimationRegistry.TryGetEntry(hash, out var entry))
             {
                 clip = entry.Clip;
@@ -870,7 +870,7 @@ namespace Arawn.GameCreator2.Networking
                 m_ClipCache[hash] = clip;
                 return true;
             }
-	            
+
             clip = null;
             return false;
         }
@@ -1520,7 +1520,7 @@ namespace Arawn.GameCreator2.Networking
             string characterName = m_Character != null ? m_Character.name : name;
             Debug.Log($"[NetworkStateDebug][AnimimController] {characterName}: {message}", this);
         }
-        
+
         private bool TryGetState(int hash, out State state)
         {
             // Try local cache first
@@ -1528,9 +1528,9 @@ namespace Arawn.GameCreator2.Networking
             {
                 return state != null;
             }
-            
+
             // Try registry
-            if (m_AnimationRegistry != null && 
+            if (m_AnimationRegistry != null &&
                 m_AnimationRegistry.TryGetEntry(hash, out var entry))
             {
                 state = entry.StateAsset;
@@ -1547,7 +1547,7 @@ namespace Arawn.GameCreator2.Networking
                 m_StateCache[hash] = state;
                 return true;
             }
-            
+
             state = null;
             return false;
         }
