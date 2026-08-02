@@ -243,7 +243,20 @@ namespace Arawn.GameCreator2.Networking.Traversal
                 return;
             }
 
-            Vector3 anchorPosition = interactive.MotionInteractive.CharacterPosition(character);
+            // Rebuild the traversal anchor from the accepted network root using the exact
+            // inverse of MotionInteractive's Driver.SetPosition conversion. CharacterPosition
+            // is intended for initial placement and subtracts Driver.SkinWidth; using it for
+            // every accepted owner pose makes the server write that skin-width offset back on
+            // its next interactive update, producing a vertical owner/server feedback loop.
+            float halfHeight = character.Motion.Height * 0.5f;
+            Vector3 anchorOffset = interactive.MotionInteractive.Anchor switch
+            {
+                Anchor.Crown => Vector3.up * halfHeight,
+                Anchor.Center => Vector3.zero,
+                Anchor.Feet => Vector3.down * halfHeight,
+                _ => throw new ArgumentOutOfRangeException()
+            };
+            Vector3 anchorPosition = ownerAuthorityPosition + anchorOffset;
             Vector3 localPosition = interactive.Transform.InverseTransformPoint(anchorPosition);
             Vector3 previousRelative = s_TraversalStanceRelativePositionProperty.GetValue(stance) is Vector3 previous
                 ? previous

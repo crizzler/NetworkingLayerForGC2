@@ -1245,6 +1245,85 @@ namespace Arawn.GameCreator2.Networking.Traversal.Tests
             }
         }
 
+        [TestCase(Anchor.Crown)]
+        [TestCase(Anchor.Center)]
+        [TestCase(Anchor.Feet)]
+        public void OwnerAuthorityRelativePose_RoundTripsRootWithoutSkinWidthDrift(Anchor anchor)
+        {
+            const float skinWidth = 0.08f;
+            GameObject characterObject = Track(new GameObject($"Owner Pose {anchor} Character"));
+            Character character = characterObject.AddComponent<Character>();
+            var driver = new UnitDriverNetworkServer();
+            SetPrivateField(driver, "m_SkinWidth", skinWidth);
+            SetPrivateField(character.Kernel, "m_Driver", driver);
+            driver.OnStartup(character);
+            InvokePrivateResult(character.Combat, "OnStartup", character);
+
+            Assert.That(character.Driver.SkinWidth, Is.EqualTo(skinWidth).Within(0.0001f));
+
+            TraverseInteractive interactive = CreateInteractive($"Owner Pose {anchor} Traverse");
+            MotionInteractive motion = Track(ScriptableObject.CreateInstance<MotionInteractive>());
+            SetPrivateField(motion, "m_Anchor", anchor);
+            SetPrivateField(interactive, "m_Motion", motion);
+            SetPrivateField(interactive, "m_Width", 4f);
+            SetPrivateField(interactive, "m_PositionA", -2f);
+            SetPrivateField(interactive, "m_PositionB", 2f);
+
+            // Free-climb traversal uses local Z as its vertical axis. With an identity rotation,
+            // the erroneous world-space skin offset would land on local Y and be hidden by the
+            // traversal plane clamp, so preserve the production orientation in this regression.
+            interactive.transform.SetPositionAndRotation(
+                new Vector3(4f, 2f, -3f),
+                Quaternion.Euler(-90f, 0f, 0f));
+
+            Vector3 expectedRelative = new Vector3(0.5f, 0f, 1.25f);
+            Vector3 expectedAnchor = interactive.Transform.TransformPoint(expectedRelative);
+            float halfHeight = character.Motion.Height * 0.5f;
+            Vector3 anchorOffset = anchor switch
+            {
+                Anchor.Crown => Vector3.up * halfHeight,
+                Anchor.Center => Vector3.zero,
+                Anchor.Feet => Vector3.down * halfHeight,
+                _ => throw new System.ArgumentOutOfRangeException(nameof(anchor), anchor, null)
+            };
+            Vector3 ownerRoot = expectedAnchor - anchorOffset;
+            character.transform.position = ownerRoot;
+            Physics.SyncTransforms();
+
+            TraversalStance stance = character.Combat.RequestStance<TraversalStance>();
+            Assert.That(
+                stance.NetworkRestoreInteractiveSnapshot(interactive, Vector3.zero),
+                Is.True);
+
+            InvokePrivateStaticResult(
+                typeof(NetworkTraversalManager),
+                "SyncTraversalRelativePositionFromOwnerAuthority",
+                character,
+                ownerRoot);
+
+            Vector3 actualRelative = (Vector3)GetProperty(stance, "RelativePosition");
+            Assert.That(
+                Vector3.Distance(actualRelative, expectedRelative),
+                Is.LessThan(0.0001f),
+                "Accepted owner roots must not store CharacterPosition's skin-width offset");
+
+            Vector3 driverOffset = anchor switch
+            {
+                Anchor.Crown => Vector3.down * character.Motion.Height,
+                Anchor.Center => Vector3.down * halfHeight,
+                Anchor.Feet => Vector3.zero,
+                _ => throw new System.ArgumentOutOfRangeException(nameof(anchor), anchor, null)
+            };
+            character.Driver.SetPosition(
+                interactive.Transform.TransformPoint(actualRelative) + driverOffset,
+                teleport: true);
+
+            Assert.That(
+                Vector3.Distance(character.transform.position, ownerRoot),
+                Is.LessThan(0.0001f),
+                "The next server MotionInteractive update must not move the accepted owner root");
+        }
+
         [Test]
         public async Task LedgeAnimationOverride_HoldsIntentPoseAtBoundaryAndUsesOnlyShortReleaseMemory()
         {

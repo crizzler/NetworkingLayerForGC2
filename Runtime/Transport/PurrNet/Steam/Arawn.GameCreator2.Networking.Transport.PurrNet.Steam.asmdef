@@ -1,0 +1,23 @@
+{
+    "name": "Arawn.GameCreator2.Networking.Transport.PurrNet.Steam",
+    "rootNamespace": "Arawn.GameCreator2.Networking.Transport.PurrNet.Steam",
+    "references": [
+        "Arawn.GameCreator2.Networking.Transport.PurrNet",
+        "GUID:68bd7fdb68ef2684e982e8a9825b18a5"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [
+        {
+            "name": "com.rlabrecque.steamworks.net",
+            "expression": "",
+            "define": "ARAWN_STEAMWORKS_NET_PACKAGE"
+        }
+    ],
+    "noEngineReferences": false
+}

@@ -7,19 +7,20 @@ using UnityEngine;
 namespace Arawn.GameCreator2.Networking
 {
     /// <summary>
-    /// GC2 Instruction that fires a networked trigger by name via
-    /// <see cref="NetworkTriggerController"/>. The trigger is broadcast
-    /// to all connected peers.
+    /// Legacy GC2 Instruction that invokes a registered trigger locally. A custom transport
+    /// relay may subscribe to <see cref="NetworkTriggerController.OnTriggerBroadcastRequested"/>,
+    /// but the bundled transports intentionally do not execute arbitrary remote triggers.
     /// </summary>
-    [Title("Invoke Network Trigger")]
-    [Description("Fires a named trigger on the NetworkTriggerController, broadcasting to all peers")]
+    [Obsolete("Legacy local/custom-transport hook. Use typed network Instructions for gameplay.")]
+    [Title("Invoke Legacy Network Trigger (Local Only)")]
+    [Description("Invokes a legacy registered trigger locally; requires custom code to relay it")]
 
-    [Category("Network/Triggers/Invoke Network Trigger")]
+    [Category("Network/Legacy/Invoke Registered Trigger (Local Only)")]
 
     [Parameter("Trigger Name", "The unique name of the trigger to fire")]
     [Parameter("Target", "GameObject with the NetworkTriggerController (defaults to Self)")]
 
-    [Keywords("Network", "Trigger", "Broadcast", "Fire", "Invoke", "RPC")]
+    [Keywords("Network", "Legacy", "Trigger", "Custom Transport", "Local")]
 
     [Image(typeof(IconTriggers), ColorTheme.Type.Blue)]
     [Serializable]
@@ -34,6 +35,7 @@ namespace Arawn.GameCreator2.Networking
         [SerializeField]
         [Tooltip("The target with the NetworkTriggerController (defaults to Self)")]
         private PropertyGetGameObject m_Target = GetGameObjectSelf.Create();
+        [NonSerialized] private bool m_HasWarnedMissingRelay;
 
         // PROPERTIES: ----------------------------------------------------------------------------
 
@@ -58,8 +60,18 @@ namespace Arawn.GameCreator2.Networking
                 return DefaultResult;
             }
 
-            // Execute locally — the controller's EventBeforeExecute interception
-            // will broadcast to the network automatically
+            if (!controller.HasBroadcastRelay && !m_HasWarnedMissingRelay)
+            {
+                m_HasWarnedMissingRelay = true;
+                Debug.LogWarning(
+                    "[InstructionInvokeNetworkTrigger] No custom broadcast relay is attached. " +
+                    "The trigger will execute locally only. Use typed network Instructions for " +
+                    "authoritative gameplay.",
+                    controller);
+            }
+
+            // Execute locally. A custom relay can observe EventBeforeExecute through the
+            // controller, but built-in transports deliberately do not relay this operation.
             var trigger = controller.GetTriggerByName(triggerName);
             if (trigger != null)
             {

@@ -38,7 +38,9 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
         }
 
         [Header("References")]
-        [Tooltip("Optional reference to a specific NetworkManager. Leave empty to use NetworkManager.main.")]
+        [InspectorName("PurrNet Network Manager (Optional Scene Override)")]
+        [Tooltip("Optional PurrNet.NetworkManager scene-instance override. Leave empty on prefab assets: " +
+                 "Unity cannot store a scene reference on a prefab, and runtime auto-resolution uses NetworkManager.main.")]
         [SerializeField] private NetworkManager m_NetworkManager;
 
         [Header("Ownership")]
@@ -52,24 +54,38 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
         [Tooltip("When using NetworkIdentity ownership, wait for PurrNet to spawn the identity and replicate its owner before initializing.")]
         [SerializeField] private bool m_WaitForNetworkIdentityOwner = true;
 
-        [Tooltip("Maximum time to wait for the host client half or NetworkIdentity ownership before falling back.")]
+        [Tooltip("Maximum time to wait for the host client half or NetworkIdentity ownership before falling back to Owner Mode.")]
         [Min(0.5f)]
         [SerializeField] private float m_StartupWaitTimeout = 8f;
 
         private NetworkCharacter m_Character;
         private NetworkIdentity m_Identity;
-        private bool m_Hooked;
+        private NetworkManager m_HookedManager;
+        private NetworkManager m_InitializedManager;
         private bool m_Initialized;
+        private bool m_InitializedUsingOwnerModeFallback;
         private Coroutine m_PendingInit;
         private PlayerID? m_SpawnedOwnerHint;
+        private bool m_MissingManagerWarningLogged;
+        private bool m_OwnerFallbackWarningLogged;
 
-        private NetworkManager ActiveManager => m_NetworkManager ? m_NetworkManager : NetworkManager.main;
+        private NetworkManager ActiveManager
+        {
+            get
+            {
+                if (m_NetworkManager != null) return m_NetworkManager;
+
+                // Normalize Unity's destroyed-object pseudo-null so reference-based
+                // manager change detection cannot mistake it for a live instance.
+                NetworkManager main = NetworkManager.main;
+                return main != null ? main : null;
+            }
+        }
 
         private void Awake()
         {
             m_Character = GetComponent<NetworkCharacter>();
             m_Identity = GetComponentInParent<NetworkIdentity>();
-            if (m_NetworkManager == null) m_NetworkManager = NetworkManager.main;
         }
 
         public void SetSpawnedOwnerHint(PlayerID owner)
@@ -102,6 +118,34 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
             ScheduleDeferredInit();
         }
 
+        private void Update()
+        {
+            NetworkManager manager = ActiveManager;
+            bool initializedManagerChanged =
+                m_Initialized && !ReferenceEquals(m_InitializedManager, manager);
+            if (!ReferenceEquals(m_HookedManager, manager) || initializedManagerChanged)
+            {
+                // NetworkManager.main can change when a bootstrap scene is replaced.
+                // A role derived from the previous manager is no longer valid.
+                if (m_Initialized)
+                {
+                    ResetInitializedRole();
+                }
+
+                TryHook();
+                ScheduleDeferredInit();
+                return;
+            }
+
+            // OwnerMode is only a timeout escape hatch. If PurrNet ownership arrives
+            // later, converge back to the identity-derived role instead of keeping a
+            // spawned player permanently classified by the fallback.
+            if (m_Initialized && m_InitializedUsingOwnerModeFallback)
+            {
+                RefreshResolvedIdentityOwner();
+            }
+        }
+
         private void OnDisable()
         {
             if (m_PendingInit != null)
@@ -110,20 +154,35 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
                 m_PendingInit = null;
             }
 
-            var nm = ActiveManager;
-            if (nm == null || !m_Hooked) return;
-            nm.onNetworkStarted -= OnNetworkStarted;
-            nm.onNetworkShutdown -= OnNetworkShutdown;
-            m_Hooked = false;
+            UnhookNetworkManager();
+            if (m_Initialized) ResetInitializedRole();
+            m_SpawnedOwnerHint = null;
+            m_OwnerFallbackWarningLogged = false;
         }
 
         private void TryHook()
         {
             var nm = ActiveManager;
-            if (nm == null || m_Hooked) return;
+            if (ReferenceEquals(m_HookedManager, nm)) return;
+
+            UnhookNetworkManager();
+            if (nm == null) return;
+
             nm.onNetworkStarted += OnNetworkStarted;
             nm.onNetworkShutdown += OnNetworkShutdown;
-            m_Hooked = true;
+            m_HookedManager = nm;
+        }
+
+        private void UnhookNetworkManager()
+        {
+            var nm = m_HookedManager;
+            if (nm != null)
+            {
+                nm.onNetworkStarted -= OnNetworkStarted;
+                nm.onNetworkShutdown -= OnNetworkShutdown;
+            }
+
+            m_HookedManager = null;
         }
 
         private void OnNetworkStarted(NetworkManager manager, bool asServer)
@@ -135,20 +194,33 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
             // applied every server tick -> visible "falling" / lost-ground feel on
             // the host's own character). We defer one frame so both isServer and
             // isClient have settled before we ResolveRole.
+            if (m_Initialized)
+            {
+                // This can also be the second half of a topology change on the same
+                // manager (for example StartClient after a server-only session).
+                ResetInitializedRole();
+            }
+
             ScheduleDeferredInit();
         }
 
         private void OnNetworkShutdown(NetworkManager manager, bool asServer)
         {
-            // Allow re-init on next session.
-            m_Initialized = false;
             if (m_PendingInit != null)
             {
                 StopCoroutine(m_PendingInit);
                 m_PendingInit = null;
             }
 
-            m_Character?.ResetNetworkRole();
+            // Allow re-init on the remaining half or next session.
+            ResetInitializedRole();
+
+            // PurrNet reports the client and server halves independently. If one
+            // half remains alive, rebuild the role for that remaining topology.
+            if (manager != null && (manager.isServer || manager.isClient))
+            {
+                ScheduleDeferredInit();
+            }
         }
 
         private void ScheduleDeferredInit()
@@ -165,6 +237,34 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
             // server and client modules before we look at nm.isHost / isServer / isClient.
             yield return null;
 
+            // A prefab cannot hold a scene-manager reference, so its normal path is
+            // NetworkManager.main. Additive scenes and runtime-created managers can
+            // publish that instance after this component's Start. Keep looking rather
+            // than silently abandoning character initialization after one frame.
+            float managerWarningDeadline =
+                Time.unscaledTime + Mathf.Max(0.5f, m_StartupWaitTimeout);
+            while (ActiveManager == null)
+            {
+                TryHook();
+
+                if (!m_MissingManagerWarningLogged &&
+                    Time.unscaledTime >= managerWarningDeadline)
+                {
+                    m_MissingManagerWarningLogged = true;
+                    Debug.LogError(
+                        "[PurrNetNetworkCharacterAuto] No PurrNet.NetworkManager is available. " +
+                        "Leave the manager override empty on prefab assets and add a " +
+                        "PurrNet/Network Manager to the scene. PurrNet.RawNetManager and " +
+                        "similarly named managers from other packages are not compatible. " +
+                        "Auto-initialization will keep waiting for NetworkManager.main.",
+                        this);
+                }
+
+                yield return null;
+            }
+
+            TryHook();
+
             // If the manager is server-only at this point, also probe a short window
             // for the client side coming up. PurrNet's StartHost registers client
             // modules one frame later, and UDP only flips isClient after the local
@@ -180,6 +280,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
                 }
             }
 
+            bool allowOwnerModeFallback = false;
             if (m_UseNetworkIdentityOwner && HasNetworkIdentity())
             {
                 float deadline = Time.unscaledTime + Mathf.Max(0.5f, m_StartupWaitTimeout);
@@ -187,16 +288,33 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
                 {
                     yield return null;
                 }
+
+                // The timeout is an actual fallback boundary. Previously the routine
+                // reached this point, called TryInitializeNow without carrying the
+                // timeout state, and immediately began another full wait forever.
+                allowOwnerModeFallback = ShouldWaitForNetworkIdentityOwner();
+                if (allowOwnerModeFallback && !m_OwnerFallbackWarningLogged)
+                {
+                    m_OwnerFallbackWarningLogged = true;
+                    Debug.LogWarning(
+                        "[PurrNetNetworkCharacterAuto] NetworkIdentity ownership did not " +
+                        $"become available within {Mathf.Max(0.5f, m_StartupWaitTimeout):0.##} seconds. " +
+                        $"Falling back to Owner Mode '{m_OwnerMode}'. Ensure spawned player " +
+                        "prefabs are given PurrNet ownership; legacy scene-placed characters " +
+                        "may intentionally use this fallback.",
+                        this);
+                }
             }
 
             m_PendingInit = null;
-            if (!TryInitializeNow() && ShouldRetryInitialization())
+            TryHook();
+            if (!TryInitializeNow(allowOwnerModeFallback) && ShouldRetryInitialization())
             {
                 ScheduleDeferredInit();
             }
         }
 
-        private bool TryInitializeNow()
+        private bool TryInitializeNow(bool allowOwnerModeFallback = false)
         {
             if (m_Initialized) return true;
             if (m_Character == null) return false;
@@ -213,33 +331,104 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
             bool isServer = serverActive;
             bool isHost = nm.isHost;
 
-            bool isOwner;
-            if (TryResolveNetworkIdentityOwner(nm, out bool identityOwner, out bool identityReady))
+            bool identityApplicable =
+                TryResolveNetworkIdentityOwner(nm, out bool identityOwner, out bool identityReady);
+            if (!TryResolveInitializationOwner(
+                    identityApplicable,
+                    identityReady,
+                    identityOwner,
+                    m_WaitForNetworkIdentityOwner,
+                    allowOwnerModeFallback,
+                    m_OwnerMode,
+                    isServer,
+                    clientActive,
+                    isHost,
+                    out bool isOwner))
             {
-                if (!identityReady && m_WaitForNetworkIdentityOwner)
+                return false;
+            }
+
+            m_Character.InitializeNetworkRole(isServer, isOwner, isHost);
+            m_Initialized = true;
+            m_InitializedManager = nm;
+            m_InitializedUsingOwnerModeFallback = identityApplicable && !identityReady;
+            return true;
+        }
+
+        private void RefreshResolvedIdentityOwner()
+        {
+            NetworkManager manager = ActiveManager;
+            if (manager == null || (!manager.isServer && !manager.isClient)) return;
+
+            bool identityApplicable =
+                TryResolveNetworkIdentityOwner(manager, out _, out bool identityReady);
+            if (!identityApplicable || !identityReady) return;
+
+            ResetInitializedRole();
+
+            // Ownership is ready now, so this does not enter the fallback path again.
+            if (!TryInitializeNow() && ShouldRetryInitialization())
+            {
+                ScheduleDeferredInit();
+            }
+        }
+
+        private void ResetInitializedRole()
+        {
+            m_Initialized = false;
+            m_InitializedManager = null;
+            m_InitializedUsingOwnerModeFallback = false;
+            m_Character?.ResetNetworkRole();
+        }
+
+        private static bool TryResolveInitializationOwner(
+            bool identityApplicable,
+            bool identityReady,
+            bool identityOwner,
+            bool waitForIdentityOwner,
+            bool allowOwnerModeFallback,
+            OwnerMode ownerMode,
+            bool isServer,
+            bool isClient,
+            bool isHost,
+            out bool isOwner)
+        {
+            if (identityApplicable)
+            {
+                if (identityReady)
                 {
-                    return false;
+                    isOwner = identityOwner;
+                    return true;
                 }
 
-                isOwner = identityOwner;
+                if (waitForIdentityOwner && !allowOwnerModeFallback)
+                {
+                    isOwner = false;
+                    return false;
+                }
             }
-            else switch (m_OwnerMode)
+
+            isOwner = ResolveOwnerMode(ownerMode, isServer, isClient, isHost);
+            return true;
+        }
+
+        private static bool ResolveOwnerMode(
+            OwnerMode ownerMode,
+            bool isServer,
+            bool isClient,
+            bool isHost)
+        {
+            switch (ownerMode)
             {
                 case OwnerMode.Everyone:
-                    isOwner = true;
-                    break;
+                    return true;
                 case OwnerMode.HostOnly:
                 default:
                     // Single-character demo: only the hosting peer owns and authoritatively
                     // simulates this character. Joining clients see it as a remote character
                     // and receive state from the host.
-                    isOwner = isHost || (isServer && !clientActive);
-                    break;
+                    return isHost || (isServer && !isClient);
             }
-
-            m_Character.InitializeNetworkRole(isServer, isOwner, isHost);
-            m_Initialized = true;
-            return true;
         }
 
         private bool HasNetworkIdentity()
@@ -253,9 +442,11 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
             if (nm == null || !nm.isServer || nm.isClient) return false;
 
             // StartHost() has a short window where the server is up but the client
-            // coroutine has not yet flipped clientState/pendingHost. Wait the budget
-            // here instead of resolving a host-owned spawned identity as server-only.
-            return true;
+            // coroutine has not yet flipped isClient. By the next frame StartClient()
+            // has moved clientState away from Disconnected, which pendingHost exposes.
+            // A true dedicated server leaves clientState disconnected and should not
+            // pay the full host startup timeout.
+            return nm.pendingHost;
         }
 
         private bool ShouldWaitForNetworkIdentityOwner()
@@ -302,7 +493,6 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
             {
                 if (!nm.isLocalPlayerReady)
                 {
-                    isReady = !m_WaitForNetworkIdentityOwner;
                     return true;
                 }
 
@@ -319,7 +509,6 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
 
                 if (!hasClientOwner && !hasServerOwner)
                 {
-                    isReady = !m_WaitForNetworkIdentityOwner;
                     return true;
                 }
 
@@ -334,7 +523,6 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
             {
                 if (!TryGetIdentityOwner(nm, true, out _))
                 {
-                    isReady = !m_WaitForNetworkIdentityOwner;
                     return true;
                 }
 
@@ -346,7 +534,6 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
 
             if (!m_Identity.owner.HasValue)
             {
-                isReady = !m_WaitForNetworkIdentityOwner;
                 return true;
             }
 
@@ -366,7 +553,9 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
         private bool ShouldRetryInitialization()
         {
             var nm = ActiveManager;
-            if (nm == null) return false;
+            // A delayed/additively loaded manager is a supported setup. The pending
+            // coroutine waits without allocating a fresh coroutine every frame.
+            if (nm == null) return true;
             if (nm.isServer || nm.isClient) return true;
             return nm.serverState != ConnectionState.Disconnected ||
                    nm.clientState != ConnectionState.Disconnected;

@@ -22,7 +22,7 @@ Patch menu:
 
 For PurrNet projects, enable **Dialogue** on the PurrNet wizard Modules page. The wizard creates/reuses `NetworkDialogueManager` and `PurrNetDialogueTransportBridge`.
 
-`NetworkDialogueController` is usually not added to the Player Prefab because most GC2 dialogue endpoints live on NPCs or scene objects. Add one controller to each networked dialogue endpoint you want synchronized, or use the PurrNet demo scene creator for a generated test NPC.
+`NetworkDialogueController` is usually not added to the Player Prefab because most GC2 dialogue endpoints live on NPCs or scene objects. Add one controller to each networked dialogue endpoint you want synchronized. The included PurrNet Dialogue demo contains a preconfigured scene NPC for reference.
 
 `NetworkDialogueController` needs:
 
@@ -43,7 +43,7 @@ Most GC2 projects put `Dialogue` components on NPCs or scene objects, not on pla
 
 For NPC/scene dialogue, leave `Network Character` empty, set the authority mode to `ServerOwnedNpc` or `GlobalScene`, and keep automatic ids enabled unless you need a hand-authored stable id. Network instructions expose both a `Dialogue` target and an `Actor` field: set `Dialogue` to the NPC/scene object and `Actor` to the player initiating the conversation.
 
-The PurrNet demo scene creator builds a `Scene Network Dialogue NPC` object with a `Dialogue` component and `NetworkDialogueController`. The generated T/Y/U/I test instructions target that scene object and use the local player as the requesting actor.
+The included PurrNet Dialogue demo contains a `Scene Network Dialogue NPC` object with a `Dialogue` component and `NetworkDialogueController`. Its T/Y/U/I test instructions target that scene object and use the local player as the requesting actor.
 
 ## Transport Wiring
 
@@ -51,7 +51,7 @@ PurrNet users can add manually, or let the PurrNet wizard create:
 
 - `PurrNetDialogueTransportBridge`
 
-The PurrNet wizard and demo scene creator add this bridge automatically when the Dialogue transport assembly is available.
+The PurrNet wizard adds this bridge automatically when the Dialogue transport assembly is available; the included Dialogue demo scene is already wired.
 
 Wire the manager delegates to your transport layer:
 

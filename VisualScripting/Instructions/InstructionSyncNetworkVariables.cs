@@ -7,16 +7,15 @@ using UnityEngine;
 namespace Arawn.GameCreator2.Networking
 {
     /// <summary>
-    /// GC2 Instruction that forces a full variable snapshot broadcast via
-    /// <see cref="NetworkVariableSync"/>. Useful after batch-setting
-    /// variables or during ownership transfer.
+    /// Authority-only GC2 Instruction that builds a snapshot from the current profiled
+    /// variable manager and broadcasts it through the active transport adapter.
     /// </summary>
     [Title("Sync Network Variables")]
-    [Description("Forces a full snapshot broadcast of all networked variables on the target")]
+    [Description("Broadcasts the current profiled network-variable state from the logical authority")]
 
     [Category("Network/Variables/Sync Network Variables")]
 
-    [Parameter("Target", "GameObject with the NetworkVariableSync (defaults to Self)")]
+    [Parameter("Manager", "Optional GameObject with the Network Variable Manager; otherwise uses the active manager")]
 
     [Keywords("Network", "Variable", "Sync", "Snapshot", "Broadcast", "Force")]
 
@@ -27,8 +26,8 @@ namespace Arawn.GameCreator2.Networking
         // MEMBERS: -------------------------------------------------------------------------------
 
         [SerializeField]
-        [Tooltip("The target with the NetworkVariableSync (defaults to Self)")]
-        private PropertyGetGameObject m_Target = GetGameObjectSelf.Create();
+        [Tooltip("Optional target with the current Network Variable Manager")]
+        private PropertyGetGameObject m_Target = new PropertyGetGameObject();
 
         // PROPERTIES: ----------------------------------------------------------------------------
 
@@ -39,18 +38,26 @@ namespace Arawn.GameCreator2.Networking
         protected override Task Run(Args args)
         {
             GameObject target = m_Target.Get(args);
-            if (target == null) target = args.Self;
-            if (target == null) return DefaultResult;
+            NetworkVariableManager manager = target != null
+                ? target.GetComponent<NetworkVariableManager>()
+                : null;
+            if (manager == null) manager = NetworkVariableManager.Instance;
 
-            var sync = target.GetComponent<NetworkVariableSync>();
-            if (sync == null)
+            if (manager == null)
             {
-                Debug.LogWarning($"[InstructionSyncNetworkVariables] " +
-                                 $"No NetworkVariableSync on {target.name}");
+                Debug.LogWarning(
+                    "[InstructionSyncNetworkVariables] No NetworkVariableManager is available.");
                 return DefaultResult;
             }
 
-            sync.BroadcastFullSnapshot();
+            if (!manager.BroadcastFullSnapshot())
+            {
+                Debug.LogWarning(
+                    "[InstructionSyncNetworkVariables] The snapshot was not broadcast. " +
+                    "Run this instruction on the logical network authority and verify the Variables transport adapter.",
+                    manager);
+            }
+
             return DefaultResult;
         }
     }

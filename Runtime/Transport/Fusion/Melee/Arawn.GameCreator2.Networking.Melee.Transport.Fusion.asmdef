@@ -1,0 +1,28 @@
+{
+    "name": "Arawn.GameCreator2.Networking.Melee.Transport.Fusion",
+    "rootNamespace": "Arawn.GameCreator2.Networking.Melee.Transport.Fusion",
+    "references": [
+        "Arawn.GameCreator2.Networking",
+        "Arawn.GameCreator2.Networking.Melee",
+        "Arawn.GameCreator2.Networking.Transport.Fusion",
+        "GameCreator.Runtime.Core",
+        "GameCreator.Runtime.Melee"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [
+        "GC2_MELEE"
+    ],
+    "versionDefines": [
+        {
+            "name": "com.gamecreator.melee",
+            "expression": "",
+            "define": "GC2_MELEE"
+        }
+    ],
+    "noEngineReferences": false
+}

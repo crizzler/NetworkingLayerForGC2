@@ -9,7 +9,8 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
     [DefaultExecutionOrder(-395)]
     public sealed class PurrNetAnimationMotionTransportBridge : MonoBehaviour
     {
-        [Tooltip("Optional reference to a specific NetworkManager. Leave empty to use NetworkManager.main.")]
+        [InspectorName("PurrNet Network Manager (Optional Scene Override)")]
+        [Tooltip("Optional PurrNet.NetworkManager scene-instance override. Leave empty to use NetworkManager.main.")]
         [SerializeField] private NetworkManager m_NetworkManager;
 
         [Tooltip("Reliable channel used for one-shot animation and semantic motion commands.")]
@@ -22,22 +23,31 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
 
         private bool m_SubscribedServer;
         private bool m_SubscribedClient;
+        private NetworkManager m_HookedManager;
         private bool m_ManagersInitialized;
         private bool m_LastServer;
         private bool m_LastClient;
 
-        private NetworkManager ActiveManager => m_NetworkManager ? m_NetworkManager : NetworkManager.main;
+        private NetworkManager ActiveManager
+        {
+            get
+            {
+                if (m_NetworkManager != null) return m_NetworkManager;
+                NetworkManager main = NetworkManager.main;
+                return main != null ? main : null;
+            }
+        }
 
         public void Configure(NetworkManager networkManager)
         {
-            if (networkManager != null) m_NetworkManager = networkManager;
+            if (networkManager != null && m_NetworkManager != networkManager)
+            {
+                UnhookNetworkManager();
+                m_NetworkManager = networkManager;
+            }
+
             TryHookNetworkManager();
             WireManagers();
-        }
-
-        private void Awake()
-        {
-            if (m_NetworkManager == null) m_NetworkManager = NetworkManager.main;
         }
 
         private void OnEnable()
@@ -54,13 +64,19 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
 
         private void Update()
         {
-            if (ActiveManager == null) TryHookNetworkManager();
+            if (!ReferenceEquals(m_HookedManager, ActiveManager)) TryHookNetworkManager();
             WireManagers();
         }
 
         private void OnDisable()
         {
-            var nm = ActiveManager;
+            UnhookNetworkManager();
+            UnwireManagers();
+        }
+
+        private void UnhookNetworkManager()
+        {
+            var nm = m_HookedManager;
             if (nm != null)
             {
                 nm.onNetworkStarted -= HandleNetworkStarted;
@@ -79,18 +95,21 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
                 }
             }
 
-            UnwireManagers();
+            m_SubscribedServer = false;
+            m_SubscribedClient = false;
+            m_HookedManager = null;
         }
 
         private void TryHookNetworkManager()
         {
             var nm = ActiveManager;
+            if (ReferenceEquals(m_HookedManager, nm)) return;
+
+            UnhookNetworkManager();
             if (nm == null) return;
 
-            nm.onNetworkStarted -= HandleNetworkStarted;
+            m_HookedManager = nm;
             nm.onNetworkStarted += HandleNetworkStarted;
-
-            nm.onNetworkShutdown -= HandleNetworkShutdown;
             nm.onNetworkShutdown += HandleNetworkShutdown;
 
             if (nm.isServer) HandleNetworkStarted(nm, true);

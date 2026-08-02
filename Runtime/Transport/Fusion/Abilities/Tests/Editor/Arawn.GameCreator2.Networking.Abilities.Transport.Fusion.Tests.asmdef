@@ -1,0 +1,31 @@
+{
+    "name": "Arawn.GameCreator2.Networking.Abilities.Transport.Fusion.Tests",
+    "rootNamespace": "Arawn.GameCreator2.Networking.Abilities.Transport.Fusion.Tests",
+    "references": [
+        "Arawn.GameCreator2.Networking",
+        "Arawn.GameCreator2.Networking.Abilities",
+        "Arawn.GameCreator2.Networking.Abilities.Transport.Fusion"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": true,
+    "precompiledReferences": [
+        "nunit.framework.dll"
+    ],
+    "autoReferenced": false,
+    "defineConstraints": [
+        "UNITY_INCLUDE_TESTS",
+        "GC2_ABILITIES"
+    ],
+    "versionDefines": [
+        {
+            "name": "com.daimahougames.abilities",
+            "expression": "",
+            "define": "GC2_ABILITIES"
+        }
+    ],
+    "noEngineReferences": false
+}

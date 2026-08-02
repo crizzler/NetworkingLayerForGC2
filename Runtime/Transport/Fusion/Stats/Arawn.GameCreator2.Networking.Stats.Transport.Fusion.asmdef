@@ -1,0 +1,28 @@
+{
+    "name": "Arawn.GameCreator2.Networking.Stats.Transport.Fusion",
+    "rootNamespace": "Arawn.GameCreator2.Networking.Stats.Transport.Fusion",
+    "references": [
+        "Arawn.GameCreator2.Networking",
+        "Arawn.GameCreator2.Networking.Stats",
+        "Arawn.GameCreator2.Networking.Transport.Fusion",
+        "GameCreator.Runtime.Core",
+        "GameCreator.Runtime.Stats"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [
+        "GC2_STATS"
+    ],
+    "versionDefines": [
+        {
+            "name": "com.gamecreator.stats",
+            "expression": "",
+            "define": "GC2_STATS"
+        }
+    ],
+    "noEngineReferences": false
+}

@@ -3,7 +3,7 @@
 Server-authoritative networking for Game Creator 2 Core character features.
 
 For the local UI, cosmetic effect, attached prop, and network-object decision
-guide, see [Spawning Prefabs and UI in Multiplayer](../Documentation/spawning-prefabs-and-ui-in-multiplayer.md).
+guide, see the [online documentation](../Documentation/Online%20Documentation.md).
 
 ## Features Covered
 

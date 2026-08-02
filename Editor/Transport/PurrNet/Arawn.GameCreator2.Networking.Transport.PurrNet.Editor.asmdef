@@ -4,6 +4,7 @@
     "references": [
         "Arawn.GameCreator2.Networking",
         "Arawn.GameCreator2.Networking.Editor",
+        "Arawn.GameCreator2.Networking.Lobby",
         "Arawn.GameCreator2.Networking.Transport.PurrNet",
         "PurrNet.Runtime",
         "PurrNet.Editor",

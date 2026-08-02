@@ -1,1 +1,1 @@
-GC2 Networking Layer aka Multiplayer Integration for Game Creator with Purrnet Version 1.5.1
+GC2 Networking Layer aka Multiplayer Integration for Game Creator 2 Version 1.9.0

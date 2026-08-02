@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using UnityEngine;
 using GameCreator.Runtime.Characters;
+using GameCreator.Runtime.Common;
 using Arawn.GameCreator2.Networking.Security;
 
 namespace Arawn.GameCreator2.Networking
@@ -13,7 +14,16 @@ namespace Arawn.GameCreator2.Networking
         bool IsServer { get; }
         bool IsClient { get; }
         bool IsHost { get; }
+        bool IsRunning { get; }
+        bool IsStarting { get; }
         float ServerTime { get; }
+        NetworkTransportRole Role { get; }
+        IReadOnlyCollection<uint> ConnectedClientIds { get; }
+        string LastSessionError { get; }
+        string LastSessionStopReason { get; }
+
+        bool TryGetLocalClientId(out uint clientId);
+        bool TryGetLocalPlayer(out GameObject player);
 
         void SendToServer(uint characterNetworkId, NetworkInputState[] inputs);
         void SendToOwner(uint ownerClientId, uint characterNetworkId, NetworkPositionState state, float serverTime);
@@ -72,7 +82,17 @@ namespace Arawn.GameCreator2.Networking
         private readonly Dictionary<uint, HashSet<uint>> m_OwnedCharactersByClient = new Dictionary<uint, HashSet<uint>>(32);
         private readonly HashSet<uint> m_UnknownOwnershipWarned = new HashSet<uint>();
         private readonly Dictionary<NetworkCharacter, uint> m_ServerIssuedIds = new Dictionary<NetworkCharacter, uint>(128);
+        private readonly HashSet<uint> m_ObservedConnectedClientIds = new HashSet<uint>();
+        private readonly List<uint> m_ObservedClientScratch = new List<uint>(32);
         private uint m_NextServerIssuedNetworkId = 1;
+        private bool m_LifecycleObservationInitialized;
+        private bool m_ObservedRunning;
+        private bool m_ObservedAuthority;
+        private uint m_ObservedAuthorityEpoch;
+        private GameObject m_ObservedLocalPlayer;
+
+        private static readonly IReadOnlyCollection<uint> s_NoConnectedClients =
+            Array.Empty<uint>();
 
         public static NetworkTransportBridge Active
         {
@@ -91,6 +111,23 @@ namespace Arawn.GameCreator2.Networking
 
         public NetworkSessionProfile GlobalSessionProfile => m_GlobalSessionProfile;
         public Func<uint, uint, bool> RecipientRelevanceFilter { get; set; }
+
+        public virtual bool IsRunning => IsServer || IsClient;
+        public virtual bool IsStarting => false;
+        public virtual IReadOnlyCollection<uint> ConnectedClientIds => s_NoConnectedClients;
+        public virtual string LastSessionError => string.Empty;
+        public virtual string LastSessionStopReason => string.Empty;
+
+        public NetworkTransportRole Role
+        {
+            get
+            {
+                if (!IsRunning) return NetworkTransportRole.Offline;
+                if (IsHost) return NetworkTransportRole.Host;
+                if (IsServer) return NetworkTransportRole.Server;
+                return IsClient ? NetworkTransportRole.Client : NetworkTransportRole.Offline;
+            }
+        }
 
         /// <summary>
         /// Convert a transport sender ID into the GC2 networking client ID domain.
@@ -125,6 +162,31 @@ namespace Arawn.GameCreator2.Networking
         public abstract bool IsHost { get; }
         public abstract float ServerTime { get; }
 
+        public virtual bool TryGetLocalClientId(out uint clientId)
+        {
+            clientId = InvalidClientId;
+            return false;
+        }
+
+        public virtual bool TryGetLocalPlayer(out GameObject player)
+        {
+            player = null;
+            if (!IsRunning || ShortcutPlayer.Instance == null) return false;
+
+            NetworkCharacter networkCharacter =
+                ShortcutPlayer.Instance.GetComponent<NetworkCharacter>();
+            if (networkCharacter == null)
+            {
+                networkCharacter =
+                    ShortcutPlayer.Instance.GetComponentInParent<NetworkCharacter>();
+            }
+
+            if (networkCharacter == null || !networkCharacter.IsLocalPlayer) return false;
+
+            player = ShortcutPlayer.Instance;
+            return true;
+        }
+
         public abstract void SendToServer(uint characterNetworkId, NetworkInputState[] inputs);
         public abstract void SendToOwner(uint ownerClientId, uint characterNetworkId, NetworkPositionState state, float serverTime);
         public abstract void Broadcast(
@@ -153,6 +215,8 @@ namespace Arawn.GameCreator2.Networking
 
         protected virtual void OnDestroy()
         {
+            StopLifecycleObservation();
+
             if (s_Active == this)
             {
                 s_Active = null;
@@ -174,6 +238,21 @@ namespace Arawn.GameCreator2.Networking
             m_OwnedCharactersByClient.Clear();
             m_UnknownOwnershipWarned.Clear();
             m_ServerIssuedIds.Clear();
+        }
+
+        /// <summary>
+        /// Observe normalized lifecycle state after native transport callbacks have completed.
+        /// Derived bridges should avoid hiding this Unity message; override and call base when
+        /// transport-specific late-frame work is required.
+        /// </summary>
+        protected virtual void LateUpdate()
+        {
+            ObserveLifecycle();
+        }
+
+        protected virtual void OnDisable()
+        {
+            StopLifecycleObservation();
         }
 
         public virtual void RegisterCharacter(NetworkCharacter networkCharacter)
@@ -521,6 +600,185 @@ namespace Arawn.GameCreator2.Networking
         protected void RaiseStateReceivedClient(uint characterNetworkId, NetworkPositionState state, float serverTime)
         {
             OnStateReceivedClient?.Invoke(characterNetworkId, state, serverTime);
+        }
+
+        private void ObserveLifecycle()
+        {
+            // Only the globally selected bridge represents the active GC2 session. Ignored
+            // duplicate bridge components must not generate duplicate visual-script events.
+            if (Active != this)
+            {
+                StopLifecycleObservation();
+                return;
+            }
+
+            bool running = IsRunning;
+            bool authority = running && IsServer;
+            GameObject localPlayer = null;
+            if (running)
+            {
+                TryGetLocalPlayer(out localPlayer);
+            }
+
+            if (!m_LifecycleObservationInitialized)
+            {
+                m_LifecycleObservationInitialized = true;
+                m_ObservedRunning = false;
+                m_ObservedAuthority = false;
+                m_ObservedAuthorityEpoch = 0;
+            }
+
+            bool sessionStarted = running && !m_ObservedRunning;
+            bool sessionStopped = !running && m_ObservedRunning;
+            if (sessionStarted || sessionStopped)
+            {
+                m_ObservedRunning = running;
+            }
+
+            if (sessionStarted)
+            {
+                NetworkLifecycleEvents.RaiseSessionStarted(this);
+            }
+
+            // On teardown, publish the payload-bearing loss notifications before the final
+            // SessionStopped marker. This matches OnDestroy and lets stopped-session actions
+            // inspect the final client, player, and authority contexts consistently.
+            if (sessionStopped)
+            {
+                ObserveLocalPlayer(localPlayer);
+                ObserveConnectedClients(false);
+                ObserveLogicalAuthority(false);
+                NetworkLifecycleEvents.RaiseSessionStopped(this);
+                return;
+            }
+
+            ObserveConnectedClients(running);
+            ObserveLogicalAuthority(authority);
+            ObserveLocalPlayer(localPlayer);
+        }
+
+        private void ObserveLogicalAuthority(bool authority)
+        {
+            if (authority == m_ObservedAuthority) return;
+
+            m_ObservedAuthority = authority;
+            m_ObservedAuthorityEpoch++;
+            if (m_ObservedAuthorityEpoch == 0) m_ObservedAuthorityEpoch = 1;
+            NetworkLifecycleEvents.RaiseLogicalAuthorityChanged(
+                this,
+                authority,
+                m_ObservedAuthorityEpoch);
+        }
+
+        private void ObserveLocalPlayer(GameObject localPlayer)
+        {
+            if (!ReferenceEquals(localPlayer, m_ObservedLocalPlayer))
+            {
+                GameObject previous = m_ObservedLocalPlayer;
+                m_ObservedLocalPlayer = localPlayer;
+
+                if (!ReferenceEquals(previous, null))
+                {
+                    NetworkLifecycleEvents.RaiseLocalPlayerLost(this, previous);
+                }
+
+                if (localPlayer != null)
+                {
+                    NetworkLifecycleEvents.RaiseLocalPlayerReady(this, localPlayer);
+                }
+            }
+        }
+
+        private void ObserveConnectedClients(bool running)
+        {
+            m_ObservedClientScratch.Clear();
+            if (running)
+            {
+                IReadOnlyCollection<uint> connectedClients = ConnectedClientIds;
+                if (connectedClients != null)
+                {
+                    foreach (uint clientId in connectedClients)
+                    {
+                        if (!IsValidClientId(clientId)) continue;
+                        if (m_ObservedConnectedClientIds.Contains(clientId)) continue;
+                        m_ObservedConnectedClientIds.Add(clientId);
+                        NetworkLifecycleEvents.RaiseClientConnected(this, clientId);
+                    }
+                }
+            }
+
+            foreach (uint clientId in m_ObservedConnectedClientIds)
+            {
+                if (running && ContainsClient(ConnectedClientIds, clientId)) continue;
+                m_ObservedClientScratch.Add(clientId);
+            }
+
+            for (int i = 0; i < m_ObservedClientScratch.Count; i++)
+            {
+                uint clientId = m_ObservedClientScratch[i];
+                m_ObservedConnectedClientIds.Remove(clientId);
+                NetworkLifecycleEvents.RaiseClientDisconnected(this, clientId);
+            }
+        }
+
+        private void StopLifecycleObservation()
+        {
+            if (!m_LifecycleObservationInitialized) return;
+
+            m_ObservedClientScratch.Clear();
+
+            if (!ReferenceEquals(m_ObservedLocalPlayer, null))
+            {
+                NetworkLifecycleEvents.RaiseLocalPlayerLost(this, m_ObservedLocalPlayer);
+                m_ObservedLocalPlayer = null;
+            }
+
+            foreach (uint clientId in m_ObservedConnectedClientIds)
+            {
+                m_ObservedClientScratch.Add(clientId);
+            }
+
+            for (int i = 0; i < m_ObservedClientScratch.Count; i++)
+            {
+                NetworkLifecycleEvents.RaiseClientDisconnected(
+                    this,
+                    m_ObservedClientScratch[i]);
+            }
+
+            m_ObservedConnectedClientIds.Clear();
+            m_ObservedClientScratch.Clear();
+
+            if (m_ObservedAuthority)
+            {
+                m_ObservedAuthority = false;
+                m_ObservedAuthorityEpoch++;
+                if (m_ObservedAuthorityEpoch == 0) m_ObservedAuthorityEpoch = 1;
+                NetworkLifecycleEvents.RaiseLogicalAuthorityChanged(
+                    this,
+                    false,
+                    m_ObservedAuthorityEpoch);
+            }
+
+            if (m_ObservedRunning)
+            {
+                m_ObservedRunning = false;
+                NetworkLifecycleEvents.RaiseSessionStopped(this);
+            }
+
+            m_LifecycleObservationInitialized = false;
+        }
+
+        private static bool ContainsClient(
+            IReadOnlyCollection<uint> connectedClients,
+            uint clientId)
+        {
+            if (connectedClients == null) return false;
+            foreach (uint candidate in connectedClients)
+            {
+                if (candidate == clientId) return true;
+            }
+
+            return false;
         }
 
         private void RemoveOwnedCharacter(uint ownerClientId, uint characterNetworkId)

@@ -4,6 +4,7 @@ using System.Reflection;
 using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
+using UnityEngine.SceneManagement;
 
 namespace Arawn.GameCreator2.Networking.Editor
 {
@@ -27,6 +28,10 @@ namespace Arawn.GameCreator2.Networking.Editor
         private static bool s_HasCachedValidation;
         private static double s_NextValidationTime;
         private static ValidationSummary s_CachedValidation;
+        private static bool s_HasCachedSceneValidation;
+        private static double s_NextSceneValidationTime;
+        private static int s_CachedSceneHandle;
+        private static ValidationSummary s_CachedSceneValidation;
 
         public readonly struct ValidationSummary
         {
@@ -112,6 +117,38 @@ namespace Arawn.GameCreator2.Networking.Editor
                 return s_CachedValidation;
             }
 
+            ValidationSummary summary = ValidateSceneScope(null);
+            s_CachedValidation = summary;
+            s_HasCachedValidation = true;
+            s_NextValidationTime = EditorApplication.timeSinceStartup + 0.5d;
+            return summary;
+        }
+
+        /// <summary>
+        /// Validates authoritative Inventory pickup setup in one loaded scene only.
+        /// Transport-specific setup wizards use this overload so an unrelated additive
+        /// scene cannot block or influence the scene being configured.
+        /// </summary>
+        public static ValidationSummary ValidateScene(Scene scene, bool force = false)
+        {
+            if (!scene.IsValid() || !scene.isLoaded) return default;
+            if (!force && s_HasCachedSceneValidation &&
+                s_CachedSceneHandle == scene.handle &&
+                EditorApplication.timeSinceStartup < s_NextSceneValidationTime)
+            {
+                return s_CachedSceneValidation;
+            }
+
+            ValidationSummary summary = ValidateSceneScope(scene);
+            s_CachedSceneValidation = summary;
+            s_CachedSceneHandle = scene.handle;
+            s_HasCachedSceneValidation = true;
+            s_NextSceneValidationTime = EditorApplication.timeSinceStartup + 0.5d;
+            return summary;
+        }
+
+        private static ValidationSummary ValidateSceneScope(Scene? targetScene)
+        {
             Type pickupType = Type.GetType(PICKUP_SOURCE_TYPE);
             Type managerType = Type.GetType(INVENTORY_MANAGER_TYPE);
             int sourceCount = 0;
@@ -123,7 +160,7 @@ namespace Arawn.GameCreator2.Networking.Editor
 
             if (pickupType != null)
             {
-                foreach (Component source in FindSceneComponents(pickupType))
+                foreach (Component source in FindSceneComponents(pickupType, targetScene))
                 {
                     sourceCount++;
                     var serialized = new SerializedObject(source);
@@ -153,7 +190,7 @@ namespace Arawn.GameCreator2.Networking.Editor
 
             if (managerType != null)
             {
-                foreach (Component manager in FindSceneComponents(managerType))
+                foreach (Component manager in FindSceneComponents(managerType, targetScene))
                 {
                     var serialized = new SerializedObject(manager);
                     SerializedProperty unsafeAdds = serialized.FindProperty(
@@ -163,7 +200,7 @@ namespace Arawn.GameCreator2.Networking.Editor
             }
 
             int legacyCount = 0;
-            foreach (AddItemSource source in FindStockAddItemSources())
+            foreach (AddItemSource source in FindStockAddItemSources(targetScene))
             {
                 if (pickupType == null || FindPickupSourceInParents(source.InstructionOwner, pickupType) == null)
                 {
@@ -171,16 +208,13 @@ namespace Arawn.GameCreator2.Networking.Editor
                 }
             }
 
-            s_CachedValidation = new ValidationSummary(
+            return new ValidationSummary(
                 sourceCount,
                 duplicateCount,
                 unresolvedCount,
                 implicitCount,
                 legacyCount,
                 unsafeManagerCount);
-            s_HasCachedValidation = true;
-            s_NextValidationTime = EditorApplication.timeSinceStartup + 0.5d;
-            return s_CachedValidation;
         }
 
         /// <summary>
@@ -188,6 +222,22 @@ namespace Arawn.GameCreator2.Networking.Editor
         /// grants, and other Add Item instructions are deliberately left untouched.
         /// </summary>
         public static int ConvertStockScenePickups(bool showSummary)
+        {
+            return ConvertStockScenePickupsInternal(null, showSummary);
+        }
+
+        /// <summary>
+        /// Converts stock pickup-shaped Add Item triggers in one loaded scene only.
+        /// </summary>
+        public static int ConvertStockScenePickups(Scene scene, bool showSummary)
+        {
+            if (!scene.IsValid() || !scene.isLoaded) return 0;
+            return ConvertStockScenePickupsInternal(scene, showSummary);
+        }
+
+        private static int ConvertStockScenePickupsInternal(
+            Scene? targetScene,
+            bool showSummary)
         {
             Type pickupType = Type.GetType(PICKUP_SOURCE_TYPE);
             if (pickupType == null)
@@ -202,9 +252,9 @@ namespace Arawn.GameCreator2.Networking.Editor
                 return 0;
             }
 
-            List<AddItemSource> candidates = FindStockAddItemSources();
+            List<AddItemSource> candidates = FindStockAddItemSources(targetScene);
             var usedIds = new HashSet<uint>();
-            foreach (Component existing in FindSceneComponents(pickupType))
+            foreach (Component existing in FindSceneComponents(pickupType, targetScene))
             {
                 var serialized = new SerializedObject(existing);
                 uint id = serialized.FindProperty("m_PickupId")?.uintValue ?? 0u;
@@ -274,6 +324,7 @@ namespace Arawn.GameCreator2.Networking.Editor
 
             Undo.CollapseUndoOperations(undoGroup);
             s_HasCachedValidation = false;
+            s_HasCachedSceneValidation = false;
             if (showSummary)
             {
                 EditorUtility.DisplayDialog(
@@ -285,11 +336,11 @@ namespace Arawn.GameCreator2.Networking.Editor
             return converted;
         }
 
-        private static List<AddItemSource> FindStockAddItemSources()
+        private static List<AddItemSource> FindStockAddItemSources(Scene? targetScene = null)
         {
             var results = new List<AddItemSource>();
             var seenOwners = new HashSet<GameObject>();
-            foreach (MonoBehaviour behaviour in FindSceneMonoBehaviours())
+            foreach (MonoBehaviour behaviour in FindSceneMonoBehaviours(targetScene))
             {
                 if (behaviour == null || !IsStockPickupObject(behaviour.gameObject)) continue;
                 if (!TryFindFixedAddItem(behaviour, out UnityEngine.Object item)) continue;
@@ -436,7 +487,7 @@ namespace Arawn.GameCreator2.Networking.Editor
             return null;
         }
 
-        private static MonoBehaviour[] FindSceneMonoBehaviours()
+        private static MonoBehaviour[] FindSceneMonoBehaviours(Scene? targetScene = null)
         {
 #if UNITY_2023_1_OR_NEWER
             MonoBehaviour[] values = UnityEngine.Object.FindObjectsByType<MonoBehaviour>(
@@ -449,7 +500,9 @@ namespace Arawn.GameCreator2.Networking.Editor
             if (values == null) return result.ToArray();
             foreach (MonoBehaviour value in values)
             {
-                if (value != null && value.gameObject.scene.IsValid() && value.gameObject.scene.isLoaded)
+                if (value != null && value.gameObject.scene.IsValid() &&
+                    value.gameObject.scene.isLoaded &&
+                    (!targetScene.HasValue || value.gameObject.scene == targetScene.Value))
                 {
                     result.Add(value);
                 }
@@ -457,7 +510,7 @@ namespace Arawn.GameCreator2.Networking.Editor
             return result.ToArray();
         }
 
-        private static Component[] FindSceneComponents(Type type)
+        private static Component[] FindSceneComponents(Type type, Scene? targetScene = null)
         {
             if (type == null) return Array.Empty<Component>();
 #if UNITY_2023_1_OR_NEWER
@@ -473,7 +526,8 @@ namespace Arawn.GameCreator2.Networking.Editor
             foreach (UnityEngine.Object value in values)
             {
                 if (value is Component component && component.gameObject.scene.IsValid() &&
-                    component.gameObject.scene.isLoaded)
+                    component.gameObject.scene.isLoaded &&
+                    (!targetScene.HasValue || component.gameObject.scene == targetScene.Value))
                 {
                     result.Add(component);
                 }

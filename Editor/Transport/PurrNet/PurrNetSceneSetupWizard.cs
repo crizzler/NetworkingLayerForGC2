@@ -31,9 +31,17 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
         private enum TransportChoice
         {
             UDP,
+            PurrTransport,
             WebTransport,
             Local,
             ExistingOrManual
+        }
+
+        private enum LobbySetupMode
+        {
+            Direct = 0,
+            Lan = 1,
+            RoomCode = 2
         }
 
         private enum WizardPage
@@ -148,6 +156,12 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
             "Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction.PurrDictionNetworkCharacterController, Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction";
         private const string PURRDICTION_NAVMESH_CONTROLLER_TYPE =
             "Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction.PurrDictionNetworkNavmeshController, Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction";
+        private const string PURRNET_LOBBY_SERVICE_TYPE =
+            "Arawn.GameCreator2.Networking.Transport.PurrNet.Lobby.PurrNetLobbyService, " +
+            "Arawn.GameCreator2.Networking.Transport.PurrNet";
+        private const string NETWORK_LOBBY_UI_TYPE =
+            "Arawn.GameCreator2.Networking.Lobby.NetworkLobbyCanvasUI, " +
+            "Arawn.GameCreator2.Networking.Lobby";
 
         private TransportChoice m_Transport = TransportChoice.UDP;
         private WizardPage m_Page = WizardPage.ProjectShape;
@@ -198,6 +212,8 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
         private NetworkSessionProfile m_CustomSessionProfileDraft;
 
         private bool m_CreateDemoCanvasUI = true;
+        private bool m_CreateLobbyUI;
+        private LobbySetupMode m_LobbyMode = LobbySetupMode.Lan;
         private bool m_CreateControlsUI = true;
         private bool m_CreateChatUI = false;
         private string m_UITitle = "PurrNet";
@@ -1892,6 +1908,45 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
             m_CreateDemoCanvasUI = EditorGUILayout.ToggleLeft(
                 new GUIContent("Create / Reuse PurrNet Demo UI", "Adds the UGUI host/join overlay used by the PurrNet demo scenes."),
                 m_CreateDemoCanvasUI);
+            bool createLobbyUI = EditorGUILayout.ToggleLeft(
+                new GUIContent(
+                    "Create / Reuse Multiplayer Lobby UI",
+                    "Adds the shared GC2 lobby menu and a PurrNet Direct, LAN discovery, or room-code service."),
+                m_CreateLobbyUI);
+            if (createLobbyUI && !m_CreateLobbyUI)
+            {
+                m_CreateDemoCanvasUI = false;
+            }
+            m_CreateLobbyUI = createLobbyUI;
+            if (m_CreateLobbyUI)
+            {
+                LobbySetupMode lobbyMode = (LobbySetupMode)EditorGUILayout.EnumPopup(
+                    new GUIContent(
+                        "Lobby Connection",
+                        "LAN discovers UDP hosts on the same network. Direct uses address/port. Room Code uses PurrTransport and requires a production relay deployment."),
+                    m_LobbyMode);
+                if (lobbyMode != m_LobbyMode)
+                {
+                    m_LobbyMode = lobbyMode;
+                    if (m_LobbyMode == LobbySetupMode.RoomCode)
+                    {
+                        m_Transport = TransportChoice.PurrTransport;
+                    }
+                    else if (m_Transport == TransportChoice.PurrTransport)
+                    {
+                        m_Transport = TransportChoice.UDP;
+                    }
+                }
+
+                if (m_LobbyMode == LobbySetupMode.RoomCode)
+                {
+                    EditorGUILayout.HelpBox(
+                        "PurrTransport room codes do not provide a public browser. The bundled " +
+                        "Purr relay endpoint is development-only; production games must use a " +
+                        "self-hosted relay endpoint.",
+                        MessageType.Warning);
+                }
+            }
             m_CreateControlsUI = EditorGUILayout.ToggleLeft(
                 new GUIContent("Create / Reuse PurrNet Demo Controls UI", "Adds a small UGUI panel summarizing the configured modules and startup controls."),
                 m_CreateControlsUI);
@@ -1906,7 +1961,15 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
                     MessageType.Info);
             }
 
-            using (new EditorGUI.DisabledScope(!m_CreateCharacterSelectionUI && !m_CreateDemoCanvasUI && !m_CreateControlsUI && !m_CreateChatUI))
+            if (m_CreateLobbyUI && m_CreateDemoCanvasUI)
+            {
+                EditorGUILayout.HelpBox(
+                    "Multiplayer Lobby UI replaces the simple PurrNet Demo UI connection " +
+                    "controls. Disable one of them to avoid duplicate session starts.",
+                    MessageType.Warning);
+            }
+
+            using (new EditorGUI.DisabledScope(!m_CreateCharacterSelectionUI && !m_CreateDemoCanvasUI && !m_CreateLobbyUI && !m_CreateControlsUI && !m_CreateChatUI))
             {
                 m_UITitle = EditorGUILayout.TextField(
                     new GUIContent("UI Title", "Title shown by the generated runtime connection UI and controls panel."),
@@ -1995,6 +2058,11 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
                 EditorGUILayout.LabelField($"Selectable prefabs: {GetSelectablePlayerPrefabs().Count}");
             }
             EditorGUILayout.LabelField($"Demo UI: {YesNo(m_CreateDemoCanvasUI)}");
+            EditorGUILayout.LabelField($"Multiplayer Lobby UI: {YesNo(m_CreateLobbyUI)}");
+            if (m_CreateLobbyUI)
+            {
+                EditorGUILayout.LabelField($"Lobby connection: {m_LobbyMode}");
+            }
             EditorGUILayout.LabelField($"Controls UI: {YesNo(m_CreateControlsUI)}");
             EditorGUILayout.LabelField($"Chat UI: {YesNo(m_CreateChatUI)}");
 
@@ -2127,10 +2195,46 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
             }
 
             NetworkManager manager = FindSceneComponent<NetworkManager>();
-            if (manager == null) return;
+            RawNetManager rawManager = FindSceneComponent<RawNetManager>();
+
+            if (manager == null)
+            {
+                EditorGUILayout.Space(8);
+                EditorGUILayout.LabelField("Current Scene Validation", EditorStyles.miniBoldLabel);
+
+                if (rawManager != null)
+                {
+                    EditorGUILayout.HelpBox(
+                        $"The scene contains PurrNet.RawNetManager '{rawManager.name}', but the GC2 " +
+                        "PurrNet integration requires PurrNet.NetworkManager (Add Component > " +
+                        "PurrNet > Network Manager). RawNetManager is a separate, incompatible " +
+                        "type. Keep Create / Reuse NetworkManager enabled and apply this wizard, " +
+                        "then transfer/check the intended transport and startup settings before " +
+                        "disabling or removing the old Raw Net Manager.",
+                        MessageType.Error);
+                }
+                else
+                {
+                    EditorGUILayout.HelpBox(
+                        "No PurrNet.NetworkManager exists in the loaded scene. Keep Create / Reuse " +
+                        "NetworkManager enabled and apply the wizard from the Review page.",
+                        MessageType.Warning);
+                }
+
+                return;
+            }
 
             EditorGUILayout.Space(8);
             EditorGUILayout.LabelField("Current Scene Validation", EditorStyles.miniBoldLabel);
+
+            if (rawManager != null)
+            {
+                EditorGUILayout.HelpBox(
+                    $"This scene also contains PurrNet.RawNetManager '{rawManager.name}'. GC2 bridges " +
+                    $"use PurrNet.NetworkManager '{manager.name}', not RawNetManager. Verify that the " +
+                    "Raw Net Manager is intentional and that it is not auto-starting a competing transport.",
+                    MessageType.Warning);
+            }
 
             DrawTransportConfigurationWarnings(manager);
             DrawBridgeManagerReferenceWarnings(manager);
@@ -2377,6 +2481,13 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
 
                 if (manager != null)
                 {
+                    if (m_CreateLobbyUI && m_LobbyMode == LobbySetupMode.RoomCode)
+                    {
+                        // Room-code sessions are implemented by PurrTransport. Enforce the
+                        // matching transport again at Apply time so navigating back to the
+                        // Transport page cannot leave a stale incompatible selection.
+                        m_Transport = TransportChoice.PurrTransport;
+                    }
                     EnsureTransport(manager);
                     ConfigureNetworkManager(manager);
                 }
@@ -2423,6 +2534,11 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
                 if (m_CreateDemoCanvasUI)
                 {
                     EnsureDemoCanvasUI(root, manager);
+                }
+
+                if (m_CreateLobbyUI)
+                {
+                    EnsureLobbyUI(root, manager);
                 }
 
                 if (m_CreateControlsUI)
@@ -2571,11 +2687,10 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
 
         private void EnsureCoreManagers(GameObject root)
         {
-            FindOrCreateComponent<NetworkSecurityManager>("Network Security Manager", root);
-            FindOrCreateComponent<NetworkCoreManager>("Network Core Manager", root);
-            FindOrCreateComponent<NetworkAnimationManager>("Network Animation Manager", root);
-            FindOrCreateComponent<NetworkMotionManager>("Network Motion Manager", root);
-            FindOrCreateComponent<NetworkVariableManager>("Network Variable Manager", root);
+            GC2SceneSetupShared.EnsureCoreManagers(
+                root,
+                (type, objectName, parent) =>
+                    EnsureComponentByType(type.AssemblyQualifiedName, objectName, parent));
         }
 
         private void EnsureCoreFeatureTransportBridge(GameObject root, NetworkManager manager)
@@ -3007,77 +3122,9 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
 
         private static bool ConfigureNetworkReadyCharacterKernel(Character character)
         {
-            if (character == null) return false;
-
-            Transform existingMannequin = character.Animim?.Mannequin;
-            Animator existingAnimator = character.Animim?.Animator;
-
-            var so = new SerializedObject(character);
-            var kernel = so.FindProperty("m_Kernel");
-            if (kernel == null) return false;
-
-            IUnitPlayer currentPlayer = character.Player;
-            SerializedProperty player = kernel.FindPropertyRelative("m_Player");
-            SerializedProperty driver = kernel.FindPropertyRelative("m_Driver");
-
-            bool changed = false;
-            if (currentPlayer is UnitPlayerPointClick || currentPlayer is UnitPlayerPointClickNetwork)
-            {
-                changed |= SetManagedReferenceIfDifferent<UnitPlayerPointClickNetwork>(player);
-                changed |= SetManagedReferenceIfDifferent<UnitDriverNavmeshNetworkClient>(driver);
-            }
-            else if (currentPlayer is UnitPlayerTank || currentPlayer is UnitPlayerTankNetwork)
-            {
-                changed |= SetManagedReferenceIfDifferent<UnitPlayerTankNetwork>(player);
-                changed |= SetManagedReferenceIfDifferent<UnitDriverNetworkClient>(driver);
-            }
-            else if (currentPlayer is UnitPlayerFollowPointer || currentPlayer is UnitPlayerFollowPointerNetwork)
-            {
-                changed |= SetManagedReferenceIfDifferent<UnitPlayerFollowPointerNetwork>(player);
-                changed |= SetManagedReferenceIfDifferent<UnitDriverNetworkClient>(driver);
-            }
-            else
-            {
-                changed |= SetManagedReferenceIfDifferent<UnitPlayerDirectionalNetwork>(player);
-                changed |= SetManagedReferenceIfDifferent<UnitDriverNetworkClient>(driver);
-            }
-
-            changed |= SetManagedReferenceIfDifferent<UnitMotionNetworkController>(kernel.FindPropertyRelative("m_Motion"));
-            changed |= SetManagedReferenceIfDifferent<UnitFacingNetworkPivot>(kernel.FindPropertyRelative("m_Facing"));
-            changed |= SetManagedReferenceIfDifferent<UnitAnimimNetworkKinematic>(kernel.FindPropertyRelative("m_Animim"));
-
-            if (changed)
-            {
-                so.ApplyModifiedPropertiesWithoutUndo();
-                RestoreAnimimModelReferences(character, existingMannequin, existingAnimator);
-                EditorUtility.SetDirty(character);
-            }
-
-            return changed;
-        }
-
-        private static void RestoreAnimimModelReferences(
-            Character character,
-            Transform mannequin,
-            Animator animator)
-        {
-            if (character?.Animim == null) return;
-
-            animator ??= character.GetComponentInChildren<Animator>(true);
-            if (mannequin == null && animator != null)
-            {
-                mannequin = animator.transform.parent;
-            }
-
-            if (character.Animim.Mannequin == null && mannequin != null)
-            {
-                character.Animim.Mannequin = mannequin;
-            }
-
-            if (character.Animim.Animator == null && animator != null)
-            {
-                character.Animim.Animator = animator;
-            }
+            return GC2SceneSetupShared.ConfigureNetworkReadyCharacterKernel(
+                character,
+                applyWithUndo: false);
         }
 
         private bool ConfigureNetworkCharacterForSpawnedPlayer(NetworkCharacter networkCharacter)
@@ -3246,6 +3293,48 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
             SetString(so, "m_Subtitle", m_UISubtitle);
             so.ApplyModifiedPropertiesWithoutUndo();
             EditorUtility.SetDirty(ui);
+        }
+
+        private void EnsureLobbyUI(GameObject root, NetworkManager manager)
+        {
+            Component service = EnsureComponentByTypeOnGameObject(
+                manager != null ? manager.gameObject : null,
+                PURRNET_LOBBY_SERVICE_TYPE,
+                "PurrNet Lobby Service");
+            if (service == null) return;
+
+            var serviceObject = new SerializedObject(service);
+            AssignObjectReference(serviceObject, "m_NetworkManager", manager);
+            SetInt(serviceObject, "m_Mode", (int)m_LobbyMode);
+            SetString(serviceObject, "m_DefaultAddress", m_Address);
+            SetInt(serviceObject, "m_DefaultPort", m_Port);
+            serviceObject.ApplyModifiedPropertiesWithoutUndo();
+            EditorUtility.SetDirty(service);
+
+            Component ui = EnsureComponentByType(
+                NETWORK_LOBBY_UI_TYPE,
+                "GC2 Multiplayer Lobby UI",
+                root);
+            if (ui != null)
+            {
+                var uiObject = new SerializedObject(ui);
+                AssignObjectReference(uiObject, "m_ServiceBehaviour", service);
+                SetString(uiObject, "m_Title", m_UITitle);
+                SetString(uiObject, "m_Subtitle", m_UISubtitle);
+                SetString(uiObject, "m_DefaultAddress", m_Address);
+                SetInt(uiObject, "m_DefaultPort", m_Port);
+                SetInt(uiObject, "m_DefaultTopology", 0);
+                uiObject.ApplyModifiedPropertiesWithoutUndo();
+                EditorUtility.SetDirty(ui);
+            }
+
+            PurrNetDemoCanvasUI directUi = FindSceneComponent<PurrNetDemoCanvasUI>();
+            if (directUi != null && directUi.enabled)
+            {
+                Undo.RecordObject(directUi, "Disable duplicate PurrNet demo session UI");
+                directUi.enabled = false;
+                EditorUtility.SetDirty(directUi);
+            }
         }
 
         private void EnsureControlsUI(GameObject root)
@@ -4326,6 +4415,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
             switch (choice)
             {
                 case TransportChoice.UDP: return type == typeof(UDPTransport);
+                case TransportChoice.PurrTransport: return type == typeof(PurrTransport);
                 case TransportChoice.WebTransport: return type == typeof(WebTransport);
                 case TransportChoice.Local: return type == typeof(LocalTransport);
                 case TransportChoice.ExistingOrManual: return true;
@@ -4338,6 +4428,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
             switch (choice)
             {
                 case TransportChoice.UDP: return typeof(UDPTransport);
+                case TransportChoice.PurrTransport: return typeof(PurrTransport);
                 case TransportChoice.WebTransport: return typeof(WebTransport);
                 case TransportChoice.Local: return typeof(LocalTransport);
                 default: return null;
@@ -4609,15 +4700,6 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
             if (prop.enumValueIndex == value) return false;
 
             prop.enumValueIndex = value;
-            return true;
-        }
-
-        private static bool SetManagedReferenceIfDifferent<T>(SerializedProperty prop) where T : class, new()
-        {
-            if (prop == null || prop.propertyType != SerializedPropertyType.ManagedReference) return false;
-            if (prop.managedReferenceValue is T) return false;
-
-            prop.managedReferenceValue = new T();
             return true;
         }
 

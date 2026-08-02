@@ -1,0 +1,21 @@
+{
+    "name": "Arawn.GameCreator2.Networking.Transport.Fusion",
+    "rootNamespace": "Arawn.GameCreator2.Networking.Transport.Fusion",
+    "references": [
+        "Arawn.GameCreator2.Networking",
+        "Arawn.GameCreator2.Networking.Lobby",
+        "Fusion.Unity",
+        "Photon.Realtime",
+        "GameCreator.Runtime.Core",
+        "UnityEngine.UI"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

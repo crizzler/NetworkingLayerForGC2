@@ -85,8 +85,24 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
         private bool m_HasLastInteractableState;
         private bool m_LastConnectedState;
         private string m_LastRoleStatus;
+        private bool m_RestoreMessageFieldFocus;
 
         private NetworkManager ActiveManager => m_NetworkManager ? m_NetworkManager : NetworkManager.main;
+
+        /// <summary>
+        /// Current local chat display name. Staging-room UIs can use this to keep
+        /// the authoritative roster name and the chat sender label in sync.
+        /// </summary>
+        public string DisplayName => CleanName(
+            m_NameField != null ? m_NameField.text : m_DefaultDisplayName);
+
+        public void SetDisplayName(string displayName)
+        {
+            string cleaned = CleanName(displayName);
+            m_DefaultDisplayName = cleaned;
+            if (m_NameField != null && m_NameField.text != cleaned)
+                m_NameField.text = cleaned;
+        }
 
         private void Awake()
         {
@@ -143,6 +159,8 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
                 RefreshInteractable();
                 m_LastRefreshTime = Time.unscaledTime;
             }
+
+            RestoreMessageFieldFocusIfRequested();
         }
 
         public void SendCurrentMessage()
@@ -195,7 +213,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
             if (m_MessageField != null)
             {
                 m_MessageField.text = string.Empty;
-                m_MessageField.ActivateInputField();
+                RequestMessageFieldFocus();
             }
 
             if (manager.isServer)
@@ -639,6 +657,18 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
             {
                 m_MessageField.characterLimit = Mathf.Max(1, m_MaxMessageLength);
                 m_MessageField.lineType = InputField.LineType.SingleLine;
+
+                bool hasPersistentListener = HasPersistentMessageSubmitListener(m_MessageField);
+                m_MessageField.onSubmit.RemoveListener(HandleMessageSubmitted);
+                if (!hasPersistentListener)
+                {
+                    m_MessageField.onSubmit.AddListener(HandleMessageSubmitted);
+                }
+
+                LogDebug(
+                    $"Configured message-field submit listener. persistentListenerToThis={hasPersistentListener}, " +
+                    $"runtimeListenerAdded={!hasPersistentListener}, " +
+                    $"persistentEventCount={m_MessageField.onSubmit.GetPersistentEventCount()}");
             }
 
             ConfigureMessageViewport();
@@ -647,11 +677,69 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
             {
                 bool hasPersistentListener = HasPersistentSendListener(m_SendButton);
                 m_SendButton.onClick.RemoveListener(SendCurrentMessage);
-                m_SendButton.onClick.AddListener(SendCurrentMessage);
+                if (!hasPersistentListener)
+                {
+                    m_SendButton.onClick.AddListener(SendCurrentMessage);
+                }
+
                 LogDebug(
-                    $"Configured Send button runtime listener. persistentListenerToThis={hasPersistentListener}, " +
+                    $"Configured Send button. persistentListenerToThis={hasPersistentListener}, " +
+                    $"runtimeListenerAdded={!hasPersistentListener}, " +
                     $"persistentEventCount={m_SendButton.onClick.GetPersistentEventCount()}");
             }
+        }
+
+        private void HandleMessageSubmitted(string _)
+        {
+            SendCurrentMessage();
+
+            // InputField invokes onSubmit before it deactivates itself. Restore focus
+            // from Update so Return can be used repeatedly without clicking the field.
+            RequestMessageFieldFocus();
+        }
+
+        private void RequestMessageFieldFocus()
+        {
+            if (m_MessageField != null)
+            {
+                m_RestoreMessageFieldFocus = true;
+            }
+        }
+
+        private void RestoreMessageFieldFocusIfRequested()
+        {
+            if (!m_RestoreMessageFieldFocus) return;
+            m_RestoreMessageFieldFocus = false;
+
+            if (m_MessageField == null ||
+                !m_MessageField.gameObject.activeInHierarchy ||
+                !m_MessageField.interactable)
+            {
+                return;
+            }
+
+            m_MessageField.Select();
+            m_MessageField.ActivateInputField();
+        }
+
+        private bool HasPersistentMessageSubmitListener(InputField inputField)
+        {
+            if (inputField == null) return false;
+
+            int count = inputField.onSubmit.GetPersistentEventCount();
+            for (int i = 0; i < count; i++)
+            {
+                if (inputField.onSubmit.GetPersistentTarget(i) != this) continue;
+
+                string methodName = inputField.onSubmit.GetPersistentMethodName(i);
+                if (methodName == nameof(SendCurrentMessage) ||
+                    methodName == nameof(HandleMessageSubmitted))
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         private bool HasPersistentSendListener(Button button)

@@ -355,6 +355,16 @@ namespace Arawn.GameCreator2.Networking
         {
             if (!m_IsClient) return;
 
+            if (broadcast.CastState == AbilityCastState.Started ||
+                broadcast.CastState == AbilityCastState.Triggered)
+            {
+                m_ReplicatedActiveCasts[broadcast.CastInstanceId] = broadcast;
+            }
+            else
+            {
+                m_ReplicatedActiveCasts.Remove(broadcast.CastInstanceId);
+            }
+
             OnCastBroadcastReceived?.Invoke(broadcast);
 
             HandleVisualCast(broadcast);
@@ -482,6 +492,20 @@ namespace Arawn.GameCreator2.Networking
         public void ReceiveCooldownBroadcast(NetworkCooldownBroadcast broadcast)
         {
             if (!m_IsClient) return;
+
+            var cooldownKey = (broadcast.CharacterNetworkId, broadcast.AbilityIdHash);
+            if (broadcast.CooldownEndTime > 0f)
+            {
+                m_Cooldowns[cooldownKey] = new CooldownData
+                {
+                    EndTime = broadcast.CooldownEndTime,
+                    TotalDuration = broadcast.TotalDuration
+                };
+            }
+            else
+            {
+                m_Cooldowns.Remove(cooldownKey);
+            }
 
             OnCooldownBroadcastReceived?.Invoke(broadcast);
 

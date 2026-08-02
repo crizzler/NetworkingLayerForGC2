@@ -259,7 +259,8 @@ namespace Arawn.GameCreator2.Networking.Editor
         {
             return HasTransportSubdirectory(TRANSPORT_RUNTIME_ROOT) ||
                    HasTransportSubdirectory(TRANSPORT_EDITOR_ROOT) ||
-                   IsNamespacePresentCached("Arawn.GameCreator2.Networking.Transport.PurrNet");
+                   IsNamespacePresentCached("Arawn.GameCreator2.Networking.Transport.PurrNet") ||
+                   IsNamespacePresentCached("Arawn.GameCreator2.Networking.Transport.Fusion");
         }
 
         private static bool HasTransportSubdirectory(string rootPath)

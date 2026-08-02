@@ -243,7 +243,7 @@ The bridge:
 - Auto-registers scene `Pawn` components that belong to `NetworkCharacter` instances.
 - Routes owner requests through the same server validation path used by the transport-agnostic API.
 
-The PurrNet Scene Setup Wizard and demo scene creator can add:
+The PurrNet Scene Setup Wizard can add:
 
 - `Network Abilities Controller`
 - `PurrNet Abilities Bridge`

@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using PurrNet;
 using PurrNet.Transports;
 using UnityEngine;
@@ -26,7 +27,8 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
     public sealed class PurrNetTransportBridge : NetworkTransportBridge
     {
         [Header("PurrNet Transport")]
-        [Tooltip("Optional reference to a specific NetworkManager. Leave empty to use NetworkManager.main.")]
+        [InspectorName("PurrNet Network Manager (Optional Scene Override)")]
+        [Tooltip("Optional PurrNet.NetworkManager scene-instance override. Leave empty to use NetworkManager.main.")]
         [SerializeField] private NetworkManager m_NetworkManager;
 
         [Tooltip("Delivery channel used for client->server input broadcasts.")]
@@ -37,15 +39,44 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
 
         private bool m_SubscribedServer;
         private bool m_SubscribedClient;
+        private NetworkManager m_HookedManager;
         private PurrNetCoreTransportBridge m_CoreTransportBridge;
         private PurrNetAnimationMotionTransportBridge m_AnimationMotionBridge;
         private LagCompensationBootstrap m_LagCompensationBootstrap;
+        private readonly HashSet<uint> m_ConnectedClientIds = new HashSet<uint>();
 
-        private NetworkManager ActiveManager => m_NetworkManager ? m_NetworkManager : NetworkManager.main;
+        private NetworkManager ActiveManager
+        {
+            get
+            {
+                if (m_NetworkManager != null) return m_NetworkManager;
+                NetworkManager main = NetworkManager.main;
+                return main != null ? main : null;
+            }
+        }
+
+        /// <summary>
+        /// The scene override selected by this bridge, or PurrNet's main manager when no
+        /// override is assigned. Session UI and GC2 Inspector entries use this property so
+        /// they cannot accidentally control a different manager than the gameplay bridge.
+        /// </summary>
+        public NetworkManager ActiveNetworkManager => ActiveManager;
 
         public override bool IsServer => ActiveManager != null && ActiveManager.isServer;
         public override bool IsClient => ActiveManager != null && ActiveManager.isClient;
         public override bool IsHost => ActiveManager != null && ActiveManager.isHost;
+        public override bool IsRunning => IsServer || IsClient;
+        public override IReadOnlyCollection<uint> ConnectedClientIds => m_ConnectedClientIds;
+
+        public override bool TryGetLocalClientId(out uint clientId)
+        {
+            clientId = InvalidClientId;
+            NetworkManager manager = ActiveManager;
+            if (manager == null || !manager.isLocalPlayerReady) return false;
+
+            clientId = PlayerIdToClientId(manager.localPlayer);
+            return IsValidClientId(clientId);
+        }
 
         public override float ServerTime
         {
@@ -68,7 +99,6 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
         protected override void Awake()
         {
             base.Awake();
-            if (m_NetworkManager == null) m_NetworkManager = NetworkManager.main;
             EnsureLagCompensationBootstrap();
             EnsureCoreTransportBridge();
             EnsureAnimationMotionBridge();
@@ -91,14 +121,34 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
             TryHookNetworkManager();
         }
 
-        private void OnDisable()
+        private void Update()
         {
-            var nm = ActiveManager;
+            // NetworkManager.main may be published after this bridge starts (for
+            // example by an additive bootstrap scene). It can also be replaced
+            // between sessions. Rebind only when the resolved instance changes.
+            if (!ReferenceEquals(m_HookedManager, ActiveManager))
+            {
+                TryHookNetworkManager();
+            }
+
+            RebuildConnectedClients();
+        }
+
+        protected override void OnDisable()
+        {
+            UnhookNetworkManager();
+            base.OnDisable();
+        }
+
+        private void UnhookNetworkManager()
+        {
+            var nm = m_HookedManager;
             bool ownedServerLifecycle = m_SubscribedServer || (nm != null && nm.isServer);
             if (nm != null)
             {
                 nm.onNetworkStarted -= HandleNetworkStarted;
                 nm.onNetworkShutdown -= HandleNetworkShutdown;
+                nm.onPlayerJoined -= HandlePlayerJoined;
                 nm.onPlayerLeft -= HandlePlayerLeft;
 
                 if (m_SubscribedServer)
@@ -114,6 +164,13 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
                 }
             }
 
+            // A destroyed Unity object compares equal to null, so make sure local
+            // subscription state is still cleared even when callbacks cannot be removed.
+            m_SubscribedServer = false;
+            m_SubscribedClient = false;
+            m_HookedManager = null;
+            m_ConnectedClientIds.Clear();
+
             if (ownedServerLifecycle)
             {
                 m_LagCompensationBootstrap?.SetServerMode(false);
@@ -123,23 +180,22 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
         private void TryHookNetworkManager()
         {
             var nm = ActiveManager;
-            if (nm == null)
-            {
-                return;
-            }
+            if (ReferenceEquals(m_HookedManager, nm)) return;
 
-            nm.onNetworkStarted -= HandleNetworkStarted;
+            UnhookNetworkManager();
+            if (nm == null) return;
+
+            m_HookedManager = nm;
+
             nm.onNetworkStarted += HandleNetworkStarted;
-
-            nm.onNetworkShutdown -= HandleNetworkShutdown;
             nm.onNetworkShutdown += HandleNetworkShutdown;
-
-            nm.onPlayerLeft -= HandlePlayerLeft;
+            nm.onPlayerJoined += HandlePlayerJoined;
             nm.onPlayerLeft += HandlePlayerLeft;
 
             // If the manager is already running when we hook in, subscribe immediately.
             if (nm.isServer) HandleNetworkStarted(nm, true);
             if (nm.isClient) HandleNetworkStarted(nm, false);
+            RebuildConnectedClients();
 
             EnsureLagCompensationBootstrap();
             EnsureCoreTransportBridge();
@@ -278,6 +334,20 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
                 manager.Unsubscribe<GC2StateBroadcast>(HandleStateBroadcastClient, false);
                 m_SubscribedClient = false;
             }
+
+            if (!manager.isServer && !manager.isClient)
+            {
+                m_ConnectedClientIds.Clear();
+            }
+        }
+
+        private void HandlePlayerJoined(PlayerID player, bool isReconnect, bool asServer)
+        {
+            uint clientId = PlayerIdToClientId(player);
+            if (IsValidClientId(clientId))
+            {
+                m_ConnectedClientIds.Add(clientId);
+            }
         }
 
         private void HandlePlayerLeft(PlayerID player, bool asServer)
@@ -287,10 +357,39 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
             uint clientId = PlayerIdToClientId(player);
             if (!IsValidClientId(clientId)) return;
 
+            m_ConnectedClientIds.Remove(clientId);
+
             // A reconnect can reuse the same PurrNet PlayerID while its controllers restart
             // their request counters. Drop all per-client replay/rate-limit state with the
             // connection so the new incarnation is not mistaken for replay traffic.
             NetworkSecurityManager.Instance?.OnClientDisconnected(clientId);
+        }
+
+        private void RebuildConnectedClients()
+        {
+            NetworkManager manager = ActiveManager;
+            if (manager == null || (!manager.isServer && !manager.isClient))
+            {
+                m_ConnectedClientIds.Clear();
+                return;
+            }
+
+            var players = manager.players;
+            if (players == null)
+            {
+                m_ConnectedClientIds.Clear();
+                return;
+            }
+
+            m_ConnectedClientIds.Clear();
+            for (int i = 0; i < players.Count; i++)
+            {
+                uint clientId = PlayerIdToClientId(players[i]);
+                if (IsValidClientId(clientId))
+                {
+                    m_ConnectedClientIds.Add(clientId);
+                }
+            }
         }
 
         // ------------------------------------------------------------------

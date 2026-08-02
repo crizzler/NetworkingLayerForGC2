@@ -1,0 +1,20 @@
+PHOTON FUSION DEMO SCENES
+=========================
+
+These ten ready-to-open scenes mirror the Game Creator 2 PurrNet demo suite
+while using the independent, server-authoritative Arawn Photon Fusion
+transport. Shared is the default; the session overlay exposes Host, Join Host,
+Create Shared, and Join Shared. Each scene uses a unique session name and a
+32 Hz-compatible project configuration.
+
+Configure a Fusion App ID in Photon App Settings before starting a live
+session. With no App ID the scenes remain editable, but live-session controls
+are disabled. Install the Game Creator demo/example packages named in each
+scene filename. The Dialogue scene intentionally preserves its serialized
+Dialogue content even when the optional GC2 Dialogue package is absent;
+install Dialogue and run the Fusion Scene Setup Wizard with Dialogue enabled
+in a project-owned scene to configure and validate that optional bridge.
+
+Duplicate an included scene in the Unity Project window before making
+project-specific changes. Use Game Creator > Networking Layer > Fusion Scene
+Setup Wizard to configure a fresh production scene.

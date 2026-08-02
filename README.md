@@ -1,28 +1,35 @@
 # Game Creator 2 Networking Layer
 
-Transport-agnostic, server-authoritative multiplayer layer for Game Creator 2.
+Transport-agnostic, server-authoritative multiplayer support for Game Creator 2.
 
-**Online documentation: <https://arawn-software-publishing.gitbook.io/networking-layer-for-gc2>**
+**[Online documentation](https://arawn-software-publishing.gitbook.io/networking-layer-for-gc2)** · **[Releases](https://github.com/crizzler/NetworkingLayerForGC2/releases)**
 
-**Download: [https://github.com/crizzler/NetworkingLayerForGC2/releases/
-](https://github.com/crizzler/NetworkingLayerForGC2/releases/)**
+> **Release status: Alpha**  
+> The package is in alpha and its APIs, behavior, and documentation may change. The new Photon Fusion integration is specifically an **early alpha** feature.
 
-> **Release Status: Alpha**  
-> This package is currently in **Alpha**. APIs, behavior, and documentation may change between releases.
-
-<img width="880" height="1163" alt="image" src="https://github.com/user-attachments/assets/53739b39-dbab-4222-9d33-98d0b3c18254" />
+<img width="880" height="1163" alt="Game Creator 2 Networking Layer" src="https://github.com/user-attachments/assets/53739b39-dbab-4222-9d33-98d0b3c18254" />
 
 ## What This Package Is
 
-- A runtime networking layer for GC2 that is **not bound to one networking SDK**.
-- A strict authority/security model designed for coop and competitive multiplayer.
-- A module system that lets you wire one transport stack and keep GC2 gameplay integration consistent.
+- A runtime networking layer for GC2 that is not bound to one networking SDK.
+- A server-authoritative security model for cooperative and competitive multiplayer.
+- A shared module contract that keeps GC2 gameplay integration consistent across transports.
+- Setup, validation, migration, patching, demo, lobby, and GC2 Inspector visual-scripting tooling.
 
-The core layer remains transport-agnostic. PurrNet is included as the currently supported concrete transport, and future transport folders can plug into the same manager/controller send/receive APIs.
+## Supported Transports
+
+| Transport | Status | Included workflows |
+| --- | --- | --- |
+| PurrNet | Alpha | Host/client transport bridge, LAN discovery and direct join, staging/ready-room lobby with chat, and an optional Steamworks.NET lobby/invite demo |
+| Photon Fusion 2 | **Early alpha** | Host/Client and Shared topologies, Photon matchmaking/lobby discovery, session bootstrap and diagnostics, character selection, chat, and Steam authentication/invite extension points |
+
+The Fusion integration uses Fusion/Photon connectivity. It does not replace Fusion's transport with Steam Datagram Relay. In Host/Client mode Fusion can use direct UDP or Photon Relay; Shared Mode uses Photon Relay.
+
+Version 1.9.0 was validated against PurrNet 1.21.0 and Photon Fusion 2.1.1. The complete public source snapshot contains both transport integrations, so install the corresponding SDK assemblies before importing or compiling their transport folders.
 
 ## Supported Modules
 
-- Core
+- Core, Variables, Animation, and Motion
 - Inventory
 - Stats
 - Shooter
@@ -32,74 +39,53 @@ The core layer remains transport-agnostic. PurrNet is included as the currently 
 - Traversal
 - Abilities (DaimahouGames third-party module integration)
 
-## Core Runtime Entry Points
+Both transport integrations include bridges for the shared core and supported optional modules. The Fusion integration also includes GC2 Inspector Instructions, Conditions, Events, and Properties for session control and transport state.
 
-- `NetworkTransportBridge` / `INetworkTransportBridge`
-- `NetworkCharacter`
-- Module managers/controllers (`Core`, `Inventory`, `Stats`, `Shooter`, `Melee`, `Quests`, `Dialogue`, `Traversal`, `Abilities`)
-- `NetworkSecurityManager` + `SecurityIntegration`
+## Setup Wizards
 
-## Integration Model
+- PurrNet: `Game Creator > Networking Layer > PurrNet Scene Setup Wizard`
+- Fusion: `Game Creator > Networking Layer > Fusion Scene Setup Wizard`
 
-1. Implement your bridge by inheriting `NetworkTransportBridge`.
-2. Wire outbound delegates from managers/controllers to your transport sender.
-3. Route inbound transport packets to the matching manager/controller `Receive*` APIs.
-4. Register ownership mappings early (`characterNetworkId -> ownerClientId`) so strict validation succeeds from first request.
-5. Normalize sender IDs through `NetworkTransportBridge.TryConvertSenderClientId(...)` (`clientId = 0` is valid).
+The wizards create or reuse the transport session objects, shared GC2 managers, transport bridges, selected module bridges, player-prefab components, session profiles, registration assets, and optional demo UI. Use each wizard's Review and validation pages before applying changes to an existing scene.
 
-## Setup Wizard
+## Lobby Workflows
 
-Use `Game Creator > Networking Layer > PurrNet Scene Setup Wizard` for PurrNet projects. The generic scene setup wizard is hidden automatically when a transport-specific wizard is installed. Follow this guide when no PurrNet Transport is present: [https://arawn-software-publishing.gitbook.io/networking-layer-for-gc2/getting-started/quickstart](https://arawn-software-publishing.gitbook.io/networking-layer-for-gc2/getting-started/quickstart)
-
-
-When a Player Prefab is assigned and preparation is enabled, the wizard can add `NetworkIdentity`, `NetworkCharacter`, `PurrNetNetworkCharacterAuto`, selected module controllers, optional `NetworkVariableController` for local GC2 variables, and pre-registered animation clips used by Network State, Dash, or Gesture instructions.
+- The transport-neutral lobby API and canvas UI provide a common front end for hosting, discovery, joining, compatibility checks, and session capacity.
+- PurrNet includes LAN discovery/direct-address joining plus an authoritative staging room with player list, ready states, configurable launch policies, capacity enforcement, join-in-progress rules, and chat.
+- Fusion includes Photon session discovery and joining through its lobby/matchmaking service.
+- The optional PurrNet Steamworks.NET demo adds Steam lobbies and invites and remains compile-safe when Steamworks.NET is absent.
+- Fusion exposes region, authentication, visibility, capacity, session-property, and force-Photon-Relay start options. Steam authentication and invite metadata can be supplied by project-level adapters without coupling the core integration to a Steamworks wrapper.
 
 ## Patch System
 
-Use `Game Creator > Networking Layer > Patches` outside Play Mode. The PurrNet
-Scene Setup Wizard validates the required patch for every selected module.
+Use `Game Creator > Networking Layer > Patches` outside Play Mode. Each transport wizard validates the required patch for every selected module.
 
-- Inventory, Melee, Shooter, and Traversal networking require their current
-  server-authority patches.
+- Inventory, Melee, Shooter, and Traversal networking require their current server-authority patches.
 - Shooter also requires the remote-camera-safety Sight patch.
-- Updating or reinstalling a patched GC2 module can overwrite its hooks; rerun
-  the wizard and reapply any patch reported as missing or stale.
+- Updating or reinstalling a patched GC2 module can overwrite its hooks. Rerun Patch Status and reapply anything reported missing or stale.
 - The Networking Layer fails closed when required hooks are unavailable.
 
-See:
+## Compatibility
 
-- [Online documentation](https://arawn-software-publishing.gitbook.io/networking-layer-for-gc2)
+Servers and clients must use the same Networking Layer version. Version 1.9.0 uses the v2 position-state wire layout, which older clients cannot decode.
 
-## Quickstart
+## Documentation
 
-Start here for transport wiring:
-
-- [Quickstart](https://arawn-software-publishing.gitbook.io/networking-layer-for-gc2/getting-started/quickstart)
-- [Public API](https://arawn-software-publishing.gitbook.io/networking-layer-for-gc2/getting-started/publish-your-docs)
-- [PurrNet Transport](https://arawn-software-publishing.gitbook.io/networking-layer-for-gc2/purrnet-overview)
+- [General quickstart](https://arawn-software-publishing.gitbook.io/networking-layer-for-gc2/getting-started/quickstart)
+- [PurrNet overview](https://arawn-software-publishing.gitbook.io/networking-layer-for-gc2/purrnet-overview)
+- [Fusion overview](https://arawn-software-publishing.gitbook.io/networking-layer-for-gc2/fusion-overview)
 
 ## Contributing
 
-Recommended default flow: **fork -> branch -> pull request**.
+The recommended flow is fork, branch, and pull request.
 
-1. Fork the repository.
-2. Create a branch from `main` (example: `fix/melee-hit-validation`).
-3. Keep changes scoped and atomic (one concern per PR when possible).
-4. Verify Unity compiles cleanly for affected modules (no new errors).
-5. Open a PR with:
-   - What changed
-   - Why it changed
-   - How to test it
+1. Fork the repository and create a branch from `main`.
+2. Keep changes scoped and atomic.
+3. Verify Unity compiles cleanly for every affected module.
+4. Open a pull request describing what changed, why, and how to test it.
 
-Notes:
-
-- If you have direct write access, branch + PR in the main repo is still preferred over direct pushes to `main`.
-- For release packaging/sync, include `Assets/Arawn/NetworkingLayerForGC2/` and its generated documentation/assets as required by the package release.
+Preserve Unity `.meta` files and GUIDs. The repository root is a flattened mirror of `Assets/Arawn/NetworkingLayerForGC2/`, plus the repository README and license.
 
 ## License
 
-This networking layer is MIT licensed.
-
-See:
-
-- [License](https://arawn-software-publishing.gitbook.io/networking-layer-for-gc2/getting-started/license-mit)
+This networking layer is MIT licensed. See [LICENSE.md](LICENSE.md).

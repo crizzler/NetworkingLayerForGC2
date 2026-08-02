@@ -3,6 +3,7 @@
     "rootNamespace": "Arawn.GameCreator2.Networking.Transport.PurrNet",
     "references": [
         "Arawn.GameCreator2.Networking",
+        "Arawn.GameCreator2.Networking.Lobby",
         "PurrNet.Runtime",
         "GameCreator.Runtime.Core",
         "UnityEngine.UI"

@@ -383,6 +383,39 @@ namespace Arawn.GameCreator2.Networking
             }
         }
 
+        /// <summary>
+        /// Builds and broadcasts the current profiled variable state through the active
+        /// Variables transport adapter. This is authority-only and uses the same snapshot
+        /// format and profile filtering as late-join synchronization.
+        /// </summary>
+        public bool BroadcastFullSnapshot()
+        {
+            if (!m_IsServer)
+            {
+                LogWarning("Only the logical network authority can broadcast a variable snapshot.");
+                return false;
+            }
+
+            NetworkTransportBridge bridge = NetworkTransportBridge.Active;
+            float serverTime = bridge != null ? bridge.ServerTime : Time.time;
+            NetworkVariableSnapshot snapshot = BuildSnapshot(serverTime);
+
+            if (snapshot.Changes == null || snapshot.Changes.Length == 0)
+            {
+                return true;
+            }
+
+            if (OnBroadcastSnapshot == null)
+            {
+                LogWarning("Cannot broadcast the variable snapshot because no Variables transport adapter is wired.");
+                return false;
+            }
+
+            OnBroadcastSnapshot.Invoke(snapshot);
+            Log($"broadcast full snapshot changes={snapshot.Changes.Length}");
+            return true;
+        }
+
         public NetworkVariableSnapshot BuildSnapshot(float serverTime)
         {
             var changes = new List<NetworkVariableBroadcast>();

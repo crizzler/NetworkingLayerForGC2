@@ -1,0 +1,32 @@
+{
+    "name": "Arawn.GameCreator2.Networking.Transport.Fusion.Tests",
+    "rootNamespace": "Arawn.GameCreator2.Networking.Transport.Fusion.Tests",
+    "references": [
+        "Arawn.GameCreator2.Networking",
+        "Arawn.GameCreator2.Networking.Editor",
+        "Arawn.GameCreator2.Networking.Transport.Fusion",
+        "Arawn.GameCreator2.Networking.Transport.Fusion.Editor",
+        "Fusion.Unity",
+        "Photon.Realtime"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": true,
+    "precompiledReferences": [
+        "Fusion.Common.dll",
+        "Fusion.Log.dll",
+        "Fusion.Realtime.dll",
+        "Fusion.Runtime.dll",
+        "Fusion.Sockets.dll",
+        "nunit.framework.dll"
+    ],
+    "autoReferenced": false,
+    "defineConstraints": [
+        "UNITY_INCLUDE_TESTS"
+    ],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

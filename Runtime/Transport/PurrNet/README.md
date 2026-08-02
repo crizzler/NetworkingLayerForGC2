@@ -3,20 +3,9 @@
 A concrete `NetworkTransportBridge` implementation that wires the
 Game Creator 2 Networking Layer on top of **PurrNet**.
 
-For deciding whether UI, VFX, attached props, or gameplay prefabs should be
-local or network-spawned, see [Spawning Prefabs and UI in Multiplayer](../../../Documentation/spawning-prefabs-and-ui-in-multiplayer.md).
-
-For a compact project setup guide, see
-`Assets/Arawn/NetworkingLayerForGC2/Documentation/purrnet-quickstart.md`.
-
-For Steam P2P, relay behavior, compatible channels, and Inventory authority
-setup, see [PurrNet Steam P2P and Relay Guide](../../../Documentation/purrnet-steam-relay-guide.md).
-
-For a manual character-selection setup, see
-`Assets/Arawn/NetworkingLayerForGC2/Documentation/purrnet-character-selection-manual-setup.md`.
-
-For moving platform setup, see
-`Assets/Arawn/NetworkingLayerForGC2/Documentation/network-motion-support-anchor.md`.
+For setup, prefab/UI decisions, Steam connectivity, character selection, and
+moving-platform guidance, see the
+[online documentation](../../../Documentation/Online%20Documentation.md).
 
 For secure Add Item requests, stable UI reconciliation, static pickups, and
 runtime network pickups, see [Inventory networking](../../../Inventory/README.md).
@@ -106,11 +95,20 @@ The wizard has six pages:
    (`PurrNetMeleeTransportBridge`, `PurrNetShooterTransportBridge`, etc.).
 5. Initialize the GC2 managers when PurrNet starts. The bridge components do
    this automatically when configured like the wizard output; custom manual
-   setups should follow `Documentation/TRANSPORT_QUICKSTART.md`.
+   setups should follow the transport contract described in the
+   [online documentation](../../../Documentation/Online%20Documentation.md).
 6. Prepare spawned player prefabs with `NetworkIdentity`, `NetworkCharacter`,
    `PurrNetNetworkCharacterAuto`, and selected per-player module controllers.
    Add `NetworkVariableController` only when the prefab uses local GC2
    variables that must synchronize.
+
+`PurrNetNetworkCharacterAuto`'s PurrNet Network Manager field is an optional
+scene-instance override. Leave it empty on a prefab asset: Unity cannot serialize
+a reference from a prefab asset to a scene object, and the component resolves
+`PurrNet.NetworkManager.main` automatically at runtime. The compatible scene
+component is specifically **PurrNet > Network Manager** (`PurrNet.NetworkManager`),
+not `PurrNet.RawNetManager`, GC2's Network Core Manager, or another transport's
+similarly named manager.
 
 ## Host / Join overlay
 
@@ -206,6 +204,7 @@ Wizard, the wizard creates/reuses both the GC2 module manager and the PurrNet
 bridge for that module.
 
 Custom transports or hand-written PurrNet setups should still follow the public
-transport contract in `Documentation/TRANSPORT_QUICKSTART.md`: wire outbound
-manager/controller delegates to transport sends and route inbound packets to the
-matching `Receive*` APIs.
+transport contract in the
+[online documentation](../../../Documentation/Online%20Documentation.md): wire
+outbound manager/controller delegates to transport sends and route inbound
+packets to the matching `Receive*` APIs.

@@ -1,0 +1,30 @@
+{
+    "name": "Arawn.GameCreator2.Networking.Inventory.Transport.Fusion",
+    "rootNamespace": "Arawn.GameCreator2.Networking.Inventory.Transport.Fusion",
+    "references": [
+        "Arawn.GameCreator2.Networking",
+        "Arawn.GameCreator2.Networking.Inventory",
+        "Arawn.GameCreator2.Networking.Transport.Fusion",
+        "Fusion.Unity",
+        "GameCreator.Runtime.Core",
+        "GameCreator.Runtime.Inventory"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [
+        "GC2_INVENTORY",
+        "GC2_NETWORK_INVENTORY_PATCHED"
+    ],
+    "versionDefines": [
+        {
+            "name": "com.gamecreator.inventory",
+            "expression": "",
+            "define": "GC2_INVENTORY"
+        }
+    ],
+    "noEngineReferences": false
+}

@@ -33,7 +33,7 @@ namespace Arawn.GameCreator2.Networking
     [Parameter("Action", "Selection screen action to run")]
     [Parameter("Character Index", "Zero-based character slot used by Select Character")]
 
-    [Keywords("Network", "Demo", "Character", "Selection", "PurrNet", "Host", "Join")]
+    [Keywords("Network", "Demo", "Character", "Selection", "Transport", "Host", "Join")]
     [Image(typeof(IconCharacter), ColorTheme.Type.Blue)]
     [Serializable]
     public sealed class InstructionNetworkDemoCharacterSelection : Instruction

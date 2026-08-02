@@ -1,0 +1,18 @@
+{
+    "name": "Arawn.GameCreator2.Networking.Lobby",
+    "rootNamespace": "Arawn.GameCreator2.Networking.Lobby",
+    "references": [
+        "Arawn.GameCreator2.Networking",
+        "GameCreator.Runtime.Core",
+        "UnityEngine.UI"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

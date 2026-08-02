@@ -3,7 +3,7 @@
 Server-authoritative melee combat networking for Game Creator 2.
 
 For melee hit presentation and the broader multiplayer prefab decision guide,
-see [Spawning Prefabs and UI in Multiplayer](../Documentation/spawning-prefabs-and-ui-in-multiplayer.md).
+see the [online documentation](../Documentation/Online%20Documentation.md).
 
 ## Overview
 

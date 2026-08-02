@@ -13,7 +13,9 @@ namespace Arawn.GameCreator2.Networking
         Integer = 3,
         Boolean = 4,
         Position = 5,
-        Color = 6
+        Color = 6,
+        Vector2 = 7,
+        Rotation = 8
     }
 
     [Serializable]
@@ -25,6 +27,7 @@ namespace Arawn.GameCreator2.Networking
         [SerializeField] private PropertyGetInteger m_Integer = new PropertyGetInteger(0);
         [SerializeField] private PropertyGetBool m_Boolean = new PropertyGetBool(false);
         [SerializeField] private PropertyGetPosition m_Position = new PropertyGetPosition(Vector3.zero);
+        [SerializeField] private PropertyGetRotation m_Rotation = new PropertyGetRotation(Quaternion.identity);
         [SerializeField] private PropertyGetColor m_Color = new PropertyGetColor(Color.white);
 
         public object Get(Args args)
@@ -38,8 +41,15 @@ namespace Arawn.GameCreator2.Networking
                 NetworkVariableInstructionValueType.Boolean => m_Boolean.Get(args),
                 NetworkVariableInstructionValueType.Position => m_Position.Get(args),
                 NetworkVariableInstructionValueType.Color => m_Color.Get(args),
+                NetworkVariableInstructionValueType.Vector2 => ToVector2(m_Position.Get(args)),
+                NetworkVariableInstructionValueType.Rotation => m_Rotation.Get(args),
                 _ => null
             };
+        }
+
+        private static Vector2 ToVector2(Vector3 value)
+        {
+            return new Vector2(value.x, value.y);
         }
     }
 

@@ -1,0 +1,28 @@
+{
+    "name": "Arawn.GameCreator2.Networking.Dialogue.Transport.Fusion",
+    "rootNamespace": "Arawn.GameCreator2.Networking.Dialogue.Transport.Fusion",
+    "references": [
+        "Arawn.GameCreator2.Networking",
+        "Arawn.GameCreator2.Networking.Dialogue",
+        "Arawn.GameCreator2.Networking.Transport.Fusion",
+        "GameCreator.Runtime.Core",
+        "GameCreator.Runtime.Dialogue"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [
+        "GC2_DIALOGUE"
+    ],
+    "versionDefines": [
+        {
+            "name": "com.gamecreator.dialogue",
+            "expression": "",
+            "define": "GC2_DIALOGUE"
+        }
+    ],
+    "noEngineReferences": false
+}

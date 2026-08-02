@@ -1,0 +1,44 @@
+{
+    "name": "Arawn.GameCreator2.Networking.FusionModulesA.Tests",
+    "rootNamespace": "Arawn.GameCreator2.Networking.FusionModulesA.Tests",
+    "references": [
+        "Arawn.GameCreator2.Networking",
+        "Arawn.GameCreator2.Networking.Transport.Fusion",
+        "Arawn.GameCreator2.Networking.Stats",
+        "Arawn.GameCreator2.Networking.Inventory",
+        "Arawn.GameCreator2.Networking.Stats.Transport.Fusion",
+        "Arawn.GameCreator2.Networking.Inventory.Transport.Fusion",
+        "GameCreator.Runtime.Core",
+        "GameCreator.Runtime.Stats",
+        "GameCreator.Runtime.Inventory"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": true,
+    "precompiledReferences": [
+        "nunit.framework.dll"
+    ],
+    "autoReferenced": false,
+    "defineConstraints": [
+        "UNITY_INCLUDE_TESTS",
+        "GC2_STATS",
+        "GC2_INVENTORY",
+        "GC2_NETWORK_INVENTORY_PATCHED"
+    ],
+    "versionDefines": [
+        {
+            "name": "com.gamecreator.stats",
+            "expression": "",
+            "define": "GC2_STATS"
+        },
+        {
+            "name": "com.gamecreator.inventory",
+            "expression": "",
+            "define": "GC2_INVENTORY"
+        }
+    ],
+    "noEngineReferences": false
+}

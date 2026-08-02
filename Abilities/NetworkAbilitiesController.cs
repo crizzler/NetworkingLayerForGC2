@@ -626,6 +626,7 @@ namespace Arawn.GameCreator2.Networking
             m_PendingCooldownRequests.Clear();
             m_PendingCancelRequests.Clear();
             m_ClientVisualReplayCastIds.Clear();
+            m_ReplicatedActiveCasts.Clear();
             m_CasterStates.Clear();
             m_ActiveCasts.Clear();
             m_ActiveProjectiles.Clear();

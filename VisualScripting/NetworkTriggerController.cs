@@ -6,8 +6,8 @@ using GameCreator.Runtime.VisualScripting;
 namespace Arawn.GameCreator2.Networking
 {
     /// <summary>
-    /// Network-agnostic trigger synchronization for GC2 Triggers.
-    /// Intercepts trigger execution and broadcasts to all clients via events.
+    /// Legacy custom-transport relay hook for GC2 Triggers. The shipped transports do not
+    /// relay arbitrary trigger execution; gameplay networking uses typed, validated requests.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -21,7 +21,8 @@ namespace Arawn.GameCreator2.Networking
     /// <see cref="GetPersistentStates"/> and <see cref="ReplayPersistentStates"/>.
     /// </para>
     /// </remarks>
-    [AddComponentMenu("Game Creator/Network/Networked Trigger")]
+    [Obsolete("Legacy custom-transport hook. No built-in transport relays arbitrary GC2 triggers.")]
+    [AddComponentMenu("Game Creator/Network/Legacy/Networked Trigger (Custom Transport)")]
     [DisallowMultipleComponent]
     public class NetworkTriggerController : MonoBehaviour
     {
@@ -124,6 +125,12 @@ namespace Arawn.GameCreator2.Networking
             get => m_IsOwner;
             set => m_IsOwner = value;
         }
+
+        /// <summary>
+        /// True only when custom project code has attached a transport relay. Neither the
+        /// bundled Fusion nor PurrNet integrations subscribe to this legacy event.
+        /// </summary>
+        public bool HasBroadcastRelay => OnTriggerBroadcastRequested != null;
 
         // ════════════════════════════════════════════════════════════════════
         // LIFECYCLE

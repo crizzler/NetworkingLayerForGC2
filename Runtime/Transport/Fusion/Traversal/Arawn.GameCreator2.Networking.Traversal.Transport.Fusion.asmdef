@@ -1,0 +1,29 @@
+{
+    "name": "Arawn.GameCreator2.Networking.Traversal.Transport.Fusion",
+    "rootNamespace": "Arawn.GameCreator2.Networking.Traversal.Transport.Fusion",
+    "references": [
+        "Arawn.GameCreator2.Networking",
+        "Arawn.GameCreator2.Networking.Traversal",
+        "Arawn.GameCreator2.Networking.Transport.Fusion",
+        "GameCreator.Runtime.Core",
+        "GameCreator.Runtime.Characters",
+        "GameCreator.Runtime.Traversal"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [
+        "GC2_TRAVERSAL"
+    ],
+    "versionDefines": [
+        {
+            "name": "com.gamecreator.traversal",
+            "expression": "",
+            "define": "GC2_TRAVERSAL"
+        }
+    ],
+    "noEngineReferences": false
+}

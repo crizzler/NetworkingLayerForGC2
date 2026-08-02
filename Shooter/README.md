@@ -3,7 +3,8 @@
 Server-authoritative shooter combat networking for Game Creator 2.
 
 For weapon model registration, local projectile/VFX playback, impact props, and
-the multiplayer prefab decision guide, see [Spawning Prefabs and UI in Multiplayer](../Documentation/spawning-prefabs-and-ui-in-multiplayer.md).
+the multiplayer prefab decision guide, see the
+[online documentation](../Documentation/Online%20Documentation.md).
 
 ## Overview
 

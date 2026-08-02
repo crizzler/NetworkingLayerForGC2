@@ -1,0 +1,27 @@
+{
+    "name": "Arawn.GameCreator2.Networking.Transport.Fusion.Editor",
+    "rootNamespace": "Arawn.GameCreator2.Networking.Transport.Fusion.Editor",
+    "references": [
+        "Arawn.GameCreator2.Networking",
+        "Arawn.GameCreator2.Networking.Editor",
+        "Arawn.GameCreator2.Networking.Lobby",
+        "Arawn.GameCreator2.Networking.Transport.Fusion",
+        "Fusion.Unity",
+        "Fusion.Unity.Editor",
+        "Photon.Realtime",
+        "GameCreator.Runtime.Core",
+        "GameCreator.Editor.Core",
+        "UnityEngine.UI"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

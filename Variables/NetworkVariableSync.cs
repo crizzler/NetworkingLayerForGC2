@@ -25,7 +25,8 @@ namespace Arawn.GameCreator2.Networking
     /// <c>"vector3:1.0,2.0,3.0"</c>, <c>"color:1.0,0.5,0.0,1.0"</c>.
     /// </para>
     /// </remarks>
-    [AddComponentMenu("Game Creator/Network/Variable Sync")]
+    [Obsolete("Legacy custom-transport relay. Use NetworkVariableController and NetworkVariableManager instead.")]
+    [AddComponentMenu("Game Creator/Network/Legacy/Variable Sync (Custom Transport)")]
     [DisallowMultipleComponent]
     public class NetworkVariableSync : MonoBehaviour
     {
