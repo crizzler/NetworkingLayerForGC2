@@ -1,4 +1,6 @@
 using System.Collections.Generic;
+using System.Reflection;
+using Arawn.NetworkingCore.LagCompensation;
 using Fusion;
 using NUnit.Framework;
 using Assert = NUnit.Framework.Assert;
@@ -8,6 +10,11 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
 {
     public sealed class FusionLobbyIsolationTests
     {
+        private const BindingFlags StaticNonPublic =
+            BindingFlags.Static | BindingFlags.NonPublic;
+        private const BindingFlags InstanceNonPublic =
+            BindingFlags.Instance | BindingFlags.NonPublic;
+
         [Test]
         public void SessionStartOptions_CopyLobbyPropertiesAndCapacity()
         {
@@ -55,6 +62,56 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
         }
 
         [Test]
+        public void TransportBridge_ControlsAuthoritativeLagCompensationLifecycle()
+        {
+            if (LagCompensationManager.TryGetInitialized(out LagCompensationManager existing))
+            {
+                existing.Dispose();
+            }
+
+            var bridgeObject = new GameObject("Fusion lag compensation bridge");
+            try
+            {
+                FusionTransportBridge bridge =
+                    bridgeObject.AddComponent<FusionTransportBridge>();
+                FieldInfo bootstrapField = typeof(FusionTransportBridge).GetField(
+                    "m_LagCompensationBootstrap",
+                    InstanceNonPublic);
+                MethodInfo setAuthority = typeof(FusionTransportBridge).GetMethod(
+                    "SetLagCompensationAuthority",
+                    InstanceNonPublic);
+
+                Assert.NotNull(bootstrapField);
+                Assert.NotNull(setAuthority);
+
+                // Edit-mode AddComponent does not invoke MonoBehaviour.Awake. Driving the
+                // authority entry point verifies that it can establish the bootstrap itself.
+                setAuthority.Invoke(bridge, new object[] { true });
+                var bootstrap = (LagCompensationBootstrap)bootstrapField.GetValue(bridge);
+                Assert.NotNull(bootstrap);
+                Assert.NotNull(bootstrap.GetServerTimeFunc);
+                Assert.AreSame(bridge, bootstrap.GetServerTimeFunc.Target);
+
+                Assert.IsTrue(bootstrap.IsServer);
+                Assert.IsTrue(bootstrap.IsInitialized);
+                Assert.IsTrue(LagCompensationManager.IsInitialized);
+
+                setAuthority.Invoke(bridge, new object[] { false });
+                Assert.IsFalse(bootstrap.IsServer);
+                Assert.IsFalse(bootstrap.IsInitialized);
+                Assert.IsFalse(LagCompensationManager.IsInitialized);
+            }
+            finally
+            {
+                if (LagCompensationManager.TryGetInitialized(out LagCompensationManager manager))
+                {
+                    manager.Dispose();
+                }
+                Object.DestroyImmediate(bridgeObject);
+            }
+        }
+
+        [Test]
         public void SessionBootstrap_RejectsDiscoveryRunner()
         {
             var runnerObject = new GameObject("Discovery Runner");
@@ -74,6 +131,58 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
                 Object.DestroyImmediate(bootstrapObject);
                 Object.DestroyImmediate(runnerObject);
             }
+        }
+
+        [Test]
+        public void SessionBootstrap_AppIdDiagnosticDoesNotExposeFullAppId()
+        {
+            MethodInfo formatter = typeof(FusionSessionBootstrap).GetMethod(
+                "FormatAppIdForDiagnostic",
+                StaticNonPublic);
+            Assert.NotNull(formatter);
+
+            const string appId = "12345678-90ab-cdef-1234-567890abcdef";
+            string diagnostic = (string)formatter.Invoke(null, new object[] { appId });
+
+            StringAssert.StartsWith("sha256=", diagnostic);
+            StringAssert.Contains(" suffix=cdef", diagnostic);
+            StringAssert.DoesNotContain(appId, diagnostic);
+        }
+
+        [Test]
+        public void SessionBootstrap_DiagnosticQuotingEscapesLogBreakingCharacters()
+        {
+            MethodInfo quote = typeof(FusionSessionBootstrap).GetMethod(
+                "QuoteDiagnosticValue",
+                StaticNonPublic);
+            Assert.NotNull(quote);
+
+            string diagnostic = (string)quote.Invoke(
+                null,
+                new object[] { "room\"name\nnext\\part" });
+
+            Assert.AreEqual("\"room\\\"name\\nnext\\\\part\"", diagnostic);
+        }
+
+        [Test]
+        public void SessionBootstrap_ResultDetailRedactsAppIdCaseInsensitively()
+        {
+            MethodInfo redact = typeof(FusionSessionBootstrap).GetMethod(
+                "RedactExactValue",
+                StaticNonPublic);
+            Assert.NotNull(redact);
+
+            const string appId = "12345678-90ab-cdef-1234-567890abcdef";
+            string diagnostic = (string)redact.Invoke(
+                null,
+                new object[]
+                {
+                    $"Photon rejected app {appId.ToUpperInvariant()} during matchmaking.",
+                    appId
+                });
+
+            StringAssert.Contains("<app-id-redacted>", diagnostic);
+            StringAssert.DoesNotContain(appId.ToUpperInvariant(), diagnostic);
         }
     }
 }

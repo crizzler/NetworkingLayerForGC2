@@ -336,8 +336,9 @@ namespace Arawn.GameCreator2.Networking.Traversal
             m_RouteDiagnosticTimes[diagnosticKey] = now;
             Debug.LogWarning(
                 $"[NetworkTraversalPatchHooks] Suppressed native local traversal for network character " +
-                $"'{(character != null ? character.name : "unknown")}': {reason}. Run the PurrNet setup " +
-                "wizard and verify the required Traversal patch, controller role, and prediction backend.",
+                $"'{(character != null ? character.name : "unknown")}': {reason}. Run the setup wizard " +
+                "for the active transport and verify the required Traversal patch, controller role, " +
+                "and prediction backend.",
                 character);
         }
 
@@ -508,6 +509,7 @@ namespace Arawn.GameCreator2.Networking.Traversal
             }
 
             Vector3 localPosition = GetTraversalLocalPosition(stance, interactive, character);
+            float edgePositionTolerance = GetTraversalEdgePositionTolerance(character);
             if (Mathf.Abs(horizontalInput) < LEDGE_EDGE_INPUT_THRESHOLD)
             {
                 ClearLedgeEdgeIntent(character);
@@ -530,9 +532,9 @@ namespace Arawn.GameCreator2.Networking.Traversal
                 return false;
             }
 
-            bool pushingA = localPosition.z <= interactive.PositionA + LEDGE_EDGE_POSITION_TOLERANCE &&
+            bool pushingA = localPosition.z <= interactive.PositionA + edgePositionTolerance &&
                             horizontalInput < -LEDGE_EDGE_INPUT_THRESHOLD;
-            bool pushingB = localPosition.z >= interactive.PositionB - LEDGE_EDGE_POSITION_TOLERANCE &&
+            bool pushingB = localPosition.z >= interactive.PositionB - edgePositionTolerance &&
                             horizontalInput > LEDGE_EDGE_INPUT_THRESHOLD;
 
             if (!pushingA && !pushingB)
@@ -609,6 +611,7 @@ namespace Arawn.GameCreator2.Networking.Traversal
                     $"role={(networkCharacter != null ? networkCharacter.CurrentRole.ToString() : "none")} " +
                     $"inputX={horizontalInput:F3} localZ={localPosition.z:F3} " +
                     $"boundsA={interactive.PositionA:F3} boundsB={interactive.PositionB:F3} " +
+                    $"edgeTolerance={edgePositionTolerance:F3} " +
                     $"edge={(pushingA ? "A" : "B")} intent={FormatVector(targetIntent)} speed={FormatVector(targetSpeed)}",
                     character);
             }
@@ -629,6 +632,7 @@ namespace Arawn.GameCreator2.Networking.Traversal
             Vector3 speedBefore = targetSpeed;
             Vector3 localPosition = GetTraversalLocalPosition(stance, interactive, character);
             float halfWidth = interactive.Width * 0.5f;
+            float edgePositionTolerance = GetTraversalEdgePositionTolerance(character);
 
             Vector2 climbPlaneIntent = new Vector2(intentBefore.x, intentBefore.z);
             string inputSource = "local-animation-intent";
@@ -655,17 +659,17 @@ namespace Arawn.GameCreator2.Networking.Traversal
 
             bool pushingLeft =
                 halfWidth > float.Epsilon &&
-                localPosition.x <= -halfWidth + LEDGE_EDGE_POSITION_TOLERANCE &&
+                localPosition.x <= -halfWidth + edgePositionTolerance &&
                 climbPlaneIntent.x < -LEDGE_EDGE_INPUT_THRESHOLD;
             bool pushingRight =
                 halfWidth > float.Epsilon &&
-                localPosition.x >= halfWidth - LEDGE_EDGE_POSITION_TOLERANCE &&
+                localPosition.x >= halfWidth - edgePositionTolerance &&
                 climbPlaneIntent.x > LEDGE_EDGE_INPUT_THRESHOLD;
             bool pushingDown =
-                localPosition.z <= interactive.PositionA + LEDGE_EDGE_POSITION_TOLERANCE &&
+                localPosition.z <= interactive.PositionA + edgePositionTolerance &&
                 climbPlaneIntent.y < -LEDGE_EDGE_INPUT_THRESHOLD;
             bool pushingUp =
-                localPosition.z >= interactive.PositionB - LEDGE_EDGE_POSITION_TOLERANCE &&
+                localPosition.z >= interactive.PositionB - edgePositionTolerance &&
                 climbPlaneIntent.y > LEDGE_EDGE_INPUT_THRESHOLD;
 
             string edge = pushingLeft ? "left" :
@@ -697,6 +701,7 @@ namespace Arawn.GameCreator2.Networking.Traversal
                     $"local={NetworkTraversalClimbDiagnostics.Vector(localPosition)} " +
                     $"boundsX={-halfWidth:F3}/{halfWidth:F3} " +
                     $"boundsZ={interactive.PositionA:F3}/{interactive.PositionB:F3} " +
+                    $"edgeTolerance={edgePositionTolerance:F3} " +
                     $"intentPre={NetworkTraversalClimbDiagnostics.Vector(intentBefore)} " +
                     $"intentPost={NetworkTraversalClimbDiagnostics.Vector(targetIntent)} " +
                     $"speedPre={NetworkTraversalClimbDiagnostics.Vector(speedBefore)} " +
@@ -1007,6 +1012,18 @@ namespace Arawn.GameCreator2.Networking.Traversal
             return interactive != null && character != null
                 ? interactive.Transform.InverseTransformPoint(character.transform.position)
                 : Vector3.zero;
+        }
+
+        private static float GetTraversalEdgePositionTolerance(Character character)
+        {
+            // CharacterController stops a root approximately one skin width before a contact
+            // boundary. The original fixed tolerance was smaller than GC2's default 0.08 skin,
+            // so a network owner could be visibly clamped while still missing the authored edge
+            // animation test. This tolerance is only used together with explicit outward input.
+            float skinWidth = character?.Driver != null
+                ? Mathf.Max(0f, character.Driver.SkinWidth)
+                : 0f;
+            return Mathf.Max(LEDGE_EDGE_POSITION_TOLERANCE, skinWidth + 0.01f);
         }
 
         private static NetworkTraversalController ResolveController(Character character)

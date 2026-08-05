@@ -2315,6 +2315,7 @@ GameObject:
   - component: {fileID: 1980495407572504787}
   - component: {fileID: 5451211347596764032}
   - component: {fileID: 5934501986805208957}
+  - component: {fileID: 8900000000000000011}
   - component: {fileID: 2718172822443367827}
   m_Layer: 0
   m_Name: FusionDemoPlayer-Traversal
@@ -2558,13 +2559,13 @@ MonoBehaviour:
   m_UseAnimationSync: 1
   m_PreRegisteredAnimationClips: []
   m_UseCoreNetworking: 1
-  m_PredictionBackend: 0
+  m_PredictionBackend: 2
   m_UseAutomaticNetworkId: 1
   m_ManualNetworkId: 0
   m_NetworkIdSalt: 
   m_SessionProfileOverride: {fileID: 0}
   m_UseRelevanceTiers: 1
-  m_HostOwnerUsesClientPrediction: 0
+  m_HostOwnerUsesClientPrediction: 1
   m_RelevanceObserver: {fileID: 0}
   m_DisableVisualsOnServer: 1
   m_DisableAudioOnServer: 1
@@ -2860,9 +2861,10 @@ MonoBehaviour:
   SortKey: 2698041920
   SendPriority: 1
   EnableInterpolation: 1
-  Flags: 131074
+  Flags: 131330
   NestedObjects: []
   NetworkedBehaviours:
+  - {fileID: 8900000000000000011}
   - {fileID: 5934501986805208957}
   - {fileID: 2718172822443367827}
   ForceRemoteRenderTimeframe: 0
@@ -3811,3 +3813,17 @@ Transform:
   - {fileID: 2493134675830167130}
   m_Father: {fileID: 1317643689634834535}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &8900000000000000011
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 6502751915633435404}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 5958940fa173489abf778864eed73a2d, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Arawn.GameCreator2.Networking.Transport.Fusion::Arawn.GameCreator2.Networking.Transport.Fusion.FusionNativeNetworkCharacterMotor
+  m_ListenHostPresentationVisualRoot: {fileID: 8177458554594483598}
+  m_LogDiagnostics: 0

@@ -1907,7 +1907,9 @@ MonoBehaviour:
   m_RunnerPrefab: {fileID: 0}
   m_DefaultLaunchMode: 1
   m_DefaultSessionName: GC2-Fusion-Traversal
-  m_Region: 
+  m_Region: asia
+  m_ForcePhotonRelay: 0
+  m_AuthenticationProviderBehaviour: {fileID: 0}
   m_MaxPlayers: 4
   m_CreateDefaultSceneManager: 1
   m_IncludeActiveScene: 1
@@ -2456,6 +2458,7 @@ MonoBehaviour:
   m_MaxPendingTransientStatesPerCharacter: 16
   m_MaxPendingCharacterStates: 128
   m_LogNetworkMessages: 0
+  m_LogFocusedClimbDiagnostics: 0
 --- !u!1 &813995712
 GameObject:
   m_ObjectHideFlags: 0
@@ -2717,6 +2720,9 @@ MonoBehaviour:
           m_Position:
             m_Property:
               rid: 4906697320776074226
+          m_Rotation:
+            m_Property:
+              rid: 7345832871051395986
           m_Color:
             m_Property:
               rid: 4906697320776074227
@@ -2751,6 +2757,9 @@ MonoBehaviour:
           m_Position:
             m_Property:
               rid: 4906697320776074235
+          m_Rotation:
+            m_Property:
+              rid: 7345832871051395987
           m_Color:
             m_Property:
               rid: 4906697320776074236
@@ -2891,6 +2900,54 @@ MonoBehaviour:
     - rid: 4906697322472407045
       type: {class: GetGameObjectSelf, ns: GameCreator.Runtime.Common, asm: GameCreator.Runtime.Core}
       data: 
+    - rid: 7345832871051395986
+      type: {class: GetRotationEuler, ns: GameCreator.Runtime.Common, asm: GameCreator.Runtime.Core}
+      data:
+        m_X:
+          m_Property:
+            rid: 7345832871051395988
+        m_Y:
+          m_Property:
+            rid: 7345832871051395989
+        m_Z:
+          m_Property:
+            rid: 7345832871051395990
+    - rid: 7345832871051395987
+      type: {class: GetRotationEuler, ns: GameCreator.Runtime.Common, asm: GameCreator.Runtime.Core}
+      data:
+        m_X:
+          m_Property:
+            rid: 7345832871051395991
+        m_Y:
+          m_Property:
+            rid: 7345832871051395992
+        m_Z:
+          m_Property:
+            rid: 7345832871051395993
+    - rid: 7345832871051395988
+      type: {class: GetDecimalDecimal, ns: GameCreator.Runtime.Common, asm: GameCreator.Runtime.Core}
+      data:
+        m_Value: -0
+    - rid: 7345832871051395989
+      type: {class: GetDecimalDecimal, ns: GameCreator.Runtime.Common, asm: GameCreator.Runtime.Core}
+      data:
+        m_Value: 0
+    - rid: 7345832871051395990
+      type: {class: GetDecimalDecimal, ns: GameCreator.Runtime.Common, asm: GameCreator.Runtime.Core}
+      data:
+        m_Value: 0
+    - rid: 7345832871051395991
+      type: {class: GetDecimalDecimal, ns: GameCreator.Runtime.Common, asm: GameCreator.Runtime.Core}
+      data:
+        m_Value: -0
+    - rid: 7345832871051395992
+      type: {class: GetDecimalDecimal, ns: GameCreator.Runtime.Common, asm: GameCreator.Runtime.Core}
+      data:
+        m_Value: 0
+    - rid: 7345832871051395993
+      type: {class: GetDecimalDecimal, ns: GameCreator.Runtime.Common, asm: GameCreator.Runtime.Core}
+      data:
+        m_Value: 0
 --- !u!114 &961720188
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -5400,6 +5457,7 @@ MonoBehaviour:
   m_AutoBindSingleRunner: 1
   m_MaxInboundPacketsPerSecond: 512
   m_LogRejectedPackets: 1
+  m_LogLifecycleDiagnostics: 1
 --- !u!4 &1496222916
 Transform:
   m_ObjectHideFlags: 0

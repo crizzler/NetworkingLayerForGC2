@@ -522,4 +522,52 @@ namespace Arawn.GameCreator2.Networking
         }
     }
 
+    /// <summary>
+    /// Deterministic helpers shared by owner-predicted and host-local input producers. Keeping
+    /// scheduling phase separate from elapsed payload time prevents render/network frequency
+    /// aliasing, while fractional millisecond carry avoids long-term authoritative time drift.
+    /// </summary>
+    internal static class NetworkInputCadence
+    {
+        public static bool Advance(ref float phase, float deltaTime, float interval)
+        {
+            if (interval <= 0f || float.IsNaN(interval) || float.IsInfinity(interval))
+            {
+                phase = 0f;
+                return false;
+            }
+
+            if (deltaTime > 0f && !float.IsNaN(deltaTime) && !float.IsInfinity(deltaTime))
+            {
+                phase += deltaTime;
+            }
+
+            if (phase < interval) return false;
+
+            // Emit at most one aggregate packet per render frame and discard whole missed
+            // schedule slots, retaining only the sub-interval phase. The payload producer keeps
+            // the actual elapsed time separately, so a hitch is still represented correctly.
+            phase = Mathf.Repeat(phase, interval);
+            return true;
+        }
+
+        public static float QuantizeElapsedSeconds(
+            float elapsedSeconds,
+            ref float remainderMilliseconds)
+        {
+            float exactMilliseconds =
+                Mathf.Max(0f, elapsedSeconds) * 1000f +
+                remainderMilliseconds;
+            int encodedMilliseconds = Mathf.Clamp(
+                Mathf.RoundToInt(exactMilliseconds),
+                1,
+                byte.MaxValue);
+
+            remainderMilliseconds = exactMilliseconds <= byte.MaxValue + 0.5f
+                ? exactMilliseconds - encodedMilliseconds
+                : 0f;
+            return encodedMilliseconds * 0.001f;
+        }
+    }
+
 }

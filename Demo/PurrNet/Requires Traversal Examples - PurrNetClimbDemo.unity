@@ -2408,6 +2408,7 @@ MonoBehaviour:
   m_MaxPendingTransientStatesPerCharacter: 16
   m_MaxPendingCharacterStates: 128
   m_LogNetworkMessages: 0
+  m_LogFocusedClimbDiagnostics: 0
 --- !u!1 &876312185
 GameObject:
   m_ObjectHideFlags: 0

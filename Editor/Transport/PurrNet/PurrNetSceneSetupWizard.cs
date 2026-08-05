@@ -156,6 +156,10 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
             "Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction.PurrDictionNetworkCharacterController, Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction";
         private const string PURRDICTION_NAVMESH_CONTROLLER_TYPE =
             "Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction.PurrDictionNetworkNavmeshController, Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction";
+        private const string PURRDICTION_DIRECTIONAL_DRIVER_TYPE =
+            "Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction.UnitDriverPurrDiction, Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction";
+        private const string PURRDICTION_NAVMESH_DRIVER_TYPE =
+            "Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction.UnitDriverPurrDictionNavmesh, Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction";
         private const string PURRNET_LOBBY_SERVICE_TYPE =
             "Arawn.GameCreator2.Networking.Transport.PurrNet.Lobby.PurrNetLobbyService, " +
             "Arawn.GameCreator2.Networking.Transport.PurrNet";
@@ -1150,22 +1154,28 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
             }
 
             EditorGUILayout.Space(4);
-            m_PredictionBackend = (NetworkPredictionBackend)EditorGUILayout.EnumPopup(
+            if (m_PredictionBackend != NetworkPredictionBackend.BuiltIn &&
+                m_PredictionBackend != NetworkPredictionBackend.PurrDiction)
+            {
+                // Transport-specific backends share the runtime enum so NetworkCharacter can
+                // serialize them, but the PurrNet wizard must never offer or retain FusionNative.
+                m_PredictionBackend = NetworkPredictionBackend.BuiltIn;
+            }
+
+            int predictionChoice = m_PredictionBackend == NetworkPredictionBackend.PurrDiction
+                ? 1
+                : 0;
+            predictionChoice = EditorGUILayout.Popup(
                 new GUIContent(
                     "Prediction Backend",
-                    "Built-in uses the GC2 networking layer's transport-agnostic prediction. PurrDiction uses PurrNet's PurrDiction stack for supported directional and point-click player prefabs."),
-                m_PredictionBackend);
+                    "Built-in uses the stable transport-agnostic GC2 prediction path. PurrDiction Native uses the optional PurrDiction addon for native prediction and resimulation; this integration remains experimental."),
+                predictionChoice,
+                new[] { "Built-in (Stable)", "PurrDiction Native (Experimental)" });
+            m_PredictionBackend = predictionChoice == 1
+                ? NetworkPredictionBackend.PurrDiction
+                : NetworkPredictionBackend.BuiltIn;
 
             if (m_PredictionBackend != NetworkPredictionBackend.PurrDiction) return;
-
-            if (IsTraversalEnabledForSetupOrScene())
-            {
-                EditorGUILayout.HelpBox(
-                    "Traversal currently requires the Built-in prediction backend. The PurrDiction adapters " +
-                    "do not expose INetworkOwnerMotionAuthority, so allowing this combination would let " +
-                    "movement reconciliation overwrite traversal-driven poses.",
-                    MessageType.Error);
-            }
 
             bool hasDefine = HasScriptingDefine(PURRDICTION_DEFINE);
             bool compiled = IsPurrDictionIntegrationCompiled();
@@ -1190,25 +1200,29 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
             else
             {
                 EditorGUILayout.HelpBox(
-                    "PurrDiction will own player movement prediction. Existing GC2 module bridges remain enabled for gameplay state sync.",
+                    "PurrDiction Native will own player movement prediction and resimulation. Existing GC2 module bridges remain enabled for gameplay state sync. Treat this backend as experimental and keep Built-in available as a fallback.",
                     MessageType.Info);
+
+                if (IsTraversalEnabledForSetupOrScene())
+                {
+                    if (TryValidatePurrDictionTraversalCapabilities(out string capabilityIssue))
+                    {
+                        EditorGUILayout.HelpBox(
+                            "The selected PurrDiction movement adapter exposes both owner and server " +
+                            "motion-authority windows required by Traversal.",
+                            MessageType.Info);
+                    }
+                    else
+                    {
+                        EditorGUILayout.HelpBox(capabilityIssue, MessageType.Error);
+                    }
+                }
             }
         }
 
         private bool ValidatePredictionBackendSelection()
         {
             if (m_PredictionBackend != NetworkPredictionBackend.PurrDiction) return true;
-
-            if (IsTraversalEnabledForSetupOrScene())
-            {
-                EditorUtility.DisplayDialog(
-                    "Traversal Requires Built-in Prediction",
-                    "PurrDiction cannot currently be used with the Traversal module because its movement " +
-                    "adapters do not implement INetworkOwnerMotionAuthority. Select Built-in prediction, or " +
-                    "disable Traversal, to prevent traversal pose and transform desynchronization.",
-                    "OK");
-                return false;
-            }
 
             if (!IsPurrDictionInstalled())
             {
@@ -1242,7 +1256,71 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
                 return false;
             }
 
+            if (IsTraversalEnabledForSetupOrScene() &&
+                !TryValidatePurrDictionTraversalCapabilities(out string capabilityIssue))
+            {
+                EditorUtility.DisplayDialog(
+                    "PurrDiction Traversal Capabilities",
+                    capabilityIssue,
+                    "OK");
+                return false;
+            }
+
             return true;
+        }
+
+        private bool TryValidatePurrDictionTraversalCapabilities(out string issue)
+        {
+            issue = string.Empty;
+
+            var requiredAdapters = new HashSet<PurrDictionMovementAdapter>();
+            List<GameObject> prefabs = GetSpawnablePlayerPrefabs();
+            for (int i = 0; i < prefabs.Count; i++)
+            {
+                PurrDictionMovementAdapter adapter = DetectPurrDictionMovementAdapter(
+                    prefabs[i],
+                    m_ConfigurePlayerPrefabKernel);
+                if (adapter != PurrDictionMovementAdapter.Unsupported)
+                {
+                    requiredAdapters.Add(adapter);
+                }
+            }
+
+            // A newly authored wizard setup without an assigned prefab prepares a directional
+            // Character kernel by default. Validate that concrete adapter instead of treating an
+            // absent prefab as permission to bypass the capability gate.
+            if (requiredAdapters.Count == 0)
+            {
+                requiredAdapters.Add(PurrDictionMovementAdapter.Directional);
+            }
+
+            foreach (PurrDictionMovementAdapter adapter in requiredAdapters)
+            {
+                string driverTypeName = adapter == PurrDictionMovementAdapter.NavMesh
+                    ? PURRDICTION_NAVMESH_DRIVER_TYPE
+                    : PURRDICTION_DIRECTIONAL_DRIVER_TYPE;
+                Type driverType = Type.GetType(driverTypeName);
+                if (HasTraversalMotionAuthorityCapabilities(driverType)) continue;
+
+                issue =
+                    $"Traversal cannot use the {GetPurrDictionMovementAdapterLabel(adapter)} " +
+                    "PurrDiction adapter in the currently compiled integration. Its active driver " +
+                    $"'{driverType?.FullName ?? driverTypeName}' must implement both " +
+                    $"{nameof(INetworkOwnerMotionAuthority)} and " +
+                    $"{nameof(INetworkServerOwnerMotionAuthority)}. Update/recompile the PurrDiction " +
+                    "integration, or select Built-in prediction. The wizard is blocking this setup " +
+                    "to prevent traversal-driven root poses from fighting reconciliation.";
+                return false;
+            }
+
+            return true;
+        }
+
+        private static bool HasTraversalMotionAuthorityCapabilities(Type driverType)
+        {
+            return driverType != null &&
+                   typeof(INetworkOwnerMotionAuthority).IsAssignableFrom(driverType) &&
+                   typeof(INetworkServerOwnerMotionAuthority).IsAssignableFrom(driverType);
         }
 
         private bool IsTraversalEnabledForSetupOrScene()

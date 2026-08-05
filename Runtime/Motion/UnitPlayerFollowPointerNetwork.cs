@@ -65,7 +65,7 @@ namespace Arawn.GameCreator2.Networking
         [NonSerialized] private bool m_WasPressed;
 
         // Network
-        [NonSerialized] private UnitDriverNetworkClient m_NetworkDriver;
+        [NonSerialized] private INetworkDirectionalInputSink m_NetworkDriver;
         [NonSerialized] private ushort m_InputSequence;
 
         // EVENTS: --------------------------------------------------------------------------------
@@ -119,7 +119,7 @@ namespace Arawn.GameCreator2.Networking
             this.m_InputMove.OnStartup();
 
             // Try to find network driver
-            m_NetworkDriver = character.Driver as UnitDriverNetworkClient;
+            m_NetworkDriver = character.Driver as INetworkDirectionalInputSink;
         }
 
         public override void OnDispose(Character character)
@@ -205,7 +205,7 @@ namespace Arawn.GameCreator2.Networking
             {
                 // Convert direction to input format
                 Vector2 input = new Vector2(m_Direction.x, m_Direction.z);
-                m_NetworkDriver.ProcessLocalInput(input, null, false);
+                m_NetworkDriver.ProcessDirectionalInput(input, null, false);
             }
 
             // Track press state for stop detection
@@ -342,11 +342,20 @@ namespace Arawn.GameCreator2.Networking
             m_NetworkDriver = driver;
         }
 
+        /// <summary>
+        /// Connect to any compatible directional input sink, including the strict-authority
+        /// server driver used by a host-owned character.
+        /// </summary>
+        public void SetNetworkInputSink(INetworkDirectionalInputSink inputSink)
+        {
+            m_NetworkDriver = inputSink;
+        }
+
         private void RefreshNetworkDriver()
         {
             if (this.Character == null) return;
             if (ReferenceEquals(m_NetworkDriver, this.Character.Driver)) return;
-            m_NetworkDriver = this.Character.Driver as UnitDriverNetworkClient;
+            m_NetworkDriver = this.Character.Driver as INetworkDirectionalInputSink;
         }
 
         private void SendStopToNetwork()
@@ -365,7 +374,7 @@ namespace Arawn.GameCreator2.Networking
             }
 
             RefreshNetworkDriver();
-            m_NetworkDriver?.ProcessLocalInput(Vector2.zero, null, false);
+            m_NetworkDriver?.ProcessDirectionalInput(Vector2.zero, null, false);
         }
 
         // STRING: --------------------------------------------------------------------------------

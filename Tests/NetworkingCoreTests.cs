@@ -827,6 +827,18 @@ namespace Arawn.GameCreator2.Networking.Tests
         }
 
         [Test]
+        public void InputState_Create_RoundsDeltaTimeInsteadOfTruncating()
+        {
+            var state = NetworkInputState.Create(
+                UnityEngine.Vector2.zero,
+                sequence: 1,
+                deltaTime: 0.0336f);
+
+            Assert.AreEqual(34, state.deltaTimeMs);
+            Assert.AreEqual(0.034f, state.GetDeltaTime(), 0.0001f);
+        }
+
+        [Test]
         public void InputState_GetRotationY_Decompresses()
         {
             var state = new NetworkInputState { rotationY = 32768 };
@@ -2471,6 +2483,156 @@ namespace Arawn.GameCreator2.Networking.Tests
 
             // The position state references which input it last processed
             Assert.AreEqual(input.sequenceNumber, posState.lastProcessedInput);
+        }
+
+        [Test]
+        public void StrictHostServerDriver_ProvidesDirectionalInputSink()
+        {
+            Type driverType = Type.GetType(
+                "Arawn.GameCreator2.Networking.UnitDriverNetworkServer, " +
+                "Arawn.GameCreator2.Networking");
+            Assert.That(driverType, Is.Not.Null, "Server driver type was not loaded.");
+
+            object driver = Activator.CreateInstance(driverType);
+            Assert.That(
+                driver,
+                Is.InstanceOf<INetworkDirectionalInputSink>(),
+                "A strict-authority host keeps its owner on the server driver, so that driver " +
+                "must accept the local network player unit's directional input.");
+        }
+
+        [Test]
+        public void DirectionalNetworkPlayers_AcceptStrictHostServerInputSink()
+        {
+            const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
+            FieldInfo tankDriver = typeof(UnitPlayerTankNetwork).GetField(
+                "m_NetworkDriver",
+                flags);
+            FieldInfo followPointerDriver = typeof(UnitPlayerFollowPointerNetwork).GetField(
+                "m_NetworkDriver",
+                flags);
+
+            Assert.That(tankDriver, Is.Not.Null);
+            Assert.That(followPointerDriver, Is.Not.Null);
+            Assert.That(tankDriver.FieldType, Is.EqualTo(typeof(INetworkDirectionalInputSink)));
+            Assert.That(
+                followPointerDriver.FieldType,
+                Is.EqualTo(typeof(INetworkDirectionalInputSink)));
+
+            MethodInfo tankMovementInput = typeof(UnitPlayerTankNetwork).GetMethod(
+                "GetNetworkMovementInput",
+                BindingFlags.Static | BindingFlags.NonPublic);
+            Assert.That(tankMovementInput, Is.Not.Null);
+            Vector2 movement = (Vector2)tankMovementInput.Invoke(
+                null,
+                new object[] { new Vector2(-0.75f, 0.5f) });
+            Assert.That(movement.x, Is.EqualTo(0f));
+            Assert.That(movement.y, Is.EqualTo(0.5f));
+        }
+
+        [Test]
+        public void StrictHostServerDriver_LocalDirectionalInput_UsesAuthoritativeQueue()
+        {
+            GameObject characterObject = null;
+            GameObject cameraObject = null;
+            object driver = null;
+            Type driverType = null;
+            Component character = null;
+
+            try
+            {
+                characterObject = new GameObject("Strict Host Local Input Test");
+                characterObject.SetActive(false);
+                characterObject.transform.position = new Vector3(0f, 3f, 0f);
+                Animator animator = characterObject.AddComponent<Animator>();
+                Type characterType = Type.GetType(
+                    "GameCreator.Runtime.Characters.Character, GameCreator.Runtime.Core");
+                Assert.That(characterType, Is.Not.Null, "Game Creator Character type was not loaded.");
+                character = characterObject.AddComponent(characterType);
+
+                // Root-motion blending is outside the directional-queue behavior under test.
+                // Supply the normal Animator dependency and disable positional root motion so the
+                // synthetic EditMode fixture does not require a running GC2 PlayableGraph.
+                object animim = characterType.GetProperty("Animim")?.GetValue(character);
+                Assert.That(animim, Is.Not.Null, "GC2 Animim unit was not initialized.");
+                PropertyInfo animatorProperty = animim.GetType().GetProperty("Animator");
+                Assert.That(animatorProperty, Is.Not.Null);
+                animatorProperty.SetValue(animim, animator);
+                PropertyInfo rootMotionUsage = characterType.GetProperty("CanUseRootMotionPosition");
+                Assert.That(rootMotionUsage, Is.Not.Null);
+                rootMotionUsage.SetValue(character, false);
+                characterObject.SetActive(true);
+
+                driverType = Type.GetType(
+                    "Arawn.GameCreator2.Networking.UnitDriverNetworkServer, " +
+                    "Arawn.GameCreator2.Networking");
+                Assert.That(driverType, Is.Not.Null, "Server driver type was not loaded.");
+                driver = Activator.CreateInstance(driverType);
+                Assert.That(driver, Is.InstanceOf<INetworkDirectionalInputSink>());
+
+                MethodInfo startup = driverType.GetMethod("OnStartup");
+                Assert.That(startup, Is.Not.Null);
+                startup.Invoke(driver, new object[] { character });
+
+                cameraObject = new GameObject("Strict Host Input Camera");
+                cameraObject.transform.rotation = Quaternion.Euler(0f, 90f, 0f);
+
+                MethodInfo queueLocalInput = driverType.GetMethod(
+                    "QueueLocalDirectionalInput",
+                    BindingFlags.Instance | BindingFlags.NonPublic);
+                Assert.That(queueLocalInput, Is.Not.Null);
+                queueLocalInput.Invoke(
+                    driver,
+                    new object[]
+                    {
+                        Vector2.up,
+                        cameraObject.transform,
+                        false,
+                        0.016f
+                    });
+                queueLocalInput.Invoke(
+                    driver,
+                    new object[]
+                    {
+                        Vector2.zero,
+                        cameraObject.transform,
+                        false,
+                        0.034f
+                    });
+
+                Vector3 positionBefore = characterObject.transform.position;
+                MethodInfo processInputs = driverType.GetMethod("ProcessInputs");
+                Assert.That(processInputs, Is.Not.Null);
+                NetworkPositionState state = (NetworkPositionState)processInputs.Invoke(
+                    driver,
+                    new object[] { null });
+
+                Assert.That(
+                    characterObject.transform.position.x,
+                    Is.GreaterThan(positionBefore.x + 0.01f),
+                    "A short camera-relative host input must survive a release before the " +
+                    "authoritative send boundary and translate through server simulation.");
+                Assert.That(
+                    Mathf.Abs(characterObject.transform.position.z - positionBefore.z),
+                    Is.LessThan(0.01f),
+                    "A 90-degree camera yaw should convert forward input onto world +X.");
+                Assert.That(
+                    state.lastProcessedInput,
+                    Is.EqualTo(0),
+                    "Host-local input must be sequenced and acknowledged like remote input.");
+            }
+            finally
+            {
+                if (driver != null && character != null)
+                {
+                    driverType
+                        ?.GetMethod("OnDispose")
+                        ?.Invoke(driver, new object[] { character });
+                }
+                if (cameraObject != null) UnityEngine.Object.DestroyImmediate(cameraObject);
+                if (characterObject != null) UnityEngine.Object.DestroyImmediate(characterObject);
+                Physics.SyncTransforms();
+            }
         }
 
         [Test]

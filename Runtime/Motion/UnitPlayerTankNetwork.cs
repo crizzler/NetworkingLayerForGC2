@@ -37,7 +37,7 @@ namespace Arawn.GameCreator2.Networking
         [NonSerialized] private bool m_IsInputEnabled = true;
 
         // Network
-        [NonSerialized] private UnitDriverNetworkClient m_NetworkDriver;
+        [NonSerialized] private INetworkDirectionalInputSink m_NetworkDriver;
         [NonSerialized] private ushort m_InputSequence;
 
         // PROPERTIES: ----------------------------------------------------------------------------
@@ -71,7 +71,7 @@ namespace Arawn.GameCreator2.Networking
             this.m_InputMove.OnStartup();
 
             // Try to find network driver
-            m_NetworkDriver = character.Driver as UnitDriverNetworkClient;
+            m_NetworkDriver = character.Driver as INetworkDirectionalInputSink;
         }
 
         public override void OnDispose(Character character)
@@ -118,7 +118,7 @@ namespace Arawn.GameCreator2.Networking
                 }
 
                 RefreshNetworkDriver();
-                m_NetworkDriver?.ProcessLocalInput(Vector2.zero, this.Transform, false);
+                m_NetworkDriver?.ProcessDirectionalInput(Vector2.zero, this.Transform, false);
                 return;
             }
 
@@ -150,10 +150,18 @@ namespace Arawn.GameCreator2.Networking
             RefreshNetworkDriver();
             if (m_NetworkDriver != null)
             {
-                // For tank controls, we send the raw input and let the driver/server handle
-                // the character-relative transformation
-                m_NetworkDriver.ProcessLocalInput(m_CurrentInput, this.Transform, false);
+                // Tank X input belongs exclusively to UnitFacingTank. Feeding it to the generic
+                // movement sink would turn left/right input into authoritative strafing.
+                m_NetworkDriver.ProcessDirectionalInput(
+                    GetNetworkMovementInput(m_CurrentInput),
+                    this.Transform,
+                    false);
             }
+        }
+
+        private static Vector2 GetNetworkMovementInput(Vector2 tankInput)
+        {
+            return new Vector2(0f, tankInput.y);
         }
 
         private bool ShouldSendInput()
@@ -218,11 +226,20 @@ namespace Arawn.GameCreator2.Networking
             m_NetworkDriver = driver;
         }
 
+        /// <summary>
+        /// Connect to any compatible directional input sink, including the strict-authority
+        /// server driver used by a host-owned character.
+        /// </summary>
+        public void SetNetworkInputSink(INetworkDirectionalInputSink inputSink)
+        {
+            m_NetworkDriver = inputSink;
+        }
+
         private void RefreshNetworkDriver()
         {
             if (this.Character == null) return;
             if (ReferenceEquals(m_NetworkDriver, this.Character.Driver)) return;
-            m_NetworkDriver = this.Character.Driver as UnitDriverNetworkClient;
+            m_NetworkDriver = this.Character.Driver as INetworkDirectionalInputSink;
         }
 
         // STRING: --------------------------------------------------------------------------------

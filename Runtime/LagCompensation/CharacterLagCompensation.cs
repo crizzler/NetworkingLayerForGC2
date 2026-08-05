@@ -83,6 +83,9 @@ namespace Arawn.GameCreator2.Networking
 
         private Character m_Character;
         private CharacterController m_Controller;
+        private NetworkCharacter m_NetworkCharacter;
+        private INetworkAuthoritativePoseProvider m_FallbackAuthoritativePoseProvider;
+        private bool m_FallbackAuthoritativePoseProviderResolved;
         private bool m_IsRegistered;
         private bool m_HasExplicitNetworkRole;
         private bool m_IsServerRole;
@@ -118,9 +121,25 @@ namespace Arawn.GameCreator2.Networking
             ReferenceEquals(manager, m_RegisteredManager) &&
             manager.IsRegistered(this);
 
-        public Vector3 Position => transform.position;
+        public Vector3 Position
+        {
+            get
+            {
+                return TryGetAuthoritativePose(out Vector3 position, out _)
+                    ? position
+                    : transform.position;
+            }
+        }
 
-        public Quaternion Rotation => transform.rotation;
+        public Quaternion Rotation
+        {
+            get
+            {
+                return TryGetAuthoritativePose(out _, out Quaternion rotation)
+                    ? rotation
+                    : transform.rotation;
+            }
+        }
 
         public Bounds Bounds
         {
@@ -129,7 +148,7 @@ namespace Arawn.GameCreator2.Networking
                 float radius = GetRadius();
                 float height = GetHeight();
 
-                Vector3 center = transform.position + Vector3.up * (height * 0.5f);
+                Vector3 center = Position + Vector3.up * (height * 0.5f);
                 Vector3 size = new Vector3(radius * 2f, height, radius * 2f);
 
                 return new Bounds(center, size);
@@ -223,6 +242,62 @@ namespace Arawn.GameCreator2.Networking
         {
             m_Character = GetComponent<Character>();
             m_Controller = GetComponent<CharacterController>();
+            m_NetworkCharacter = GetComponent<NetworkCharacter>();
+            if (m_NetworkCharacter == null)
+            {
+                ResolveFallbackAuthoritativePoseProvider();
+            }
+        }
+
+        private bool TryGetAuthoritativePose(
+            out Vector3 position,
+            out Quaternion rotation)
+        {
+            position = default;
+            rotation = Quaternion.identity;
+
+            // NetworkCharacter owns backend selection. Never pick a Fusion provider merely
+            // because both transport integrations happen to be installed on the prefab.
+            if (m_NetworkCharacter != null)
+            {
+                return m_NetworkCharacter.TryGetAuthoritativePose(
+                    out position,
+                    out rotation);
+            }
+
+            // Preserve support for custom, NetworkCharacter-free integrations. A separate
+            // resolved bit distinguishes "not searched" from "searched and none found", so
+            // ordinary PurrNet/Built-in history capture does not allocate and scan components
+            // several times per character on every fixed update.
+            if (!m_FallbackAuthoritativePoseProviderResolved)
+            {
+                ResolveFallbackAuthoritativePoseProvider();
+            }
+
+            if (m_FallbackAuthoritativePoseProvider == null) return false;
+            if (m_FallbackAuthoritativePoseProvider is Behaviour behaviour &&
+                !behaviour.isActiveAndEnabled)
+            {
+                return false;
+            }
+
+            return m_FallbackAuthoritativePoseProvider.TryGetAuthoritativePose(
+                out position,
+                out rotation);
+        }
+
+        private void ResolveFallbackAuthoritativePoseProvider()
+        {
+            m_FallbackAuthoritativePoseProvider = null;
+            m_FallbackAuthoritativePoseProviderResolved = true;
+            MonoBehaviour[] behaviours = GetComponents<MonoBehaviour>();
+            for (int i = 0; i < behaviours.Length; i++)
+            {
+                if (behaviours[i] is not INetworkAuthoritativePoseProvider provider) continue;
+                if (!behaviours[i].isActiveAndEnabled) continue;
+                m_FallbackAuthoritativePoseProvider = provider;
+                return;
+            }
         }
 
         private void Start()
@@ -462,7 +537,7 @@ namespace Arawn.GameCreator2.Networking
         private void DetermineHitZone(ref HitValidationResult result)
         {
             // Calculate local height of hit
-            float hitLocalY = result.hitPoint.y - transform.position.y;
+            float hitLocalY = result.hitPoint.y - Position.y;
             float height = GetHeight();
             float normalizedHeight = hitLocalY / height;
 
@@ -492,8 +567,9 @@ namespace Arawn.GameCreator2.Networking
                 : m_Height;
 
             // Draw capsule
-            Vector3 bottom = transform.position + Vector3.up * radius;
-            Vector3 top = transform.position + Vector3.up * (height - radius);
+            Vector3 authoritativePosition = Position;
+            Vector3 bottom = authoritativePosition + Vector3.up * radius;
+            Vector3 top = authoritativePosition + Vector3.up * (height - radius);
 
             Gizmos.color = IsActive ? Color.green : Color.red;
             Gizmos.DrawWireSphere(bottom, radius);
@@ -516,7 +592,7 @@ namespace Arawn.GameCreator2.Networking
                     float zoneMax = zone.heightMax * height;
                     float zoneCenter = (zoneMin + zoneMax) * 0.5f;
 
-                    Vector3 center = transform.position + Vector3.up * zoneCenter;
+                    Vector3 center = authoritativePosition + Vector3.up * zoneCenter;
                     Gizmos.DrawWireSphere(center, zone.radius);
                 }
             }

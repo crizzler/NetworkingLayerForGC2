@@ -3228,6 +3228,7 @@ GameObject:
   - component: {fileID: 2104900620536121518}
   - component: {fileID: 4323429841630032264}
   - component: {fileID: 4552270404229647705}
+  - component: {fileID: 8900000000000000001}
   - component: {fileID: 711243067367019855}
   m_Layer: 0
   m_Name: FusionDemoCharacter_Cobalt
@@ -3471,13 +3472,13 @@ MonoBehaviour:
   m_UseAnimationSync: 1
   m_PreRegisteredAnimationClips: []
   m_UseCoreNetworking: 1
-  m_PredictionBackend: 0
+  m_PredictionBackend: 2
   m_UseAutomaticNetworkId: 1
   m_ManualNetworkId: 0
   m_NetworkIdSalt: 
   m_SessionProfileOverride: {fileID: 0}
   m_UseRelevanceTiers: 1
-  m_HostOwnerUsesClientPrediction: 0
+  m_HostOwnerUsesClientPrediction: 1
   m_RelevanceObserver: {fileID: 0}
   m_DisableVisualsOnServer: 1
   m_DisableAudioOnServer: 1
@@ -3496,9 +3497,10 @@ MonoBehaviour:
   SortKey: 3265337071
   SendPriority: 1
   EnableInterpolation: 1
-  Flags: 131074
+  Flags: 131330
   NestedObjects: []
   NetworkedBehaviours:
+  - {fileID: 8900000000000000001}
   - {fileID: 4552270404229647705}
   - {fileID: 711243067367019855}
   ForceRemoteRenderTimeframe: 0
@@ -3530,3 +3532,17 @@ MonoBehaviour:
   m_EditorClassIdentifier: Arawn.GameCreator2.Networking.Transport.Fusion::Arawn.GameCreator2.Networking.Transport.Fusion.FusionNetworkCharacterAuto
   m_GameplayReadyDelay: 0.35
   m_GameplayReadyTimeout: 10
+--- !u!114 &8900000000000000001
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 9123784800777857425}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 5958940fa173489abf778864eed73a2d, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Arawn.GameCreator2.Networking.Transport.Fusion::Arawn.GameCreator2.Networking.Transport.Fusion.FusionNativeNetworkCharacterMotor
+  m_ListenHostPresentationVisualRoot: {fileID: 1548369148246035351}
+  m_LogDiagnostics: 0

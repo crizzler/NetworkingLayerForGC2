@@ -13,10 +13,17 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction
         public byte commandType;
         public ushort sequence;
         public Vector3 target;
+        public Vector3 rootMotionDelta;
+        public float rootMotionWeight;
+        public float authoritativeRootMotionAllowance;
+        public PurrDictionExternalPoseCommand externalPose;
+        public ushort transientSequence;
         public byte flags;
 
         public const byte FLAG_HAS_COMMAND = 1;
         public const byte FLAG_STOP_IMMEDIATE = 2;
+        public const byte FLAG_UPDATE_KINEMATICS = 4;
+        public const byte FLAG_FORCE_GROUNDED = 8;
 
         public bool HasCommand => HasFlag(FLAG_HAS_COMMAND);
         public bool HasFlag(byte flag) => (flags & flag) != 0;
@@ -45,7 +52,11 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction
         public Quaternion rotation;
         public Vector3 velocity;
         public Vector3 destination;
+        public Vector3 scale;
         public ushort activeSequence;
+        public ushort lastExternalPoseSequence;
+        public ushort lastTrustedExternalPoseSequence;
+        public ushort lastTransientSequence;
         public byte commandType;
         public byte pathStatus;
         public int currentCornerIndex;
@@ -73,7 +84,11 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction
                     a.rotation.w + b.rotation.w),
                 velocity = a.velocity + b.velocity,
                 destination = a.destination + b.destination,
+                scale = a.scale + b.scale,
                 activeSequence = a.activeSequence,
+                lastExternalPoseSequence = a.lastExternalPoseSequence,
+                lastTrustedExternalPoseSequence = a.lastTrustedExternalPoseSequence,
+                lastTransientSequence = a.lastTransientSequence,
                 commandType = a.commandType,
                 pathStatus = a.pathStatus,
                 currentCornerIndex = a.currentCornerIndex,
@@ -89,7 +104,11 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction
                 rotation = new Quaternion(-a.rotation.x, -a.rotation.y, -a.rotation.z, -a.rotation.w),
                 velocity = -a.velocity,
                 destination = -a.destination,
+                scale = -a.scale,
                 activeSequence = a.activeSequence,
+                lastExternalPoseSequence = a.lastExternalPoseSequence,
+                lastTrustedExternalPoseSequence = a.lastTrustedExternalPoseSequence,
+                lastTransientSequence = a.lastTransientSequence,
                 commandType = a.commandType,
                 pathStatus = a.pathStatus,
                 currentCornerIndex = a.currentCornerIndex,
@@ -105,7 +124,11 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction
                 rotation = new Quaternion(a.rotation.x * b, a.rotation.y * b, a.rotation.z * b, a.rotation.w * b),
                 velocity = a.velocity * b,
                 destination = a.destination * b,
+                scale = a.scale * b,
                 activeSequence = a.activeSequence,
+                lastExternalPoseSequence = a.lastExternalPoseSequence,
+                lastTrustedExternalPoseSequence = a.lastTrustedExternalPoseSequence,
+                lastTransientSequence = a.lastTransientSequence,
                 commandType = a.commandType,
                 pathStatus = a.pathStatus,
                 currentCornerIndex = a.currentCornerIndex,
@@ -121,7 +144,10 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction
     [Image(typeof(IconCharacterWalk), ColorTheme.Type.Yellow)]
     [Category("PurrDiction NavMesh Controller")]
     [Description("GC2 driver shim for PurrDiction-owned NavMesh movement.")]
-    public sealed class UnitDriverPurrDictionNavmesh : TUnitDriver, INetworkNavMeshCommandSink
+    public sealed class UnitDriverPurrDictionNavmesh : TUnitDriver,
+        INetworkNavMeshCommandSink,
+        INetworkOwnerMotionAuthority,
+        INetworkServerOwnerMotionAuthority
     {
         [SerializeField] private float m_SkinWidth = 0.08f;
         [SerializeField] private Axonometry m_Axonometry = new Axonometry();
@@ -134,6 +160,16 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction
         [NonSerialized] private Vector3 m_Velocity;
         [NonSerialized] private bool m_IsGrounded = true;
         [NonSerialized] private byte m_PathStatus = NetworkNavMeshPathState.STATUS_NONE;
+        [NonSerialized] private Vector3 m_SampledRootMotionVelocity;
+        [NonSerialized] private float m_SampledRootMotionWeight;
+        [NonSerialized] private int m_LastRootMotionSampleFrame = -1;
+        [NonSerialized] private bool m_TeleportRotationPending;
+        [NonSerialized] private int m_TeleportRotationPendingFrame = -1;
+        [NonSerialized] private IPurrDictionNativeMovementBackend m_Backend;
+        [NonSerialized] private bool m_CapsuleEnabledBeforeRagdoll;
+        [NonSerialized] private bool m_RagdollColliderSuspended;
+        [NonSerialized] private bool m_HasOwnerPoseTarget;
+        [NonSerialized] private Vector3 m_OwnerPoseTarget;
 
         public override Vector3 WorldMoveDirection => m_Velocity;
         public override Vector3 LocalMoveDirection => Transform != null
@@ -167,18 +203,40 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction
             base.OnStartup(character);
             m_Agent = EnsureAgent(character);
             m_Capsule = EnsureCapsule(character);
+            m_LastRootMotionSampleFrame = -1;
+            character.Ragdoll.EventBeforeStartRagdoll -= HandleStartRagdoll;
+            character.Ragdoll.EventAfterStartRecover -= HandleEndRagdoll;
+            character.Ragdoll.EventBeforeStartRagdoll += HandleStartRagdoll;
+            character.Ragdoll.EventAfterStartRecover += HandleEndRagdoll;
         }
 
         public override void OnDispose(Character character)
         {
+            if (character?.Ragdoll != null)
+            {
+                character.Ragdoll.EventBeforeStartRagdoll -= HandleStartRagdoll;
+                character.Ragdoll.EventAfterStartRecover -= HandleEndRagdoll;
+            }
+            if (m_RagdollColliderSuspended) HandleEndRagdoll();
             base.OnDispose(character);
             m_Agent = null;
             m_Capsule = null;
+            m_Backend = null;
+            m_SampledRootMotionVelocity = Vector3.zero;
+            m_SampledRootMotionWeight = 0f;
+            m_TeleportRotationPending = false;
+            m_TeleportRotationPendingFrame = -1;
+            m_HasOwnerPoseTarget = false;
+        }
+
+        internal void AttachBackend(IPurrDictionNativeMovementBackend backend)
+        {
+            m_Backend = backend;
         }
 
         public void RequestMoveToPosition(Vector3 target)
         {
-            m_CurrentSequence++;
+            AdvanceSequence();
             QueueInput(GC2PurrDictionNavMeshInput.Create(
                 NetworkNavMeshCommand.CMD_MOVE_TO_POSITION,
                 m_CurrentSequence,
@@ -187,7 +245,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction
 
         public void RequestMoveToDirection(Vector3 direction)
         {
-            m_CurrentSequence++;
+            AdvanceSequence();
             QueueInput(GC2PurrDictionNavMeshInput.Create(
                 NetworkNavMeshCommand.CMD_MOVE_TO_DIRECTION,
                 m_CurrentSequence,
@@ -196,7 +254,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction
 
         public void RequestStop(bool immediate = false)
         {
-            m_CurrentSequence++;
+            AdvanceSequence();
             QueueInput(GC2PurrDictionNavMeshInput.Create(
                 NetworkNavMeshCommand.CMD_STOP,
                 m_CurrentSequence,
@@ -206,7 +264,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction
 
         public void RequestWarp(Vector3 position)
         {
-            m_CurrentSequence++;
+            AdvanceSequence();
             QueueInput(GC2PurrDictionNavMeshInput.Create(
                 NetworkNavMeshCommand.CMD_WARP,
                 m_CurrentSequence,
@@ -233,46 +291,121 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction
             m_PathStatus = pathStatus;
         }
 
+        public void OpenOwnerMotionWindow(float durationSeconds)
+        {
+            if (Transform != null && IsFinite(Transform.position))
+            {
+                m_OwnerPoseTarget = Transform.position;
+                m_HasOwnerPoseTarget = true;
+            }
+            m_Backend?.OpenOwnerMotionWindow(durationSeconds);
+        }
+
+        public void OpenServerOwnerMotionWindow(float durationSeconds, uint operationId = 0)
+        {
+            m_Backend?.OpenServerOwnerMotionWindow(durationSeconds, operationId);
+        }
+
+        public void CloseServerOwnerMotionWindow(float graceSeconds = 0f)
+        {
+            m_Backend?.CloseServerOwnerMotionWindow(graceSeconds);
+        }
+
+        internal void SampleFrameIntent()
+        {
+            SampleRootMotionForCurrentFrame();
+        }
+
+        internal void GetRootMotionForTick(
+            float tickDelta,
+            out Vector3 delta,
+            out float weight)
+        {
+            SampleRootMotionForCurrentFrame();
+            delta = m_SampledRootMotionVelocity * Mathf.Max(0f, tickDelta);
+            weight = m_SampledRootMotionWeight;
+        }
+
+        internal bool IsForceGrounded => m_ForceGrounded;
+
         public override void SetPosition(Vector3 position, bool teleport = false)
         {
             Vector3 rootPosition = ToRootPosition(position);
-            Transform.position = rootPosition;
-            if (teleport && m_Agent != null && m_Agent.enabled && m_Agent.isOnNavMesh)
+            if (!IsFinite(rootPosition)) return;
+            if (teleport)
             {
-                m_Agent.Warp(rootPosition);
+                m_TeleportRotationPending = true;
+                m_TeleportRotationPendingFrame = Time.frameCount;
             }
-
-            Physics.SyncTransforms();
+            if (m_Backend?.IsOwnerMotionWindowActive == true)
+            {
+                m_OwnerPoseTarget = rootPosition;
+                m_HasOwnerPoseTarget = true;
+            }
+            m_Backend?.QueueExternalPosition(
+                rootPosition,
+                absolute: true,
+                teleport: teleport);
         }
 
         public override void SetRotation(Quaternion rotation)
         {
-            Transform.rotation = rotation;
-            Physics.SyncTransforms();
+            if (!IsUsableRotation(rotation)) return;
+            bool externalRotation =
+                (m_TeleportRotationPending &&
+                 m_TeleportRotationPendingFrame == Time.frameCount) ||
+                m_Backend?.IsOwnerMotionWindowActive == true ||
+                m_Backend?.CanAuthorTrustedServerPose == true;
+            if (externalRotation)
+            {
+                m_Backend?.QueueExternalRotation(rotation.normalized, absolute: true);
+            }
+            m_TeleportRotationPending = false;
+            m_TeleportRotationPendingFrame = -1;
         }
 
         public override void SetScale(Vector3 scale)
         {
-            Transform.localScale = scale;
-            Physics.SyncTransforms();
+            if (!IsFinite(scale)) return;
+            m_Backend?.QueueExternalScale(scale, absolute: true);
         }
 
         public override void AddPosition(Vector3 amount)
         {
-            Transform.position += amount;
-            Physics.SyncTransforms();
+            if (!IsFinite(amount)) return;
+            if (m_Backend?.IsOwnerMotionWindowActive == true)
+            {
+                if (!m_HasOwnerPoseTarget)
+                {
+                    m_OwnerPoseTarget = Transform != null
+                        ? Transform.position
+                        : Vector3.zero;
+                    m_HasOwnerPoseTarget = true;
+                }
+                m_OwnerPoseTarget += amount;
+                m_Backend.QueueExternalPosition(
+                    m_OwnerPoseTarget,
+                    absolute: true,
+                    teleport: false);
+                return;
+            }
+            m_Backend?.QueueExternalPosition(amount, absolute: false, teleport: false);
         }
 
         public override void AddRotation(Quaternion amount)
         {
-            Transform.rotation *= amount;
-            Physics.SyncTransforms();
+            if (!IsUsableRotation(amount)) return;
+            if (m_Backend?.IsOwnerMotionWindowActive == true ||
+                m_Backend?.CanAuthorTrustedServerPose == true)
+            {
+                m_Backend.QueueExternalRotation(amount.normalized, absolute: false);
+            }
         }
 
         public override void AddScale(Vector3 scale)
         {
-            Transform.localScale += scale;
-            Physics.SyncTransforms();
+            if (!IsFinite(scale)) return;
+            m_Backend?.QueueExternalScale(scale, absolute: false);
         }
 
         public override void ResetVerticalVelocity()
@@ -349,6 +482,15 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction
             m_HasPendingInput = true;
         }
 
+        private void AdvanceSequence()
+        {
+            unchecked
+            {
+                m_CurrentSequence++;
+                if (m_CurrentSequence == 0) m_CurrentSequence = 1;
+            }
+        }
+
         private Vector3 ToRootPosition(Vector3 driverPosition)
         {
             float halfHeight = Character?.Motion != null
@@ -356,6 +498,77 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction
                 : 0f;
 
             return driverPosition + Vector3.up * halfHeight;
+        }
+
+        private void SampleRootMotionForCurrentFrame()
+        {
+            if (m_LastRootMotionSampleFrame == Time.frameCount) return;
+            m_LastRootMotionSampleFrame = Time.frameCount;
+            m_SampledRootMotionVelocity = Vector3.zero;
+            m_SampledRootMotionWeight = 0f;
+            if (Character?.Animim == null) return;
+
+            Vector3 delta = Character.Animim.RootMotionDeltaPosition;
+            float weight = Mathf.Clamp01(Character.RootMotionPosition);
+            if (!IsFinite(delta) || !IsFinite(weight) || weight <= 0f) return;
+
+            float sampleDelta = Character.Time.DeltaTime;
+            if (!IsFinite(sampleDelta) || sampleDelta <= 0f) sampleDelta = Time.deltaTime;
+            if (!IsFinite(sampleDelta) || sampleDelta <= 0f) return;
+
+            m_SampledRootMotionVelocity = delta / sampleDelta;
+            m_SampledRootMotionWeight = weight;
+        }
+
+        internal void QueueHeldOwnerPoseForTick()
+        {
+            if (m_Backend?.IsOwnerMotionWindowActive != true)
+            {
+                m_HasOwnerPoseTarget = false;
+                return;
+            }
+            if (!m_HasOwnerPoseTarget || !IsFinite(m_OwnerPoseTarget)) return;
+
+            m_Backend.QueueExternalPosition(
+                m_OwnerPoseTarget,
+                absolute: true,
+                teleport: false);
+        }
+
+        private void HandleStartRagdoll()
+        {
+            if (m_Capsule == null) return;
+            m_CapsuleEnabledBeforeRagdoll = m_Capsule.enabled;
+            m_RagdollColliderSuspended = true;
+            m_Capsule.enabled = false;
+        }
+
+        private void HandleEndRagdoll()
+        {
+            if (m_Capsule != null)
+            {
+                m_Capsule.enabled = m_CapsuleEnabledBeforeRagdoll;
+            }
+            m_Velocity = Vector3.zero;
+            m_RagdollColliderSuspended = false;
+        }
+
+        private static bool IsFinite(Vector3 value)
+        {
+            return IsFinite(value.x) && IsFinite(value.y) && IsFinite(value.z);
+        }
+
+        private static bool IsUsableRotation(Quaternion value)
+        {
+            if (!IsFinite(value.x) || !IsFinite(value.y) ||
+                !IsFinite(value.z) || !IsFinite(value.w)) return false;
+            return value.x * value.x + value.y * value.y +
+                   value.z * value.z + value.w * value.w > 0.000001f;
+        }
+
+        private static bool IsFinite(float value)
+        {
+            return !float.IsNaN(value) && !float.IsInfinity(value);
         }
     }
 
@@ -372,7 +585,10 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction
         private const float REJECT_DIRECTION_INPUT_SQR = 1.21f;
         private const byte VALID_INPUT_FLAGS =
             GC2PurrDictionNavMeshInput.FLAG_HAS_COMMAND |
-            GC2PurrDictionNavMeshInput.FLAG_STOP_IMMEDIATE;
+            GC2PurrDictionNavMeshInput.FLAG_STOP_IMMEDIATE |
+            GC2PurrDictionNavMeshInput.FLAG_UPDATE_KINEMATICS |
+            GC2PurrDictionNavMeshInput.FLAG_FORCE_GROUNDED;
+        private const float MAX_ROOT_MOTION_PER_TICK = 4f;
 
         [Header("NavMesh Server Authority")]
         [SerializeField] private bool m_EnableCommandSecurityValidation = true;
@@ -388,6 +604,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction
         private Vector3 m_PathDestination;
         private GC2PurrDictionNavMeshState m_LastState;
         private ClickValidator m_ClickValidator;
+        private ushort m_NextTransientSequence;
 
         private bool ShouldValidateNavMeshCommands =>
             ShouldValidateServerSecurity && m_EnableCommandSecurityValidation;
@@ -398,6 +615,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction
         {
             EnsureReferences(networkCharacter);
             m_Driver ??= new UnitDriverPurrDictionNavmesh();
+            m_Driver.AttachBackend(this);
             return m_Driver;
         }
 
@@ -410,6 +628,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction
         {
             EnsureReferences(networkCharacter);
             m_Driver = GameCreatorCharacter?.Driver as UnitDriverPurrDictionNavmesh ?? m_Driver;
+            m_Driver?.AttachBackend(this);
             EnsureClickValidator();
             PublishDriverState(GetStateFromTransform());
         }
@@ -417,11 +636,13 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction
         protected override void OnBackendReset(NetworkCharacter networkCharacter)
         {
             DisposeClickValidator();
+            m_Driver?.AttachBackend(null);
             m_Driver = null;
             m_Agent = null;
             m_Path = null;
             m_PathCorners = null;
             m_LastState = default;
+            m_NextTransientSequence = 0;
         }
 
         protected override GC2PurrDictionNavMeshState GetInitialState()
@@ -438,22 +659,90 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction
         protected override void SetUnityState(GC2PurrDictionNavMeshState state)
         {
             EnsureReferences();
-            transform.SetPositionAndRotation(state.position, state.rotation.normalized);
+
+            TryResolveFiniteRootPose(
+                state.position,
+                state.rotation,
+                state.scale,
+                out Vector3 safePosition,
+                out Quaternion safeRotation,
+                out Vector3 safeScale);
+            state.position = safePosition;
+            state.rotation = safeRotation;
+            state.scale = safeScale;
+
+            if (GameCreatorCharacter?.Ragdoll?.IsRagdoll == true)
+            {
+                PublishDriverState(state);
+                return;
+            }
+
+            transform.SetPositionAndRotation(state.position, state.rotation);
+            transform.localScale = state.scale;
+            RememberRootPose(state.position, state.rotation, state.scale);
             PublishDriverState(state);
         }
 
         protected override void GetFinalInput(ref GC2PurrDictionNavMeshInput input)
         {
             ReadDriverInput(ref input);
+            m_Driver?.GetRootMotionForTick(
+                PredictionDelta,
+                out input.rootMotionDelta,
+                out input.rootMotionWeight);
+            m_Driver?.QueueHeldOwnerPoseForTick();
+            CapturePendingExternalPose(ref input.externalPose);
+            unchecked
+            {
+                m_NextTransientSequence++;
+                if (m_NextTransientSequence == 0) m_NextTransientSequence = 1;
+            }
+            input.transientSequence = m_NextTransientSequence;
         }
 
         protected override void UpdateInput(ref GC2PurrDictionNavMeshInput input)
         {
             ReadDriverInput(ref input);
+            m_Driver?.SampleFrameIntent();
+        }
+
+        protected override void ModifyExtrapolatedInput(ref GC2PurrDictionNavMeshInput input)
+        {
+            input.commandType = 0;
+            input.sequence = 0;
+            input.target = Vector3.zero;
+            input.flags &=
+                GC2PurrDictionNavMeshInput.FLAG_UPDATE_KINEMATICS |
+                GC2PurrDictionNavMeshInput.FLAG_FORCE_GROUNDED;
+            input.rootMotionDelta = Vector3.zero;
+            input.rootMotionWeight = 0f;
+            input.externalPose.ClearOneShot();
         }
 
         protected override void SanitizeInput(ref GC2PurrDictionNavMeshInput input)
         {
+            if (!IsFinite(input.rootMotionDelta) || !IsFinite(input.rootMotionWeight))
+            {
+                RecordCoreSecurityViolation(
+                    SecurityViolationType.OutOfBoundsValue,
+                    "PurrDictionNavMeshInput: invalid root-motion sample");
+                input.rootMotionDelta = Vector3.zero;
+                input.rootMotionWeight = 0f;
+            }
+            else
+            {
+                input.rootMotionDelta = Vector3.ClampMagnitude(
+                    input.rootMotionDelta,
+                    MAX_ROOT_MOTION_PER_TICK);
+                input.rootMotionWeight = Mathf.Clamp01(input.rootMotionWeight);
+            }
+
+            SanitizeExternalPose(
+                ref input.externalPose,
+                "PurrDictionNavMeshInput.ExternalPose");
+            input.authoritativeRootMotionAllowance =
+                CaptureAuthoritativeRootMotionAllowance();
+
             if (!input.HasCommand) return;
 
             if (!IsKnownCommand(input.commandType))
@@ -550,17 +839,64 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction
                 : GetStateFromTransform();
             if (!IsValidState(state))
             {
+                safeState.activeSequence = state.activeSequence;
+                safeState.lastExternalPoseSequence = state.lastExternalPoseSequence;
+                safeState.lastTrustedExternalPoseSequence =
+                    state.lastTrustedExternalPoseSequence;
+                safeState.lastTransientSequence = state.lastTransientSequence;
                 state = safeState;
             }
 
+            bool hasFreshTransient = input.transientSequence != 0 &&
+                                     IsSequenceNewer(
+                                         input.transientSequence,
+                                         state.lastTransientSequence);
+            if (hasFreshTransient)
+            {
+                state.lastTransientSequence = input.transientSequence;
+            }
+            else
+            {
+                input.commandType = 0;
+                input.sequence = 0;
+                input.target = Vector3.zero;
+                input.flags &=
+                    GC2PurrDictionNavMeshInput.FLAG_UPDATE_KINEMATICS |
+                    GC2PurrDictionNavMeshInput.FLAG_FORCE_GROUNDED;
+                input.rootMotionDelta = Vector3.zero;
+                input.rootMotionWeight = 0f;
+                input.externalPose.ClearOneShot();
+            }
+
+            if (GameCreatorCharacter.Ragdoll?.IsRagdoll == true)
+            {
+                state.velocity = Vector3.zero;
+                PublishDriverState(state);
+                return;
+            }
+
             SetUnityState(state);
+            if (GameCreatorCharacter.IsDead)
+            {
+                state.velocity = Vector3.zero;
+                PublishDriverState(state);
+                return;
+            }
+            Vector3 tickStartPosition = transform.position;
             m_Driver?.UpdateAgentSettings();
             EnsureClickValidator();
+            bool hasServerPose = TryConsumeTrustedServerPose(
+                out PurrDictionExternalPoseCommand serverPose);
+            bool externalPositionWillBeFinal = input.externalPose.HasPosition ||
+                                               (hasServerPose && serverPose.HasPosition);
 
+            bool commandWarpApplied = false;
             if (input.HasCommand && IsSequenceNewer(input.sequence, state.activeSequence))
             {
                 if (TryValidateCommand(input, ref state, out GC2PurrDictionNavMeshInput validatedInput))
                 {
+                    commandWarpApplied =
+                        validatedInput.commandType == NetworkNavMeshCommand.CMD_WARP;
                     ApplyCommand(validatedInput, ref state);
                 }
                 else
@@ -569,18 +905,87 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction
                 }
             }
 
-            switch (state.commandType)
+            Vector3 movementStart = transform.position;
+            bool suspendPathWriter = externalPositionWillBeFinal ||
+                                     IsOwnerMotionWindowActive ||
+                                     (IsAuthoritativeServer && IsServerOwnerMotionAuthorized) ||
+                                     !input.HasFlag(
+                                         GC2PurrDictionNavMeshInput.FLAG_UPDATE_KINEMATICS);
+            if (!suspendPathWriter)
             {
-                case NetworkNavMeshCommand.CMD_MOVE_TO_POSITION:
-                    SimulatePath(ref state, delta);
-                    break;
-                case NetworkNavMeshCommand.CMD_MOVE_TO_DIRECTION:
-                    SimulateDirection(ref state, delta);
-                    break;
+                switch (state.commandType)
+                {
+                    case NetworkNavMeshCommand.CMD_MOVE_TO_POSITION:
+                        SimulatePath(ref state, delta);
+                        break;
+                    case NetworkNavMeshCommand.CMD_MOVE_TO_DIRECTION:
+                        SimulateDirection(ref state, delta);
+                        break;
+                }
+            }
+            else
+            {
+                state.velocity = Vector3.zero;
+            }
+
+            Vector3 kineticDelta = transform.position - movementStart;
+            Vector3 rootMotionDelta = input.rootMotionDelta;
+            float rootMotionWeight = externalPositionWillBeFinal
+                ? 0f
+                : Mathf.Clamp01(input.rootMotionWeight);
+            if (ShouldValidateServerSecurity && rootMotionWeight > 0f)
+            {
+                rootMotionWeight = Mathf.Min(
+                    rootMotionWeight,
+                    Mathf.Clamp01(input.authoritativeRootMotionAllowance));
+                if (rootMotionWeight <= 0f)
+                {
+                    rootMotionDelta = Vector3.zero;
+                }
+                else
+                {
+                    float maxRootDistance =
+                        ResolveMaxAllowedHorizontalSpeed() * Mathf.Max(delta, 0.001f);
+                    rootMotionDelta = Vector3.ClampMagnitude(
+                        rootMotionDelta,
+                        Mathf.Max(0.01f, maxRootDistance));
+                }
+            }
+
+            if (rootMotionWeight > 0f)
+            {
+                Vector3 blendedDelta = Vector3.Lerp(
+                    kineticDelta,
+                    rootMotionDelta,
+                    rootMotionWeight);
+                transform.position = movementStart + blendedDelta;
+                state.velocity = blendedDelta / delta;
+            }
+
+            bool inputPoseApplied = ApplyExternalPoseCommand(
+                input.externalPose,
+                ref state,
+                delta,
+                trustedServerCommand: false);
+            bool serverPoseApplied = false;
+            if (hasServerPose)
+            {
+                serverPoseApplied = ApplyExternalPoseCommand(
+                    serverPose,
+                    ref state,
+                    delta,
+                    trustedServerCommand: true);
             }
 
             state.position = transform.position;
             state.rotation = transform.rotation;
+            state.scale = transform.localScale;
+            bool acceptedTeleport = commandWarpApplied ||
+                (inputPoseApplied && input.externalPose.IsTeleport) ||
+                (serverPoseApplied && serverPose.IsTeleport);
+            state.velocity = acceptedTeleport
+                ? Vector3.zero
+                : (state.position - tickStartPosition) / delta;
             if (state.velocity.sqrMagnitude <= 0.000001f)
             {
                 state.flags &= unchecked((byte)~GC2PurrDictionNavMeshState.FLAG_MOVING);
@@ -595,6 +1000,8 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction
             }
 
             PublishDriverState(state);
+            RememberRootPose(state.position, state.rotation, state.scale);
+            Physics.SyncTransforms();
         }
 
         protected override GC2PurrDictionNavMeshState Interpolate(
@@ -607,8 +1014,18 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction
                 position = Vector3.LerpUnclamped(from.position, to.position, t),
                 rotation = Quaternion.SlerpUnclamped(from.rotation, to.rotation, t).normalized,
                 velocity = Vector3.LerpUnclamped(from.velocity, to.velocity, t),
+                scale = Vector3.LerpUnclamped(from.scale, to.scale, t),
                 destination = t < 0.5f ? from.destination : to.destination,
                 activeSequence = t < 0.5f ? from.activeSequence : to.activeSequence,
+                lastExternalPoseSequence = t < 0.5f
+                    ? from.lastExternalPoseSequence
+                    : to.lastExternalPoseSequence,
+                lastTrustedExternalPoseSequence = t < 0.5f
+                    ? from.lastTrustedExternalPoseSequence
+                    : to.lastTrustedExternalPoseSequence,
+                lastTransientSequence = t < 0.5f
+                    ? from.lastTransientSequence
+                    : to.lastTransientSequence,
                 commandType = t < 0.5f ? from.commandType : to.commandType,
                 pathStatus = t < 0.5f ? from.pathStatus : to.pathStatus,
                 currentCornerIndex = t < 0.5f ? from.currentCornerIndex : to.currentCornerIndex,
@@ -620,14 +1037,8 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction
             GC2PurrDictionNavMeshState viewState,
             GC2PurrDictionNavMeshState? verified)
         {
-            if (!isController)
-            {
-                SetUnityState(viewState);
-            }
-            else
-            {
-                PublishDriverState(viewState);
-            }
+            ApplyPresentationView(viewState.position, viewState.rotation, viewState.scale);
+            ApplyDriverState(viewState);
         }
 
         private void EnsureReferences(NetworkCharacter networkCharacter = null)
@@ -642,6 +1053,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction
             if (m_Driver == null && GameCreatorCharacter?.Driver is UnitDriverPurrDictionNavmesh driver)
             {
                 m_Driver = driver;
+                m_Driver.AttachBackend(this);
             }
         }
 
@@ -650,6 +1062,9 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction
             GC2PurrDictionNavMeshState state = m_LastState;
             state.position = transform.position;
             state.rotation = transform.rotation;
+            state.scale = IsUsableScale(transform.localScale)
+                ? transform.localScale
+                : Vector3.one;
             state.velocity = m_Driver?.WorldMoveDirection ?? state.velocity;
             state.flags |= GC2PurrDictionNavMeshState.FLAG_GROUNDED;
             return state;
@@ -659,6 +1074,26 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction
         {
             EnsureReferences();
             m_Driver?.ConsumeInput(ref input);
+            if (m_Driver == null) return;
+
+            if (m_Driver.UpdateKinematics)
+            {
+                input.flags |= GC2PurrDictionNavMeshInput.FLAG_UPDATE_KINEMATICS;
+            }
+            else
+            {
+                input.flags &= unchecked((byte)~
+                    GC2PurrDictionNavMeshInput.FLAG_UPDATE_KINEMATICS);
+            }
+            if (m_Driver.IsForceGrounded)
+            {
+                input.flags |= GC2PurrDictionNavMeshInput.FLAG_FORCE_GROUNDED;
+            }
+            else
+            {
+                input.flags &= unchecked((byte)~
+                    GC2PurrDictionNavMeshInput.FLAG_FORCE_GROUNDED);
+            }
         }
 
         private void ApplyCommand(
@@ -872,17 +1307,88 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction
         private void PublishDriverState(GC2PurrDictionNavMeshState state)
         {
             m_LastState = state;
-            m_Driver?.ApplyPredictedState(
-                state.velocity,
-                state.IsGrounded,
-                state.pathStatus);
+            ApplyDriverState(state);
 
-            if (ShouldValidateNavMeshCommands &&
+            if (!IsPredictionReplay &&
+                ShouldValidateNavMeshCommands &&
                 m_ClickValidator != null &&
                 NetworkTransportBridge.IsValidClientId(SecurityOwnerClientId))
             {
                 m_ClickValidator.UpdateClientPosition(SecurityOwnerClientId, state.position);
             }
+        }
+
+        private void ApplyDriverState(GC2PurrDictionNavMeshState state)
+        {
+            m_Driver?.ApplyPredictedState(
+                state.velocity,
+                state.IsGrounded,
+                state.pathStatus);
+        }
+
+        private bool ApplyExternalPoseCommand(
+            PurrDictionExternalPoseCommand command,
+            ref GC2PurrDictionNavMeshState state,
+            float delta,
+            bool trustedServerCommand)
+        {
+            ushort sequence = trustedServerCommand
+                ? state.lastTrustedExternalPoseSequence
+                : state.lastExternalPoseSequence;
+            if (!TryResolveExternalPose(
+                    command,
+                    transform.position,
+                    transform.rotation,
+                    transform.localScale,
+                    ref sequence,
+                    delta,
+                    trustedServerCommand,
+                    out PurrDictionResolvedExternalPose resolved))
+            {
+                if (trustedServerCommand)
+                {
+                    state.lastTrustedExternalPoseSequence = sequence;
+                }
+                else
+                {
+                    state.lastExternalPoseSequence = sequence;
+                }
+                return false;
+            }
+
+            if (trustedServerCommand)
+            {
+                state.lastTrustedExternalPoseSequence = sequence;
+            }
+            else
+            {
+                state.lastExternalPoseSequence = sequence;
+            }
+
+            if (resolved.hasPosition)
+            {
+                transform.position = resolved.position;
+                if (!IsPredictionReplay && IsAuthoritativeServer)
+                {
+                    NetworkOwnerMotionAuthorityHooks.NotifyPositionAccepted(
+                        GameCreatorCharacter,
+                        transform.position);
+                }
+            }
+            if (resolved.hasRotation) transform.rotation = resolved.rotation;
+            if (resolved.hasScale) transform.localScale = resolved.scale;
+
+            if (resolved.teleport)
+            {
+                state.velocity = Vector3.zero;
+            }
+
+            state.position = transform.position;
+            state.rotation = transform.rotation;
+            state.scale = transform.localScale;
+            RememberRootPose(state.position, state.rotation, state.scale);
+            Physics.SyncTransforms();
+            return true;
         }
 
         private static bool IsSequenceNewer(ushort sequence, ushort previous)
@@ -1083,8 +1589,6 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction
 
         private bool ValidateNavMeshServerState(GC2PurrDictionNavMeshState state)
         {
-            if (!ShouldValidateNavMeshCommands) return true;
-
             if (!IsValidState(state))
             {
                 RecordCoreSecurityViolation(
@@ -1092,6 +1596,8 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction
                     $"PurrDictionNavMeshState: invalid state position={state.position}, rotation={state.rotation}, velocity={state.velocity}");
                 return false;
             }
+
+            if (!ShouldValidateNavMeshCommands) return true;
 
             return ValidateServerCorePosition(
                 state.position,
@@ -1221,9 +1727,10 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction
         private static bool IsValidState(GC2PurrDictionNavMeshState state)
         {
             return IsFinite(state.position) &&
-                   IsFinite(state.rotation) &&
+                   IsUsableRotation(state.rotation) &&
                    IsFinite(state.velocity) &&
-                   IsFinite(state.destination);
+                   IsFinite(state.destination) &&
+                   IsUsableScale(state.scale);
         }
     }
 }

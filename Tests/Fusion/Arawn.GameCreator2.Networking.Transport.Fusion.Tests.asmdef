@@ -6,6 +6,7 @@
         "Arawn.GameCreator2.Networking.Editor",
         "Arawn.GameCreator2.Networking.Transport.Fusion",
         "Arawn.GameCreator2.Networking.Transport.Fusion.Editor",
+        "GameCreator.Runtime.Core",
         "Fusion.Unity",
         "Photon.Realtime"
     ],

@@ -221,6 +221,14 @@ namespace Arawn.GameCreator2.Networking
             Cleanup();
         }
 
+        private void OnDisable()
+        {
+            // Disabled network characters must stop consuming transport callbacks. Clear driver
+            // state before the old role and active driver references are released so late packets
+            // cannot revive a previous spawn/session on re-enable.
+            Cleanup();
+        }
+
         private void Cleanup()
         {
             if (m_LagCompensation != null)
@@ -243,16 +251,31 @@ namespace Arawn.GameCreator2.Networking
                 NetworkMotionManager.Instance?.UnregisterController(m_MotionController);
             }
 
+            // Invalidate built-in driver queues and interpolation state while the current role
+            // and active GC2 driver still identify this lifecycle. This makes teardown safe even
+            // when the transport bridge has already disappeared and prevents late callbacks from
+            // reviving stale remote snapshots after a role change.
+            m_RemoteDriver?.ResetNetworkState();
+            m_ServerDriver?.ResetNetworkState();
+            m_ClientDriver?.ResetNetworkState();
+
             m_ActivePredictionBackend?.ResetBackend(this);
             UnregisterFromBridge();
             UnwireMovementEvents();
             UnsubscribeFromCharacterEvents();
             m_ActivePredictionBackend = null;
+            m_ServerDriver = null;
+            m_ClientDriver = null;
+            m_RemoteDriver = null;
             m_IsInitialized = false;
             m_CurrentRole = NetworkRole.None;
             m_RuntimeIsServer = false;
             m_RuntimeIsOwner = false;
             m_RuntimeIsHost = false;
+            m_ServerSimulationAccumulator = 0f;
+            m_LastStateBroadcastTime = -100f;
+            m_NextRelevanceUpdateTime = 0f;
+            m_CurrentRelevanceTier = NetworkRelevanceTier.Near;
             m_LastStateBroadcastPerClient.Clear();
         }
 

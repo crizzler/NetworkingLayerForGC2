@@ -164,7 +164,9 @@ namespace Arawn.GameCreator2.Networking
             var behaviours = GetComponents<MonoBehaviour>();
             for (int i = 0; i < behaviours.Length; i++)
             {
-                if (behaviours[i] is INetworkCharacterPredictionBackend candidate &&
+                if (behaviours[i] != null &&
+                    behaviours[i].isActiveAndEnabled &&
+                    behaviours[i] is INetworkCharacterPredictionBackend candidate &&
                     candidate.Backend == backend)
                 {
                     return candidate;
@@ -179,6 +181,10 @@ namespace Arawn.GameCreator2.Networking
             if (m_Character?.Driver is UnitDriverNetworkServer currentDriver)
             {
                 m_ServerDriver = currentDriver;
+                // Cleanup deliberately closes the old driver's packet gate. GC2 does not invoke
+                // OnStartup/OnEnable when ChangeDriver is given this same instance, so explicitly
+                // begin the new server lifecycle before connected-client input can arrive.
+                m_ServerDriver.ActivateNetworkState();
                 return m_ServerDriver;
             }
 
@@ -241,8 +247,11 @@ namespace Arawn.GameCreator2.Networking
                 return;
             }
 
-            // Auto-upgrade common GC2 player units to their network-aware counterparts.
-            if (m_CurrentRole != NetworkRole.LocalClient) return;
+            // Auto-upgrade common GC2 player units for every locally owned character. A host
+            // owner can intentionally keep the authoritative server driver instead of using
+            // client prediction, but it still needs a network-aware player unit to feed that
+            // driver's input sink.
+            if (!isLocalOwner) return;
 
             var currentPlayer = m_Character.Player;
             if (currentPlayer is UnitPlayerDirectionalNetwork ||

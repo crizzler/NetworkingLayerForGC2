@@ -172,7 +172,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
         private ProjectTemplate m_Template = ProjectTemplate.Custom;
         private int m_ExpectedPlayers = 4;
         private NetworkSessionPreset m_SessionPreset = NetworkSessionPreset.Standard;
-        private NetworkPredictionBackend m_PredictionBackend = NetworkPredictionBackend.BuiltIn;
+        private NetworkPredictionBackend m_PredictionBackend = NetworkPredictionBackend.FusionNative;
 
         private bool m_ModuleStats;
         private bool m_ModuleInventory;
@@ -313,7 +313,10 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                 }
                 else
                 {
-                    FusionSetupReport report = FusionSceneSetupValidation.Validate(m_PlayerPrefab);
+                    FusionSetupReport report = FusionSceneSetupValidation.Validate(
+                        m_PlayerPrefab,
+                        false,
+                        m_PredictionBackend);
                     bool runnerSetupConflict = TryGetRunnerSetupConflict(out _);
                     bool modulePreflightError =
                         HasSelectedModulePreflightErrors(out _);
@@ -352,16 +355,24 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
             m_ExpectedPlayers = EditorGUILayout.IntSlider("Expected Players", m_ExpectedPlayers, 2, 200);
             m_SessionPreset =
                 (NetworkSessionPreset)EditorGUILayout.EnumPopup("Session Preset", m_SessionPreset);
-            using (new EditorGUI.DisabledScope(true))
+            if (m_PredictionBackend != NetworkPredictionBackend.BuiltIn &&
+                m_PredictionBackend != NetworkPredictionBackend.FusionNative)
             {
-                m_PredictionBackend =
-                    (NetworkPredictionBackend)EditorGUILayout.EnumPopup(
-                        new GUIContent(
-                            "Prediction Backend",
-                            "The Fusion transport uses GC2's built-in prediction. Fusion-native " +
-                            "movement, KCC, NetworkTransform, and PurrDiction are outside this integration."),
-                        NetworkPredictionBackend.BuiltIn);
+                m_PredictionBackend = NetworkPredictionBackend.FusionNative;
             }
+
+            int predictionChoice = m_PredictionBackend == NetworkPredictionBackend.BuiltIn ? 1 : 0;
+            predictionChoice = EditorGUILayout.Popup(
+                new GUIContent(
+                    "Prediction Backend",
+                    "Fusion Native runs GC2 movement inside Fusion ticks and uses Fusion rollback, " +
+                    "resimulation, and NetworkTRSP render interpolation. Built-in Legacy retains " +
+                    "the transport-neutral RPC snapshot movement path for compatibility."),
+                predictionChoice,
+                new[] { "Fusion Native (Recommended)", "Built-in Legacy" });
+            m_PredictionBackend = predictionChoice == 0
+                ? NetworkPredictionBackend.FusionNative
+                : NetworkPredictionBackend.BuiltIn;
             m_RootName = EditorGUILayout.TextField("Scene Root Name", m_RootName);
 
             EditorGUILayout.Space(8);
@@ -414,9 +425,20 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
             m_DefaultLaunchMode =
                 (DefaultLaunchMode)EditorGUILayout.EnumPopup("Demo Default Mode", m_DefaultLaunchMode);
             m_SessionName = EditorGUILayout.TextField("Session Name", m_SessionName);
-            m_Region = EditorGUILayout.TextField(
-                new GUIContent("Region", "Empty uses Photon Best Region."),
+            m_Region = FusionRegionCatalog.DrawPopup(
+                new GUIContent(
+                    "Region",
+                    "Best Region asks Photon to choose automatically. Direct session-name " +
+                    "joins require every peer to use the same region."),
                 m_Region);
+            if (string.IsNullOrWhiteSpace(m_Region))
+            {
+                EditorGUILayout.HelpBox(
+                    "Best Region can resolve differently on each device. Select the same " +
+                    "explicit region for direct named-session joins, or advertise the " +
+                    "creator's resolved region through a lobby/invite service.",
+                    MessageType.Warning);
+            }
             m_ForcePhotonRelay = EditorGUILayout.ToggleLeft(
                 new GUIContent(
                     "Force Photon Relay in Host/Client mode",
@@ -583,10 +605,24 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
             EditorGUILayout.LabelField("Review", EditorStyles.boldLabel);
             EditorGUILayout.HelpBox(BuildSummary(), MessageType.None);
 
-            FusionSetupReport report = FusionSceneSetupValidation.Validate(m_PlayerPrefab);
+            FusionSetupReport report = FusionSceneSetupValidation.Validate(
+                m_PlayerPrefab,
+                false,
+                m_PredictionBackend);
             bool runnerSetupConflict = TryGetRunnerSetupConflict(out string runnerConflict);
             EditorGUILayout.Space(8);
             EditorGUILayout.LabelField("Validation", EditorStyles.boldLabel);
+
+            if (FusionMonoBuildCompatibility.TryGetActiveBuildTargetIssue(out _))
+            {
+                if (GUILayout.Button("Fix Mono Build Compatibility (Disable Managed Stripping)"))
+                {
+                    FusionMonoBuildCompatibility.ConfigureActiveBuildTarget();
+                    GUI.FocusControl(null);
+                    Repaint();
+                }
+                EditorGUILayout.Space(4);
+            }
 
             if (report.Issues.Count == 0)
             {
@@ -666,7 +702,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
             m_Template = ProjectTemplate.Custom;
             m_ExpectedPlayers = 4;
             m_SessionPreset = NetworkSessionPreset.Standard;
-            m_PredictionBackend = NetworkPredictionBackend.BuiltIn;
+            m_PredictionBackend = NetworkPredictionBackend.FusionNative;
 
             m_ModuleStats = stats;
             m_ModuleInventory = inventory;
@@ -739,7 +775,10 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
 
         private bool RunSetup(bool showDialogs)
         {
-            FusionSetupReport preflight = FusionSceneSetupValidation.Validate(m_PlayerPrefab);
+            FusionSetupReport preflight = FusionSceneSetupValidation.Validate(
+                m_PlayerPrefab,
+                false,
+                m_PredictionBackend);
             bool runnerSetupConflict =
                 TryGetRunnerSetupConflict(out string runnerConflict);
             bool modulePreflightError =
@@ -854,7 +893,10 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                 AssetDatabase.SaveAssets();
 
                 FusionSetupReport postflight =
-                    FusionSceneSetupValidation.Validate(m_PlayerPrefab, true);
+                    FusionSceneSetupValidation.Validate(
+                        m_PlayerPrefab,
+                        true,
+                        m_PredictionBackend);
                 bool postModuleError =
                     HasSelectedModulePreflightErrors(out string postModuleReport);
                 bool postflightFailed = postflight.HasErrors || postModuleError;
@@ -1317,10 +1359,23 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                                              NetworkObjectFlags.MasterClientObject;
                 desired &= ~NetworkObjectFlags.AllowStateAuthorityOverride;
                 desired &= ~NetworkObjectFlags.DestroyWhenStateAuthorityLeaves;
+                if (m_PredictionBackend == NetworkPredictionBackend.FusionNative)
+                {
+                    // Fusion's prefab baker normally derives this bit. Set it immediately as
+                    // well so a prefab prepared and launched in the same editor update already
+                    // exposes the native motor as its main spatial TRSP.
+                    desired |= NetworkObjectFlags.HasMainNetworkTRSP;
+                }
                 if (networkObject.Flags != desired)
                 {
                     networkObject.Flags = desired;
                     changes.Add("master-owned authority flags");
+                }
+
+                if (!networkObject.EnableInterpolation)
+                {
+                    networkObject.EnableInterpolation = true;
+                    changes.Add("Fusion render interpolation");
                 }
 
                 if (EnsurePrefabComponent<Character>(root, out Character character))
@@ -1344,6 +1399,42 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
 
                 if (EnsurePrefabComponent<FusionNetworkIdentity>(root, out _))
                     changes.Add("FusionNetworkIdentity");
+                if (m_PredictionBackend == NetworkPredictionBackend.FusionNative)
+                {
+                    if (EnsurePrefabComponent<FusionNativeNetworkCharacterMotor>(
+                            root,
+                            out FusionNativeNetworkCharacterMotor nativeMotor))
+                    {
+                        changes.Add("FusionNativeNetworkCharacterMotor");
+                    }
+
+                    Transform mannequin = character?.Animim?.Mannequin;
+                    Transform presentationRoot = mannequin != null &&
+                                                 FusionNativeNetworkCharacterMotor
+                                                     .IsSafePresentationVisualRoot(
+                                                         root.transform,
+                                                         mannequin)
+                        ? mannequin
+                        : null;
+                    var motorSerialized = new SerializedObject(nativeMotor);
+                    SerializedProperty presentationProperty = motorSerialized.FindProperty(
+                        "m_ListenHostPresentationVisualRoot");
+                    if (presentationProperty != null &&
+                        presentationProperty.objectReferenceValue != presentationRoot)
+                    {
+                        presentationProperty.objectReferenceValue = presentationRoot;
+                        motorSerialized.ApplyModifiedPropertiesWithoutUndo();
+                        changes.Add(presentationRoot != null
+                            ? "listen-host visual presentation root"
+                            : "cleared unsafe listen-host presentation root");
+                    }
+                }
+                else if (root.TryGetComponent(
+                             out FusionNativeNetworkCharacterMotor legacyNativeMotor))
+                {
+                    DestroyImmediate(legacyNativeMotor, true);
+                    changes.Add("removed FusionNativeNetworkCharacterMotor for Built-in Legacy");
+                }
                 if (EnsurePrefabComponent<FusionNetworkCharacterAuto>(root, out _))
                     changes.Add("FusionNetworkCharacterAuto");
 
@@ -1424,7 +1515,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                 applyWithUndo: true);
         }
 
-        private static bool ConfigureNetworkCharacter(NetworkCharacter character)
+        private bool ConfigureNetworkCharacter(NetworkCharacter character)
         {
             if (character == null) return false;
 
@@ -1434,11 +1525,11 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
             changed |= SetBool(serialized, "m_UseNetworkMotion", true);
             changed |= SetBool(serialized, "m_UseAnimationSync", true);
             changed |= SetBool(serialized, "m_UseCoreNetworking", true);
-            changed |= SetBool(serialized, "m_HostOwnerUsesClientPrediction", false);
+            changed |= SetBool(serialized, "m_HostOwnerUsesClientPrediction", true);
             changed |= SetEnum(
                 serialized,
                 "m_PredictionBackend",
-                (int)NetworkPredictionBackend.BuiltIn);
+                (int)m_PredictionBackend);
             if (changed)
             {
                 serialized.ApplyModifiedProperties();
@@ -1455,6 +1546,11 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                 config);
             config.PeerMode = NetworkProjectConfig.PeerModes.Single;
             config.Simulation.PlayerCount = m_ExpectedPlayers;
+            // GC2 traversal/root-motion poses participate in Fusion prediction and rollback.
+            // LatestState drops historical inputs and makes State Authority advance a fast
+            // animation in multi-tick jumps, so redundant input history is mandatory.
+            config.Simulation.InputTransferMode =
+                SimulationConfig.InputTransferModes.Redundancy;
 
             TickRate.Selection selection = config.Simulation.TickRateSelection;
             selection.Client = Mathf.Clamp(m_TickRate, 10, 32);
@@ -2095,6 +2191,13 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                 return true;
             }
 
+            if (behaviour is NetworkTRSP &&
+                behaviour is not FusionNativeNetworkCharacterMotor &&
+                behaviour.GetComponentInParent<NetworkCharacter>(true) != null)
+            {
+                return true;
+            }
+
             bool isFusionMovement =
                 typeNamespace.StartsWith("Fusion", StringComparison.Ordinal) &&
                 (type.Name.Contains("NetworkTransform", StringComparison.Ordinal) ||
@@ -2332,6 +2435,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                 "Core managers/bridges + security: Yes\n" +
                 "Project config: PeerMode.Single, required reliable modes, weave list, " +
                 $"prefab table, {m_TickRate} Hz\n" +
+                "Mono player compatibility: Managed Stripping Level Disabled\n" +
                 $"Player spawner: {YesNo(m_CreatePlayerSpawner)}\n" +
                 $"Selectable player prefabs: {GetConfiguredPlayerPrefabs().Count}\n" +
                 $"Character selection: {YesNo(m_CreateCharacterSelection)}\n" +

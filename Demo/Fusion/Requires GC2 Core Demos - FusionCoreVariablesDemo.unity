@@ -464,6 +464,9 @@ MonoBehaviour:
           m_Position:
             m_Property:
               rid: 4906697314953330863
+          m_Rotation:
+            m_Property:
+              rid: 7345832865643102297
           m_Color:
             m_Property:
               rid: 4906697314953330864
@@ -498,6 +501,9 @@ MonoBehaviour:
           m_Position:
             m_Property:
               rid: 4906697314953330872
+          m_Rotation:
+            m_Property:
+              rid: 7345832865643102298
           m_Color:
             m_Property:
               rid: 4906697314953330873
@@ -638,6 +644,54 @@ MonoBehaviour:
     - rid: 4906697314953330882
       type: {class: GetGameObjectSelf, ns: GameCreator.Runtime.Common, asm: GameCreator.Runtime.Core}
       data: 
+    - rid: 7345832865643102297
+      type: {class: GetRotationEuler, ns: GameCreator.Runtime.Common, asm: GameCreator.Runtime.Core}
+      data:
+        m_X:
+          m_Property:
+            rid: 7345832865643102299
+        m_Y:
+          m_Property:
+            rid: 7345832865643102300
+        m_Z:
+          m_Property:
+            rid: 7345832865643102301
+    - rid: 7345832865643102298
+      type: {class: GetRotationEuler, ns: GameCreator.Runtime.Common, asm: GameCreator.Runtime.Core}
+      data:
+        m_X:
+          m_Property:
+            rid: 7345832865643102302
+        m_Y:
+          m_Property:
+            rid: 7345832865643102303
+        m_Z:
+          m_Property:
+            rid: 7345832865643102304
+    - rid: 7345832865643102299
+      type: {class: GetDecimalDecimal, ns: GameCreator.Runtime.Common, asm: GameCreator.Runtime.Core}
+      data:
+        m_Value: -0
+    - rid: 7345832865643102300
+      type: {class: GetDecimalDecimal, ns: GameCreator.Runtime.Common, asm: GameCreator.Runtime.Core}
+      data:
+        m_Value: 0
+    - rid: 7345832865643102301
+      type: {class: GetDecimalDecimal, ns: GameCreator.Runtime.Common, asm: GameCreator.Runtime.Core}
+      data:
+        m_Value: 0
+    - rid: 7345832865643102302
+      type: {class: GetDecimalDecimal, ns: GameCreator.Runtime.Common, asm: GameCreator.Runtime.Core}
+      data:
+        m_Value: -0
+    - rid: 7345832865643102303
+      type: {class: GetDecimalDecimal, ns: GameCreator.Runtime.Common, asm: GameCreator.Runtime.Core}
+      data:
+        m_Value: 0
+    - rid: 7345832865643102304
+      type: {class: GetDecimalDecimal, ns: GameCreator.Runtime.Common, asm: GameCreator.Runtime.Core}
+      data:
+        m_Value: 0
 --- !u!114 &64182333
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -2440,7 +2494,9 @@ MonoBehaviour:
   m_RunnerPrefab: {fileID: 0}
   m_DefaultLaunchMode: 1
   m_DefaultSessionName: GC2-Fusion-Core
-  m_Region: 
+  m_Region: asia
+  m_ForcePhotonRelay: 0
+  m_AuthenticationProviderBehaviour: {fileID: 0}
   m_MaxPlayers: 4
   m_CreateDefaultSceneManager: 1
   m_IncludeActiveScene: 1

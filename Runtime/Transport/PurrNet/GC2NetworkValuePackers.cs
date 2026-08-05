@@ -42,7 +42,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
             Hasher.PrepareType(typeof(NetworkPositionState));
         }
 
-        // -------- NetworkInputState (10 bytes base + optional authority pose) --------
+        // -------- NetworkInputState (11 bytes base + optional authority pose/direction) --------
 
         [UsedByIL]
         public static void Write(this BitPacker packer, NetworkInputState value)
@@ -60,6 +60,13 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
                 packer.Write(value.authorityPositionX);
                 packer.Write(value.authorityPositionY);
                 packer.Write(value.authorityPositionZ);
+            }
+
+            if (value.HasTraversalPresentationDirection)
+            {
+                packer.Write(value.traversalDirectionX);
+                packer.Write(value.traversalDirectionY);
+                packer.Write(value.traversalDirectionZ);
             }
         }
 
@@ -85,6 +92,19 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
                 value.authorityPositionX = 0;
                 value.authorityPositionY = 0;
                 value.authorityPositionZ = 0;
+            }
+
+            if (value.HasTraversalPresentationDirection)
+            {
+                packer.Read(ref value.traversalDirectionX);
+                packer.Read(ref value.traversalDirectionY);
+                packer.Read(ref value.traversalDirectionZ);
+            }
+            else
+            {
+                value.traversalDirectionX = 0;
+                value.traversalDirectionY = 0;
+                value.traversalDirectionZ = 0;
             }
         }
 

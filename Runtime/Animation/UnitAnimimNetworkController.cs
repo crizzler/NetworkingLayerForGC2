@@ -139,7 +139,18 @@ namespace Arawn.GameCreator2.Networking
 
         public void Initialize(Character character, bool isLocalPlayer)
         {
-            if (m_IsInitialized) return;
+            if (m_IsInitialized)
+            {
+                // Fusion can assign LogicalOwner/authority after the prefab's first setup pass.
+                // Keep the caches and subscriptions, but refresh the role used to decide whether
+                // animation commands may be emitted. Without this, a reassigned local player can
+                // remain permanently classified as a remote (or vice versa).
+                m_Character = character;
+                m_IsLocalPlayer = isLocalPlayer;
+                LogStateDiagnostics(
+                    $"role refreshed character={character?.name ?? "null"} local={m_IsLocalPlayer}");
+                return;
+            }
 
             m_Character = character;
             m_IsLocalPlayer = isLocalPlayer;

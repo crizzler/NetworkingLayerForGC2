@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using Fusion;
 using UnityEngine;
 
@@ -14,6 +15,8 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
     [RequireComponent(typeof(NetworkObject))]
     public sealed class FusionNetworkIdentity : NetworkBehaviour
     {
+        private const int SharedTransientSendBacklogCapacity = 128;
+
         [Networked] public PlayerRef LogicalOwner { get; set; }
         [Networked] public NetworkBool AuthorityAdmitted { get; private set; }
 
@@ -22,6 +25,10 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         private uint m_LastAuthorityEpoch;
         private bool m_TransportAdmitted;
         private bool m_SuppressChangedObservation;
+        private readonly Queue<FusionNativeCharacterInput> m_SharedTransientSendBacklog =
+            new Queue<FusionNativeCharacterInput>(16);
+        private bool m_SharedTransientSendOverflowLatched;
+        private float m_NextSharedTransientSendWarningTime;
 
         public event Action<FusionNetworkIdentity> IdentityChanged;
         public event Action<FusionIdentityObservation> IdentityObservedChanged;
@@ -39,11 +46,18 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         }
 
         public NetworkObject NetworkObject => Object;
-        public uint NetworkId => Object != null && Object.IsValid ? Object.Id.Raw : 0;
+        /// <summary>
+        /// True only while Fusion permits access to this behaviour's generated
+        /// <c>[Networked]</c> properties. Scene objects are discoverable by Unity before
+        /// Fusion invokes <see cref="Spawned"/>, so an existing component is not by itself
+        /// proof that its replicated state can be read.
+        /// </summary>
+        public bool IsSpawned => Object != null && Object.IsValid;
+        public uint NetworkId => IsSpawned ? Object.Id.Raw : 0;
         public bool TransportAdmitted => m_TransportAdmitted;
-        public bool HasAuthorityAdmission => AuthorityAdmitted;
+        public bool HasAuthorityAdmission => IsSpawned && AuthorityAdmitted;
         public bool IsLocalLogicalOwner =>
-            Runner != null && Runner.IsRunning && IsOwnedBy(Runner.LocalPlayer);
+            IsSpawned && Runner != null && Runner.IsRunning && IsOwnedBy(Runner.LocalPlayer);
 
         public uint LogicalOwnerClientId =>
             TryGetLogicalOwnerClientId(out uint clientId)
@@ -67,6 +81,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
 
         public override void Spawned()
         {
+            ResetSharedTransientSendBacklog();
             m_SuppressChangedObservation = true;
             try
             {
@@ -151,6 +166,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             m_LastAuthorityAdmission = false;
             m_LastAuthorityEpoch = 0;
             m_TransportAdmitted = false;
+            ResetSharedTransientSendBacklog();
             try
             {
                 IdentityChanged?.Invoke(this);
@@ -166,6 +182,9 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
 
         public bool TryGetLogicalOwnerClientId(out uint clientId)
         {
+            clientId = NetworkTransportBridge.InvalidClientId;
+            if (!IsSpawned) return false;
+
             PlayerRef owner = LogicalOwner;
             if (!owner.IsRealPlayer &&
                 Runner != null &&
@@ -180,7 +199,10 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
 
         public bool IsOwnedBy(PlayerRef player)
         {
-            return player.IsRealPlayer && LogicalOwner.IsRealPlayer && player == LogicalOwner;
+            return IsSpawned &&
+                   player.IsRealPlayer &&
+                   LogicalOwner.IsRealPlayer &&
+                   player == LogicalOwner;
         }
 
         public bool TryAssignLogicalOwner(PlayerRef owner)
@@ -199,6 +221,176 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         {
             if (!owner.IsRealPlayer) return;
             LogicalOwner = owner;
+        }
+
+        /// <summary>
+        /// Sends one Shared-mode owner input sample to the centralized State Authority.
+        /// The native character motor is manually state-woven and therefore cannot own RPCs:
+        /// Fusion skips RPC weaving on behaviours carrying NetworkBehaviourWeavedAttribute.
+        /// </summary>
+        internal bool TrySubmitSharedCharacterInput(
+            FusionNativeCharacterInput input,
+            out RpcInvokeInfo invokeInfo)
+        {
+            invokeInfo = default;
+            if (!IsSpawned || Runner == null || !Runner.IsRunning ||
+                Runner.GameMode != GameMode.Shared ||
+                !IsOwnedBy(Runner.LocalPlayer))
+            {
+                return false;
+            }
+
+            // Continuous steering is latency-sensitive and safe to hold through an occasional
+            // packet gap. Continuous MotionInteractive poses are absolute and replaceable, so
+            // only their newest endpoint belongs on this same latest-state stream. One-shot
+            // Vault/Jump/PullUp/root-motion displacement remains reliably ordered below.
+            int continuousFlags = input.HasContinuousOwnerPose
+                ? FusionNativeCharacterInput.FlagOwnerPose |
+                  FusionNativeCharacterInput.FlagContinuousOwnerPose
+                : 0;
+            invokeInfo = RPC_SubmitSharedCharacterInput(
+                input.Move,
+                input.Yaw,
+                input.SourceTick,
+                continuousFlags,
+                input.HasContinuousOwnerPose ? input.OwnerPosition : Vector3.zero);
+
+            if (FusionNativeNetworkCharacterMotor.HasSharedTransientInput(input))
+            {
+                EnqueueSharedCharacterTransient(input);
+            }
+            TrySendQueuedSharedCharacterTransient();
+            return true;
+        }
+
+        private void EnqueueSharedCharacterTransient(FusionNativeCharacterInput input)
+        {
+            if (m_SharedTransientSendOverflowLatched) return;
+            if (m_SharedTransientSendBacklog.Count >= SharedTransientSendBacklogCapacity)
+            {
+                // Dropping an entry and later sending a higher sequence would let the master's
+                // cumulative ACK falsely cover the missing Vault/Jump sample. Fail closed for
+                // this object until its ownership/session boundary resets the queue.
+                m_SharedTransientSendOverflowLatched = true;
+                Debug.LogError(
+                    $"[FusionNativeCharacter] Reliable Shared transient send backlog exceeded " +
+                    $"{SharedTransientSendBacklogCapacity} samples for '{name}'. " +
+                    "Further traversal input is blocked to preserve acknowledgement integrity; " +
+                    "reconnect the player and inspect network health.",
+                    this);
+                return;
+            }
+
+            m_SharedTransientSendBacklog.Enqueue(input);
+        }
+
+        private void TrySendQueuedSharedCharacterTransient()
+        {
+            if (m_SharedTransientSendBacklog.Count == 0) return;
+
+            FusionNativeCharacterInput pending = m_SharedTransientSendBacklog.Peek();
+            RpcInvokeInfo transientInvokeInfo = RPC_SubmitSharedCharacterTransient(
+                pending.Move,
+                pending.Yaw,
+                pending.SourceTick,
+                pending.Flags,
+                pending.OwnerPosition,
+                pending.RootMotionDelta,
+                pending.RootMotionWeight,
+                pending.JumpForce);
+            if (transientInvokeInfo.SendMessageResult == RpcSendMessageResult.Sent)
+            {
+                m_SharedTransientSendBacklog.Dequeue();
+                return;
+            }
+
+            float now = Time.unscaledTime;
+            if (now < m_NextSharedTransientSendWarningTime) return;
+            m_NextSharedTransientSendWarningTime = now + 1f;
+            Debug.LogWarning(
+                $"[FusionNativeCharacter] Retaining reliable Shared transient " +
+                $"payloadTick={pending.SourceTick} for retry on '{name}': " +
+                $"{transientInvokeInfo}",
+                this);
+        }
+
+        private void ResetSharedTransientSendBacklog()
+        {
+            m_SharedTransientSendBacklog.Clear();
+            m_SharedTransientSendOverflowLatched = false;
+            m_NextSharedTransientSendWarningTime = 0f;
+        }
+
+        [Rpc(
+            RpcSources.All,
+            RpcTargets.StateAuthority,
+            Channel = RpcChannel.Unreliable,
+            InvokeLocal = false,
+            TickAligned = true)]
+        private RpcInvokeInfo RPC_SubmitSharedCharacterInput(
+            Vector2 move,
+            float yaw,
+            int sourceTick,
+            int flags,
+            Vector3 ownerPosition,
+            RpcInfo info = default)
+        {
+            if (!IsSpawned || Runner == null ||
+                Runner.GameMode != GameMode.Shared || !Object.HasStateAuthority)
+            {
+                return default;
+            }
+
+            FusionNativeNetworkCharacterMotor motor =
+                GetComponent<FusionNativeNetworkCharacterMotor>();
+            motor?.AcceptSharedCharacterInput(
+                info.Source,
+                info.Tick.Raw,
+                move,
+                yaw,
+                sourceTick,
+                flags,
+                ownerPosition);
+            return default;
+        }
+
+        [Rpc(
+            RpcSources.All,
+            RpcTargets.StateAuthority,
+            Channel = RpcChannel.Reliable,
+            InvokeLocal = false,
+            TickAligned = true)]
+        private RpcInvokeInfo RPC_SubmitSharedCharacterTransient(
+            Vector2 move,
+            float yaw,
+            int sourceTick,
+            int flags,
+            Vector3 ownerPosition,
+            Vector3 rootMotionDelta,
+            float rootMotionWeight,
+            float jumpForce,
+            RpcInfo info = default)
+        {
+            if (!IsSpawned || Runner == null ||
+                Runner.GameMode != GameMode.Shared || !Object.HasStateAuthority)
+            {
+                return default;
+            }
+
+            FusionNativeNetworkCharacterMotor motor =
+                GetComponent<FusionNativeNetworkCharacterMotor>();
+            motor?.AcceptSharedCharacterTransient(
+                info.Source,
+                info.Tick.Raw,
+                move,
+                yaw,
+                sourceTick,
+                flags,
+                ownerPosition,
+                rootMotionDelta,
+                rootMotionWeight,
+                jumpForce);
+            return default;
         }
 
         internal bool TryIssueAuthorityAdmission(bool admitted)
@@ -230,9 +422,20 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             RaiseIdentityChanged();
         }
 
-        internal void RefreshAuthorityRole()
+        internal bool RefreshAuthorityRole()
         {
-            m_LastLogicalOwner = LogicalOwner;
+            // Unity scene objects and freshly-instantiated prefabs can be found before
+            // NetworkRunner.InvokeSpawnedCallback. Reading a generated Networked property
+            // in that window throws and, when invoked from an authority-announcement RPC,
+            // also prevents the reliable stream from recording that packet's sequence.
+            if (!IsSpawned) return false;
+
+            PlayerRef logicalOwner = LogicalOwner;
+            if (logicalOwner != m_LastLogicalOwner)
+            {
+                ResetSharedTransientSendBacklog();
+            }
+            m_LastLogicalOwner = logicalOwner;
             m_LastAuthorityAdmission = AuthorityAdmitted;
             m_LastAuthorityEpoch =
                 FusionTransportBridge.TryGetBoundBridge(Runner, out var bridge)
@@ -250,6 +453,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             }
 
             RaiseIdentityChanged();
+            return true;
         }
 
         private void RaiseIdentityChanged()
@@ -306,7 +510,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                 networkId,
                 logicalOwnerClientId,
                 m_TransportAdmitted,
-                AuthorityAdmitted,
+                HasAuthorityAdmission,
                 IsLogicalAuthority,
                 localLogicalOwner);
 

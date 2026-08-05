@@ -41,6 +41,7 @@ namespace Arawn.GameCreator2.Networking.Traversal.Transport.PurrNet
         private bool m_ManagerInitialized;
         private bool m_LastServer;
         private float m_NextControllerScanTime;
+        private NetworkTraversalManager m_WiredTraversalManager;
 
         private NetworkManager ActiveManager => m_NetworkManager ? m_NetworkManager : NetworkManager.main;
         private bool DiagnosticsEnabled =>
@@ -103,8 +104,11 @@ namespace Arawn.GameCreator2.Networking.Traversal.Transport.PurrNet
 
             if (m_HookedManager == nm)
             {
-                if (nm.isServer) HandleNetworkStarted(nm, true);
-                if (nm.isClient) HandleNetworkStarted(nm, false);
+                // Network-start events normally establish these subscriptions. Retain a
+                // fail-safe for a bridge enabled after the event, but never replay the full
+                // start path every Update once each side is already subscribed.
+                if (nm.isServer && !m_SubscribedServer) HandleNetworkStarted(nm, true);
+                if (nm.isClient && !m_SubscribedClient) HandleNetworkStarted(nm, false);
                 return;
             }
 
@@ -148,10 +152,12 @@ namespace Arawn.GameCreator2.Networking.Traversal.Transport.PurrNet
 
         private void HandleNetworkStarted(NetworkManager manager, bool asServer)
         {
+            bool subscriptionAdded = false;
             if (asServer && !m_SubscribedServer)
             {
                 manager.Subscribe<GC2TraversalRequestPacket>(HandleTraversalRequestServer, true);
                 m_SubscribedServer = true;
+                subscriptionAdded = true;
             }
             else if (!asServer && !m_SubscribedClient)
             {
@@ -159,7 +165,10 @@ namespace Arawn.GameCreator2.Networking.Traversal.Transport.PurrNet
                 manager.Subscribe<GC2TraversalBroadcastPacket>(HandleTraversalBroadcastClient, false);
                 manager.Subscribe<GC2TraversalSnapshotPacket>(HandleTraversalSnapshotClient, false);
                 m_SubscribedClient = true;
+                subscriptionAdded = true;
             }
+
+            if (!subscriptionAdded) return;
 
             WireTraversalManager();
             RefreshControllerRegistry(force: true);
@@ -193,20 +202,25 @@ namespace Arawn.GameCreator2.Networking.Traversal.Transport.PurrNet
         private void WireTraversalManager()
         {
             NetworkTraversalManager manager = GetTraversalManager();
-            if (manager == null) return;
+            if (manager == null)
+            {
+                UnwireTraversalManager();
+                return;
+            }
 
-            manager.OnSendTraversalRequest -= SendTraversalRequestToServer;
-            manager.OnSendTraversalRequest += SendTraversalRequestToServer;
-            manager.OnSendTraversalResponse -= SendTraversalResponseToClient;
-            manager.OnSendTraversalResponse += SendTraversalResponseToClient;
-            manager.OnBroadcastTraversalChange -= BroadcastTraversalChangeToAllClients;
-            manager.OnBroadcastTraversalChange += BroadcastTraversalChangeToAllClients;
-            manager.OnBroadcastFullSnapshot -= BroadcastSnapshotToAllClients;
-            manager.OnBroadcastFullSnapshot += BroadcastSnapshotToAllClients;
-            manager.OnSendSnapshotToClient -= SendSnapshotToClient;
-            manager.OnSendSnapshotToClient += SendSnapshotToClient;
-            manager.OnResolveRequestRouteStatusForActor -= ResolveRequestRouteStatus;
-            manager.OnResolveRequestRouteStatusForActor += ResolveRequestRouteStatus;
+            if (!ReferenceEquals(m_WiredTraversalManager, manager))
+            {
+                UnwireTraversalManager();
+
+                manager.OnSendTraversalRequest += SendTraversalRequestToServer;
+                manager.OnSendTraversalResponse += SendTraversalResponseToClient;
+                manager.OnBroadcastTraversalChange += BroadcastTraversalChangeToAllClients;
+                manager.OnBroadcastFullSnapshot += BroadcastSnapshotToAllClients;
+                manager.OnSendSnapshotToClient += SendSnapshotToClient;
+                manager.OnResolveRequestRouteStatusForActor += ResolveRequestRouteStatus;
+                m_WiredTraversalManager = manager;
+                m_ManagerInitialized = false;
+            }
 
             NetworkManager nm = ActiveManager;
             bool isServer = nm != null && nm.isServer;
@@ -220,8 +234,13 @@ namespace Arawn.GameCreator2.Networking.Traversal.Transport.PurrNet
 
         private void UnwireTraversalManager()
         {
-            NetworkTraversalManager manager = GetTraversalManager();
-            if (manager == null) return;
+            NetworkTraversalManager manager = m_WiredTraversalManager;
+            if (manager == null)
+            {
+                m_WiredTraversalManager = null;
+                m_ManagerInitialized = false;
+                return;
+            }
 
             manager.OnSendTraversalRequest -= SendTraversalRequestToServer;
             manager.OnSendTraversalResponse -= SendTraversalResponseToClient;
@@ -229,6 +248,7 @@ namespace Arawn.GameCreator2.Networking.Traversal.Transport.PurrNet
             manager.OnBroadcastFullSnapshot -= BroadcastSnapshotToAllClients;
             manager.OnSendSnapshotToClient -= SendSnapshotToClient;
             manager.OnResolveRequestRouteStatusForActor -= ResolveRequestRouteStatus;
+            m_WiredTraversalManager = null;
             m_ManagerInitialized = false;
         }
 
@@ -291,28 +311,35 @@ namespace Arawn.GameCreator2.Networking.Traversal.Transport.PurrNet
                 return TraversalRouteStatus.ControllerNotReady;
             }
 
-            if (networkCharacter.PredictionBackend != NetworkPredictionBackend.BuiltIn)
-            {
-                TraceTraversal($"route actor={actorNetworkId} status={TraversalRouteStatus.UnsupportedPredictionBackend} backend={networkCharacter.PredictionBackend}");
-                return TraversalRouteStatus.UnsupportedPredictionBackend;
-            }
-
-            Character character = controller.GetComponent<Character>();
-            bool hasOwnerAuthority = networkCharacter.OwnerMotionAuthority != null ||
-                                     character?.Driver is INetworkOwnerMotionAuthority;
-            bool hasServerAuthority = nm.isServer &&
-                                      character?.Driver is INetworkServerOwnerMotionAuthority;
-            if (!hasOwnerAuthority && !hasServerAuthority)
+            // Traversal support is a property of the active movement driver, not the serialized
+            // backend enum. This keeps optional native backends fail-closed until their driver
+            // actually implements the owner/server motion-window contracts, while allowing a
+            // capable backend without adding another transport-specific allow-list here.
+            IUnitDriver activeDriver = networkCharacter.ActiveDriver;
+            bool hasOwnerAuthority = activeDriver is INetworkOwnerMotionAuthority;
+            bool hasServerAuthority = activeDriver is INetworkServerOwnerMotionAuthority;
+            bool ownerCapabilityMissing = controller.IsLocalClient &&
+                                          !hasOwnerAuthority &&
+                                          !(controller.IsServer && hasServerAuthority);
+            bool serverCapabilityMissing = controller.IsServer &&
+                                           !controller.IsLocalClient &&
+                                           !hasServerAuthority;
+            if (activeDriver == null || ownerCapabilityMissing || serverCapabilityMissing)
             {
                 TraceTraversal(
                     $"route actor={actorNetworkId} status={TraversalRouteStatus.UnsupportedPredictionBackend} " +
-                    "reason=motion-authority-capability-missing");
+                    $"reason=motion-authority-capability-missing backend={networkCharacter.PredictionBackend} " +
+                    $"driver={(activeDriver != null ? activeDriver.GetType().FullName : "<missing>")} " +
+                    $"ownerRequired={controller.IsLocalClient} ownerAuthority={hasOwnerAuthority} " +
+                    $"serverRequired={controller.IsServer && !controller.IsLocalClient} serverAuthority={hasServerAuthority}");
                 return TraversalRouteStatus.UnsupportedPredictionBackend;
             }
 
             TraceTraversal(
                 $"route actor={actorNetworkId} status={TraversalRouteStatus.Ready} " +
                 $"server={controller.IsServer} local={controller.IsLocalClient} " +
+                $"backend={networkCharacter.PredictionBackend} " +
+                $"driver={activeDriver.GetType().FullName} " +
                 $"ownerAuthority={hasOwnerAuthority} serverAuthority={hasServerAuthority}");
             return TraversalRouteStatus.Ready;
         }
@@ -358,9 +385,13 @@ namespace Arawn.GameCreator2.Networking.Traversal.Transport.PurrNet
                         Log($"updated traversal controller role netId={networkId} name={controller.name} server={isServer} local={isLocalClient}");
                     }
 
-                    // Reassert the manager-owned route as part of synchronous resolution. The
-                    // manager may have pruned its entry while this bridge map remained valid.
-                    manager.RegisterController(networkId, controller);
+                    // Reassert only if another system explicitly removed or replaced the
+                    // manager route while this bridge cache remained valid. Routine scans are
+                    // otherwise side-effect free.
+                    if (!ReferenceEquals(manager.GetController(networkId), controller))
+                    {
+                        manager.RegisterController(networkId, controller);
+                    }
                     return;
                 }
 
@@ -411,6 +442,7 @@ namespace Arawn.GameCreator2.Networking.Traversal.Transport.PurrNet
             LogFocusedTransport(
                 request.ActorNetworkId,
                 request.ActionIdString,
+                request.TraverseIdString,
                 "PurrNetTraversalRequest",
                 $"direction=send request={request.RequestId} corr={request.CorrelationId} " +
                 $"action={request.Action} actionId='{request.ActionIdString}' traverseHash={request.TraverseHash} " +
@@ -434,6 +466,7 @@ namespace Arawn.GameCreator2.Networking.Traversal.Transport.PurrNet
                 LogFocusedTransport(
                     request.ActorNetworkId,
                     request.ActionIdString,
+                    request.TraverseIdString,
                     "PurrNetTraversalRequest",
                     $"direction=host-dispatch player={nm.localPlayer.id} request={request.RequestId} " +
                     $"corr={request.CorrelationId} action={request.Action}");
@@ -472,6 +505,7 @@ namespace Arawn.GameCreator2.Networking.Traversal.Transport.PurrNet
             LogFocusedTransport(
                 response.ActorNetworkId,
                 response.ActionIdString,
+                response.TraverseIdString,
                 "PurrNetTraversalResponse",
                 $"direction=send player={playerId.id} request={response.RequestId} corr={response.CorrelationId} " +
                 $"action={response.Action} authorized={response.Authorized} applied={response.Applied} " +
@@ -498,6 +532,7 @@ namespace Arawn.GameCreator2.Networking.Traversal.Transport.PurrNet
             LogFocusedTransport(
                 broadcast.NetworkId,
                 broadcast.ActionIdString,
+                broadcast.TraverseIdString,
                 "PurrNetTraversalBroadcast",
                 $"direction=send actor={broadcast.ActorNetworkId} corr={broadcast.CorrelationId} " +
                 $"action={broadcast.Action} actionId='{broadcast.ActionIdString}' stateVersion={broadcast.StateVersion} " +
@@ -522,6 +557,7 @@ namespace Arawn.GameCreator2.Networking.Traversal.Transport.PurrNet
             LogFocusedTransport(
                 snapshot.NetworkId,
                 string.Empty,
+                snapshot.TraverseIdString,
                 "PurrNetTraversalSnapshot",
                 $"direction=broadcast kind={snapshot.Kind} stateVersion={snapshot.StateVersion} " +
                 $"traversing={snapshot.IsTraversing} hasRelative={snapshot.HasRelativePose} " +
@@ -564,6 +600,7 @@ namespace Arawn.GameCreator2.Networking.Traversal.Transport.PurrNet
             LogFocusedTransport(
                 data.request.ActorNetworkId,
                 data.request.ActionIdString,
+                data.request.TraverseIdString,
                 "PurrNetTraversalRequest",
                 $"direction=receive sender={senderPlayer.id} request={data.request.RequestId} " +
                 $"corr={data.request.CorrelationId} action={data.request.Action} actionId='{data.request.ActionIdString}'");
@@ -581,16 +618,42 @@ namespace Arawn.GameCreator2.Networking.Traversal.Transport.PurrNet
             _ = DispatchTraversalRequestOnServer(senderPlayer, data);
         }
 
-        private System.Threading.Tasks.Task DispatchTraversalRequestOnServer(PlayerID senderPlayer, GC2TraversalRequestPacket data)
+        private async System.Threading.Tasks.Task DispatchTraversalRequestOnServer(
+            PlayerID senderPlayer,
+            GC2TraversalRequestPacket data)
         {
+            float startedAt = Time.realtimeSinceStartup;
             LogFocusedTransport(
                 data.request.ActorNetworkId,
                 data.request.ActionIdString,
+                data.request.TraverseIdString,
                 "PurrNetTraversalRequest",
                 $"direction=server-dispatch sender={senderPlayer.id} request={data.request.RequestId} " +
                 $"corr={data.request.CorrelationId} action={data.request.Action}");
-            return GetTraversalManager()?.ReceiveTraversalRequest(data.request, senderPlayer.id) ??
-                   System.Threading.Tasks.Task.CompletedTask;
+
+            NetworkTraversalManager traversalManager = GetTraversalManager();
+            if (traversalManager == null)
+            {
+                LogFocusedTransport(
+                    data.request.ActorNetworkId,
+                    data.request.ActionIdString,
+                    data.request.TraverseIdString,
+                    "PurrNetTraversalRequest",
+                    $"direction=server-complete outcome=no-manager sender={senderPlayer.id} " +
+                    $"request={data.request.RequestId} corr={data.request.CorrelationId} " +
+                    $"elapsed={Time.realtimeSinceStartup - startedAt:F3}s");
+                return;
+            }
+
+            await traversalManager.ReceiveTraversalRequest(data.request, senderPlayer.id);
+            LogFocusedTransport(
+                data.request.ActorNetworkId,
+                data.request.ActionIdString,
+                data.request.TraverseIdString,
+                "PurrNetTraversalRequest",
+                $"direction=server-complete outcome=processed sender={senderPlayer.id} " +
+                $"request={data.request.RequestId} corr={data.request.CorrelationId} " +
+                $"elapsed={Time.realtimeSinceStartup - startedAt:F3}s");
         }
 
         private void HandleTraversalResponseClient(PlayerID senderPlayer, GC2TraversalResponsePacket data, bool asServer)
@@ -599,6 +662,7 @@ namespace Arawn.GameCreator2.Networking.Traversal.Transport.PurrNet
             LogFocusedTransport(
                 data.response.ActorNetworkId,
                 data.response.ActionIdString,
+                data.response.TraverseIdString,
                 "PurrNetTraversalResponse",
                 $"direction=receive sender={senderPlayer.id} request={data.response.RequestId} " +
                 $"corr={data.response.CorrelationId} action={data.response.Action} authorized={data.response.Authorized} " +
@@ -626,6 +690,7 @@ namespace Arawn.GameCreator2.Networking.Traversal.Transport.PurrNet
             LogFocusedTransport(
                 data.broadcast.NetworkId,
                 data.broadcast.ActionIdString,
+                data.broadcast.TraverseIdString,
                 "PurrNetTraversalBroadcast",
                 $"direction=receive sender={senderPlayer.id} actor={data.broadcast.ActorNetworkId} " +
                 $"corr={data.broadcast.CorrelationId} action={data.broadcast.Action} " +
@@ -653,6 +718,7 @@ namespace Arawn.GameCreator2.Networking.Traversal.Transport.PurrNet
             LogFocusedTransport(
                 data.snapshot.NetworkId,
                 string.Empty,
+                data.snapshot.TraverseIdString,
                 "PurrNetTraversalSnapshot",
                 $"direction=receive sender={senderPlayer.id} kind={data.snapshot.Kind} " +
                 $"stateVersion={data.snapshot.StateVersion} traversing={data.snapshot.IsTraversing} " +
@@ -690,18 +756,30 @@ namespace Arawn.GameCreator2.Networking.Traversal.Transport.PurrNet
         private void LogFocusedTransport(
             uint networkId,
             string actionId,
+            string traverseId,
             string stage,
             string message)
         {
-            bool pullUp = !string.IsNullOrEmpty(actionId) &&
-                          actionId.IndexOf("PullUp", StringComparison.OrdinalIgnoreCase) >= 0;
+            bool pullUp = ContainsPullUp(actionId) || ContainsPullUp(traverseId);
+            if (pullUp)
+            {
+                NetworkTraversalClimbDiagnostics.SetCharacterFocus(null, networkId, true);
+            }
+
             if (!pullUp && !NetworkTraversalClimbDiagnostics.IsFocused(networkId)) return;
 
             NetworkManager manager = ActiveManager;
             NetworkTraversalClimbDiagnostics.Log(
                 stage,
-                $"networkId={networkId} server={manager?.isServer ?? false} client={manager?.isClient ?? false} {message}",
+                $"networkId={networkId} server={manager?.isServer ?? false} client={manager?.isClient ?? false} " +
+                $"traverse='{traverseId}' {message}",
                 this);
+        }
+
+        private static bool ContainsPullUp(string value)
+        {
+            return !string.IsNullOrEmpty(value) &&
+                   value.IndexOf("PullUp", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         private void WarnRateLimited(string key, string message, float interval = 5f)

@@ -5885,7 +5885,7 @@ MonoBehaviour:
   m_NameField: {fileID: 1645969719}
   m_MessageField: {fileID: 1950208416}
   m_SendButton: {fileID: 2054603967}
-  m_DebugLog: 1
+  m_DebugLog: 0
 --- !u!1 &2054603965
 GameObject:
   m_ObjectHideFlags: 0

@@ -1,4 +1,7 @@
 using System;
+using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Fusion;
@@ -25,6 +28,48 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
     [DisallowMultipleComponent]
     public sealed class FusionSessionBootstrap : MonoBehaviour
     {
+        private readonly struct StartDiagnosticContext
+        {
+            public StartDiagnosticContext(
+                int attempt,
+                GameMode gameMode,
+                string sessionName,
+                bool allowSessionCreation,
+                string requestedRegion,
+                string configuredRegion,
+                string appVersion,
+                string customLobbyName,
+                string appId,
+                string processContext)
+            {
+                Attempt = attempt;
+                GameMode = gameMode;
+                SessionName = sessionName ?? string.Empty;
+                AllowSessionCreation = allowSessionCreation;
+                RequestedRegion = requestedRegion ?? string.Empty;
+                ConfiguredRegion = configuredRegion ?? string.Empty;
+                AppVersion = appVersion ?? string.Empty;
+                CustomLobbyName = customLobbyName ?? string.Empty;
+                AppId = appId ?? string.Empty;
+                AppIdDiagnostic = FormatAppIdForDiagnostic(appId);
+                ProcessContext = processContext ?? string.Empty;
+            }
+
+            public int Attempt { get; }
+            public GameMode GameMode { get; }
+            public string SessionName { get; }
+            public bool AllowSessionCreation { get; }
+            public string RequestedRegion { get; }
+            public string ConfiguredRegion { get; }
+            public string AppVersion { get; }
+            public string CustomLobbyName { get; }
+            public string AppId { get; }
+            public string AppIdDiagnostic { get; }
+            public string ProcessContext { get; }
+        }
+
+        private static int s_StartDiagnosticAttempt;
+
         [SerializeField] private FusionTransportBridge m_TransportBridge;
         [SerializeField] private NetworkRunner m_RunnerPrefab;
         [SerializeField] private FusionDefaultLaunchMode m_DefaultLaunchMode =
@@ -381,6 +426,16 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
 
             string sessionName = options.SessionName.Trim();
             string region = NormalizeRegion(options.Region);
+            if (string.IsNullOrEmpty(region))
+            {
+                Debug.LogWarning(
+                    "[FusionSessionBootstrap] Best Region is automatic and may resolve " +
+                    "differently on each device. Named sessions are region-scoped; for a " +
+                    "direct Host/Join or Create/Join Shared workflow, select the same explicit " +
+                    "region on every peer or advertise the creator's resolved region through " +
+                    "your lobby/invite service.",
+                    this);
+            }
             options = new FusionSessionStartOptions(
                 sessionName,
                 region,
@@ -448,6 +503,19 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             bool authenticationProviderInvoked = false;
             FusionAuthenticationCompletion authenticationCompletion = default;
             bool hasAuthenticationCompletion = false;
+            string startStage = "authentication";
+            StartDiagnosticContext diagnostic = CreateStartDiagnosticContext(
+                gameMode,
+                options,
+                allowSessionCreation);
+            LogStartDiagnostic(
+                "request",
+                diagnostic,
+                null,
+                null,
+                string.Empty,
+                string.Empty,
+                startStage);
             try
             {
                 Photon.Realtime.AuthenticationValues authenticationValues =
@@ -468,6 +536,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                     }
                 }
 
+                startStage = "runner-setup";
                 if (m_DontDestroyRunnerOnLoad)
                 {
                     DontDestroyOnLoad(transform.root.gameObject);
@@ -509,6 +578,8 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                     }
                 }
 
+                EnsureRuntimeProjectConfiguration();
+
                 var args = new StartGameArgs
                 {
                     GameMode = gameMode,
@@ -531,21 +602,30 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                 if (options.IsOpen.HasValue) args.IsOpen = options.IsOpen.Value;
                 if (options.IsVisible.HasValue) args.IsVisible = options.IsVisible.Value;
 
-                if (!string.IsNullOrWhiteSpace(options.Region))
-                {
-                    FusionAppSettings appSettings =
-                        PhotonAppSettings.Global.AppSettings.GetCopy();
-                    appSettings.UseNameServer = true;
-                    appSettings.FixedRegion = options.Region;
-                    args.CustomPhotonAppSettings = appSettings;
-                }
+                // Always provide a copy so an empty bootstrap selection has deterministic
+                // semantics: it clears any project-global FixedRegion and asks Photon to choose
+                // the best available region. A selected dropdown value pins that exact region.
+                FusionAppSettings appSettings =
+                    PhotonAppSettings.Global.AppSettings.GetCopy();
+                appSettings.UseNameServer = true;
+                appSettings.FixedRegion = options.Region;
+                args.CustomPhotonAppSettings = appSettings;
 
+                startStage = "matchmaking";
                 StartGameResult result = await runner.StartGame(args);
                 // From this point the runner can safely be shut down even if ShutdownAsync
                 // is called synchronously by a SessionStarted/SessionStartFailed subscriber.
                 m_StartAwaitCompleted = true;
                 if (result.Ok)
                 {
+                    LogStartDiagnostic(
+                        "success",
+                        diagnostic,
+                        runner,
+                        result.ShutdownReason,
+                        result.ErrorMessage,
+                        string.Empty,
+                        startStage);
                     authenticationCompletion = new FusionAuthenticationCompletion(
                         FusionAuthenticationCompletionStatus.Succeeded,
                         ShutdownReason.Ok,
@@ -566,6 +646,14 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                 }
                 else
                 {
+                    LogStartDiagnostic(
+                        "failure",
+                        diagnostic,
+                        runner,
+                        result.ShutdownReason,
+                        result.ErrorMessage,
+                        string.Empty,
+                        startStage);
                     bool cancelled =
                         result.ShutdownReason == ShutdownReason.OperationCanceled;
                     authenticationCompletion = new FusionAuthenticationCompletion(
@@ -597,6 +685,14 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             {
                 bool cancelled =
                     exception is OperationCanceledException || m_ShutdownRequested;
+                LogStartDiagnostic(
+                    "failure",
+                    diagnostic,
+                    runner,
+                    cancelled ? ShutdownReason.OperationCanceled : ShutdownReason.Error,
+                    exception.Message,
+                    exception.GetType().FullName,
+                    startStage);
                 authenticationCompletion = new FusionAuthenticationCompletion(
                     cancelled
                         ? FusionAuthenticationCompletionStatus.Cancelled
@@ -1035,6 +1131,320 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             return string.IsNullOrWhiteSpace(region)
                 ? string.Empty
                 : region.Trim().ToLowerInvariant();
+        }
+
+        private static void EnsureRuntimeProjectConfiguration()
+        {
+            // NetworkProjectConfig owns Fusion's runtime NetworkPrefabTable. Never create a
+            // JsonUtility copy here: that table is runtime state and is not JSON-serialized, so a
+            // copied config cannot translate baked NetworkObject GUIDs during Runner.Spawn.
+            // Use Fusion's populated global instance and let NetworkRunner perform its internal
+            // configuration copy. This retains the prefab catalog while repairing older projects
+            // that still use LatestState input transfer.
+            NetworkProjectConfig config = NetworkProjectConfig.Global;
+            if (config == null) return;
+            config.Simulation.InputTransferMode =
+                SimulationConfig.InputTransferModes.Redundancy;
+        }
+
+        private static StartDiagnosticContext CreateStartDiagnosticContext(
+            GameMode gameMode,
+            FusionSessionStartOptions options,
+            bool allowSessionCreation)
+        {
+            string appVersion = string.Empty;
+            string configuredRegion = string.Empty;
+            string appId = string.Empty;
+            try
+            {
+                if (PhotonAppSettings.TryGetGlobal(out PhotonAppSettings photonSettings) &&
+                    photonSettings?.AppSettings != null)
+                {
+                    appVersion = photonSettings.AppSettings.AppVersion ?? string.Empty;
+                    appId = photonSettings.AppSettings.AppIdFusion ?? string.Empty;
+                }
+            }
+            catch (Exception)
+            {
+                // Diagnostics must never prevent a session attempt. Fusion will report any
+                // unusable global settings through the normal StartGame result or exception.
+            }
+
+            string requestedRegion = NormalizeRegion(options.Region);
+            configuredRegion = requestedRegion;
+
+            return new StartDiagnosticContext(
+                Interlocked.Increment(ref s_StartDiagnosticAttempt),
+                gameMode,
+                options.SessionName,
+                allowSessionCreation,
+                requestedRegion,
+                configuredRegion,
+                appVersion,
+                options.CustomLobbyName,
+                appId,
+                GetProcessContext());
+        }
+
+        private void LogStartDiagnostic(
+            string phase,
+            StartDiagnosticContext context,
+            NetworkRunner runner,
+            ShutdownReason? reason,
+            string resultDetail,
+            string exceptionType,
+            string stage)
+        {
+            bool isRequest = string.Equals(phase, "request", StringComparison.Ordinal);
+            bool isSuccess = string.Equals(phase, "success", StringComparison.Ordinal);
+            string resolvedRegion = ResolveDiagnosticRegion(runner, context, isRequest);
+            string safeResultDetail = RedactExactValue(resultDetail, context.AppId);
+            CaptureActualSessionDiagnostic(
+                runner,
+                isRequest,
+                isSuccess,
+                out string actualMode,
+                out string actualSession,
+                out string actualIsOpen,
+                out string actualIsVisible,
+                out string actualPlayerCount,
+                out string actualMaxPlayers);
+            string message =
+                $"[FusionSessionBootstrap] start-{phase} " +
+                $"utc={DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture)} " +
+                $"attempt={context.Attempt} " +
+                $"process={QuoteDiagnosticValue(context.ProcessContext)} " +
+                $"mode={context.GameMode} " +
+                $"session={QuoteDiagnosticValue(context.SessionName)} " +
+                $"allowSessionCreation={context.AllowSessionCreation} " +
+                $"requestedRegion={QuoteDiagnosticValue(ValueOrLabel(context.RequestedRegion, "none"))} " +
+                $"resolvedRegion={QuoteDiagnosticValue(resolvedRegion)} " +
+                $"appVersion={QuoteDiagnosticValue(ValueOrLabel(context.AppVersion, "default"))} " +
+                $"customLobby={QuoteDiagnosticValue(ValueOrLabel(context.CustomLobbyName, "default"))} " +
+                $"appId={QuoteDiagnosticValue(context.AppIdDiagnostic)} " +
+                $"reason={QuoteDiagnosticValue(reason?.ToString() ?? "Pending")} " +
+                $"detail={QuoteDiagnosticValue(ValueOrLabel(safeResultDetail, "none"))} " +
+                $"exceptionType={QuoteDiagnosticValue(ValueOrLabel(exceptionType, "none"))} " +
+                $"stage={QuoteDiagnosticValue(ValueOrLabel(stage, "unknown"))} " +
+                $"actualMode={QuoteDiagnosticValue(actualMode)} " +
+                $"actualSession={QuoteDiagnosticValue(actualSession)} " +
+                $"isOpen={QuoteDiagnosticValue(actualIsOpen)} " +
+                $"isVisible={QuoteDiagnosticValue(actualIsVisible)} " +
+                $"playerCount={QuoteDiagnosticValue(actualPlayerCount)} " +
+                $"maxPlayers={QuoteDiagnosticValue(actualMaxPlayers)}";
+
+            if (string.Equals(phase, "failure", StringComparison.Ordinal))
+            {
+                Debug.LogWarning(message, this);
+            }
+            else
+            {
+                Debug.Log(message, this);
+            }
+        }
+
+        private static string ResolveDiagnosticRegion(
+            NetworkRunner runner,
+            StartDiagnosticContext context,
+            bool requestPending)
+        {
+            try
+            {
+                if (runner != null)
+                {
+                    // Region can remain populated while a failed room join has no valid
+                    // SessionInfo (and a direct join may never have valid LobbyInfo). Read the
+                    // value independently from validity so failure diagnostics retain it when
+                    // the SDK makes it available.
+                    string sessionRegion = NormalizeRegion(runner.SessionInfo.Region);
+                    if (!string.IsNullOrEmpty(sessionRegion)) return sessionRegion;
+
+                    string lobbyRegion = NormalizeRegion(runner.LobbyInfo.Region);
+                    if (!string.IsNullOrEmpty(lobbyRegion)) return lobbyRegion;
+                }
+            }
+            catch (Exception)
+            {
+                // A failed/shutting-down runner may no longer expose SessionInfo.
+            }
+
+            if (!string.IsNullOrEmpty(context.ConfiguredRegion))
+            {
+                return context.ConfiguredRegion;
+            }
+
+            return requestPending ? "<auto-pending>" : "<unresolved>";
+        }
+
+        private static void CaptureActualSessionDiagnostic(
+            NetworkRunner runner,
+            bool isRequest,
+            bool isSuccess,
+            out string actualMode,
+            out string actualSession,
+            out string isOpen,
+            out string isVisible,
+            out string playerCount,
+            out string maxPlayers)
+        {
+            string placeholder = isRequest ? "<pending>" : "<unavailable>";
+            actualMode = placeholder;
+            actualSession = placeholder;
+            isOpen = placeholder;
+            isVisible = placeholder;
+            playerCount = placeholder;
+            maxPlayers = placeholder;
+            if (!isSuccess || runner == null) return;
+
+            try
+            {
+                actualMode = runner.GameMode.ToString();
+                SessionInfo sessionInfo = runner.SessionInfo;
+                if (!sessionInfo.IsValid) return;
+
+                actualSession = ValueOrLabel(sessionInfo.Name, "unreported");
+                isOpen = sessionInfo.IsOpen.ToString();
+                isVisible = sessionInfo.IsVisible.ToString();
+                playerCount = sessionInfo.PlayerCount.ToString(CultureInfo.InvariantCulture);
+                maxPlayers = sessionInfo.MaxPlayers.ToString(CultureInfo.InvariantCulture);
+            }
+            catch (Exception)
+            {
+                // A shutdown racing this observational log must not affect session lifecycle.
+            }
+        }
+
+        private static string GetProcessContext()
+        {
+            string runtime = Application.isEditor ? "editor" : "player";
+            string platform = Application.platform.ToString();
+            try
+            {
+                using (System.Diagnostics.Process process =
+                       System.Diagnostics.Process.GetCurrentProcess())
+                {
+                    return $"{process.ProcessName}:{process.Id}/{runtime}/{platform}";
+                }
+            }
+            catch (Exception)
+            {
+                return $"unknown:unknown/{runtime}/{platform}";
+            }
+        }
+
+        private static string FormatAppIdForDiagnostic(string appId)
+        {
+            if (string.IsNullOrWhiteSpace(appId))
+            {
+                return "sha256=<missing> suffix=<missing>";
+            }
+
+            string normalized = appId.Trim().ToLowerInvariant();
+            string suffix = normalized.Length > 4
+                ? normalized.Substring(normalized.Length - 4)
+                : "<short>";
+            string fingerprint = "<unavailable>";
+            try
+            {
+                using (SHA256 sha256 = SHA256.Create())
+                {
+                    byte[] digest = sha256.ComputeHash(Encoding.UTF8.GetBytes(normalized));
+                    fingerprint = BitConverter
+                        .ToString(digest, 0, 8)
+                        .Replace("-", string.Empty)
+                        .ToLowerInvariant();
+                }
+            }
+            catch (Exception)
+            {
+                // The suffix still lets two local logs be compared on platforms without SHA-256.
+            }
+
+            return $"sha256={fingerprint} suffix={suffix}";
+        }
+
+        private static string RedactExactValue(string value, string valueToRedact)
+        {
+            if (string.IsNullOrEmpty(value) || string.IsNullOrEmpty(valueToRedact))
+            {
+                return value ?? string.Empty;
+            }
+
+            var result = new StringBuilder(value.Length);
+            int copiedUntil = 0;
+            while (copiedUntil < value.Length)
+            {
+                int match = value.IndexOf(
+                    valueToRedact,
+                    copiedUntil,
+                    StringComparison.OrdinalIgnoreCase);
+                if (match < 0)
+                {
+                    result.Append(value, copiedUntil, value.Length - copiedUntil);
+                    break;
+                }
+
+                result.Append(value, copiedUntil, match - copiedUntil);
+                result.Append("<app-id-redacted>");
+                copiedUntil = match + valueToRedact.Length;
+            }
+
+            return result.ToString();
+        }
+
+        private static string ValueOrLabel(string value, string label)
+        {
+            return string.IsNullOrWhiteSpace(value)
+                ? $"<{label}>"
+                : value.Trim();
+        }
+
+        private static string QuoteDiagnosticValue(string value)
+        {
+            const int maximumInputLength = 512;
+            value ??= "<null>";
+            if (value.Length > maximumInputLength)
+            {
+                value = value.Substring(0, maximumInputLength) + "<truncated>";
+            }
+
+            var quoted = new StringBuilder(value.Length + 2);
+            quoted.Append('"');
+            for (int index = 0; index < value.Length; index++)
+            {
+                char character = value[index];
+                switch (character)
+                {
+                    case '\\':
+                        quoted.Append("\\\\");
+                        break;
+                    case '"':
+                        quoted.Append("\\\"");
+                        break;
+                    case '\r':
+                        quoted.Append("\\r");
+                        break;
+                    case '\n':
+                        quoted.Append("\\n");
+                        break;
+                    case '\t':
+                        quoted.Append("\\t");
+                        break;
+                    default:
+                        if (char.IsControl(character))
+                        {
+                            quoted.Append("\\u");
+                            quoted.Append(((int)character).ToString("x4"));
+                        }
+                        else
+                        {
+                            quoted.Append(character);
+                        }
+                        break;
+                }
+            }
+            quoted.Append('"');
+            return quoted.ToString();
         }
 
         private void EnsureTransport()

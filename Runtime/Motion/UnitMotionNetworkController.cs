@@ -348,6 +348,21 @@ namespace Arawn.GameCreator2.Networking
             return m_HasTraversalPresentationDirection;
         }
 
+        /// <summary>
+        /// Applies the sequenced Traversal presentation direction carried by the regular owner
+        /// input/state stream. This does not execute or authorize movement; it only preserves
+        /// attempted input for blend trees when a ledge clamp produces no displacement.
+        /// </summary>
+        public void ApplyReplicatedTraversalPresentationDirection(Vector3 worldDirection)
+        {
+            if (!NetworkCharacterVisualPresentation.IsFinite(worldDirection))
+            {
+                worldDirection = Vector3.zero;
+            }
+
+            SetTraversalPresentationDirection(worldDirection);
+        }
+
         // CONSTRUCTORS: --------------------------------------------------------------------------
 
         public UnitMotionNetworkController() : base()
@@ -1702,15 +1717,9 @@ namespace Arawn.GameCreator2.Networking
             Vector3 velocity,
             bool preserveWhileTraversalLikeMotion = false)
         {
-            switch (this.Character?.Driver)
+            if (this.Character?.Driver is INetworkExternalMoveDirectionSink sink)
             {
-                case UnitDriverNetworkClient clientDriver:
-                    clientDriver.SetExternalMoveDirection(velocity, preserveWhileTraversalLikeMotion);
-                    break;
-
-                case UnitDriverNetworkServer serverDriver:
-                    serverDriver.SetExternalMoveDirection(velocity, preserveWhileTraversalLikeMotion);
-                    break;
+                sink.SetExternalMoveDirection(velocity, preserveWhileTraversalLikeMotion);
             }
         }
 
@@ -1802,14 +1811,16 @@ namespace Arawn.GameCreator2.Networking
                 return false;
             }
 
-            if (this.Character.Driver is UnitDriverNetworkRemote)
+            NetworkCharacter networkCharacter =
+                this.Character.GetComponent<NetworkCharacter>();
+            if (this.Character.Driver is UnitDriverNetworkRemote ||
+                networkCharacter?.CurrentRole == NetworkCharacter.NetworkRole.RemoteClient)
             {
                 reason = $"false: remote interpolation driver ({FormatDriver()})";
                 return false;
             }
 
-            if (this.Character.Driver is UnitDriverNetworkServer ||
-                this.Character.Driver is UnitDriverNetworkClient)
+            if (this.Character.Driver is INetworkDirectionalInputSink)
             {
                 reason = $"true: supported network controller driver ({FormatDriver()})";
                 return true;
@@ -2257,6 +2268,25 @@ namespace Arawn.GameCreator2.Networking
                     BumpDashCooldown();
                     return;
                 }
+
+                // Transport-native prediction backends (for example Fusion Native) use the
+                // same GC2 driver type for owners, authority, and proxies. Their NetworkTRSP
+                // presentation already follows the authoritative dash, so executing GC2 Dash
+                // again on the proxy would add a second transform writer and visibly fight the
+                // interpolated root. Publish only locomotion intent/busy presentation here.
+                if (this.Character?.Driver is INetworkExternalMoveDirectionSink nativeSink)
+                {
+                    nativeSink.SetExternalMoveDirection(direction * speed, true);
+                    if (this.Character.Busy != null && !this.Character.Busy.AreLegsBusy)
+                    {
+                        this.Character.Busy.MakeLegsBusy();
+                    }
+
+                    this.Character.StartCoroutine(
+                        ClearNativeDashPresentationAfter(duration, nativeSink));
+                    BumpDashCooldown();
+                    return;
+                }
             }
 
             // On the host viewing a non-locally-owned character (role=Server,
@@ -2380,6 +2410,18 @@ namespace Arawn.GameCreator2.Networking
         private System.Collections.IEnumerator ClearLegsBusyAfter(float delaySeconds)
         {
             if (delaySeconds > 0f) yield return new UnityEngine.WaitForSeconds(delaySeconds);
+            if (this.Character?.Busy != null && this.Character.Busy.AreLegsBusy)
+            {
+                this.Character.Busy.RemoveLegsBusy();
+            }
+        }
+
+        private System.Collections.IEnumerator ClearNativeDashPresentationAfter(
+            float delaySeconds,
+            INetworkExternalMoveDirectionSink sink)
+        {
+            if (delaySeconds > 0f) yield return new UnityEngine.WaitForSeconds(delaySeconds);
+            sink?.SetExternalMoveDirection(Vector3.zero, false);
             if (this.Character?.Busy != null && this.Character.Busy.AreLegsBusy)
             {
                 this.Character.Busy.RemoveLegsBusy();

@@ -13,6 +13,7 @@ using GameCreator.Runtime.VisualScripting;
 using NUnit.Framework;
 using PurrNet.Packing;
 using UnityEngine;
+using UnityEngine.TestTools;
 
 namespace Arawn.GameCreator2.Networking.Traversal.Tests
 {
@@ -716,6 +717,67 @@ namespace Arawn.GameCreator2.Networking.Traversal.Tests
         }
 
         [Test]
+        public async Task RepeatedInteractiveSnapshot_DoesNotPullActiveLocalOwnerBackToStalePose()
+        {
+            NetworkTraversalController controller = CreateController(
+                123,
+                isLocalClient: true,
+                out Character character,
+                out TraversalStance stance);
+            NetworkCharacter networkCharacter = character.GetComponent<NetworkCharacter>();
+            networkCharacter.InitializeNetworkRole(
+                isServer: false,
+                isOwner: true,
+                isHost: false);
+            controller.Initialize(isServer: false, isLocalClient: true);
+
+            TraverseInteractive interactive = CreateInteractive("Owner Repeated Snapshot Traverse");
+            MotionInteractive motion = Track(ScriptableObject.CreateInstance<MotionInteractive>());
+            SetPrivateField(interactive, "m_Motion", motion);
+
+            NetworkTraversalSnapshot snapshot = CreateActiveInteractiveSnapshot(
+                controller,
+                interactive,
+                8);
+            controller.ReceiveFullSnapshot(snapshot);
+            Assert.That(stance.Traverse, Is.SameAs(interactive));
+
+            for (int i = 0;
+                 i < 20 && GetPrivateField<object>(controller, "m_ClientAuthoritativeStateApply") != null;
+                 i++)
+            {
+                await Task.Yield();
+            }
+            Assert.That(
+                GetPrivateField<object>(controller, "m_ClientAuthoritativeStateApply"),
+                Is.Null,
+                "The initial authoritative entry must finish before exercising routine snapshots");
+
+            PropertyInfo relativePosition = typeof(TraversalStance).GetProperty(
+                "RelativePosition",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.That(relativePosition, Is.Not.Null);
+
+            Vector3 liveOwnerRelative = new Vector3(0f, 0f, 0.925f);
+            Vector3 liveOwnerRoot = new Vector3(4f, 5f, 6f);
+            relativePosition.SetValue(stance, liveOwnerRelative);
+            character.transform.position = liveOwnerRoot;
+
+            snapshot.ServerTime += 5f;
+            snapshot.RelativePosition = Vector3.zero;
+            controller.ReceiveFullSnapshot(snapshot);
+
+            Assert.That(
+                (Vector3)relativePosition.GetValue(stance),
+                Is.EqualTo(liveOwnerRelative),
+                "A routine same-version snapshot must not rewind the owner's authored traversal pose");
+            Assert.That(
+                character.transform.position,
+                Is.EqualTo(liveOwnerRoot),
+                "A routine same-version snapshot must not teleport the predicting owner");
+        }
+
+        [Test]
         public void NewerServerInteractiveSnapshot_CorrectsLocallyClearedState()
         {
             NetworkTraversalController controller = CreateRemoteController(
@@ -829,11 +891,16 @@ namespace Arawn.GameCreator2.Networking.Traversal.Tests
         }
 
         [Test]
-        public void PurrDictionHost_IsRejectedBeforeServerRoleBypass()
+        public void PurrDictionBackendLabel_WithCapableHostDriver_IsAccepted()
         {
+            NetworkTraversalManager manager = CreateManager();
+            manager.OnSendTraversalRequest = _ => { };
+            manager.OnResolveRequestRouteStatusForActor = actorNetworkId =>
+                actorNetworkId == 114 ? TraversalRouteStatus.Ready : TraversalRouteStatus.ControllerNotReady;
             NetworkTraversalController controller = CreateHostController(
                 114,
-                NetworkPredictionBackend.PurrDiction);
+                NetworkPredictionBackend.PurrDiction,
+                hostUsesClientPrediction: true);
 
             object[] arguments = { TraversalRouteStatus.Unknown };
             bool accepted = (bool)InvokePrivateResult(
@@ -841,14 +908,12 @@ namespace Arawn.GameCreator2.Networking.Traversal.Tests
                 "CanAcceptPatchedRequest",
                 arguments);
 
-            Assert.That(accepted, Is.False);
-            Assert.That(
-                arguments[0],
-                Is.EqualTo(TraversalRouteStatus.UnsupportedPredictionBackend));
+            Assert.That(accepted, Is.True);
+            Assert.That(arguments[0], Is.EqualTo(TraversalRouteStatus.Ready));
         }
 
         [Test]
-        public async Task TrustedServerRequest_StillRejectsPurrDictionTraversal()
+        public async Task TrustedServerRequest_DoesNotRejectCapablePurrDictionLabel()
         {
             NetworkTraversalController controller = CreateHostController(
                 115,
@@ -866,10 +931,31 @@ namespace Arawn.GameCreator2.Networking.Traversal.Tests
                 request,
                 NetworkTransportBridge.InvalidClientId);
 
-            Assert.That(response.Authorized, Is.False);
             Assert.That(
                 response.RejectionReason,
-                Is.EqualTo(TraversalRejectionReason.UnsupportedPredictionBackend));
+                Is.Not.EqualTo(TraversalRejectionReason.UnsupportedPredictionBackend));
+        }
+
+        [Test]
+        public void PurrDictionBackendLabel_WithoutMotionCapability_RemainsFailClosed()
+        {
+            NetworkTraversalController controller = CreateHostController(
+                118,
+                NetworkPredictionBackend.PurrDiction,
+                hostUsesClientPrediction: true);
+            Character character = controller.GetComponent<Character>();
+            character.Kernel.ChangeDriver(character, new UnitDriverNetworkRemote());
+
+            object[] arguments = { TraversalRouteStatus.Unknown };
+            bool accepted = (bool)InvokePrivateResult(
+                controller,
+                "CanAcceptPatchedRequest",
+                arguments);
+
+            Assert.That(accepted, Is.False);
+            Assert.That(
+                arguments[0],
+                Is.EqualTo(TraversalRouteStatus.UnsupportedPredictionBackend));
         }
 
         [Test]
@@ -1208,6 +1294,88 @@ namespace Arawn.GameCreator2.Networking.Traversal.Tests
         }
 
         [Test]
+        public void ClientPredictionReplay_PreservesPullUpAddPositionDisplacement()
+        {
+            AssertClientPredictionReplaysExternalTraversalDisplacement(useSetPosition: false);
+        }
+
+        [Test]
+        public void ClientPredictionReplay_PreservesInteractiveSetPositionDisplacement()
+        {
+            AssertClientPredictionReplaysExternalTraversalDisplacement(useSetPosition: true);
+        }
+
+        private void AssertClientPredictionReplaysExternalTraversalDisplacement(
+            bool useSetPosition)
+        {
+            GameObject gameObject = Track(new GameObject(
+                useSetPosition
+                    ? "Interactive SetPosition Prediction Replay"
+                    : "PullUp AddPosition Prediction Replay"));
+            Character character = gameObject.AddComponent<Character>();
+            var driver = new UnitDriverNetworkClient();
+            driver.OnStartup(character);
+
+            try
+            {
+                driver.UpdateKinematics = false;
+
+                // Sequence 0 is the server acknowledgement baseline.
+                SetPrivateField(driver, "m_InputAccumulator", 1f);
+                driver.ProcessLocalInput(Vector2.zero, null);
+                System.Array initialHistory =
+                    GetPrivateField<System.Array>(driver, "m_PredictionHistory");
+                int historyStart = GetPrivateField<int>(driver, "m_PredictionHistoryStart");
+                object baselineState = initialHistory.GetValue(historyStart);
+                Vector3 baselinePosition = (Vector3)GetField(baselineState, "position");
+
+                Vector3 beforeExternalWrite = gameObject.transform.position;
+                if (useSetPosition)
+                {
+                    Vector3 targetRoot = beforeExternalWrite + new Vector3(0.75f, 0f, 0f);
+                    float halfHeight = character.Motion.Height * 0.5f;
+                    driver.SetPosition(targetRoot - Vector3.up * halfHeight);
+                }
+                else
+                {
+                    driver.AddPosition(new Vector3(0.75f, 0f, 0f));
+                }
+
+                Vector3 externalDelta = gameObject.transform.position - beforeExternalWrite;
+                Assert.That(externalDelta.x, Is.GreaterThan(0.5f));
+
+                // Sequence 1 captures the authored Traversal displacement. Sequence 2 proves
+                // that consuming the pending delta clears it instead of replaying it twice.
+                SetPrivateField(driver, "m_InputAccumulator", 1f);
+                driver.ProcessLocalInput(Vector2.zero, null);
+                SetPrivateField(driver, "m_InputAccumulator", 1f);
+                driver.ProcessLocalInput(Vector2.zero, null);
+                Assert.That(GetPrivateField<int>(driver, "m_PredictionHistoryCount"), Is.EqualTo(3));
+
+                Vector3 correctedBaseline = baselinePosition + new Vector3(0.2f, 0f, 0f);
+                NetworkPositionState serverState = NetworkPositionState.Create(
+                    correctedBaseline,
+                    gameObject.transform.eulerAngles.y,
+                    0f,
+                    lastInput: 0,
+                    isGrounded: true,
+                    isJumping: false,
+                    moveVelocity: Vector3.zero);
+
+                driver.ApplyServerState(serverState);
+
+                Assert.That(
+                    gameObject.transform.position.x,
+                    Is.EqualTo(correctedBaseline.x + externalDelta.x).Within(0.015f),
+                    "Reconciliation must replay the Traversal root delta exactly once");
+            }
+            finally
+            {
+                driver.OnDispose(character);
+            }
+        }
+
+        [Test]
         public void ServerSimulation_HonorsDisabledKinematicsAndPreservesTraversalVelocity()
         {
             GameObject gameObject = Track(new GameObject("Traversal Server Kinematics"));
@@ -1238,6 +1406,59 @@ namespace Arawn.GameCreator2.Networking.Traversal.Tests
                     driver.WorldMoveDirection,
                     Is.EqualTo(traversalVelocity),
                     "Server locomotion must not replace Traversal's animation velocity");
+            }
+            finally
+            {
+                driver.OnDispose(character);
+            }
+        }
+
+        [Test]
+        public void ServerSimulation_SequencedTraversalDirectionSurvivesAClampedOwnerPose()
+        {
+            GameObject gameObject = Track(new GameObject("Sequenced Traversal Edge Intent"));
+            Character character = gameObject.AddComponent<Character>();
+            var motion = new UnitMotionNetworkController { IsServer = true };
+            character.Kernel.ChangeMotion(character, motion);
+            var driver = new UnitDriverNetworkServer();
+            driver.OnStartup(character);
+
+            try
+            {
+                driver.UpdateKinematics = false;
+                Vector3 attemptedDirection = new Vector3(3.25f, 0f, -1.5f);
+                NetworkInputState heldInput = NetworkInputState.Create(
+                    Vector2.zero,
+                    sequence: 1,
+                    deltaTime: 0.05f,
+                    ownerAuthorityPosition: gameObject.transform.position);
+                heldInput.SetTraversalPresentationDirection(attemptedDirection);
+
+                driver.QueueInput(heldInput);
+                NetworkPositionState heldState = driver.ProcessInputs();
+
+                Assert.That(
+                    driver.WorldMoveDirection,
+                    Is.EqualTo(heldInput.GetTraversalPresentationDirection()));
+                Assert.That(motion.TryGetTraversalPresentationDirection(out Vector3 retained), Is.True);
+                Assert.That(retained, Is.EqualTo(heldInput.GetTraversalPresentationDirection()));
+                Assert.That(
+                    heldState.GetMoveVelocity(),
+                    Is.EqualTo(heldInput.GetTraversalPresentationDirection()),
+                    "The regular authoritative state must carry attempted edge input to observers");
+
+                NetworkInputState releasedInput = NetworkInputState.Create(
+                    Vector2.zero,
+                    sequence: 2,
+                    deltaTime: 0.05f,
+                    ownerAuthorityPosition: gameObject.transform.position);
+                releasedInput.SetTraversalPresentationDirection(Vector3.zero);
+                driver.QueueInput(releasedInput);
+                NetworkPositionState releasedState = driver.ProcessInputs();
+
+                Assert.That(driver.WorldMoveDirection, Is.EqualTo(Vector3.zero));
+                Assert.That(motion.TryGetTraversalPresentationDirection(out _), Is.False);
+                Assert.That(releasedState.GetMoveVelocity(), Is.EqualTo(Vector3.zero));
             }
             finally
             {
@@ -1466,6 +1687,26 @@ namespace Arawn.GameCreator2.Networking.Traversal.Tests
             Assert.That(rightBoundaryOverride, Is.True);
             Assert.That((Vector3)rightBoundaryArguments[2], Is.EqualTo(Vector3.zero));
             Assert.That((Vector3)rightBoundaryArguments[1], Is.EqualTo(Vector3.right));
+
+            Assert.That(character.Driver.SkinWidth, Is.GreaterThanOrEqualTo(0.079f));
+            relativePosition.SetValue(stance, new Vector3(0f, 0f, 0.925f));
+            object[] skinInsetBoundaryArguments =
+            {
+                character,
+                Vector3.zero,
+                -movingSpeed,
+                -movingSpeed
+            };
+            bool skinInsetBoundaryOverride = (bool)InvokePrivateResult(
+                hooks,
+                "ApplyTraversalAnimationInputOverride",
+                skinInsetBoundaryArguments);
+            Assert.That(
+                skinInsetBoundaryOverride,
+                Is.True,
+                "A controller clamped within its skin width must still select the authored edge pose");
+            Assert.That((Vector3)skinInsetBoundaryArguments[2], Is.EqualTo(Vector3.zero));
+            Assert.That((Vector3)skinInsetBoundaryArguments[1], Is.EqualTo(Vector3.right));
 
             exitMethod.Invoke(stance, new object[] { ledge, token });
         }
@@ -1805,7 +2046,7 @@ namespace Arawn.GameCreator2.Networking.Traversal.Tests
         }
 
         [Test]
-        public void FocusedClimbDiagnostics_CanStillFollowTraversalNetworkLoggingWhenForceIsDisabled()
+        public void FocusedClimbDiagnostics_DoNotEnableVerboseNetworkLogging()
         {
             bool previousForce = NetworkTraversalDebug.ForceClimbDiagnostics;
             NetworkTraversalDebug.ForceClimbDiagnostics = false;
@@ -1813,14 +2054,56 @@ namespace Arawn.GameCreator2.Networking.Traversal.Tests
             {
                 NetworkTraversalManager manager = CreateManager();
                 SetPrivateField(manager, "m_LogNetworkMessages", false);
+                SetPrivateField(manager, "m_LogFocusedClimbDiagnostics", false);
                 Assert.That(manager.DiagnosticsEnabled, Is.False);
+                Assert.That(manager.FocusedClimbDiagnosticsEnabled, Is.False);
+
+                SetPrivateField(manager, "m_LogFocusedClimbDiagnostics", true);
+                Assert.That(manager.DiagnosticsEnabled, Is.False);
+                Assert.That(manager.FocusedClimbDiagnosticsEnabled, Is.True);
 
                 SetPrivateField(manager, "m_LogNetworkMessages", true);
                 Assert.That(manager.DiagnosticsEnabled, Is.True);
+                Assert.That(manager.FocusedClimbDiagnosticsEnabled, Is.True);
+
+                SetPrivateField(manager, "m_LogNetworkMessages", false);
+                SetPrivateField(manager, "m_LogFocusedClimbDiagnostics", false);
+                NetworkTraversalDebug.ForceClimbDiagnostics = true;
+                Assert.That(manager.DiagnosticsEnabled, Is.False);
+                Assert.That(manager.FocusedClimbDiagnosticsEnabled, Is.True);
             }
             finally
             {
                 NetworkTraversalDebug.ForceClimbDiagnostics = previousForce;
+            }
+        }
+
+        [Test]
+        public void RegisterController_RepeatedSameInstanceDoesNotLogAgain()
+        {
+            NetworkTraversalManager manager = CreateManager();
+            NetworkTraversalController controller = CreateRemoteController(
+                321,
+                out _,
+                out _);
+
+            manager.UnregisterController(321);
+            SetPrivateField(manager, "m_LogNetworkMessages", true);
+            try
+            {
+                LogAssert.Expect(
+                    LogType.Log,
+                    "[NetworkTraversalManager] Registered controller for NetworkId=321");
+
+                manager.RegisterController(321, controller);
+                manager.RegisterController(321, controller);
+
+                LogAssert.NoUnexpectedReceived();
+                Assert.That(manager.GetController(321), Is.SameAs(controller));
+            }
+            finally
+            {
+                SetPrivateField(manager, "m_LogNetworkMessages", false);
             }
         }
 

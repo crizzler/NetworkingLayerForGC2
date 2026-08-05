@@ -312,6 +312,7 @@ namespace Arawn.GameCreator2.Networking.Traversal.Transport.Fusion
         private void BroadcastChange(NetworkTraversalBroadcast broadcast)
         {
             if (m_BoundBridge == null || !m_BoundBridge.IsServer) return;
+            LogFocusedClimbRoute("send-broadcast", broadcast);
             byte[] payload = FusionValueCodec.Encode(broadcast, (writer, value) => writer.Write(value));
             m_BoundBridge.BroadcastModule(ModuleId, (ushort)MessageType.Broadcast, payload);
         }
@@ -372,6 +373,7 @@ namespace Arawn.GameCreator2.Networking.Traversal.Transport.Fusion
                         Log("dropped malformed broadcast");
                         return;
                     }
+                    LogFocusedClimbRoute("receive-broadcast", broadcast, message);
                     RefreshControllerRegistry(force: true);
                     GetManager()?.ReceiveTraversalChangeBroadcast(broadcast);
                     break;
@@ -400,6 +402,29 @@ namespace Arawn.GameCreator2.Networking.Traversal.Transport.Fusion
         {
             if (!m_LogNetworkMessages) return;
             Debug.Log("[FusionTraversalTransportBridge] " + message, this);
+        }
+
+        private void LogFocusedClimbRoute(
+            string stage,
+            in NetworkTraversalBroadcast broadcast,
+            FusionModuleMessage message = default)
+        {
+            NetworkTraversalManager manager = GetManager();
+            if (manager == null || !manager.FocusedClimbDiagnosticsEnabled) return;
+
+            string traverseId = broadcast.TraverseIdString ?? string.Empty;
+            bool focused = traverseId.IndexOf("Free_Climb", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                           traverseId.IndexOf("Free Climb", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                           traverseId.IndexOf("Ledge_Climb", StringComparison.OrdinalIgnoreCase) >= 0;
+            if (!focused) return;
+
+            Debug.Log(
+                $"[FusionTraversalRoute] stage={stage} actor={broadcast.NetworkId} " +
+                $"correlation={broadcast.CorrelationId} version={broadcast.StateVersion} " +
+                $"action={broadcast.Action} traversing={broadcast.IsTraversing} " +
+                $"traverse='{traverseId}' sender={message.SenderClientId} " +
+                $"fromAuthority={message.FromAuthority}",
+                this);
         }
 
         private static NetworkTraversalManager GetManager()

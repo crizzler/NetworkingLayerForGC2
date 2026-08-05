@@ -187,7 +187,10 @@ namespace Arawn.GameCreator2.Networking.Traversal
         private const float TRAVERSAL_POSE_AUTHORITY_REFRESH_SECONDS = 0.35f;
         private const float TRAVERSAL_POSE_AUTHORITY_EXIT_GRACE_SECONDS = 0.25f;
         private const float SERVER_OWNER_MOTION_WINDOW_SECONDS = 0.5f;
-        private const float SERVER_OWNER_MOTION_EXIT_GRACE_SECONDS = 0.2f;
+        // The server can finish a finite MotionLink before the connected owner's last pose
+        // samples arrive. Keep the correlated server gate open long enough for one final
+        // client-to-server delivery after GC2 clears Busy/root motion on the server.
+        private const float SERVER_OWNER_MOTION_EXIT_GRACE_SECONDS = 0.5f;
         private const float EDGE_CONNECTION_REQUEST_INTERVAL_SECONDS = 0.25f;
         private const float EDGE_CONNECTION_JUMP_MEMORY_SECONDS = 1.25f;
         private const float AUTHORITATIVE_CONNECTION_EXIT_SUPPRESSION_SECONDS = 2f;
@@ -328,11 +331,10 @@ namespace Arawn.GameCreator2.Networking.Traversal
                 return false;
             }
 
-            // Traversal currently relies on the built-in driver's explicit owner/server motion
-            // authority windows. Reject PurrDiction for every role, including a host-owned
-            // character whose server role would otherwise bypass the owner-driver capability
-            // check below.
-            if (m_NetworkCharacter.PredictionBackend != NetworkPredictionBackend.BuiltIn)
+            // Traversal is capability-based. A backend name never grants access by itself: the
+            // active driver must expose the owner/server motion windows needed to preserve
+            // animation-driven root poses.
+            if (!SupportsTraversalMotionAuthorityForCurrentRole())
             {
                 routeStatus = TraversalRouteStatus.UnsupportedPredictionBackend;
                 return false;
@@ -398,6 +400,23 @@ namespace Arawn.GameCreator2.Networking.Traversal
             }
 
             return m_IsServer && m_Character?.Driver is INetworkServerOwnerMotionAuthority;
+        }
+
+        private bool SupportsTraversalMotionAuthorityForCurrentRole()
+        {
+            if (m_NetworkCharacter == null || m_Character?.Driver == null) return false;
+
+            if (m_IsLocalClient)
+            {
+                return HasOwnerMotionAuthorityForCurrentRole();
+            }
+
+            if (m_IsServer)
+            {
+                return m_Character.Driver is INetworkServerOwnerMotionAuthority;
+            }
+
+            return false;
         }
 
         private void Awake()
@@ -895,11 +914,11 @@ namespace Arawn.GameCreator2.Networking.Traversal
                 return;
             }
 
-            if (m_NetworkCharacter.PredictionBackend != NetworkPredictionBackend.BuiltIn)
+            if (!SupportsTraversalMotionAuthorityForCurrentRole())
             {
                 RejectLocalRequest(
                     TraversalRejectionReason.UnsupportedPredictionBackend,
-                    "Traversal currently supports only the built-in movement backend; PurrDiction Traversal is disabled to prevent partially synchronized motion",
+                    "The active movement backend does not expose the owner/server motion-authority capabilities required by Traversal",
                     "unsupported-prediction-backend");
                 return;
             }
@@ -1343,13 +1362,47 @@ namespace Arawn.GameCreator2.Networking.Traversal
 
         public async Task<NetworkTraversalResponse> ProcessTraversalRequestAsync(NetworkTraversalRequest request, uint senderClientId)
         {
+            float queuedAt = Time.realtimeSinceStartup;
+            if (ContainsDiagnosticName(request.TraverseIdString, "PullUp"))
+            {
+                m_ClimbDiagnosticRequestId = request.RequestId;
+                m_ClimbDiagnosticCorrelationId = request.CorrelationId;
+                m_ClimbDiagnosticAction = request.Action.ToString();
+                m_PullUpDiagnosticUntilRealtime = Mathf.Max(
+                    m_PullUpDiagnosticUntilRealtime,
+                    queuedAt + 8f);
+                SetClimbDiagnosticFocus(true, "server-request-queued", null, null);
+            }
+
             await m_ServerRequestGate.WaitAsync();
+            float gateAcquiredAt = Time.realtimeSinceStartup;
+            if (m_ClimbDiagnosticFocused)
+            {
+                FocusedClimbLog(
+                    "ServerRequestGate",
+                    $"event=acquired sender={senderClientId} action={request.Action} " +
+                    $"queueWait={gateAcquiredAt - queuedAt:F3}s traverse='{request.TraverseIdString}' " +
+                    $"pos={NetworkTraversalClimbDiagnostics.Vector(transform.position)}");
+            }
+
             try
             {
                 return await ProcessTraversalRequestSerializedAsync(request, senderClientId);
             }
             finally
             {
+                if (m_ClimbDiagnosticFocused)
+                {
+                    TraversalStance finalStance = ResolveTraversalStance();
+                    FocusedClimbLog(
+                        "ServerRequestGate",
+                        $"event=released sender={senderClientId} action={request.Action} " +
+                        $"processing={Time.realtimeSinceStartup - gateAcquiredAt:F3}s " +
+                        $"total={Time.realtimeSinceStartup - queuedAt:F3}s " +
+                        $"active='{finalStance?.Traverse?.name ?? "none"}' " +
+                        $"pos={NetworkTraversalClimbDiagnostics.Vector(transform.position)}");
+                }
+
                 m_ServerRequestGate.Release();
             }
         }
@@ -1372,14 +1425,17 @@ namespace Arawn.GameCreator2.Networking.Traversal
             }
 
             // Keep the authoritative boundary self-contained. Trusted server/AI callers bypass
-            // client routing checks, so the unsupported backend rule must be enforced here too.
+            // client routing checks, so the driver capability rule must be enforced here too.
             if (m_NetworkCharacter == null ||
-                m_NetworkCharacter.PredictionBackend != NetworkPredictionBackend.BuiltIn)
+                m_Character?.Driver is not INetworkServerOwnerMotionAuthority &&
+                !(m_IsLocalClient &&
+                  (m_NetworkCharacter.OwnerMotionAuthority ??
+                   m_Character?.Driver as INetworkOwnerMotionAuthority) != null))
             {
                 return CreateRejectedResponse(
                     request,
                     TraversalRejectionReason.UnsupportedPredictionBackend,
-                    "Traversal authoritative processing currently supports only the built-in movement backend");
+                    "The active authoritative movement backend does not expose Traversal motion-authority windows");
             }
 
             TraversalStance serverStance = ResolveTraversalStance();
@@ -1415,10 +1471,11 @@ namespace Arawn.GameCreator2.Networking.Traversal
             if (m_ClimbDiagnosticFocused)
             {
                 FocusedClimbLog(
-                    "ServerValidation",
+                    "ServerRequestBegin",
                     $"sender={senderClientId} action={request.Action} traverse='{traverse?.name ?? "none"}' " +
                     $"stance='{serverStance.Traverse?.name ?? "none"}' motion='{traverse?.Motion?.name ?? "none"}' " +
-                    $"resolved=true active={traverse?.isActiveAndEnabled ?? false} canUse=true");
+                    $"resolved=true active={traverse?.isActiveAndEnabled ?? false} canUse=true " +
+                    $"pos={NetworkTraversalClimbDiagnostics.Vector(transform.position)}");
             }
 
             if (!IsTraversalStartAction(request.Action) && serverStance.Traverse == null)
@@ -1456,6 +1513,16 @@ namespace Arawn.GameCreator2.Networking.Traversal
                 : null;
 
             bool applied;
+            float authoritativeApplyStartedAt = Time.realtimeSinceStartup;
+            if (m_ClimbDiagnosticFocused)
+            {
+                FocusedClimbLog(
+                    "ServerAuthoritativeApply",
+                    $"event=begin action={request.Action} target='{traverse?.name ?? "none"}' " +
+                    $"current='{serverStance.Traverse?.name ?? "none"}' " +
+                    $"pos={NetworkTraversalClimbDiagnostics.Vector(transform.position)}");
+            }
+
             try
             {
                 applied = await ApplyRequestAuthoritativelyAsync(request, traverse);
@@ -1465,6 +1532,16 @@ namespace Arawn.GameCreator2.Networking.Traversal
                 RemoveServerStartAcknowledgement(request.CorrelationId, startAcknowledgement);
                 LogTraversal($"server exception requestId={request.RequestId}: {exception.Message}");
                 return CreateRejectedResponse(request, TraversalRejectionReason.Exception, exception.Message);
+            }
+
+            if (m_ClimbDiagnosticFocused)
+            {
+                FocusedClimbLog(
+                    "ServerAuthoritativeApply",
+                    $"event=returned applied={applied} elapsed={Time.realtimeSinceStartup - authoritativeApplyStartedAt:F3}s " +
+                    $"target='{traverse?.name ?? "none"}' active='{serverStance.Traverse?.name ?? "none"}' " +
+                    $"startAck={(startAcknowledgement != null ? startAcknowledgement.Acknowledged.ToString() : "none")} " +
+                    $"pos={NetworkTraversalClimbDiagnostics.Vector(transform.position)}");
             }
 
             if (!applied)
@@ -1485,6 +1562,15 @@ namespace Arawn.GameCreator2.Networking.Traversal
             {
                 m_HasDeferredStartBroadcastRequest = true;
                 m_DeferredStartBroadcastRequest = request;
+                if (m_ClimbDiagnosticFocused)
+                {
+                    FocusedClimbLog(
+                        "ServerStartAck",
+                        $"event=waiting sequence={startAcknowledgement.Sequence} " +
+                        $"age={Time.realtimeSinceStartup - startAcknowledgement.CreatedAt:F3}s " +
+                        $"target='{startAcknowledgement.Target?.name ?? "none"}' " +
+                        $"active='{serverStance.Traverse?.name ?? "none"}'");
+                }
             }
 
             if (startAcknowledgement != null &&
@@ -1498,6 +1584,16 @@ namespace Arawn.GameCreator2.Networking.Traversal
             }
 
             RemoveServerStartAcknowledgement(request.CorrelationId, startAcknowledgement);
+            if (m_ClimbDiagnosticFocused && startAcknowledgement != null)
+            {
+                FocusedClimbLog(
+                    "ServerStartAck",
+                    $"event=completed sequence={startAcknowledgement.Sequence} " +
+                    $"acknowledged={startAcknowledgement.Acknowledged} " +
+                    $"elapsed={Time.realtimeSinceStartup - startAcknowledgement.CreatedAt:F3}s " +
+                    $"active='{serverStance.Traverse?.name ?? "none"}' " +
+                    $"pos={NetworkTraversalClimbDiagnostics.Vector(transform.position)}");
+            }
             if (m_HasDeferredStartBroadcastRequest &&
                 m_DeferredStartBroadcastRequest.CorrelationId == request.CorrelationId)
             {
@@ -1553,16 +1649,35 @@ namespace Arawn.GameCreator2.Networking.Traversal
 
         public void ReceiveTraversalResponse(NetworkTraversalResponse response)
         {
-            if (m_ClimbDiagnosticFocused || ContainsDiagnosticName(response.ActionIdString, "PullUp"))
+            bool pullUpResponse = ContainsDiagnosticName(response.ActionIdString, "PullUp") ||
+                                  ContainsDiagnosticName(response.TraverseIdString, "PullUp");
+            if (pullUpResponse)
+            {
+                m_ClimbDiagnosticRequestId = response.RequestId;
+                m_ClimbDiagnosticCorrelationId = response.CorrelationId;
+                m_ClimbDiagnosticAction = response.Action.ToString();
+                m_PullUpDiagnosticUntilRealtime = Mathf.Max(
+                    m_PullUpDiagnosticUntilRealtime,
+                    Time.realtimeSinceStartup + 8f);
+                SetClimbDiagnosticFocus(true, "pullup-response", null, null);
+            }
+
+            ulong key = GetPendingKey(response.ActorNetworkId, response.CorrelationId, response.RequestId);
+            bool pendingFound = m_PendingRequests.TryGetValue(key, out PendingTraversalRequest pending);
+            float roundTrip = pendingFound
+                ? Mathf.Max(0f, Time.time - pending.SentTime)
+                : -1f;
+
+            if (m_ClimbDiagnosticFocused || pullUpResponse)
             {
                 FocusedClimbLog(
                     "Response",
                     $"authorized={response.Authorized} applied={response.Applied} rejection={response.RejectionReason} " +
                     $"action={response.Action} responseVersion={response.StateVersion} traversing={response.IsTraversing} " +
-                    $"error='{response.Error}'");
+                    $"pending={pendingFound} roundTrip={(pendingFound ? $"{roundTrip:F3}s" : "unknown")} " +
+                    $"traverse='{response.TraverseIdString}' error='{response.Error}'");
             }
 
-            ulong key = GetPendingKey(response.ActorNetworkId, response.CorrelationId, response.RequestId);
             if (!m_PendingRequests.Remove(key))
             {
                 LogTraversal(
@@ -1669,15 +1784,32 @@ namespace Arawn.GameCreator2.Networking.Traversal
             if (broadcast.NetworkId != NetworkId) return;
             if (m_IsServer) return;
 
-            if (ContainsDiagnosticName(broadcast.ActionIdString, "PullUp"))
+            bool focusedPullUpBroadcast =
+                ContainsDiagnosticName(broadcast.ActionIdString, "PullUp") ||
+                ContainsDiagnosticName(broadcast.TraverseIdString, "PullUp");
+            bool focusedZiplineBroadcast =
+                ContainsDiagnosticName(broadcast.TraverseIdString, "Zipline");
+            bool focusedClimbBroadcast =
+                ContainsDiagnosticName(broadcast.TraverseIdString, "Free_Climb") ||
+                ContainsDiagnosticName(broadcast.TraverseIdString, "Free Climb") ||
+                ContainsDiagnosticName(broadcast.TraverseIdString, "Ledge_Climb");
+            if (focusedPullUpBroadcast || focusedZiplineBroadcast || focusedClimbBroadcast)
             {
                 m_ClimbDiagnosticRequestId = 0;
                 m_ClimbDiagnosticCorrelationId = broadcast.CorrelationId;
                 m_ClimbDiagnosticAction = broadcast.ActionIdString;
                 m_PullUpDiagnosticUntilRealtime = Mathf.Max(
                     m_PullUpDiagnosticUntilRealtime,
-                    Time.realtimeSinceStartup + 4f);
-                SetClimbDiagnosticFocus(true, "pullup-broadcast", null, null);
+                    Time.realtimeSinceStartup + 8f);
+                SetClimbDiagnosticFocus(
+                    true,
+                    focusedZiplineBroadcast
+                        ? "zipline-broadcast"
+                        : focusedClimbBroadcast
+                            ? "climb-broadcast"
+                            : "pullup-broadcast",
+                    null,
+                    null);
             }
 
             if (m_ClimbDiagnosticFocused)
@@ -1702,6 +1834,18 @@ namespace Arawn.GameCreator2.Networking.Traversal
                         broadcast.TraverseIdString))
                 {
                     RaiseTraversalAppliedOnce(broadcast);
+                    TraversalStance repeatedStance = ResolveTraversalStance();
+                    if (repeatedStance?.Traverse is TraverseInteractive repeatedInteractive &&
+                        MatchesTraverseIdentity(
+                            repeatedInteractive,
+                            broadcast.TraverseHash,
+                            broadcast.TraverseIdString))
+                    {
+                        _ = EnsureInteractiveMotionStateAfterEnterAsync(
+                            repeatedInteractive,
+                            0,
+                            "repeated-broadcast");
+                    }
                 }
 
                 LogTraversal(
@@ -1850,6 +1994,23 @@ namespace Arawn.GameCreator2.Networking.Traversal
             if (snapshot.NetworkId != NetworkId) return;
             if (m_IsServer) return;
 
+            if (ContainsDiagnosticName(snapshot.TraverseIdString, "PullUp") ||
+                ContainsDiagnosticName(snapshot.TraverseIdString, "Free_Climb") ||
+                ContainsDiagnosticName(snapshot.TraverseIdString, "Free Climb") ||
+                ContainsDiagnosticName(snapshot.TraverseIdString, "Ledge_Climb"))
+            {
+                m_PullUpDiagnosticUntilRealtime = Mathf.Max(
+                    m_PullUpDiagnosticUntilRealtime,
+                    Time.realtimeSinceStartup + 8f);
+                SetClimbDiagnosticFocus(
+                    true,
+                    ContainsDiagnosticName(snapshot.TraverseIdString, "PullUp")
+                        ? "pullup-snapshot"
+                        : "climb-snapshot",
+                    null,
+                    null);
+            }
+
             if (m_ClimbDiagnosticFocused)
             {
                 m_HasClimbDiagnosticSnapshot = true;
@@ -1859,7 +2020,10 @@ namespace Arawn.GameCreator2.Networking.Traversal
                     "Snapshot",
                     $"snapshotVersion={snapshot.StateVersion} kind={snapshot.Kind} traversing={snapshot.IsTraversing} " +
                     $"hasRelative={snapshot.HasRelativePose} relative={NetworkTraversalClimbDiagnostics.Vector(snapshot.RelativePosition)} " +
-                    $"serverTime={snapshot.ServerTime:F3} clientPos={NetworkTraversalClimbDiagnostics.Vector(transform.position)}");
+                    $"serverTime={snapshot.ServerTime:F3} local='{m_TraversalStance?.Traverse?.name ?? "none"}' " +
+                    $"driver={m_Character?.Driver?.GetType().Name ?? "none"} " +
+                    $"clientPos={NetworkTraversalClimbDiagnostics.Vector(transform.position)} " +
+                    $"visual={NetworkTraversalClimbDiagnostics.Vector(GetFocusedVisualPosition(transform.position))}");
             }
 
             // A snapshot can arrive while the matching response/broadcast is still entering.
@@ -1888,7 +2052,35 @@ namespace Arawn.GameCreator2.Networking.Traversal
                             snapshot.TraverseHash,
                             snapshot.TraverseIdString))
                     {
-                        ApplySnapshotRelativePose(snapshot, repeatedStance, repeatedTraverse);
+                        // Routine full snapshots keep replicas and late joiners converged, but
+                        // the owning client is already advancing the authored interactive pose.
+                        // Reapplying the same state version there teleports prediction back to
+                        // an older server sample and can pin PullUp or pull a climber off an edge.
+                        bool preserveOwnerPose = ShouldPreserveActiveLocalOwnerPoseFromRepeatedSnapshot(
+                            repeatedStance,
+                            repeatedTraverse);
+                        if (m_ClimbDiagnosticFocused)
+                        {
+                            FocusedClimbLog(
+                                "SnapshotDecision",
+                                $"decision={(preserveOwnerPose ? "preserve-local-owner" : "apply-repeated-pose")} " +
+                                $"version={snapshot.StateVersion} traverse='{snapshot.TraverseIdString}' " +
+                                $"relative={NetworkTraversalClimbDiagnostics.Vector(snapshot.RelativePosition)} " +
+                                $"pos={NetworkTraversalClimbDiagnostics.Vector(transform.position)}");
+                        }
+
+                        if (!preserveOwnerPose)
+                        {
+                            ApplySnapshotRelativePose(snapshot, repeatedStance, repeatedTraverse);
+                        }
+
+                        if (repeatedTraverse is TraverseInteractive repeatedInteractive)
+                        {
+                            _ = EnsureInteractiveMotionStateAfterEnterAsync(
+                                repeatedInteractive,
+                                0,
+                                "repeated-snapshot");
+                        }
                     }
                 }
 
@@ -1930,6 +2122,15 @@ namespace Arawn.GameCreator2.Networking.Traversal
                 if (currentlyTraversing)
                 {
                     LogTraversal("client forcing traversal cancel from non-traversing snapshot");
+                    if (m_ClimbDiagnosticFocused)
+                    {
+                        FocusedClimbLog(
+                            "SnapshotDecision",
+                            $"decision=force-cancel-active-link snapshotVersion={snapshot.StateVersion} " +
+                            $"snapshotServerTime={snapshot.ServerTime:F3} local='{stance.Traverse?.name ?? "none"}' " +
+                            $"root={NetworkTraversalClimbDiagnostics.Vector(transform.position)} " +
+                            $"visual={NetworkTraversalClimbDiagnostics.Vector(GetFocusedVisualPosition(transform.position))}");
+                    }
                 }
 
                 _ = BeginOrJoinClientAuthoritativeStateApply(
@@ -2029,6 +2230,18 @@ namespace Arawn.GameCreator2.Networking.Traversal
                 snapshot.StateVersion,
                 true,
                 snapshot);
+        }
+
+        private bool ShouldPreserveActiveLocalOwnerPoseFromRepeatedSnapshot(
+            TraversalStance stance,
+            Traverse traverse)
+        {
+            return !m_IsServer &&
+                   m_IsLocalClient &&
+                   !m_IsRemoteClient &&
+                   stance?.Traverse is TraverseInteractive &&
+                   ReferenceEquals(stance.Traverse, traverse) &&
+                   HasOwnerMotionAuthorityForCurrentRole();
         }
 
         private bool TryJoinInFlightSnapshot(in NetworkTraversalSnapshot snapshot)
@@ -2303,6 +2516,19 @@ namespace Arawn.GameCreator2.Networking.Traversal
             bool presentationSafeSnapshot = false,
             NetworkTraversalSnapshot snapshot = default)
         {
+            bool pullUpApply = ContainsDiagnosticName(actionIdString, "PullUp") ||
+                               ContainsDiagnosticName(traverseIdString, "PullUp") ||
+                               ContainsDiagnosticName(authoritativeTraverse != null ? authoritativeTraverse.name : string.Empty, "PullUp");
+            if (pullUpApply)
+            {
+                m_ClimbDiagnosticCorrelationId = correlationId;
+                m_ClimbDiagnosticAction = action.ToString();
+                m_PullUpDiagnosticUntilRealtime = Mathf.Max(
+                    m_PullUpDiagnosticUntilRealtime,
+                    Time.realtimeSinceStartup + 8f);
+                SetClimbDiagnosticFocus(true, "pullup-client-apply", authoritativeTraverse, null);
+            }
+
             ClientAuthoritativeStateApply current = m_ClientAuthoritativeStateApply;
             if (current != null && current.Completion != null && !current.Completion.IsCompleted)
             {
@@ -2325,6 +2551,14 @@ namespace Arawn.GameCreator2.Networking.Traversal
                     LogTraversal(
                         $"client joined in-flight authoritative state version={stateVersion} " +
                         $"correlation={correlationId} traverse='{traverseIdString}'");
+                    if (m_ClimbDiagnosticFocused)
+                    {
+                        FocusedClimbLog(
+                            "ClientApplyJoin",
+                            $"sequence={current.Sequence} action={action} correlation={correlationId} " +
+                            $"stateVersion={stateVersion} traverseHash={traverseHash} " +
+                            $"traverse='{traverseIdString}' pos={NetworkTraversalClimbDiagnostics.Vector(transform.position)}");
+                    }
                     return current.Completion;
                 }
 
@@ -2360,6 +2594,18 @@ namespace Arawn.GameCreator2.Networking.Traversal
             };
 
             m_ClientAuthoritativeStateApply = operation;
+            if (m_ClimbDiagnosticFocused)
+            {
+                TraversalStance stance = ResolveTraversalStance();
+                FocusedClimbLog(
+                    "ClientApplyBegin",
+                    $"sequence={operation.Sequence} action={action} correlation={correlationId} " +
+                    $"stateVersion={stateVersion} traversing={isTraversing} snapshot={presentationSafeSnapshot} " +
+                    $"target='{authoritativeTraverse?.name ?? "none"}' traverseHash={traverseHash} " +
+                    $"traverse='{traverseIdString}' current='{stance?.Traverse?.name ?? "none"}' " +
+                    $"pos={NetworkTraversalClimbDiagnostics.Vector(transform.position)}");
+            }
+
             operation.Completion = RunClientAuthoritativeStateApplyAsync(
                 operation,
                 action,
@@ -2384,6 +2630,9 @@ namespace Arawn.GameCreator2.Networking.Traversal
             bool presentationSafeSnapshot,
             NetworkTraversalSnapshot snapshot)
         {
+            float startedAt = Time.realtimeSinceStartup;
+            bool appliedForDiagnostics = false;
+            bool convergedForDiagnostics = false;
             try
             {
                 bool localStateMatches = LocalTraversalMatchesAuthoritativeState(
@@ -2432,6 +2681,8 @@ namespace Arawn.GameCreator2.Networking.Traversal
                         operation.StateVersion);
                 }
 
+                appliedForDiagnostics = applied;
+
                 if (!applied && LocalTraversalMatchesAuthoritativeState(
                         operation.IsTraversing,
                         operation.TraverseHash,
@@ -2445,6 +2696,17 @@ namespace Arawn.GameCreator2.Networking.Traversal
                     operation.TraverseHash,
                     operation.TraverseIdString,
                     operation.Sequence);
+
+                if (stateConverged &&
+                    operation.IsTraversing &&
+                    authoritativeTraverse is TraverseInteractive interactive)
+                {
+                    await EnsureInteractiveMotionStateAfterEnterAsync(
+                        interactive,
+                        operation.Sequence,
+                        "authoritative-convergence");
+                }
+                convergedForDiagnostics = stateConverged;
 
                 if (stateConverged && IsCurrentClientApply(operation.Sequence))
                 {
@@ -2469,6 +2731,23 @@ namespace Arawn.GameCreator2.Networking.Traversal
             }
             finally
             {
+                if (m_ClimbDiagnosticFocused)
+                {
+                    TraversalStance finalStance = ResolveTraversalStance();
+                    bool localMatches = LocalTraversalMatchesAuthoritativeState(
+                        operation.IsTraversing,
+                        operation.TraverseHash,
+                        operation.TraverseIdString);
+                    FocusedClimbLog(
+                        "ClientApplyEnd",
+                        $"sequence={operation.Sequence} action={action} correlation={operation.CorrelationId} " +
+                        $"stateVersion={operation.StateVersion} elapsed={Time.realtimeSinceStartup - startedAt:F3}s " +
+                        $"applied={appliedForDiagnostics} converged={convergedForDiagnostics} " +
+                        $"localMatches={localMatches} currentSequence={IsCurrentClientApply(operation.Sequence)} " +
+                        $"target='{operation.TraverseIdString}' active='{finalStance?.Traverse?.name ?? "none"}' " +
+                        $"pos={NetworkTraversalClimbDiagnostics.Vector(transform.position)}");
+                }
+
                 if (ReferenceEquals(m_ClientAuthoritativeStateApply, operation))
                 {
                     m_ClientAuthoritativeStateApply = null;
@@ -2799,6 +3078,16 @@ namespace Arawn.GameCreator2.Networking.Traversal
                 return true;
             }
 
+            float startedAt = Time.realtimeSinceStartup;
+            if (m_ClimbDiagnosticFocused)
+            {
+                FocusedClimbLog(
+                    "TraversalDrain",
+                    $"event=begin previous='{previousTraverse.name}' next='{nextTraverse?.name ?? "none"}' " +
+                    $"correlation={correlationId} stateVersion={stateVersion} applySequence={clientApplySequence} " +
+                    $"pos={NetworkTraversalClimbDiagnostics.Vector(transform.position)}");
+            }
+
             TraversalToken previousToken = s_TraversalStanceSnapshotTokenProperty?.GetValue(stance)
                 as TraversalToken;
             ForceCancelAuthoritativeTraversal(stance, correlationId, stateVersion);
@@ -2808,7 +3097,18 @@ namespace Arawn.GameCreator2.Networking.Traversal
                 previousTraverse,
                 previousToken,
                 clientApplySequence);
-            if (!drained) return false;
+            if (!drained)
+            {
+                if (m_ClimbDiagnosticFocused)
+                {
+                    FocusedClimbLog(
+                        "TraversalDrain",
+                        $"event=end outcome=failed elapsed={Time.realtimeSinceStartup - startedAt:F3}s " +
+                        $"previous='{previousTraverse.name}' next='{nextTraverse?.name ?? "none"}' " +
+                        $"active='{stance.Traverse?.name ?? "none"}' pos={NetworkTraversalClimbDiagnostics.Vector(transform.position)}");
+                }
+                return false;
+            }
 
             Traverse current = stance.Traverse;
             if (current != null && !ReferenceEquals(current, nextTraverse))
@@ -2818,6 +3118,15 @@ namespace Arawn.GameCreator2.Networking.Traversal
                     $"previous='{FormatTraverse(previousTraverse)}' next='{FormatTraverse(nextTraverse)}' " +
                     $"current='{FormatTraverse(current)}'");
                 return false;
+            }
+
+            if (m_ClimbDiagnosticFocused)
+            {
+                FocusedClimbLog(
+                    "TraversalDrain",
+                    $"event=end outcome=drained elapsed={Time.realtimeSinceStartup - startedAt:F3}s " +
+                    $"previous='{previousTraverse.name}' next='{nextTraverse?.name ?? "none"}' " +
+                    $"active='{stance.Traverse?.name ?? "none"}' pos={NetworkTraversalClimbDiagnostics.Vector(transform.position)}");
             }
 
             return true;
@@ -3079,10 +3388,29 @@ namespace Arawn.GameCreator2.Networking.Traversal
             s_TraversalStanceRelativePositionProperty.SetValue(stance, snapshot.RelativePosition);
             if (m_Character != null)
             {
+                Vector3 before = m_Character.transform.position;
                 Transform anchor = traverse.Transform;
-                m_Character.transform.SetPositionAndRotation(
-                    anchor.TransformPoint(snapshot.RelativePosition),
-                    anchor.rotation * snapshot.RelativeRotation);
+                Vector3 rootPosition = anchor.TransformPoint(snapshot.RelativePosition);
+                Vector3 driverPosition = rootPosition -
+                                         Vector3.up * (m_Character.Motion.Height * 0.5f);
+                Quaternion rotation = anchor.rotation * snapshot.RelativeRotation;
+
+                // Route snapshot restoration through the active driver. Fusion Native captures
+                // this as an explicit teleport instead of having BeforeAllTicks silently erase a
+                // direct Transform write on the next prediction restore.
+                m_Character.Driver.SetPosition(driverPosition, true);
+                m_Character.Driver.SetRotation(rotation);
+
+                if (m_ClimbDiagnosticFocused)
+                {
+                    FocusedClimbLog(
+                        "SnapshotPoseApply",
+                        $"version={snapshot.StateVersion} traverse='{snapshot.TraverseIdString}' " +
+                        $"relative={NetworkTraversalClimbDiagnostics.Vector(snapshot.RelativePosition)} " +
+                        $"before={NetworkTraversalClimbDiagnostics.Vector(before)} " +
+                        $"requestedDriver={NetworkTraversalClimbDiagnostics.Vector(driverPosition)} " +
+                        $"after={NetworkTraversalClimbDiagnostics.Vector(m_Character.transform.position)}");
+                }
             }
         }
 
@@ -3141,6 +3469,7 @@ namespace Arawn.GameCreator2.Networking.Traversal
 
             if (ContainsDiagnosticName(actionIdString, "PullUp") ||
                 TryGetFocusedClimbMotion(traverse, out _, out _) ||
+                IsFocusedZiplineTraverse(traverse) ||
                 m_ClimbDiagnosticFocused)
             {
                 m_ClimbDiagnosticCorrelationId = operationCorrelationId;
@@ -3578,6 +3907,16 @@ namespace Arawn.GameCreator2.Networking.Traversal
             };
 
             m_ServerStartAcknowledgements[request.CorrelationId] = acknowledgement;
+            if (m_ClimbDiagnosticFocused)
+            {
+                FocusedClimbLog(
+                    "ServerStartAck",
+                    $"event=created sequence={acknowledgement.Sequence} " +
+                    $"target='{target.name}' alreadyActive={acknowledgement.Acknowledged} " +
+                    $"active='{ResolveTraversalStance()?.Traverse?.name ?? "none"}' " +
+                    $"pos={NetworkTraversalClimbDiagnostics.Vector(transform.position)}");
+            }
+
             return acknowledgement;
         }
 
@@ -3600,6 +3939,17 @@ namespace Arawn.GameCreator2.Networking.Traversal
                    Time.realtimeSinceStartup < deadline)
             {
                 await Task.Yield();
+            }
+
+            if (m_ClimbDiagnosticFocused)
+            {
+                FocusedClimbLog(
+                    "ServerStartAck",
+                    $"event=wait-finished sequence={acknowledgement.Sequence} " +
+                    $"acknowledged={acknowledgement.Acknowledged} " +
+                    $"elapsed={Time.realtimeSinceStartup - acknowledgement.CreatedAt:F3}s " +
+                    $"controllerActive={isActiveAndEnabled} " +
+                    $"active='{ResolveTraversalStance()?.Traverse?.name ?? "none"}'");
             }
 
             return acknowledgement.Acknowledged;
@@ -4021,6 +4371,27 @@ namespace Arawn.GameCreator2.Networking.Traversal
             m_LastEdgeConnectionEdgeB = edgeB;
             m_LastEdgeConnectionCandidateTime = Time.time;
 
+            if (ContainsDiagnosticName(target != null ? target.name : string.Empty, "PullUp"))
+            {
+                string sourceId = source != null ? BuildTraverseId(source) : string.Empty;
+                string targetId = BuildTraverseId(target);
+                m_PullUpDiagnosticUntilRealtime = Mathf.Max(
+                    m_PullUpDiagnosticUntilRealtime,
+                    Time.realtimeSinceStartup + 8f);
+                SetClimbDiagnosticFocus(true, "pullup-candidate", source, source?.MotionInteractive);
+                FocusedClimbLog(
+                    "PullUpCandidate",
+                    $"event=stored edge={(edgeB ? "B" : "A")} " +
+                    $"source='{source?.name ?? "none"}' target='{target.name}' " +
+                    $"sourceId='{sourceId}' sourceHash={GetOptionalStableHash(sourceId)} " +
+                    $"targetId='{targetId}' targetHash={GetOptionalStableHash(targetId)} " +
+                    $"sourceWorld={NetworkTraversalClimbDiagnostics.Vector(source != null ? source.transform.position : Vector3.zero)} " +
+                    $"targetWorld={NetworkTraversalClimbDiagnostics.Vector(target.transform.position)} " +
+                    $"local={NetworkTraversalClimbDiagnostics.Vector(localPosition)} " +
+                    $"input={NetworkTraversalClimbDiagnostics.Vector(localDirection)} " +
+                    $"character={NetworkTraversalClimbDiagnostics.Vector(transform.position)}");
+            }
+
             LogTraversal(
                 $"stored edge connection candidate edge={(edgeB ? "B" : "A")} " +
                 $"from='{FormatTraverse(source)}' to='{FormatTraverse(target)}' " +
@@ -4043,11 +4414,23 @@ namespace Arawn.GameCreator2.Networking.Traversal
             }
 
             float age = Time.time - m_LastEdgeConnectionCandidateTime;
+            bool pullUpCandidate = ContainsDiagnosticName(
+                m_LastEdgeConnectionTarget.name,
+                "PullUp");
             if (age > EDGE_CONNECTION_JUMP_MEMORY_SECONDS)
             {
                 reason =
                     $"stored edge target expired age={age:F3} " +
                     $"limit={EDGE_CONNECTION_JUMP_MEMORY_SECONDS:F3}";
+                if (pullUpCandidate)
+                {
+                    FocusedClimbLog(
+                        "PullUpCandidate",
+                        $"event=rejected reason=expired age={age:F3}s " +
+                        $"limit={EDGE_CONNECTION_JUMP_MEMORY_SECONDS:F3}s " +
+                        $"target='{m_LastEdgeConnectionTarget.name}' " +
+                        $"character={NetworkTraversalClimbDiagnostics.Vector(transform.position)}");
+                }
                 return false;
             }
 
@@ -4056,6 +4439,10 @@ namespace Arawn.GameCreator2.Networking.Traversal
                 reason =
                     $"stored edge target belongs to another source " +
                     $"stored='{FormatTraverse(m_LastEdgeConnectionSource)}' current='{FormatTraverse(interactive)}'";
+                if (pullUpCandidate)
+                {
+                    FocusedClimbLog("PullUpCandidate", $"event=rejected reason=source-mismatch age={age:F3}s {reason}");
+                }
                 return false;
             }
 
@@ -4065,6 +4452,10 @@ namespace Arawn.GameCreator2.Networking.Traversal
                     out string validationReason))
             {
                 reason = $"stored edge target failed validation reason='{validationReason}'";
+                if (pullUpCandidate)
+                {
+                    FocusedClimbLog("PullUpCandidate", $"event=rejected reason=validation age={age:F3}s {reason}");
+                }
                 return false;
             }
 
@@ -4079,6 +4470,18 @@ namespace Arawn.GameCreator2.Networking.Traversal
                 $"try jump using stored edge connection target " +
                 $"from='{FormatTraverse(interactive)}' to='{FormatTraverse(nextTraverse)}' " +
                 $"reason='{reason}'");
+
+            if (pullUpCandidate)
+            {
+                string targetId = BuildTraverseId(nextTraverse);
+                FocusedClimbLog(
+                    "PullUpCandidate",
+                    $"event=consumed age={age:F3}s source='{interactive.name}' " +
+                    $"target='{nextTraverse.name}' targetId='{targetId}' " +
+                    $"targetHash={GetOptionalStableHash(targetId)} " +
+                    $"character={NetworkTraversalClimbDiagnostics.Vector(transform.position)} " +
+                    $"reason='{reason}'");
+            }
 
             m_LastEdgeConnectionTarget = null;
             m_LastEdgeConnectionSource = null;
@@ -4725,6 +5128,145 @@ namespace Arawn.GameCreator2.Networking.Traversal
             m_HasStoredTraversalMotionValues = false;
         }
 
+        private async Task EnsureInteractiveMotionStateAfterEnterAsync(
+            TraverseInteractive interactive,
+            uint clientApplySequence,
+            string reason)
+        {
+            // TraverseInteractive.Enter assigns TraversalStance before MotionInteractive starts
+            // its State. Give that normal semantic path one continuation to do the work, then
+            // repair only a genuinely missing state. This keeps duplicate broadcasts and full
+            // snapshots idempotent instead of restarting an already-playing Climb state.
+            await Task.Yield();
+            if (!isActiveAndEnabled || interactive == null) return;
+            if (clientApplySequence != 0 && !IsCurrentClientApply(clientApplySequence)) return;
+
+            TraversalStance stance = m_TraversalStance ?? ResolveTraversalStance();
+            if (stance == null || !ReferenceEquals(stance.Traverse, interactive)) return;
+
+            EnsureInteractiveMotionStateActive(interactive, reason);
+        }
+
+        private void EnsureInteractiveMotionStateActive(
+            TraverseInteractive interactive,
+            string reason)
+        {
+            if (!TryGetInteractiveMotionState(
+                    interactive,
+                    out MotionInteractive motion,
+                    out State state,
+                    out int stateLayer,
+                    out float speed))
+            {
+                return;
+            }
+
+            bool stateActive = IsExpectedStateActive(state, stateLayer, out string stateSummary);
+            if (stateActive)
+            {
+                if (m_ClimbDiagnosticFocused)
+                {
+                    FocusedClimbLog(
+                        "StateCheck",
+                        $"reason='{reason}' result=active motion='{motion.name}' state='{state.name}' " +
+                        $"layer={stateLayer} playables={stateSummary}",
+                        $"state-active:{GetInstanceID()}:{state.GetInstanceID()}:{stateLayer}");
+                }
+                return;
+            }
+
+            ConfigState stateConfig = new ConfigState(
+                0f,
+                speed,
+                1f,
+                motion.TransitionIn,
+                motion.TransitionOut);
+
+            m_NetworkCharacter?.AnimimController?.RegisterState(state);
+            _ = m_Character.States.SetState(
+                state,
+                stateLayer,
+                BlendMode.Blend,
+                stateConfig);
+
+            Debug.LogWarning(
+                $"[TraversalAnimDebug][StateRepair] {name} netId={NetworkId} role={FormatRole()} " +
+                $"reason='{reason}' restored motion='{motion.name}' state='{state.name}' " +
+                $"layer={stateLayer} speed={speed:F3} previous={stateSummary}",
+                this);
+        }
+
+        private bool TryGetInteractiveMotionState(
+            TraverseInteractive interactive,
+            out MotionInteractive motion,
+            out State state,
+            out int stateLayer,
+            out float speed)
+        {
+            motion = interactive != null ? interactive.MotionInteractive : null;
+            state = motion != null
+                ? s_MotionInteractiveAnimationStateField?.GetValue(motion) as State
+                : null;
+            stateLayer = 1;
+            speed = 1f;
+            if (motion == null || state == null || m_Character?.States == null)
+            {
+                return false;
+            }
+
+            Args args = new Args(interactive.gameObject, m_Character.gameObject);
+            if (s_MotionInteractiveLayerField?.GetValue(motion) is PropertyGetInteger layerProperty)
+            {
+                stateLayer = (int)layerProperty.Get(args);
+            }
+            if (s_MotionInteractiveAnimationSpeedField?.GetValue(motion) is PropertyGetDecimal speedProperty)
+            {
+                speed = Mathf.Max(0.01f, (float)speedProperty.Get(args));
+            }
+
+            return true;
+        }
+
+        private bool IsExpectedStateActive(
+            State expectedState,
+            int stateLayer,
+            out string summary)
+        {
+            summary = $"layer={stateLayer}:unavailable";
+            if (expectedState == null || m_Character?.States == null ||
+                s_StatesOutputLayersField == null)
+            {
+                return false;
+            }
+
+            try
+            {
+                if (s_StatesOutputLayersField.GetValue(m_Character.States) is not
+                    SortedList<int, List<StatePlayableBehaviour>> layers ||
+                    !layers.TryGetValue(stateLayer, out List<StatePlayableBehaviour> behaviours) ||
+                    behaviours == null || behaviours.Count == 0)
+                {
+                    summary = $"layer={stateLayer}:none";
+                    return false;
+                }
+
+                summary = FormatFocusedStatePlayables(stateLayer);
+                for (int i = behaviours.Count - 1; i >= 0; i--)
+                {
+                    StatePlayableBehaviour behaviour = behaviours[i];
+                    if (behaviour == null || behaviour.IsExiting) continue;
+                    if (ReferenceEquals(behaviour.State, expectedState)) return true;
+                }
+
+                return false;
+            }
+            catch (Exception exception)
+            {
+                summary = $"layer={stateLayer}:error:{exception.GetType().Name}";
+                return false;
+            }
+        }
+
         private void StopHostLocalInteractiveMotionState()
         {
             if (!m_HostLocalInteractiveStateStarted || m_Character == null)
@@ -5306,13 +5848,16 @@ namespace Arawn.GameCreator2.Networking.Traversal
             }
 
             if (TryGetFocusedClimbMotion(traverse, out _, out MotionInteractive focusedMotion) ||
+                IsFocusedZiplineTraverse(traverse) ||
                 m_ClimbDiagnosticFocused)
             {
                 SetClimbDiagnosticFocus(true, "motion-enter", traverse, focusedMotion);
                 FocusedClimbLog(
                     "MotionEnter",
                     $"traverse='{traverse.name}' motion='{focusedMotion?.name ?? "none"}' " +
-                    $"suppress={m_SuppressInterception} pos={NetworkTraversalClimbDiagnostics.Vector(transform.position)}");
+                    $"suppress={m_SuppressInterception} driver={m_Character?.Driver?.GetType().Name ?? "none"} " +
+                    $"pos={NetworkTraversalClimbDiagnostics.Vector(transform.position)} " +
+                    $"visual={NetworkTraversalClimbDiagnostics.Vector(GetFocusedVisualPosition(transform.position))}");
             }
 
             if (m_IsServer)
@@ -5321,6 +5866,16 @@ namespace Arawn.GameCreator2.Networking.Traversal
                 {
                     if (acknowledgement != null && ReferenceEquals(acknowledgement.Target, traverse))
                     {
+                        if (m_ClimbDiagnosticFocused)
+                        {
+                            FocusedClimbLog(
+                                "ServerStartAck",
+                                $"event=motion-enter sequence={acknowledgement.Sequence} " +
+                                $"target='{traverse.name}' age={Time.realtimeSinceStartup - acknowledgement.CreatedAt:F3}s " +
+                                $"wasAcknowledged={acknowledgement.Acknowledged} " +
+                                $"pos={NetworkTraversalClimbDiagnostics.Vector(transform.position)}");
+                        }
+
                         acknowledgement.Acknowledged = true;
                     }
                 }
@@ -5338,12 +5893,12 @@ namespace Arawn.GameCreator2.Networking.Traversal
             CaptureTraversalMotionValues();
             LogTraversalPose("motion-enter-event", traverse);
 
+            // MotionInteractive.Enter starts its State immediately after EventMotionEnter.
+            // Starting it here too creates two playables on the same layer and resets Climb's
+            // normalized time on a host/Shared creator. Snapshot restoration remains the only
+            // path that explicitly prestarts an interactive state because it deliberately does
+            // not execute MotionInteractive.Enter.
             if (m_IsServer && m_IsLocalClient && !m_IsRemoteClient &&
-                traverse is TraverseInteractive hostInteractive)
-            {
-                StartHostLocalInteractiveMotionState(hostInteractive);
-            }
-            else if (m_IsServer && m_IsLocalClient && !m_IsRemoteClient &&
                      traverse is TraverseLink hostLink)
             {
                 StartHostLocalLinkMotionAnimation(hostLink);
@@ -5452,7 +6007,12 @@ namespace Arawn.GameCreator2.Networking.Traversal
                     "MotionExit",
                     $"traverse='{exitingTraverse?.name ?? "none"}' suppress={m_SuppressInterception} " +
                     $"pos={NetworkTraversalClimbDiagnostics.Vector(transform.position)} grounded={m_Character?.Driver?.IsGrounded ?? false}");
-                StartCoroutine(CaptureFocusedExitCheckpoints(exitingTraverse != null ? exitingTraverse.name : "none"));
+                Vector3 exitDirection = exitingTraverse != null
+                    ? exitingTraverse.transform.forward.normalized
+                    : Vector3.zero;
+                StartCoroutine(CaptureFocusedExitCheckpoints(
+                    exitingTraverse != null ? exitingTraverse.name : "none",
+                    exitDirection));
             }
 
             StopHostLocalInteractiveMotionState();
@@ -5529,28 +6089,94 @@ namespace Arawn.GameCreator2.Networking.Traversal
             NetworkTraversalManager.Instance?.BroadcastFullSnapshot(snapshot);
         }
 
-        private IEnumerator CaptureFocusedExitCheckpoints(string exitingTraverse)
+        private IEnumerator CaptureFocusedExitCheckpoints(
+            string exitingTraverse,
+            Vector3 expectedDirection)
         {
-            float[] delays = { 0f, 0.1f, 0.35f, 0.9f };
-            for (int i = 0; i < delays.Length; i++)
+            Vector3 previousRoot = transform.position;
+            Vector3 previousVisual = GetFocusedVisualPosition(previousRoot);
+
+            // The reported Zipline artifact lasts only a rendered frame or two. Capture the
+            // short handoff at frame resolution, then fall back to sparse checkpoints so this
+            // diagnostic remains useful without enabling the verbose movement log.
+            for (int frame = 0; frame < 12; frame++)
             {
-                if (delays[i] <= 0f) yield return null;
-                else yield return new WaitForSecondsRealtime(delays[i]);
+                yield return new WaitForEndOfFrame();
                 if (!isActiveAndEnabled) yield break;
 
-                TraversalStance stance = m_TraversalStance ?? ResolveTraversalStance();
-                float ownerGrace = m_Character?.Driver is UnitDriverNetworkClient clientDriver
-                    ? clientDriver.OwnerMotionAuthorityRemaining
-                    : 0f;
-                FocusedClimbLog(
-                    "PullUpCheckpoint",
-                    $"index={i} exiting='{exitingTraverse}' active='{stance?.Traverse?.name ?? "none"}' " +
-                    $"pos={NetworkTraversalClimbDiagnostics.Vector(transform.position)} grounded={m_Character?.Driver?.IsGrounded ?? false} " +
-                    $"serverWindow={m_ServerOwnerMotionWindowOpen} operation={m_ServerOwnerMotionOperationId} " +
-                    $"ownerGrace={ownerGrace:F3} hasSnapshot={m_HasClimbDiagnosticSnapshot} " +
-                    $"snapshotVersion={m_LastClimbDiagnosticSnapshotVersion} " +
-                    $"snapshotRelative={NetworkTraversalClimbDiagnostics.Vector(m_LastClimbDiagnosticSnapshotRelative)}");
+                LogFocusedExitPose(
+                    "ExitFrame",
+                    frame,
+                    exitingTraverse,
+                    expectedDirection,
+                    ref previousRoot,
+                    ref previousVisual);
             }
+
+            float[] delays = { 0.1f, 0.35f, 0.9f };
+            for (int i = 0; i < delays.Length; i++)
+            {
+                yield return new WaitForSecondsRealtime(delays[i]);
+                if (!isActiveAndEnabled) yield break;
+
+                LogFocusedExitPose(
+                    "ExitCheckpoint",
+                    i,
+                    exitingTraverse,
+                    expectedDirection,
+                    ref previousRoot,
+                    ref previousVisual);
+            }
+        }
+
+        private void LogFocusedExitPose(
+            string stage,
+            int index,
+            string exitingTraverse,
+            Vector3 expectedDirection,
+            ref Vector3 previousRoot,
+            ref Vector3 previousVisual)
+        {
+            TraversalStance stance = m_TraversalStance ?? ResolveTraversalStance();
+            Vector3 root = transform.position;
+            Vector3 visual = GetFocusedVisualPosition(root);
+            Vector3 rootDelta = root - previousRoot;
+            Vector3 visualDelta = visual - previousVisual;
+            float rootAlong = expectedDirection.sqrMagnitude > 0.0001f
+                ? Vector3.Dot(rootDelta, expectedDirection)
+                : 0f;
+            float visualAlong = expectedDirection.sqrMagnitude > 0.0001f
+                ? Vector3.Dot(visualDelta, expectedDirection)
+                : 0f;
+            bool rootReversed = rootAlong < -0.002f;
+            bool visualReversed = visualAlong < -0.002f;
+            float ownerGrace = m_Character?.Driver is UnitDriverNetworkClient clientDriver
+                ? clientDriver.OwnerMotionAuthorityRemaining
+                : 0f;
+
+            FocusedClimbLog(
+                rootReversed || visualReversed ? "ExitReverse" : stage,
+                $"index={index} exiting='{exitingTraverse}' active='{stance?.Traverse?.name ?? "none"}' " +
+                $"driver={m_Character?.Driver?.GetType().Name ?? "none"} " +
+                $"root={NetworkTraversalClimbDiagnostics.Vector(root)} " +
+                $"visual={NetworkTraversalClimbDiagnostics.Vector(visual)} " +
+                $"rootDelta={NetworkTraversalClimbDiagnostics.Vector(rootDelta)} rootAlong={rootAlong:F4} " +
+                $"visualDelta={NetworkTraversalClimbDiagnostics.Vector(visualDelta)} visualAlong={visualAlong:F4} " +
+                $"expected={NetworkTraversalClimbDiagnostics.Vector(expectedDirection)} " +
+                $"grounded={m_Character?.Driver?.IsGrounded ?? false} " +
+                $"serverWindow={m_ServerOwnerMotionWindowOpen} operation={m_ServerOwnerMotionOperationId} " +
+                $"ownerGrace={ownerGrace:F3} hasSnapshot={m_HasClimbDiagnosticSnapshot} " +
+                $"snapshotVersion={m_LastClimbDiagnosticSnapshotVersion} " +
+                $"snapshotRelative={NetworkTraversalClimbDiagnostics.Vector(m_LastClimbDiagnosticSnapshotRelative)}");
+
+            previousRoot = root;
+            previousVisual = visual;
+        }
+
+        private Vector3 GetFocusedVisualPosition(Vector3 fallback)
+        {
+            Transform mannequin = m_Character?.Animim?.Mannequin;
+            return mannequin != null ? mannequin.position : fallback;
         }
 
         private void CancelPendingServerExitSnapshot()
@@ -5711,7 +6337,8 @@ namespace Arawn.GameCreator2.Networking.Traversal
                             ContainsDiagnosticName(request.StateIdString, "PullUp") ||
                             ContainsDiagnosticName(traverse != null ? traverse.name : string.Empty, "PullUp");
             bool isClimb = TryGetFocusedClimbMotion(traverse, out _, out _);
-            if (!isPullUp && !isClimb && !m_ClimbDiagnosticFocused) return;
+            bool isZipline = IsFocusedZiplineTraverse(traverse);
+            if (!isPullUp && !isClimb && !isZipline && !m_ClimbDiagnosticFocused) return;
 
             m_ClimbDiagnosticRequestId = request.RequestId;
             m_ClimbDiagnosticCorrelationId = request.CorrelationId;
@@ -5723,7 +6350,7 @@ namespace Arawn.GameCreator2.Networking.Traversal
             {
                 m_PullUpDiagnosticUntilRealtime = Mathf.Max(
                     m_PullUpDiagnosticUntilRealtime,
-                    Time.realtimeSinceStartup + 4f);
+                    Time.realtimeSinceStartup + 8f);
             }
 
             SetClimbDiagnosticFocus(true, "request", traverse, null);
@@ -5742,12 +6369,19 @@ namespace Arawn.GameCreator2.Networking.Traversal
             TraversalStance stance = m_TraversalStance ?? ResolveTraversalStance();
             Traverse traverse = stance != null ? stance.Traverse : null;
             bool hasClimb = TryGetFocusedClimbMotion(traverse, out TraverseInteractive interactive, out MotionInteractive motion);
+            bool hasZipline = IsFocusedZiplineTraverse(traverse);
             bool pullUpGrace = Time.realtimeSinceStartup < m_PullUpDiagnosticUntilRealtime;
-            bool shouldFocus = hasClimb || pullUpGrace;
+            bool shouldFocus = hasClimb || hasZipline || pullUpGrace;
 
             SetClimbDiagnosticFocus(
                 shouldFocus,
-                hasClimb ? "climb-active" : pullUpGrace ? "pullup-checkpoint" : "climb-ended",
+                hasClimb
+                    ? "climb-active"
+                    : hasZipline
+                        ? "zipline-active"
+                        : pullUpGrace
+                            ? "exit-checkpoint"
+                            : "traversal-ended",
                 traverse,
                 motion);
             if (!shouldFocus) return;
@@ -5957,6 +6591,12 @@ namespace Arawn.GameCreator2.Networking.Traversal
                    ContainsDiagnosticName(motion.name, "Motion_Ledge_Climb") ||
                    ContainsDiagnosticName(motion.name, "Free_Climb") ||
                    ContainsDiagnosticName(motion.name, "Ledge_Climb");
+        }
+
+        private static bool IsFocusedZiplineTraverse(Traverse traverse)
+        {
+            return traverse is TraverseLink &&
+                   ContainsDiagnosticName(traverse.name, "Zipline");
         }
 
         private static bool ContainsDiagnosticName(string value, string expected)

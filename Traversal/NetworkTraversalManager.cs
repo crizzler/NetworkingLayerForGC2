@@ -61,7 +61,11 @@ namespace Arawn.GameCreator2.Networking.Traversal
         [SerializeField] private int m_MaxPendingCharacterStates = 128;
 
         [Header("Debug")]
+        [Tooltip("Writes verbose traversal manager, controller, patch, and transport messages.")]
         [SerializeField] private bool m_LogNetworkMessages;
+
+        [Tooltip("Enables only the rate-limited focused climb, PullUp, and Zipline handoff diagnostics without verbose network logging.")]
+        [SerializeField] private bool m_LogFocusedClimbDiagnostics;
 
         private readonly Dictionary<uint, NetworkTraversalController> m_Controllers = new(32);
         private readonly Dictionary<ulong, int> m_PendingRequestCounts = new(32);
@@ -119,12 +123,15 @@ namespace Arawn.GameCreator2.Networking.Traversal
         }
 
         public bool IsPatchModeActive => m_PatchHooks != null && m_PatchHooks.IsPatchActive;
-        public bool DiagnosticsEnabled =>
-            m_LogNetworkMessages || NetworkTraversalDebug.ForceClimbDiagnostics;
+        public bool DiagnosticsEnabled => m_LogNetworkMessages;
+        public bool FocusedClimbDiagnosticsEnabled =>
+            m_LogNetworkMessages ||
+            m_LogFocusedClimbDiagnostics ||
+            NetworkTraversalDebug.ForceClimbDiagnostics;
 
         private void OnEnable()
         {
-            SetClimbDiagnosticsActive(DiagnosticsEnabled);
+            SetClimbDiagnosticsActive(FocusedClimbDiagnosticsEnabled);
             SecurityIntegration.SetModuleServerContext("Traversal", m_IsServer);
             SecurityIntegration.EnsureSecurityManagerInitialized(m_IsServer, ResolveSecurityTimeProvider);
             SyncPatchHooks();
@@ -133,7 +140,7 @@ namespace Arawn.GameCreator2.Networking.Traversal
 
         private void Update()
         {
-            SetClimbDiagnosticsActive(DiagnosticsEnabled);
+            SetClimbDiagnosticsActive(FocusedClimbDiagnosticsEnabled);
             CleanupExpiredPendingState();
         }
 
@@ -170,19 +177,39 @@ namespace Arawn.GameCreator2.Networking.Traversal
 
         private static void InstallOwnerAuthorityPoseSyncHook()
         {
-            UnitDriverNetworkServer.OwnerAuthorityPositionAccepted -= SyncTraversalRelativePositionFromOwnerAuthority;
-            UnitDriverNetworkServer.OwnerAuthorityPositionAccepted += SyncTraversalRelativePositionFromOwnerAuthority;
-            UnitDriverNetworkServer.OwnerAuthorityPositionRejectionRequested -= RejectOwnerAuthorityPoseDuringInteractiveTransition;
-            UnitDriverNetworkServer.OwnerAuthorityPositionRejectionRequested += RejectOwnerAuthorityPoseDuringInteractiveTransition;
-            UnitDriverNetworkServer.ExternalRootPositionWriteAllowanceRequested -= AllowInteractiveTraversalRootWrite;
-            UnitDriverNetworkServer.ExternalRootPositionWriteAllowanceRequested += AllowInteractiveTraversalRootWrite;
+            NetworkOwnerMotionAuthorityHooks.PositionAccepted -= SyncTraversalRelativePositionFromOwnerAuthority;
+            NetworkOwnerMotionAuthorityHooks.PositionAccepted += SyncTraversalRelativePositionFromOwnerAuthority;
+            NetworkOwnerMotionAuthorityHooks.PositionRejectionRequested -= RejectOwnerAuthorityPoseDuringInteractiveTransition;
+            NetworkOwnerMotionAuthorityHooks.PositionRejectionRequested += RejectOwnerAuthorityPoseDuringInteractiveTransition;
+            NetworkOwnerMotionAuthorityHooks.ExternalRootWriteAllowanceRequested -= AllowInteractiveTraversalRootWrite;
+            NetworkOwnerMotionAuthorityHooks.ExternalRootWriteAllowanceRequested += AllowInteractiveTraversalRootWrite;
+            NetworkOwnerMotionAuthorityHooks.ContinuousOwnerPoseRequested -= IsContinuousInteractiveOwnerPose;
+            NetworkOwnerMotionAuthorityHooks.ContinuousOwnerPoseRequested += IsContinuousInteractiveOwnerPose;
         }
 
         private static void UninstallOwnerAuthorityPoseSyncHook()
         {
-            UnitDriverNetworkServer.OwnerAuthorityPositionAccepted -= SyncTraversalRelativePositionFromOwnerAuthority;
-            UnitDriverNetworkServer.OwnerAuthorityPositionRejectionRequested -= RejectOwnerAuthorityPoseDuringInteractiveTransition;
-            UnitDriverNetworkServer.ExternalRootPositionWriteAllowanceRequested -= AllowInteractiveTraversalRootWrite;
+            NetworkOwnerMotionAuthorityHooks.PositionAccepted -= SyncTraversalRelativePositionFromOwnerAuthority;
+            NetworkOwnerMotionAuthorityHooks.PositionRejectionRequested -= RejectOwnerAuthorityPoseDuringInteractiveTransition;
+            NetworkOwnerMotionAuthorityHooks.ExternalRootWriteAllowanceRequested -= AllowInteractiveTraversalRootWrite;
+            NetworkOwnerMotionAuthorityHooks.ContinuousOwnerPoseRequested -= IsContinuousInteractiveOwnerPose;
+        }
+
+        private static bool IsContinuousInteractiveOwnerPose(Character character)
+        {
+            if (!TryGetActiveInteractiveTraversal(
+                    character,
+                    out TraversalStance stance,
+                    out _))
+            {
+                return false;
+            }
+
+            // Entry/exit transition clips are finite operations and retain reliable ordered
+            // delivery. Once MotionInteractive enters its update loop, each world pose replaces
+            // the preceding pose and belongs on the continuous prediction stream.
+            return !TryGetInInteractiveTransition(character, stance, out bool inTransition) ||
+                   !inTransition;
         }
 
         private static string RejectOwnerAuthorityPoseDuringInteractiveTransition(Character character, Vector3 ownerAuthorityPosition)
@@ -357,6 +384,14 @@ namespace Arawn.GameCreator2.Networking.Traversal
         public void RegisterController(uint networkId, NetworkTraversalController controller)
         {
             if (controller == null || networkId == 0 || !controller.IsReadyForNetworkRouting) return;
+
+            if (m_Controllers.TryGetValue(
+                    networkId,
+                    out NetworkTraversalController existing) &&
+                ReferenceEquals(existing, controller))
+            {
+                return;
+            }
 
             m_Controllers[networkId] = controller;
             RegisterOwnedEntityMapping(networkId);

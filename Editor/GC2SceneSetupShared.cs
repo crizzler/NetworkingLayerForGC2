@@ -89,13 +89,11 @@ namespace Arawn.GameCreator2.Networking.Editor
             changed |= SetManagedReferenceIfDifferent<UnitAnimimNetworkKinematic>(
                 kernel.FindPropertyRelative("m_Animim"));
 
-            if (!changed) return false;
-
-            if (applyWithUndo)
+            if (changed && applyWithUndo)
             {
                 serialized.ApplyModifiedProperties();
             }
-            else
+            else if (changed)
             {
                 serialized.ApplyModifiedPropertiesWithoutUndo();
             }
@@ -107,16 +105,18 @@ namespace Arawn.GameCreator2.Networking.Editor
                 if (character.Animim.Mannequin == null)
                 {
                     character.Animim.Mannequin = mannequin;
+                    changed = mannequin != null;
                 }
 
                 if (character.Animim.Animator == null)
                 {
                     character.Animim.Animator = animator;
+                    changed |= animator != null;
                 }
             }
 
-            EditorUtility.SetDirty(character);
-            return true;
+            if (changed) EditorUtility.SetDirty(character);
+            return changed;
         }
 
         private static bool SetManagedReferenceIfDifferent<T>(SerializedProperty property)

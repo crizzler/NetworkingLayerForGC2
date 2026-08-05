@@ -1,0 +1,29 @@
+{
+    "name": "Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction.Tests",
+    "rootNamespace": "Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction.Tests",
+    "references": [
+        "Arawn.GameCreator2.Networking",
+        "Arawn.GameCreator2.Networking.Transport.PurrNet",
+        "Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction",
+        "PurrNet.Runtime",
+        "PurrNet.Prediction",
+        "GameCreator.Runtime.Core",
+        "GameCreator.Runtime.Characters"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": true,
+    "precompiledReferences": [
+        "nunit.framework.dll"
+    ],
+    "autoReferenced": false,
+    "defineConstraints": [
+        "UNITY_INCLUDE_TESTS",
+        "ARAWN_GC2_PURRDICTION"
+    ],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

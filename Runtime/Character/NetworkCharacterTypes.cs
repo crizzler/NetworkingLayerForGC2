@@ -6,7 +6,8 @@ namespace Arawn.GameCreator2.Networking
     /// <summary>
     /// Compressed input state for network transmission.
     /// Uses fixed-point encoding to minimize bandwidth.
-    /// Total size: 10 bytes normally, 23 bytes when carrying an owner-authority pose sample.
+    /// Total size: 11 bytes normally, 23 bytes with an owner-authority pose, and 29 bytes
+    /// when that pose also carries Traversal's attempted world-space movement direction.
     /// </summary>
     [Serializable]
     public struct NetworkInputState : IEquatable<NetworkInputState>
@@ -32,6 +33,9 @@ namespace Arawn.GameCreator2.Networking
         public int authorityPositionX;
         public int authorityPositionY;
         public int authorityPositionZ;
+        public short traversalDirectionX;
+        public short traversalDirectionY;
+        public short traversalDirectionZ;
 
         // Flag constants
         public const byte FLAG_JUMP = 1;
@@ -44,6 +48,7 @@ namespace Arawn.GameCreator2.Networking
         public const byte FLAG_CUSTOM_4 = 128;
 
         public const byte AUTHORITY_FLAG_POSITION = 1;
+        public const byte AUTHORITY_FLAG_TRAVERSAL_DIRECTION = 2;
 
         /// <summary>
         /// Creates a compressed input state from raw input.
@@ -62,7 +67,13 @@ namespace Arawn.GameCreator2.Networking
                 inputY = (short)Mathf.Clamp(input.y * 32767f, -32767f, 32767f),
                 sequenceNumber = sequence,
                 flags = flags,
-                deltaTimeMs = (byte)Mathf.Clamp(deltaTime * 1000f, 1f, 255f),
+                // Round instead of truncating. Truncating a 30 Hz sample (33.333 ms) to
+                // 33 ms introduces a consistent simulation-time deficit that eventually
+                // forces an otherwise avoidable prediction correction.
+                deltaTimeMs = (byte)Mathf.Clamp(
+                    Mathf.RoundToInt(deltaTime * 1000f),
+                    1,
+                    255),
                 rotationY = (ushort)(Mathf.Repeat(rotationY, 360f) / 360f * 65535f)
             };
 
@@ -102,6 +113,9 @@ namespace Arawn.GameCreator2.Networking
 
         public bool HasOwnerAuthorityPosition => (authorityFlags & AUTHORITY_FLAG_POSITION) != 0;
 
+        public bool HasTraversalPresentationDirection =>
+            (authorityFlags & AUTHORITY_FLAG_TRAVERSAL_DIRECTION) != 0;
+
         public void SetOwnerAuthorityPosition(Vector3 position)
         {
             authorityFlags |= AUTHORITY_FLAG_POSITION;
@@ -119,6 +133,37 @@ namespace Arawn.GameCreator2.Networking
             );
         }
 
+        /// <summary>
+        /// Stores the exact world-space direction attempted by an owner-controlled Traversal
+        /// motion. Unlike displacement, this remains non-zero when a ledge clamps the root at an
+        /// edge and is therefore required for the authored Intent/Edge animation blend.
+        /// </summary>
+        public void SetTraversalPresentationDirection(Vector3 worldDirection)
+        {
+            authorityFlags |= AUTHORITY_FLAG_TRAVERSAL_DIRECTION;
+            traversalDirectionX = (short)Mathf.Clamp(
+                Mathf.RoundToInt(worldDirection.x * 100f),
+                short.MinValue + 1,
+                short.MaxValue);
+            traversalDirectionY = (short)Mathf.Clamp(
+                Mathf.RoundToInt(worldDirection.y * 100f),
+                short.MinValue + 1,
+                short.MaxValue);
+            traversalDirectionZ = (short)Mathf.Clamp(
+                Mathf.RoundToInt(worldDirection.z * 100f),
+                short.MinValue + 1,
+                short.MaxValue);
+        }
+
+        public Vector3 GetTraversalPresentationDirection()
+        {
+            return new Vector3(
+                traversalDirectionX / 100f,
+                traversalDirectionY / 100f,
+                traversalDirectionZ / 100f
+            );
+        }
+
         public bool Equals(NetworkInputState other)
         {
             return inputX == other.inputX &&
@@ -130,7 +175,10 @@ namespace Arawn.GameCreator2.Networking
                    authorityFlags == other.authorityFlags &&
                    authorityPositionX == other.authorityPositionX &&
                    authorityPositionY == other.authorityPositionY &&
-                   authorityPositionZ == other.authorityPositionZ;
+                   authorityPositionZ == other.authorityPositionZ &&
+                   traversalDirectionX == other.traversalDirectionX &&
+                   traversalDirectionY == other.traversalDirectionY &&
+                   traversalDirectionZ == other.traversalDirectionZ;
         }
 
         public override int GetHashCode()
@@ -143,7 +191,13 @@ namespace Arawn.GameCreator2.Networking
                 deltaTimeMs,
                 rotationY,
                 authorityFlags,
-                HashCode.Combine(authorityPositionX, authorityPositionY, authorityPositionZ));
+                HashCode.Combine(
+                    authorityPositionX,
+                    authorityPositionY,
+                    authorityPositionZ,
+                    traversalDirectionX,
+                    traversalDirectionY,
+                    traversalDirectionZ));
         }
     }
 
@@ -466,6 +520,10 @@ namespace Arawn.GameCreator2.Networking
         public byte flags;
         public uint supportId;
         public Vector3 supportLocalPosition;
+        // Render-side derivative captured from consecutive support-local snapshots. This is not
+        // serialized; it prevents extrapolation from converting world velocity through a moving
+        // platform's newer rotation and curving the character away from its authored local path.
+        public Vector3 supportLocalVelocity;
         public float supportLocalYaw;
 
         public bool HasSupport => (flags & NetworkPositionState.FLAG_HAS_SUPPORT) != 0 && supportId != 0;
@@ -483,6 +541,7 @@ namespace Arawn.GameCreator2.Networking
                 flags = state.flags,
                 supportId = state.supportId,
                 supportLocalPosition = state.GetSupportLocalPosition(),
+                supportLocalVelocity = Vector3.zero,
                 supportLocalYaw = state.GetSupportLocalYaw()
             };
         }

@@ -5,6 +5,7 @@ using Fusion.Sockets;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 using Arawn.GameCreator2.Networking.Security;
+using Arawn.NetworkingCore.LagCompensation;
 
 namespace Arawn.GameCreator2.Networking.Transport.Fusion
 {
@@ -27,7 +28,15 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             public int Count;
         }
 
+        private struct RejectedInputLogState
+        {
+            public float LastLoggedAt;
+            public int Suppressed;
+        }
+
         private const uint NoSequenceTarget = uint.MaxValue;
+        private const float GameplayReadyRetrySeconds = 1f;
+        private const float RejectedInputLogIntervalSeconds = 5f;
 
         private static readonly Dictionary<NetworkRunner, FusionTransportBridge> s_Bridges =
             new Dictionary<NetworkRunner, FusionTransportBridge>();
@@ -42,6 +51,10 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         [Min(32)]
         [SerializeField] private int m_MaxInboundPacketsPerSecond = 512;
         [SerializeField] private bool m_LogRejectedPackets = true;
+
+        [Header("Diagnostics")]
+        [Tooltip("Logs low-volume authority, readiness, and snapshot lifecycle transitions.")]
+        [SerializeField] private bool m_LogLifecycleDiagnostics = true;
 
         private readonly Dictionary<ushort, Action<FusionModuleMessage>> m_ModuleHandlers =
             new Dictionary<ushort, Action<FusionModuleMessage>>();
@@ -63,6 +76,8 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             new Dictionary<ulong, OrderedReceiveState>();
         private readonly HashSet<ulong> m_SequenceBaselineResets = new HashSet<ulong>();
         private readonly Dictionary<uint, RateWindow> m_RateWindows = new Dictionary<uint, RateWindow>();
+        private readonly Dictionary<uint, RejectedInputLogState> m_RejectedInputLogs =
+            new Dictionary<uint, RejectedInputLogState>();
         private readonly List<ulong> m_ExpiredSequenceKeys = new List<ulong>();
         private readonly List<uint> m_ClientScratch = new List<uint>();
         private readonly List<IFusionFullSnapshotProducer> m_SnapshotProducerScratch =
@@ -77,13 +92,20 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         private bool m_MultipleRunnerWarningIssued;
         private bool m_AuthorityFailureShutdownInProgress;
         private bool m_AuthorityTransitionInProgress;
+        private bool m_RpcSendFailureLatched;
+        private string m_LastRpcSendFailure = string.Empty;
         private FusionFullSnapshotContext m_ActiveSnapshotContext;
+        private LagCompensationBootstrap m_LagCompensationBootstrap;
         private bool m_HasLastRunnerShutdown;
         private FusionRunnerShutdownInfo m_LastRunnerShutdown;
         private bool m_HasLastAuthorityObservation;
         private FusionAuthorityObservation m_LastAuthorityObservation;
         private bool m_HasLastLocalSceneObservation;
         private FusionSceneLifecycleInfo m_LastLocalSceneObservation;
+        private uint m_LocalSnapshotCompletedEpoch;
+        private float m_NextGameplayReadyRetryAt;
+        private uint m_GameplayReadySendEpoch;
+        private int m_GameplayReadySendCount;
 
         public event Action<uint> ClientSceneReady;
         public event Action<uint> ClientSnapshotAcknowledged;
@@ -141,10 +163,20 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         public override bool IsHost => IsRunnerUsable && m_Runner.GameMode == GameMode.Host;
         public override bool IsRunning => IsRunnerUsable;
         public override bool IsStarting => ResolveSessionBootstrap()?.IsStarting ?? false;
-        public override string LastSessionError =>
-            ResolveSessionBootstrap() is { HasLastStartFailure: true } bootstrap
-                ? bootstrap.LastStartFailure.ErrorMessage
-                : string.Empty;
+        public override string LastSessionError
+        {
+            get
+            {
+                if (!string.IsNullOrEmpty(m_LastRpcSendFailure))
+                {
+                    return m_LastRpcSendFailure;
+                }
+
+                return ResolveSessionBootstrap() is { HasLastStartFailure: true } bootstrap
+                    ? bootstrap.LastStartFailure.ErrorMessage
+                    : string.Empty;
+            }
+        }
         public override string LastSessionStopReason
         {
             get
@@ -159,9 +191,17 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                     : string.Empty;
             }
         }
-        public override float ServerTime => IsRunnerUsable ? m_Runner.SimulationTime : Time.time;
+        public override float ServerTime =>
+            IsRunnerTimeReady ? m_Runner.SimulationTime : Time.time;
 
         private bool IsRunnerUsable => m_Runner != null && m_Runner.IsRunning && !m_Runner.IsShutdown;
+
+        // A Shared runner reports IsRunning before its first server state installs
+        // RuntimeConfig. Tick is public and remains default until that state arrives;
+        // reading SimulationTime any earlier throws inside Fusion.
+        private bool IsRunnerTimeReady =>
+            IsRunnerUsable &&
+            m_Runner.Tick.Raw > 0;
 
         public bool TryGetConnectionDiagnostics(out FusionConnectionDiagnostics diagnostics)
         {
@@ -182,6 +222,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         protected override void Awake()
         {
             base.Awake();
+            EnsureLagCompensationBootstrap();
             if (m_Runner != null)
             {
                 Bind(m_Runner);
@@ -190,6 +231,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
 
         private void OnEnable()
         {
+            EnsureLagCompensationBootstrap();
             if (m_Runner != null)
             {
                 Bind(m_Runner);
@@ -208,10 +250,24 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             PollAuthority();
             ProcessSequenceTimeouts();
 
-            if (m_LocalSceneReady && TryGetLocalClientId(out uint localClientId) &&
-                !m_SceneReadyClients.Contains(localClientId))
+            if (!m_RpcSendFailureLatched &&
+                m_LocalSceneReady &&
+                TryGetLocalClientId(out uint localClientId))
             {
-                SendSceneReady();
+                if (!m_SceneReadyClients.Contains(localClientId))
+                {
+                    SendSceneReady();
+                }
+
+                // GameplayReady is an intent, not a one-shot edge. Re-announce it until the
+                // authority's snapshot-complete marker proves that this epoch reached the
+                // client. This also recovers if readiness was first sent during an epoch race.
+                if (m_LocalGameplayReadyIntent &&
+                    m_LocalSnapshotCompletedEpoch != m_AuthorityEpoch &&
+                    Time.unscaledTime >= m_NextGameplayReadyRetryAt)
+                {
+                    SendGameplayReadyIntent();
+                }
             }
         }
 
@@ -244,6 +300,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             }
 
             Unbind();
+            ResetRpcSendFailure();
             // A new runner is a new session. Epochs are session-local; carrying a larger
             // value from an earlier runner could make this peer reject the new authority.
             m_AuthorityEpoch = 1;
@@ -252,6 +309,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             s_Bridges[runner] = this;
             runner.RemoveCallbacks(this);
             runner.AddCallbacks(this);
+            EnsureLagCompensationBootstrap();
 
             if (runner.GetComponent<FusionRpcRouter>() == null)
             {
@@ -261,6 +319,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             RebuildConnectedClients();
             m_LastMaster = GetCurrentMaster();
             m_WasAuthority = IsServer;
+            SetLagCompensationAuthority(m_WasAuthority);
             bool authorityReady = InvokeAuthorityChanged(m_WasAuthority, m_AuthorityEpoch, true);
             if (authorityReady)
             {
@@ -284,6 +343,13 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             }
 
             bool wasAuthority = m_WasAuthority;
+            bool ownedLagCompensationAuthority =
+                wasAuthority ||
+                (m_LagCompensationBootstrap != null && m_LagCompensationBootstrap.IsServer);
+            if (ownedLagCompensationAuthority)
+            {
+                SetLagCompensationAuthority(false);
+            }
             m_Runner = null;
             m_LastMaster = PlayerRef.Invalid;
             m_WasAuthority = false;
@@ -298,6 +364,78 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             }
 
             if (runner != null) PublishRunnerBinding(runner, false);
+        }
+
+        private void EnsureLagCompensationBootstrap()
+        {
+            if (m_LagCompensationBootstrap == null)
+            {
+#if UNITY_2023_1_OR_NEWER
+                m_LagCompensationBootstrap = FindFirstObjectByType<LagCompensationBootstrap>(
+                    FindObjectsInactive.Include);
+#else
+                m_LagCompensationBootstrap = FindObjectOfType<LagCompensationBootstrap>(true);
+#endif
+            }
+
+            if (m_LagCompensationBootstrap == null)
+            {
+                m_LagCompensationBootstrap = gameObject.AddComponent<LagCompensationBootstrap>();
+            }
+
+            m_LagCompensationBootstrap.GetServerTimeFunc = GetLagCompensationServerTime;
+        }
+
+        private void SetLagCompensationAuthority(bool isAuthority)
+        {
+            if (!isAuthority)
+            {
+                // Teardown must never create a new component while its GameObject is being
+                // destroyed. If this bridge never owned a bootstrap, there is nothing to stop.
+                if (m_LagCompensationBootstrap == null) return;
+                m_LagCompensationBootstrap.SetServerMode(false);
+                LogLifecycle("lag compensation authority stopped");
+                return;
+            }
+
+            EnsureLagCompensationBootstrap();
+            if (m_LagCompensationBootstrap == null) return;
+            m_LagCompensationBootstrap.SetServerMode(true);
+
+            // A restarted session or Shared-mode promotion replaces the global history
+            // manager. Re-register authoritative characters that already spawned before
+            // this bridge observed the new authority role.
+#if UNITY_2023_1_OR_NEWER
+            CharacterLagCompensation[] adapters = FindObjectsByType<CharacterLagCompensation>(
+                FindObjectsInactive.Exclude,
+                FindObjectsSortMode.None);
+#else
+            CharacterLagCompensation[] adapters = FindObjectsOfType<CharacterLagCompensation>();
+#endif
+            int registered = 0;
+            for (int i = 0; i < adapters.Length; i++)
+            {
+                CharacterLagCompensation adapter = adapters[i];
+                NetworkCharacter networkCharacter =
+                    adapter != null ? adapter.GetComponent<NetworkCharacter>() : null;
+                if (networkCharacter == null ||
+                    !networkCharacter.IsServerInstance ||
+                    networkCharacter.NetworkId == 0)
+                {
+                    continue;
+                }
+
+                adapter.Configure(networkCharacter.NetworkId, true);
+                if (adapter.IsRegistered) registered++;
+            }
+
+            LogLifecycle(
+                $"lag compensation authority ready; trackedAdapters={registered}/{adapters.Length}");
+        }
+
+        private double GetLagCompensationServerTime()
+        {
+            return ServerTime;
         }
 
         public bool RegisterModuleHandler(ushort moduleId, Action<FusionModuleMessage> handler)
@@ -542,6 +680,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         public void NotifyLocalSceneReady()
         {
             m_LocalSceneReady = true;
+            LogLifecycle($"local scene ready; epoch={m_AuthorityEpoch}");
             InvokeLocalSceneReady();
             SendSceneReady();
             SendGameplayReadyIntent();
@@ -550,7 +689,12 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
 
         public void NotifyLocalGameplayReady()
         {
+            if (!m_LocalGameplayReadyIntent)
+            {
+                LogLifecycle($"local gameplay readiness armed; epoch={m_AuthorityEpoch}");
+            }
             m_LocalGameplayReadyIntent = true;
+            m_NextGameplayReadyRetryAt = 0f;
             SendGameplayReadyIntent();
         }
 
@@ -980,7 +1124,12 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                         }
                         else
                         {
-                            m_PendingGameplayReadyClients.Add(senderClientId);
+                            if (m_PendingGameplayReadyClients.Add(senderClientId))
+                            {
+                                LogLifecycle(
+                                    $"queued GameplayReady until SceneReady; " +
+                                    $"client={senderClientId} epoch={m_AuthorityEpoch}");
+                            }
                         }
                     }
                     break;
@@ -1008,11 +1157,20 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                     {
                         if (TryReadControlToken(envelope.Payload, out uint snapshotToken))
                         {
+                            LogLifecycle(
+                                $"received SnapshotComplete; token={snapshotToken} " +
+                                $"epoch={m_AuthorityEpoch}");
                             var writer = new FusionPacketWriter(4);
                             writer.WriteUInt32(snapshotToken);
-                            SendControlToAuthority(
-                                FusionTransportMessageType.SnapshotAcknowledged,
-                                writer.ToArray());
+                            if (SendControlToAuthority(
+                                    FusionTransportMessageType.SnapshotAcknowledged,
+                                    writer.ToArray()))
+                            {
+                                m_LocalSnapshotCompletedEpoch = m_AuthorityEpoch;
+                                LogLifecycle(
+                                    $"sent SnapshotAcknowledged; token={snapshotToken} " +
+                                    $"epoch={m_AuthorityEpoch}");
+                            }
                         }
                     }
                     break;
@@ -1066,12 +1224,17 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             byte[] payload,
             bool reliable)
         {
-            if (!IsRunnerUsable || !IsClient || !ValidatePayload(payload, reliable)) return false;
+            if (!IsRunnerUsable || !IsClient || !ValidatePayload(payload, reliable))
+            {
+                return false;
+            }
 
             PlayerRef target =
                 m_Runner.GameMode == GameMode.Shared
                     ? m_Runner.GetMasterClient()
                     : PlayerRef.None;
+
+            if (!IsServer && m_RpcSendFailureLatched) return false;
 
             uint sequenceTarget = TryPlayerToClientId(target, out uint targetId) ? targetId : NoSequenceTarget;
             var envelope = CreateEnvelope(
@@ -1093,8 +1256,9 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             }
 
             if (m_Runner.GameMode == GameMode.Shared && !target.IsRealPlayer) return false;
-            FusionRpcRouter.SendToAuthority(m_Runner, target, packet, reliable);
-            return true;
+            return TrySendRpc(
+                () => FusionRpcRouter.SendToAuthority(m_Runner, target, packet, reliable),
+                "client-to-authority");
         }
 
         private bool SendToClientInternal(
@@ -1104,11 +1268,15 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             byte[] payload,
             bool reliable)
         {
-            if (!IsRunnerUsable || !IsServer || !ValidatePayload(payload, reliable) ||
+            if (!IsRunnerUsable ||
+                !IsServer ||
+                !ValidatePayload(payload, reliable) ||
                 !TryGetPlayerRef(clientId, out PlayerRef target))
             {
                 return false;
             }
+
+            if (target != m_Runner.LocalPlayer && m_RpcSendFailureLatched) return false;
 
             var envelope = CreateEnvelope(
                 FusionPacketDirection.FromAuthority,
@@ -1125,8 +1293,44 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                 return true;
             }
 
-            FusionRpcRouter.SendFromAuthority(m_Runner, target, packet, reliable);
-            return true;
+            return TrySendRpc(
+                () => FusionRpcRouter.SendFromAuthority(m_Runner, target, packet, reliable),
+                "authority-to-client");
+        }
+
+        private bool TrySendRpc(Action send, string route)
+        {
+            if (m_RpcSendFailureLatched || send == null) return false;
+
+            try
+            {
+                send();
+                return true;
+            }
+            catch (MethodAccessException exception)
+            {
+                // A generated RPC failure is not transient. Latch it for this runner so
+                // readiness retries cannot flood the log every frame while leaving the
+                // original exception and remediation visible.
+                m_RpcSendFailureLatched = true;
+                m_LastRpcSendFailure =
+                    $"Fusion RPC send failed on the {route} route. Remote Fusion RPC sends " +
+                    "are disabled for this runner. Verify that the Arawn Fusion runtime assembly " +
+                    "is in Assemblies To Weave and has Allow Unsafe Code enabled. Mono player " +
+                    "builds also require Managed Stripping Level Disabled; other stripping " +
+                    "levels remove Fusion's woven RPC verification metadata. Make a clean " +
+                    "player rebuild after correcting the settings.";
+                Debug.LogError(
+                    $"[FusionTransport] {m_LastRpcSendFailure}\n{exception}",
+                    this);
+                return false;
+            }
+        }
+
+        private void ResetRpcSendFailure()
+        {
+            m_RpcSendFailureLatched = false;
+            m_LastRpcSendFailure = string.Empty;
         }
 
         private FusionPacketEnvelope CreateEnvelope(
@@ -1185,7 +1389,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         {
             if (!m_GameplayReadyClients.Contains(senderClientId))
             {
-                Reject($"character input from unready client {senderClientId}");
+                RejectUnreadyCharacterInput(senderClientId);
                 return;
             }
 
@@ -1253,6 +1457,9 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             writer.WriteInt32(value.authorityPositionX);
             writer.WriteInt32(value.authorityPositionY);
             writer.WriteInt32(value.authorityPositionZ);
+            writer.WriteInt16(value.traversalDirectionX);
+            writer.WriteInt16(value.traversalDirectionY);
+            writer.WriteInt16(value.traversalDirectionZ);
         }
 
         private static NetworkInputState ReadInput(FusionPacketReader reader)
@@ -1268,7 +1475,10 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                 authorityFlags = reader.ReadByte(),
                 authorityPositionX = reader.ReadInt32(),
                 authorityPositionY = reader.ReadInt32(),
-                authorityPositionZ = reader.ReadInt32()
+                authorityPositionZ = reader.ReadInt32(),
+                traversalDirectionX = reader.ReadInt16(),
+                traversalDirectionY = reader.ReadInt16(),
+                traversalDirectionZ = reader.ReadInt16()
             };
         }
 
@@ -1316,19 +1526,54 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         private void SendSceneReady()
         {
             if (!IsRunnerUsable || !IsClient || !m_LocalSceneReady) return;
-            if (TryGetLocalClientId(out uint clientId) &&
-                SendControlToAuthority(FusionTransportMessageType.SceneReady, Array.Empty<byte>()))
+            if (TryGetLocalClientId(out uint clientId))
             {
+                bool firstSendForEpoch = !m_SceneReadyClients.Contains(clientId);
+                if (!SendControlToAuthority(
+                        FusionTransportMessageType.SceneReady,
+                        Array.Empty<byte>()))
+                {
+                    return;
+                }
+
                 // Reliable delivery means one send per scene/epoch is sufficient. Clients
                 // keep this local marker so Update does not emit SceneReady every frame.
                 m_SceneReadyClients.Add(clientId);
+                if (firstSendForEpoch)
+                {
+                    LogLifecycle(
+                        $"sent SceneReady; client={clientId} epoch={m_AuthorityEpoch}");
+                }
             }
         }
 
         private void SendGameplayReadyIntent()
         {
             if (!m_LocalSceneReady || !m_LocalGameplayReadyIntent) return;
-            SendControlToAuthority(FusionTransportMessageType.GameplayReady, Array.Empty<byte>());
+            m_NextGameplayReadyRetryAt =
+                Time.unscaledTime + GameplayReadyRetrySeconds;
+            if (!SendControlToAuthority(
+                    FusionTransportMessageType.GameplayReady,
+                    Array.Empty<byte>()))
+            {
+                return;
+            }
+
+            if (m_GameplayReadySendEpoch != m_AuthorityEpoch)
+            {
+                m_GameplayReadySendEpoch = m_AuthorityEpoch;
+                m_GameplayReadySendCount = 0;
+            }
+
+            m_GameplayReadySendCount++;
+            if (m_GameplayReadySendCount == 1 ||
+                m_GameplayReadySendCount == 5 ||
+                m_GameplayReadySendCount % 10 == 0)
+            {
+                LogLifecycle(
+                    $"sent GameplayReady; epoch={m_AuthorityEpoch} " +
+                    $"attempt={m_GameplayReadySendCount}");
+            }
         }
 
         private bool SendControlToAuthority(FusionTransportMessageType type, byte[] payload)
@@ -1402,6 +1647,11 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         {
             if (!IsValidClientId(clientId)) return;
             bool added = m_SceneReadyClients.Add(clientId);
+            if (added)
+            {
+                LogLifecycle(
+                    $"received SceneReady; client={clientId} epoch={m_AuthorityEpoch}");
+            }
             if (added && !InvokeClientSceneReady(clientId))
             {
                 m_SceneReadyClients.Remove(clientId);
@@ -1432,10 +1682,30 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             {
                 return;
             }
-            if (forceSnapshot &&
-                (m_SnapshotInProgressClients.Contains(clientId) ||
-                 (m_LastSnapshotStartedAt.TryGetValue(clientId, out float lastStartedAt) &&
-                  now - lastStartedAt < FusionProtocol.ReorderTimeoutSeconds)))
+            if (forceSnapshot && m_SnapshotInProgressClients.Contains(clientId))
+            {
+                if (m_LastSnapshotStartedAt.TryGetValue(clientId, out float inProgressSince) &&
+                    now - inProgressSince < FusionProtocol.ReorderTimeoutSeconds)
+                {
+                    return;
+                }
+
+                // A missing reliable marker/ack must not leave this client permanently
+                // trapped in SnapshotInProgress. Once the normal reorder timeout expires,
+                // a resync request replaces the stale token with a complete new snapshot.
+                uint staleToken = m_PendingSnapshotTokens.TryGetValue(
+                    clientId, out uint pendingToken)
+                        ? pendingToken
+                        : 0;
+                m_SnapshotInProgressClients.Remove(clientId);
+                m_PendingSnapshotTokens.Remove(clientId);
+                LogLifecycle(
+                    $"replacing stale snapshot; client={clientId} token={staleToken} " +
+                    $"epoch={m_AuthorityEpoch}");
+            }
+            else if (forceSnapshot &&
+                     m_LastSnapshotStartedAt.TryGetValue(clientId, out float lastStartedAt) &&
+                     now - lastStartedAt < FusionProtocol.ReorderTimeoutSeconds)
             {
                 return;
             }
@@ -1446,6 +1716,10 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             uint snapshotToken = ++m_NextSnapshotToken;
             if (snapshotToken == 0) snapshotToken = ++m_NextSnapshotToken;
             m_PendingSnapshotTokens[clientId] = snapshotToken;
+            LogLifecycle(
+                $"begin snapshot; client={clientId} token={snapshotToken} " +
+                $"epoch={m_AuthorityEpoch} producers={m_SnapshotProducers.Count} " +
+                $"forced={forceSnapshot}");
             if (!TryProduceFullSnapshots(clientId, out string snapshotFailure))
             {
                 m_SnapshotInProgressClients.Remove(clientId);
@@ -1480,6 +1754,12 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                 ShutdownSessionForAuthorityFailure(
                     $"Could not enqueue the snapshot-complete marker for client {clientId}.");
             }
+            else
+            {
+                LogLifecycle(
+                    $"sent SnapshotComplete; client={clientId} token={snapshotToken} " +
+                    $"epoch={m_AuthorityEpoch}");
+            }
         }
 
         private void CompleteClientSnapshot(uint clientId, uint snapshotToken)
@@ -1495,6 +1775,10 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             if (!m_SnapshotInProgressClients.Remove(clientId)) return;
             m_PendingSnapshotTokens.Remove(clientId);
             m_GameplayReadyClients.Add(clientId);
+            LogLifecycle(
+                $"received SnapshotAcknowledged; client={clientId} token={snapshotToken} " +
+                $"epoch={m_AuthorityEpoch}; gameplay ready");
+            ClearRejectedInputLog(clientId, true);
             if (!InvokeClientSnapshotAcknowledged(clientId))
             {
                 m_GameplayReadyClients.Remove(clientId);
@@ -1539,6 +1823,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             m_AuthorityEpoch++;
             if (m_AuthorityEpoch == 0) m_AuthorityEpoch = 1;
             ClearDeliveryState(false);
+            SetLagCompensationAuthority(authority);
             // Promotion handlers and the authority spawn registry must rebuild before a
             // locally-owned character can announce GameplayReady and trigger snapshots.
             m_AuthorityTransitionInProgress = true;
@@ -1582,9 +1867,12 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         private void AdoptAuthorityEpoch(uint epoch)
         {
             if (epoch <= m_AuthorityEpoch) return;
+            uint previousEpoch = m_AuthorityEpoch;
+            LogLifecycle($"adopting authority epoch {previousEpoch}->{epoch}");
             m_AuthorityEpoch = epoch;
             ClearDeliveryState(false);
             m_WasAuthority = IsServer;
+            SetLagCompensationAuthority(m_WasAuthority);
             m_AuthorityTransitionInProgress = true;
             bool promotionSucceeded;
             try
@@ -1598,6 +1886,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             }
             if (!promotionSucceeded) return;
             RefreshNetworkIdentities();
+            LogLifecycle($"authority epoch {m_AuthorityEpoch} adopted");
             PublishAuthorityObservation(m_Runner, m_WasAuthority, m_AuthorityEpoch);
         }
 
@@ -1606,9 +1895,54 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             FusionNetworkIdentity[] identities = FindObjectsByType<FusionNetworkIdentity>(
                 FindObjectsInactive.Include,
                 FindObjectsSortMode.None);
+            int refreshed = 0;
+            int deferred = 0;
+            int otherRunner = 0;
+            int failures = 0;
+            var deferredNames = new List<string>(4);
             for (int i = 0; i < identities.Length; i++)
             {
-                identities[i].RefreshAuthorityRole();
+                FusionNetworkIdentity identity = identities[i];
+                if (identity == null) continue;
+                if (!identity.IsSpawned)
+                {
+                    deferred++;
+                    if (deferredNames.Count < 4) deferredNames.Add(identity.name);
+                    continue;
+                }
+                if (identity.Runner != m_Runner)
+                {
+                    otherRunner++;
+                    continue;
+                }
+
+                try
+                {
+                    if (identity.RefreshAuthorityRole()) refreshed++;
+                    else deferred++;
+                }
+                catch (Exception exception)
+                {
+                    // Authority adoption is a reliable control-stream boundary. One bad
+                    // optional identity must never abort it and poison all later sequences.
+                    failures++;
+                    Debug.LogError(
+                        $"[FusionTransport] Identity refresh failed for '{identity.name}' " +
+                        $"during authority epoch {m_AuthorityEpoch}.",
+                        identity);
+                    Debug.LogException(exception, identity);
+                }
+            }
+
+            if (deferred > 0 || otherRunner > 0 || failures > 0)
+            {
+                string names = deferredNames.Count > 0
+                    ? $" deferredObjects=[{string.Join(", ", deferredNames)}]"
+                    : string.Empty;
+                LogLifecycle(
+                    $"identity refresh; epoch={m_AuthorityEpoch} refreshed={refreshed} " +
+                    $"deferredUntilSpawned={deferred} otherRunner={otherRunner} " +
+                    $"failures={failures}{names}");
             }
         }
 
@@ -1638,6 +1972,11 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             m_PendingGameplayReadyClients.Clear();
             m_PendingSnapshotTokens.Clear();
             m_LastSnapshotStartedAt.Clear();
+            m_RejectedInputLogs.Clear();
+            m_LocalSnapshotCompletedEpoch = 0;
+            m_NextGameplayReadyRetryAt = 0f;
+            m_GameplayReadySendEpoch = 0;
+            m_GameplayReadySendCount = 0;
             if (clearConnections) m_ConnectedClientIds.Clear();
         }
 
@@ -1781,6 +2120,56 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         {
             if (!m_LogRejectedPackets) return;
             Debug.LogWarning($"[FusionTransport] Rejected packet: {reason}", this);
+        }
+
+        private void RejectUnreadyCharacterInput(uint clientId)
+        {
+            if (!m_LogRejectedPackets) return;
+
+            float now = Time.unscaledTime;
+            bool found = m_RejectedInputLogs.TryGetValue(
+                clientId, out RejectedInputLogState state);
+            if (!found || now - state.LastLoggedAt >= RejectedInputLogIntervalSeconds)
+            {
+                string suppressed = state.Suppressed > 0
+                    ? $" ({state.Suppressed} identical packets suppressed)"
+                    : string.Empty;
+                Debug.LogWarning(
+                    $"[FusionTransport] Rejected packet: character input from unready " +
+                    $"client {clientId}{suppressed}",
+                    this);
+                state.LastLoggedAt = now;
+                state.Suppressed = 0;
+            }
+            else
+            {
+                state.Suppressed++;
+            }
+
+            m_RejectedInputLogs[clientId] = state;
+        }
+
+        private void ClearRejectedInputLog(uint clientId, bool reportSuppressed)
+        {
+            if (!m_RejectedInputLogs.TryGetValue(
+                    clientId, out RejectedInputLogState state))
+            {
+                return;
+            }
+
+            m_RejectedInputLogs.Remove(clientId);
+            if (reportSuppressed && state.Suppressed > 0)
+            {
+                LogLifecycle(
+                    $"client={clientId} reached gameplay ready; suppressed " +
+                    $"{state.Suppressed} additional pre-ready input rejections");
+            }
+        }
+
+        private void LogLifecycle(string message)
+        {
+            if (!m_LogLifecycleDiagnostics) return;
+            Debug.Log($"[FusionTransport][Lifecycle] {message}", this);
         }
 
         private static ulong OutgoingSequenceKey(uint target, FusionPacketDirection direction)
@@ -2216,6 +2605,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             m_PendingSnapshotTokens.Remove(clientId);
             m_LastSnapshotStartedAt.Remove(clientId);
             m_RateWindows.Remove(clientId);
+            ClearRejectedInputLog(clientId, false);
             ClearClientDeliveryState(clientId);
             NetworkSecurityManager.Instance?.OnClientDisconnected(clientId);
             PublishPlayerObservation(
@@ -2246,6 +2636,11 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             m_PendingGameplayReadyClients.Clear();
             m_PendingSnapshotTokens.Clear();
             m_LastSnapshotStartedAt.Clear();
+            m_RejectedInputLogs.Clear();
+            m_LocalSnapshotCompletedEpoch = 0;
+            m_NextGameplayReadyRetryAt = 0f;
+            m_GameplayReadySendEpoch = 0;
+            m_GameplayReadySendCount = 0;
             PublishSceneObservation(FusionSceneLifecyclePhase.LoadStarted);
         }
 
@@ -2273,7 +2668,28 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
 
         public void OnObjectExitAOI(NetworkRunner runner, NetworkObject obj, PlayerRef player) { }
         public void OnObjectEnterAOI(NetworkRunner runner, NetworkObject obj, PlayerRef player) { }
-        public void OnInput(NetworkRunner runner, NetworkInput input) { }
+        public void OnInput(NetworkRunner runner, NetworkInput input)
+        {
+            if (runner != m_Runner || !IsRunnerUsable ||
+                runner.GameMode == GameMode.Shared ||
+                !runner.LocalPlayer.IsRealPlayer)
+            {
+                return;
+            }
+
+            // Fusion exposes one input value per player/tick. Keep collection centralized on
+            // the runner callback instead of registering every character as a callback (where
+            // multiple behaviours could overwrite each other's NetworkInput value).
+            if (!runner.TryGetPlayerObject(runner.LocalPlayer, out NetworkObject playerObject) ||
+                playerObject == null)
+            {
+                return;
+            }
+
+            FusionNativeNetworkCharacterMotor motor =
+                playerObject.GetComponent<FusionNativeNetworkCharacterMotor>();
+            motor?.TryConsumeNetworkInput(runner, input);
+        }
         public void OnInputMissing(NetworkRunner runner, PlayerRef player, NetworkInput input) { }
         public void OnConnectRequest(
             NetworkRunner runner,

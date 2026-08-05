@@ -161,7 +161,7 @@ namespace Arawn.GameCreator2.Networking
         [SerializeField] private bool m_UseCoreNetworking = true;
 
         [Header("Prediction")]
-        [Tooltip("Movement prediction backend. Built-in keeps the transport-agnostic GC2 prediction path. PurrDiction is used only when a matching optional backend component is installed.")]
+        [Tooltip("Movement prediction backend. Built-in keeps the transport-agnostic GC2 prediction path. Transport-native choices require their matching backend component on the same prefab.")]
         [SerializeField] private NetworkPredictionBackend m_PredictionBackend = NetworkPredictionBackend.BuiltIn;
 
         [Header("Network Identity")]
@@ -380,6 +380,32 @@ namespace Arawn.GameCreator2.Networking
 
         /// <summary>Movement prediction backend requested for this character.</summary>
         public NetworkPredictionBackend PredictionBackend => m_PredictionBackend;
+
+        /// <summary>
+        /// Returns the current simulation pose only when the prediction backend that is
+        /// actually driving this character supplies one. Keeping this lookup on
+        /// <see cref="NetworkCharacter"/> prevents an installed-but-inactive transport from
+        /// leaking stale state into shared systems such as lag compensation.
+        /// </summary>
+        public bool TryGetAuthoritativePose(
+            out Vector3 position,
+            out Quaternion rotation)
+        {
+            position = default;
+            rotation = Quaternion.identity;
+
+            if (m_ActivePredictionBackend is not INetworkAuthoritativePoseProvider provider)
+            {
+                return false;
+            }
+
+            if (provider is Behaviour behaviour && !behaviour.isActiveAndEnabled)
+            {
+                return false;
+            }
+
+            return provider.TryGetAuthoritativePose(out position, out rotation);
+        }
 
         // Core Feature System modes
         public RemoteSystemMode RagdollMode => m_RagdollMode;

@@ -8,6 +8,7 @@ using Arawn.GameCreator2.Networking.Transport.Fusion;
 using Fusion;
 using Fusion.Editor;
 using Fusion.Photon.Realtime;
+using GameCreator.Runtime.Characters;
 using UnityEditor;
 using UnityEngine;
 using UnityEngine.SceneManagement;
@@ -59,22 +60,36 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
         internal const string RuntimeAssemblyName =
             "Arawn.GameCreator2.Networking.Transport.Fusion";
 
+        internal const string RuntimeAssemblyDefinitionPath =
+            "Assets/Arawn/NetworkingLayerForGC2/Runtime/Transport/Fusion/" +
+            "Arawn.GameCreator2.Networking.Transport.Fusion.asmdef";
+
         private const string FusionBuildInfoPath = "Assets/Photon/Fusion/build_info.txt";
+
+        [Serializable]
+        private sealed class AssemblyDefinitionData
+        {
+            public string name;
+            public bool allowUnsafeCode;
+        }
 
         public static FusionSetupReport Validate(
             GameObject playerPrefab,
-            bool requireAppliedInfrastructure = false)
+            bool requireAppliedInfrastructure = false,
+            NetworkPredictionBackend? expectedBackend = null)
         {
             var report = new FusionSetupReport();
 
             ValidateSdk(report);
             ValidatePhotonSettings(report);
+            ValidateRuntimeAssemblyDefinition(report);
+            ValidateMonoPlayerBuildCompatibility(report);
             ValidateProjectConfig(report);
             ValidateSceneOwners(report);
             ValidateSceneCharacters(report);
             ValidateModuleRegistrations(report);
             ValidateInventoryRuntimePickups(report);
-            ValidatePlayerPrefab(report, playerPrefab);
+            ValidatePlayerPrefab(report, playerPrefab, expectedBackend);
             if (requireAppliedInfrastructure)
             {
                 ValidateRequiredInfrastructure(report);
@@ -86,7 +101,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
         internal static FusionSetupReport ValidatePlayerPrefabOnly(GameObject playerPrefab)
         {
             var report = new FusionSetupReport();
-            ValidatePlayerPrefab(report, playerPrefab);
+            ValidatePlayerPrefab(report, playerPrefab, null);
             return report;
         }
 
@@ -180,6 +195,17 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                     "and the wizard will set Peer Mode to Single.");
             }
 
+            if (config.Simulation.InputTransferMode !=
+                SimulationConfig.InputTransferModes.Redundancy)
+            {
+                report.Add(
+                    FusionSetupIssueSeverity.Error,
+                    "Fusion Input Transfer Mode must be Redundancy. GC2 native movement, " +
+                    "Traversal and root-motion prediction require tick-complete input history; " +
+                    "Latest State causes connected-owner rollback stutter. Re-run the Fusion " +
+                    "Scene Setup Wizard to repair NetworkProjectConfig.");
+            }
+
             int tickRate = config.Simulation.TickRateSelection.Client;
             if (tickRate > 32)
             {
@@ -203,9 +229,102 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                 !config.AssembliesToWeave.Contains(RuntimeAssemblyName, StringComparer.Ordinal))
             {
                 report.Add(
-                    FusionSetupIssueSeverity.Warning,
-                    $"'{RuntimeAssemblyName}' is missing from Assemblies To Weave.");
+                    FusionSetupIssueSeverity.Error,
+                    $"'{RuntimeAssemblyName}' is missing from Assemblies To Weave. " +
+                    "Fusion RPC routing cannot work until the assembly is woven.");
             }
+        }
+
+        private static void ValidateRuntimeAssemblyDefinition(FusionSetupReport report)
+        {
+            string assetPath = FindRuntimeAssemblyDefinitionPath();
+            if (string.IsNullOrEmpty(assetPath))
+            {
+                report.Add(
+                    FusionSetupIssueSeverity.Error,
+                    $"The '{RuntimeAssemblyName}' assembly definition could not be found.");
+                return;
+            }
+
+            string fullPath = Path.GetFullPath(
+                Path.Combine(Application.dataPath, "..", assetPath));
+            AssemblyDefinitionData definition;
+
+            try
+            {
+                definition = JsonUtility.FromJson<AssemblyDefinitionData>(
+                    File.ReadAllText(fullPath));
+            }
+            catch (Exception exception)
+            {
+                report.Add(
+                    FusionSetupIssueSeverity.Error,
+                    $"Fusion runtime assembly definition could not be read: {exception.Message}");
+                return;
+            }
+
+            if (definition == null ||
+                !string.Equals(definition.name, RuntimeAssemblyName, StringComparison.Ordinal))
+            {
+                report.Add(
+                    FusionSetupIssueSeverity.Error,
+                    $"'{assetPath}' does not define the expected " +
+                    $"'{RuntimeAssemblyName}' assembly.");
+                return;
+            }
+
+            if (!definition.allowUnsafeCode)
+            {
+                report.Add(
+                    FusionSetupIssueSeverity.Error,
+                    $"'{RuntimeAssemblyName}' must enable Allow Unsafe Code. Fusion's IL weaver " +
+                    "requires it for generated RPC entry points; recompile and rebuild the player " +
+                    "after enabling it.");
+            }
+        }
+
+        private static void ValidateMonoPlayerBuildCompatibility(FusionSetupReport report)
+        {
+            if (FusionMonoBuildCompatibility.TryGetActiveBuildTargetIssue(out string issue))
+            {
+                report.Add(FusionSetupIssueSeverity.Error, issue);
+            }
+        }
+
+        private static string FindRuntimeAssemblyDefinitionPath()
+        {
+            string knownFullPath = Path.GetFullPath(
+                Path.Combine(Application.dataPath, "..", RuntimeAssemblyDefinitionPath));
+            if (File.Exists(knownFullPath)) return RuntimeAssemblyDefinitionPath;
+
+            // Asset Store folders may be moved within Assets. Resolve by the assembly's
+            // declared name instead of making the default install path a requirement.
+            string[] assemblyDefinitionGuids = AssetDatabase.FindAssets("t:asmdef");
+            for (int i = 0; i < assemblyDefinitionGuids.Length; i++)
+            {
+                string assetPath = AssetDatabase.GUIDToAssetPath(assemblyDefinitionGuids[i]);
+                if (string.IsNullOrEmpty(assetPath)) continue;
+
+                try
+                {
+                    string fullPath = Path.GetFullPath(
+                        Path.Combine(Application.dataPath, "..", assetPath));
+                    AssemblyDefinitionData candidate =
+                        JsonUtility.FromJson<AssemblyDefinitionData>(File.ReadAllText(fullPath));
+                    if (candidate != null &&
+                        string.Equals(candidate.name, RuntimeAssemblyName, StringComparison.Ordinal))
+                    {
+                        return assetPath;
+                    }
+                }
+                catch
+                {
+                    // Another package's malformed/unreadable asmdef is unrelated. If it is
+                    // ours, the final not-found diagnostic still blocks setup safely.
+                }
+            }
+
+            return string.Empty;
         }
 
         private static void ValidateSceneOwners(FusionSetupReport report)
@@ -954,7 +1073,10 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
             return false;
         }
 
-        private static void ValidatePlayerPrefab(FusionSetupReport report, GameObject playerPrefab)
+        private static void ValidatePlayerPrefab(
+            FusionSetupReport report,
+            GameObject playerPrefab,
+            NetworkPredictionBackend? expectedBackend)
         {
             if (playerPrefab == null)
             {
@@ -1044,6 +1166,15 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                         playerPrefab);
                 }
 
+                if (!networkObject.EnableInterpolation)
+                {
+                    report.Add(
+                        FusionSetupIssueSeverity.Warning,
+                        "The Fusion player prefab has NetworkObject interpolation disabled. " +
+                        "The wizard will enable it for Fusion-native character presentation.",
+                        playerPrefab);
+                }
+
                 if (!NetworkProjectConfigUtilities.TryGetPrefabId(path, out _))
                 {
                     report.Add(
@@ -1053,11 +1184,115 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                         playerPrefab);
                 }
             }
+
+            NetworkCharacter networkCharacter = playerPrefab.GetComponent<NetworkCharacter>();
+            bool expectsNativeMotor = expectedBackend == NetworkPredictionBackend.FusionNative;
+            if (networkCharacter != null)
+            {
+                var serialized = new SerializedObject(networkCharacter);
+                SerializedProperty authorityOwnerPrediction = serialized.FindProperty(
+                    "m_HostOwnerUsesClientPrediction");
+                if (authorityOwnerPrediction != null && !authorityOwnerPrediction.boolValue)
+                {
+                    report.Add(
+                        FusionSetupIssueSeverity.Warning,
+                        "The Fusion player prefab has authority-owner prediction disabled. " +
+                        "A Host-owned GC2 character can rotate but cannot consume directional " +
+                        "movement input. The wizard will enable it.",
+                        playerPrefab);
+                }
+
+
+                SerializedProperty backend = serialized.FindProperty("m_PredictionBackend");
+                NetworkPredictionBackend serializedBackend = backend != null
+                    ? (NetworkPredictionBackend)backend.enumValueIndex
+                    : NetworkPredictionBackend.BuiltIn;
+                NetworkPredictionBackend desiredBackend =
+                    expectedBackend ?? serializedBackend;
+                expectsNativeMotor = desiredBackend == NetworkPredictionBackend.FusionNative;
+                if (backend == null || serializedBackend != desiredBackend)
+                {
+                    report.Add(
+                        FusionSetupIssueSeverity.Warning,
+                        $"The Fusion player prefab uses {serializedBackend}, but the current " +
+                        $"wizard selection is {desiredBackend}. The wizard will update it.",
+                        playerPrefab);
+                }
+            }
+
+            FusionNativeNetworkCharacterMotor nativeMotor =
+                playerPrefab.GetComponent<FusionNativeNetworkCharacterMotor>();
+            if (expectsNativeMotor && (nativeMotor == null || !nativeMotor.enabled))
+            {
+                report.Add(
+                    FusionSetupIssueSeverity.Warning,
+                    "The Fusion player prefab has no enabled " +
+                    "FusionNativeNetworkCharacterMotor. The wizard will add it.",
+                    playerPrefab);
+            }
+            else if (!expectsNativeMotor && nativeMotor != null)
+            {
+                report.Add(
+                    FusionSetupIssueSeverity.Warning,
+                    "The player prefab uses Built-in Legacy movement but still contains a " +
+                    "FusionNativeNetworkCharacterMotor. The wizard will remove the inactive " +
+                    "native TRSP so it cannot compete for Fusion's main transform slot.",
+                    playerPrefab);
+            }
+
+            if (expectsNativeMotor && nativeMotor != null && networkObject != null)
+            {
+                Transform configuredPresentationRoot =
+                    nativeMotor.ListenHostPresentationVisualRoot;
+                Transform mannequin = playerPrefab.GetComponent<Character>()?
+                    .Animim?.Mannequin;
+                Transform effectivePresentationRoot = configuredPresentationRoot != null
+                    ? configuredPresentationRoot
+                    : mannequin;
+                if (!FusionNativeNetworkCharacterMotor.IsSafePresentationVisualRoot(
+                        playerPrefab.transform,
+                        effectivePresentationRoot))
+                {
+                    report.Add(
+                        FusionSetupIssueSeverity.Warning,
+                        "Fusion Native cannot safely interpolate this prefab's visuals on a " +
+                        "listen host because no visual-only direct child is configured. The " +
+                        "authoritative root will remain correct but remote host presentation " +
+                        "will be tick-stepped until a safe GC2 Mannequin is assigned.",
+                        playerPrefab);
+                }
+
+                if ((networkObject.Flags & NetworkObjectFlags.HasMainNetworkTRSP) == 0)
+                {
+                    report.Add(
+                        FusionSetupIssueSeverity.Warning,
+                        "The Fusion-native motor has not been baked as the NetworkObject's " +
+                        "main NetworkTRSP. The wizard will rebuild the prefab metadata.",
+                        playerPrefab);
+                }
+
+                NetworkBehaviour firstBehaviour =
+                    networkObject.NetworkedBehaviours?.FirstOrDefault();
+                if (firstBehaviour != nativeMotor)
+                {
+                    report.Add(
+                        FusionSetupIssueSeverity.Warning,
+                        "FusionNativeNetworkCharacterMotor is not the prefab's first baked " +
+                        "NetworkBehaviour/main TRSP. Rebuild the Fusion prefab table before play.",
+                        playerPrefab);
+                }
+            }
         }
 
         private static bool IsCompetingMovementComponent(Component component)
         {
             if (component == null) return false;
+            if (component is NetworkTRSP &&
+                component is not FusionNativeNetworkCharacterMotor)
+            {
+                return true;
+            }
+
             Type type = component.GetType();
             string typeNamespace = type.Namespace ?? string.Empty;
             return typeNamespace.StartsWith("Fusion", StringComparison.Ordinal) &&

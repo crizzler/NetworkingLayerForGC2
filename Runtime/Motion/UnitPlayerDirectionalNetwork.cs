@@ -80,6 +80,7 @@ namespace Arawn.GameCreator2.Networking
 
         public override void OnDispose(Character character)
         {
+            ClearNetworkInputSink();
             base.OnDispose(character);
 
             this.m_InputJump.ForgetPerform(OnJumpPerformed);
@@ -99,6 +100,7 @@ namespace Arawn.GameCreator2.Networking
             m_CurrentInput = Vector2.zero;
             m_JumpPressed = false;
             ClearMotionDirection();
+            ClearNetworkInputSink();
         }
 
         // UPDATE METHOD: -------------------------------------------------------------------------
@@ -116,6 +118,7 @@ namespace Arawn.GameCreator2.Networking
                 m_JumpPressed = false;
                 this.InputDirection = Vector3.zero;
                 ClearMotionDirection();
+                ClearNetworkInputSink();
                 return;
             }
 
@@ -125,6 +128,7 @@ namespace Arawn.GameCreator2.Networking
                 m_JumpPressed = false;
                 this.InputDirection = Vector3.zero;
                 ClearMotionDirection();
+                ClearNetworkInputSink();
                 return;
             }
 
@@ -269,6 +273,7 @@ namespace Arawn.GameCreator2.Networking
                 m_JumpPressed = false;
                 this.InputDirection = Vector3.zero;
                 ClearMotionDirection();
+                ClearNetworkInputSink();
             }
         }
 
@@ -335,6 +340,15 @@ namespace Arawn.GameCreator2.Networking
 
             Transform camera = m_Camera.Get<Transform>(args);
             return camera != null ? camera : this.Camera;
+        }
+
+        private void ClearNetworkInputSink()
+        {
+            RefreshNetworkDriver();
+            m_InputSink?.ProcessDirectionalInput(
+                Vector2.zero,
+                GetCameraTransform(),
+                false);
         }
 
         private void SetMotionDirection(Vector3 direction)

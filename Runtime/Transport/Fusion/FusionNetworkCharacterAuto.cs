@@ -20,6 +20,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         [SerializeField] private float m_GameplayReadyDelay = 0.35f;
         [Min(1f)]
         [SerializeField] private float m_GameplayReadyTimeout = 10f;
+        [SerializeField] private bool m_LogReadinessDiagnostics = true;
 
         private NetworkCharacter m_Character;
         private FusionNetworkIdentity m_Identity;
@@ -33,6 +34,8 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         private float m_GameplayReadyDeadline;
         private float m_NextReadinessCheck;
         private uint m_GameplayReadyEpoch;
+        private string m_LastPendingParticipant = string.Empty;
+        private float m_NextReadinessDiagnosticAt;
 
         private void Awake()
         {
@@ -64,6 +67,14 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             TryNotifyGameplayReady();
         }
 
+        private void Update()
+        {
+            // Readiness is a control-plane timer, not visual presentation. Render normally
+            // pumps it, but Fusion may skip Render for an object during startup, visibility,
+            // or headless transitions. Unity Update provides a deterministic fallback.
+            TryNotifyGameplayReady();
+        }
+
         public override void Despawned(NetworkRunner runner, bool hasState)
         {
             Unsubscribe();
@@ -79,6 +90,8 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             m_LastEpoch = 0;
             m_GameplayReadyPending = false;
             m_GameplayReadyEpoch = 0;
+            m_LastPendingParticipant = string.Empty;
+            m_NextReadinessDiagnosticAt = 0f;
         }
 
         private void OnDestroy()
@@ -176,7 +189,13 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
 
             bool isOwner = m_Identity.IsOwnedBy(Runner.LocalPlayer);
             bool isServer = m_Bridge.IsServer;
-            bool isHost = m_Bridge.IsHost;
+            // A Shared master is still a graphical client peer. Treat it as host-like only for
+            // character presentation so NetworkCharacter does not apply dedicated-server
+            // optimizations (which disable every remote player's Renderer). Keep the bridge's
+            // public IsHost topology meaning unchanged.
+            bool isHost = m_Bridge.IsHost ||
+                          (Runner.GameMode == GameMode.Shared &&
+                           Runner.IsSharedModeMasterClient);
 
             if (resetExisting && m_Initialized)
             {
@@ -225,6 +244,11 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                 Time.unscaledTime + Mathf.Max(1f, m_GameplayReadyTimeout);
             m_NextReadinessCheck = m_GameplayReadyAfter;
             m_GameplayReadyEpoch = m_Bridge.AuthorityEpoch;
+            m_LastPendingParticipant = string.Empty;
+            m_NextReadinessDiagnosticAt = m_GameplayReadyAfter;
+            LogReadiness(
+                $"armed; character='{name}' networkId={m_Identity.NetworkId} " +
+                $"epoch={m_GameplayReadyEpoch}");
         }
 
         private void TryNotifyGameplayReady()
@@ -249,6 +273,9 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                 !m_Bridge.IsClient)
             {
                 m_GameplayReadyPending = false;
+                LogReadiness(
+                    $"cancelled; character='{name}' armedEpoch={m_GameplayReadyEpoch} " +
+                    $"currentEpoch={m_Bridge.AuthorityEpoch}");
                 return;
             }
 
@@ -272,11 +299,32 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                     m_Bridge.ShutdownSessionForAuthorityFailure(
                         $"Gameplay readiness timed out waiting for '{pendingParticipant}'.");
                 }
+                else if (!string.Equals(
+                             m_LastPendingParticipant,
+                             pendingParticipant,
+                             StringComparison.Ordinal) ||
+                         Time.unscaledTime >= m_NextReadinessDiagnosticAt)
+                {
+                    m_LastPendingParticipant = pendingParticipant;
+                    m_NextReadinessDiagnosticAt = Time.unscaledTime + 2f;
+                    LogReadiness(
+                        $"waiting for '{pendingParticipant}'; character='{name}' " +
+                        $"networkId={m_Identity.NetworkId} epoch={m_GameplayReadyEpoch}");
+                }
                 return;
             }
 
             m_GameplayReadyPending = false;
+            LogReadiness(
+                $"ready; character='{name}' networkId={m_Identity.NetworkId} " +
+                $"epoch={m_GameplayReadyEpoch}");
             m_Bridge.NotifyLocalGameplayReady();
+        }
+
+        private void LogReadiness(string message)
+        {
+            if (!m_LogReadinessDiagnostics) return;
+            Debug.Log($"[FusionTransport][Readiness] {message}", this);
         }
 
         private bool AreGameplayParticipantsReady(

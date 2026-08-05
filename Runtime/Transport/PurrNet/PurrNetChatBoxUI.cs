@@ -62,7 +62,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
         [SerializeField] private Button m_SendButton;
 
         [Header("Diagnostics")]
-        [SerializeField] private bool m_DebugLog = true;
+        [SerializeField] private bool m_DebugLog;
 
         private static readonly Color BG_PANEL = new Color(0.06f, 0.07f, 0.09f, 0.88f);
         private static readonly Color BG_HEADER = new Color(0.10f, 0.11f, 0.14f, 0.96f);

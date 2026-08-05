@@ -25,7 +25,7 @@ Transport-agnostic, server-authoritative multiplayer support for Game Creator 2.
 
 The Fusion integration uses Fusion/Photon connectivity. It does not replace Fusion's transport with Steam Datagram Relay. In Host/Client mode Fusion can use direct UDP or Photon Relay; Shared Mode uses Photon Relay.
 
-Version 1.9.0 was validated against PurrNet 1.21.0 and Photon Fusion 2.1.1. The complete public source snapshot contains both transport integrations, so install the corresponding SDK assemblies before importing or compiling their transport folders.
+Version 2.0.0 was validated against PurrNet 1.21.0 and Photon Fusion 2.1.1. The complete public source snapshot contains both transport integrations, so install the corresponding SDK assemblies before importing or compiling their transport folders.
 
 ## Supported Modules
 
@@ -67,7 +67,7 @@ Use `Game Creator > Networking Layer > Patches` outside Play Mode. Each transpor
 
 ## Compatibility
 
-Servers and clients must use the same Networking Layer version. Version 1.9.0 uses the v2 position-state wire layout, which older clients cannot decode.
+Servers and clients must use the same Networking Layer version. Version 2.0.0 includes transport state-layout changes and must not be mixed with older builds.
 
 ## Documentation
 

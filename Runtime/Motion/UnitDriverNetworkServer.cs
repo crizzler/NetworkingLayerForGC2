@@ -16,7 +16,10 @@ namespace Arawn.GameCreator2.Networking
     [Description("Server-authoritative driver that validates and processes client inputs. " +
                  "Use this on server/host for competitive multiplayer with cheat prevention.")]
     [Serializable]
-    public class UnitDriverNetworkServer : TUnitDriver, INetworkServerOwnerMotionAuthority
+    public class UnitDriverNetworkServer : TUnitDriver,
+        INetworkDirectionalInputSink,
+        INetworkServerOwnerMotionAuthority,
+        INetworkExternalMoveDirectionSink
     {
         // EXPOSED MEMBERS: -----------------------------------------------------------------------
 
@@ -37,10 +40,21 @@ namespace Arawn.GameCreator2.Networking
         [NonSerialized] protected Vector3 m_MoveDirection;
         [NonSerialized] protected float m_VerticalSpeed;
         [NonSerialized] protected AnimVector3 m_FloorNormal;
+        [NonSerialized] private NetworkCharacter m_NetworkCharacter;
+        [NonSerialized] private NetworkCharacterVisualPresentation m_VisualPresentation;
+        [NonSerialized] private float m_PresentationStepDuration = 1f / 30f;
+        [NonSerialized] private bool m_TeleportRotationPending;
+        [NonSerialized] private int m_TeleportRotationPendingFrame;
 
         [NonSerialized] private Queue<NetworkInputState> m_InputBuffer;
         [NonSerialized] private HashSet<ushort> m_QueuedInputSequences;
         [NonSerialized] private ushort m_LastProcessedInput;
+        [NonSerialized] private bool m_HasProcessedInputWatermark;
+        [NonSerialized] private ushort m_LastQueuedInput;
+        [NonSerialized] private bool m_HasQueuedInputWatermark;
+        [NonSerialized] private float m_AcceptedClientTimeThisTick;
+        [NonSerialized] private int m_AcceptedSequenceAdvanceThisTick;
+        [NonSerialized] private bool m_AcceptsNetworkInput;
         [NonSerialized] private int m_SpeedViolations;
         [NonSerialized] private Vector3 m_LastValidatedPosition;
         [NonSerialized] private float m_ExpectedMaxSpeed;
@@ -50,11 +64,18 @@ namespace Arawn.GameCreator2.Networking
         [NonSerialized] private float m_ServerOwnerMotionWindowUntilRealtime;
         [NonSerialized] private uint m_ServerOwnerMotionOperationId;
         [NonSerialized] private bool m_ServerOwnerMotionWindowWasActive;
+        [NonSerialized] private bool m_ServerOwnerMotionExitGraceActive;
         [NonSerialized] private float m_LastSuppressedExternalRootWriteRealtime;
         [NonSerialized] private float m_LastAllowedExternalRootWriteRealtime;
         [NonSerialized] private float m_LastExternalMoveDirectionRealtime;
         [NonSerialized] private float m_LastExplicitMoveDirectionRealtime;
         [NonSerialized] private bool m_PreserveExplicitMoveDirectionWhileTraversal;
+        [NonSerialized] private ushort m_LocalInputSequence;
+        [NonSerialized] private float m_LocalInputSendPhase;
+        [NonSerialized] private float m_LocalInputAccumulator;
+        [NonSerialized] private Vector2 m_LocalInputWeightedSum;
+        [NonSerialized] private float m_LocalInputDeltaQuantizationRemainderMs;
+        [NonSerialized] private bool m_LocalJumpPending;
         [NonSerialized] private bool m_ControllerPhysicsRefreshPending;
         [NonSerialized] private int m_ControllerPhysicsRefreshNotBeforeFrame;
         [NonSerialized] private int m_ControllerPhysicsRefreshRetryCount;
@@ -64,16 +85,28 @@ namespace Arawn.GameCreator2.Networking
         [NonSerialized] private bool m_LastControllerPhysicsRefreshQueryable;
         [NonSerialized] private int m_LastControllerPhysicsRefreshFrame;
         [NonSerialized] private float m_LastControllerPhysicsWarningRealtime;
+        [NonSerialized] private float m_LastInvalidPoseWarningRealtime;
         [NonSerialized] private int m_OwnerAuthorityNativeMoveCount;
         [NonSerialized] private int m_LastOwnerAuthorityNativeMoveFrame;
         [NonSerialized] private Vector3 m_LastOwnerAuthorityRequestedDelta;
         [NonSerialized] private Vector3 m_LastOwnerAuthorityAppliedDelta;
+        [NonSerialized] private bool m_HasLastKnownGoodAuthoritativePose;
+        [NonSerialized] private Vector3 m_LastKnownGoodAuthoritativePosition;
+        [NonSerialized] private Quaternion m_LastKnownGoodAuthoritativeRotation;
+        [NonSerialized] private Vector3 m_LastKnownGoodAuthoritativeScale;
+        [NonSerialized] private bool m_RagdollPresentationSuspended;
+        [NonSerialized] private Vector3 m_SampledRootMotionVelocity;
+        [NonSerialized] private float m_SampledRootMotionWeight;
+        [NonSerialized] private int m_LastRootMotionSampleFrame;
 
         /// <summary>
         /// Maximum number of buffered inputs. Protects against memory growth from
         /// packet floods or malicious clients. At 60 inputs/sec this is ~4 seconds.
         /// </summary>
         private const int MAX_BUFFERED_INPUTS = 256;
+        private const float MAX_CLIENT_TIME_PER_SERVER_TICK = 0.1f;
+        private const int MIN_SEQUENCE_ADVANCE_PER_SERVER_TICK = 4;
+        private const int MAX_SEQUENCE_ADVANCE_PER_SERVER_TICK = 12;
         private const float OWNER_AUTHORITY_POSITION_EPSILON = 0.005f;
         private const float OWNER_AUTHORITY_EXTRA_DISTANCE = 0.5f;
         private const float OWNER_AUTHORITY_ROOT_MOTION_THRESHOLD = 0.05f;
@@ -126,19 +159,31 @@ namespace Arawn.GameCreator2.Networking
         /// Fired after the server accepts an owner-authority pose sample. Optional modules
         /// can use this to keep their own local pose state aligned with the accepted root.
         /// </summary>
-        public static event Action<Character, Vector3> OwnerAuthorityPositionAccepted;
+        public static event Action<Character, Vector3> OwnerAuthorityPositionAccepted
+        {
+            add => NetworkOwnerMotionAuthorityHooks.PositionAccepted += value;
+            remove => NetworkOwnerMotionAuthorityHooks.PositionAccepted -= value;
+        }
 
         /// <summary>
         /// Optional module hook. Return a non-empty reason to reject an owner-authority
         /// pose sample before it is applied to the server transform.
         /// </summary>
-        public static event Func<Character, Vector3, string> OwnerAuthorityPositionRejectionRequested;
+        public static event Func<Character, Vector3, string> OwnerAuthorityPositionRejectionRequested
+        {
+            add => NetworkOwnerMotionAuthorityHooks.PositionRejectionRequested += value;
+            remove => NetworkOwnerMotionAuthorityHooks.PositionRejectionRequested -= value;
+        }
 
         /// <summary>
         /// Optional module hook. Return a non-empty reason to allow an external root
         /// SetPosition even while recent owner-authority poses would normally suppress it.
         /// </summary>
-        public static event Func<Character, Vector3, string> ExternalRootPositionWriteAllowanceRequested;
+        public static event Func<Character, Vector3, string> ExternalRootPositionWriteAllowanceRequested
+        {
+            add => NetworkOwnerMotionAuthorityHooks.ExternalRootWriteAllowanceRequested += value;
+            remove => NetworkOwnerMotionAuthorityHooks.ExternalRootWriteAllowanceRequested -= value;
+        }
 
         // INTERFACE PROPERTIES: ------------------------------------------------------------------
 
@@ -183,6 +228,12 @@ namespace Arawn.GameCreator2.Networking
             Vector3 velocity,
             bool preserveWhileTraversalLikeMotion)
         {
+            if (!m_AcceptsNetworkInput || IsAuthoritativeSimulationSuppressed())
+            {
+                this.m_MoveDirection = Vector3.zero;
+                return;
+            }
+
             this.m_MoveDirection = velocity;
             this.m_LastExplicitMoveDirectionRealtime = Time.realtimeSinceStartup;
             this.m_PreserveExplicitMoveDirectionWhileTraversal =
@@ -196,8 +247,10 @@ namespace Arawn.GameCreator2.Networking
         {
             if (profile == null) return;
 
+            m_Config.inputSendRate = profile.inputSendRate;
             m_Config.maxSpeedMultiplier = profile.maxSpeedMultiplier;
             m_Config.violationThreshold = profile.violationThreshold;
+            m_PresentationStepDuration = 1f / Mathf.Max(1f, profile.serverSimulationRate);
         }
 
         // INITIALIZERS: --------------------------------------------------------------------------
@@ -209,6 +262,9 @@ namespace Arawn.GameCreator2.Networking
             this.m_InputBuffer = new Queue<NetworkInputState>(32);
             this.m_QueuedInputSequences = new HashSet<ushort>();
             this.m_LastProcessedInput = ushort.MaxValue;
+            this.m_HasProcessedInputWatermark = false;
+            this.m_LastQueuedInput = ushort.MaxValue;
+            this.m_HasQueuedInputWatermark = false;
         }
 
         public override void OnStartup(Character character)
@@ -219,6 +275,12 @@ namespace Arawn.GameCreator2.Networking
             this.m_InputBuffer = new Queue<NetworkInputState>(32);
             this.m_QueuedInputSequences = new HashSet<ushort>();
             this.m_LastProcessedInput = ushort.MaxValue;
+            this.m_HasProcessedInputWatermark = false;
+            this.m_LastQueuedInput = ushort.MaxValue;
+            this.m_HasQueuedInputWatermark = false;
+            this.m_AcceptedClientTimeThisTick = 0f;
+            this.m_AcceptedSequenceAdvanceThisTick = 0;
+            this.m_AcceptsNetworkInput = true;
             this.m_SpeedViolations = 0;
             this.m_SuppressedDuplicateInputs = 0;
             this.m_LastMotionDiagnosticRealtime = -100f;
@@ -226,11 +288,18 @@ namespace Arawn.GameCreator2.Networking
             this.m_ServerOwnerMotionWindowUntilRealtime = -100f;
             this.m_ServerOwnerMotionOperationId = 0;
             this.m_ServerOwnerMotionWindowWasActive = false;
+            this.m_ServerOwnerMotionExitGraceActive = false;
             this.m_LastSuppressedExternalRootWriteRealtime = -100f;
             this.m_LastAllowedExternalRootWriteRealtime = -100f;
             this.m_LastExternalMoveDirectionRealtime = -100f;
             this.m_LastExplicitMoveDirectionRealtime = -100f;
             this.m_PreserveExplicitMoveDirectionWhileTraversal = false;
+            this.m_LocalInputSequence = 0;
+            this.m_LocalInputSendPhase = 0f;
+            this.m_LocalInputAccumulator = 0f;
+            this.m_LocalInputWeightedSum = Vector2.zero;
+            this.m_LocalInputDeltaQuantizationRemainderMs = 0f;
+            this.m_LocalJumpPending = false;
             this.m_ControllerPhysicsRefreshPending = false;
             this.m_ControllerPhysicsRefreshNotBeforeFrame = -1;
             this.m_ControllerPhysicsRefreshRetryCount = 0;
@@ -240,10 +309,21 @@ namespace Arawn.GameCreator2.Networking
             this.m_LastControllerPhysicsRefreshQueryable = false;
             this.m_LastControllerPhysicsRefreshFrame = -1;
             this.m_LastControllerPhysicsWarningRealtime = -100f;
+            this.m_LastInvalidPoseWarningRealtime = -100f;
             this.m_OwnerAuthorityNativeMoveCount = 0;
             this.m_LastOwnerAuthorityNativeMoveFrame = -1;
             this.m_LastOwnerAuthorityRequestedDelta = Vector3.zero;
             this.m_LastOwnerAuthorityAppliedDelta = Vector3.zero;
+            this.m_HasLastKnownGoodAuthoritativePose = false;
+            this.m_RagdollPresentationSuspended = false;
+            this.m_SampledRootMotionVelocity = Vector3.zero;
+            this.m_SampledRootMotionWeight = 0f;
+            this.m_LastRootMotionSampleFrame = -1;
+            this.m_NetworkCharacter = this.Character.GetComponent<NetworkCharacter>();
+            this.m_VisualPresentation = null;
+            this.m_PresentationStepDuration = 1f / Mathf.Max(1f, this.m_Config.inputSendRate);
+            this.m_TeleportRotationPending = false;
+            this.m_TeleportRotationPendingFrame = -1;
             this.m_Controller = this.Character.GetComponent<CharacterController>();
             if (this.m_Controller == null)
             {
@@ -269,36 +349,290 @@ namespace Arawn.GameCreator2.Networking
 
             this.m_LastValidatedPosition = this.Transform.position;
             this.m_ExpectedMaxSpeed = this.Character.Motion.LinearSpeed;
+            CaptureLastKnownGoodAuthoritativePose();
 
+            if (this.Character.Ragdoll != null)
+            {
+                this.Character.Ragdoll.EventBeforeStartRagdoll -= OnBeforeStartRagdoll;
+                this.Character.Ragdoll.EventBeforeStartRagdoll += OnBeforeStartRagdoll;
+                this.Character.Ragdoll.EventAfterFinishRecover -= OnAfterFinishRagdollRecover;
+                this.Character.Ragdoll.EventAfterFinishRecover += OnAfterFinishRagdollRecover;
+            }
         }
 
         public override void OnEnable()
         {
             base.OnEnable();
+            this.m_AcceptsNetworkInput = true;
             if (this.Character != null)
             {
                 this.m_GroundTime = this.Character.Time.Time;
                 this.m_GroundFrame = this.Character.Time.Frame;
+                this.m_LastValidatedPosition = this.Transform.position;
+                CaptureLastKnownGoodAuthoritativePose();
             }
+        }
+
+        /// <summary>
+        /// Re-arms this driver when <see cref="NetworkCharacter"/> assigns the same server role
+        /// again without replacing the GC2 driver instance. GC2 intentionally skips
+        /// <c>OnStartup</c>/<c>OnEnable</c> when <c>ChangeDriver</c> receives the already-active
+        /// driver, while <see cref="ResetNetworkState"/> deliberately rejects late packets.
+        /// </summary>
+        internal void ActivateNetworkState()
+        {
+            // Treat every explicit assignment as a fresh authority epoch. This is harmless after
+            // Cleanup (the state is already empty) and also protects custom prefabs which serialize
+            // a server driver and may have accumulated offline/local input before networking starts.
+            ResetNetworkState();
+            m_InputBuffer ??= new Queue<NetworkInputState>(32);
+            m_QueuedInputSequences ??= new HashSet<ushort>();
+            m_NetworkCharacter = this.Character != null
+                ? this.Character.GetComponent<NetworkCharacter>()
+                : null;
+            m_AcceptsNetworkInput = this.Character != null;
+
+            if (this.Character == null) return;
+
+            m_GroundTime = this.Character.Time.Time;
+            m_GroundFrame = this.Character.Time.Frame;
+            m_LastValidatedPosition = this.Transform.position;
+            CaptureLastKnownGoodAuthoritativePose();
         }
 
         public override void OnDispose(Character character)
         {
-            this.m_ServerOwnerMotionWindowUntilRealtime = -100f;
-            this.m_ServerOwnerMotionOperationId = 0;
-            this.m_ServerOwnerMotionWindowWasActive = false;
-            this.m_ControllerPhysicsRefreshPending = false;
-            this.m_ControllerPhysicsRefreshNotBeforeFrame = -1;
-            this.m_ControllerPhysicsRefreshRetryCount = 0;
+            if (character?.Ragdoll != null)
+            {
+                character.Ragdoll.EventBeforeStartRagdoll -= OnBeforeStartRagdoll;
+                character.Ragdoll.EventAfterFinishRecover -= OnAfterFinishRagdollRecover;
+            }
+
+            ResetNetworkState();
             this.m_ControllerPhysicsQueryBuffer = null;
             base.OnDispose(character);
             this.m_Controller = null;
+            this.m_NetworkCharacter = null;
+            this.m_TeleportRotationPending = false;
+            this.m_TeleportRotationPendingFrame = -1;
+        }
+
+        public override void OnDisable()
+        {
+            ResetNetworkState();
+            base.OnDisable();
+        }
+
+        /// <summary>
+        /// Clears queued simulation and transient authority state before this driver leaves the
+        /// server role. This is intentionally independent of transport bridge availability.
+        /// </summary>
+        public void ResetNetworkState()
+        {
+            m_InputBuffer?.Clear();
+            m_QueuedInputSequences?.Clear();
+            m_LastProcessedInput = ushort.MaxValue;
+            m_HasProcessedInputWatermark = false;
+            m_LastQueuedInput = ushort.MaxValue;
+            m_HasQueuedInputWatermark = false;
+            m_AcceptedClientTimeThisTick = 0f;
+            m_AcceptedSequenceAdvanceThisTick = 0;
+            m_AcceptsNetworkInput = false;
+            m_MoveDirection = Vector3.zero;
+            m_VerticalSpeed = 0f;
+            m_SpeedViolations = 0;
+            m_SuppressedDuplicateInputs = 0;
+            m_LastMotionDiagnosticRealtime = -100f;
+            m_LastOwnerAuthorityPoseRealtime = -100f;
+            m_ServerOwnerMotionWindowUntilRealtime = -100f;
+            m_ServerOwnerMotionOperationId = 0;
+            m_ServerOwnerMotionWindowWasActive = false;
+            m_ServerOwnerMotionExitGraceActive = false;
+            m_LastSuppressedExternalRootWriteRealtime = -100f;
+            m_LastAllowedExternalRootWriteRealtime = -100f;
+            m_LastExternalMoveDirectionRealtime = -100f;
+            m_LastExplicitMoveDirectionRealtime = -100f;
+            m_PreserveExplicitMoveDirectionWhileTraversal = false;
+            m_LocalInputSequence = 0;
+            m_LocalInputSendPhase = 0f;
+            m_LocalInputAccumulator = 0f;
+            m_LocalInputWeightedSum = Vector2.zero;
+            m_LocalInputDeltaQuantizationRemainderMs = 0f;
+            m_LocalJumpPending = false;
+            m_ControllerPhysicsRefreshPending = false;
+            m_ControllerPhysicsRefreshNotBeforeFrame = -1;
+            m_ControllerPhysicsRefreshRetryCount = 0;
+            m_ControllerPhysicsRefreshAttempts = 0;
+            m_ControllerPhysicsRefreshSuccesses = 0;
+            m_LastControllerPhysicsRefreshQueryable = false;
+            m_LastControllerPhysicsRefreshFrame = -1;
+            m_LastControllerPhysicsWarningRealtime = -100f;
+            m_LastInvalidPoseWarningRealtime = -100f;
+            m_OwnerAuthorityNativeMoveCount = 0;
+            m_LastOwnerAuthorityNativeMoveFrame = -1;
+            m_LastOwnerAuthorityRequestedDelta = Vector3.zero;
+            m_LastOwnerAuthorityAppliedDelta = Vector3.zero;
+            m_TeleportRotationPending = false;
+            m_TeleportRotationPendingFrame = -1;
+            m_HasLastKnownGoodAuthoritativePose = false;
+            m_LastKnownGoodAuthoritativePosition = Vector3.zero;
+            m_LastKnownGoodAuthoritativeRotation = Quaternion.identity;
+            m_LastKnownGoodAuthoritativeScale = Vector3.one;
+            m_RagdollPresentationSuspended = false;
+            m_SampledRootMotionVelocity = Vector3.zero;
+            m_SampledRootMotionWeight = 0f;
+            m_LastRootMotionSampleFrame = -1;
+            m_GroundFrame = -100;
+            m_GroundTime = -100f;
+            m_IsOnSteepSlope = false;
+            if (this.Transform != null &&
+                NetworkCharacterVisualPresentation.IsFinite(this.Transform.position))
+            {
+                m_LastValidatedPosition = this.Transform.position;
+            }
+            else
+            {
+                m_LastValidatedPosition = Vector3.zero;
+            }
+
+            if (this.Character != null)
+            {
+                m_ExpectedMaxSpeed = this.Character.Motion.LinearSpeed;
+            }
+            else
+            {
+                m_ExpectedMaxSpeed = 0f;
+            }
+
+            ReleaseVisualPresentation();
+        }
+
+        private void OnBeforeStartRagdoll()
+        {
+            m_RagdollPresentationSuspended = true;
+            DiscardQueuedInputs(acknowledgeNewest: true);
+            ResetSimulationTransients(closeOwnerAuthority: true);
+            ReleaseVisualPresentation();
+        }
+
+        private void OnAfterFinishRagdollRecover()
+        {
+            m_RagdollPresentationSuspended = false;
+            ResetSimulationTransients(closeOwnerAuthority: true);
+            // Do not reinterpret the final ragdoll/recovery render delta as locomotion.
+            m_LastRootMotionSampleFrame = Time.frameCount;
+            if (this.Character != null)
+            {
+                m_GroundTime = this.Character.Time.Time;
+                m_GroundFrame = this.Character.Time.Frame;
+                m_LastValidatedPosition = this.Transform.position;
+                CaptureLastKnownGoodAuthoritativePose();
+            }
+            ScheduleDeferredControllerPhysicsRefresh();
+        }
+
+        private bool IsAuthoritativeSimulationSuppressed()
+        {
+            return this.Character == null ||
+                   this.Character.IsDead ||
+                   m_RagdollPresentationSuspended ||
+                   (this.Character.Ragdoll != null && this.Character.Ragdoll.IsRagdoll);
+        }
+
+        /// <summary>
+        /// Drops simulation work while preserving the newest consumed sequence as an
+        /// acknowledgement watermark. This prevents redundant pre-ragdoll or pre-teleport
+        /// packets from being replayed after control of the root returns to this driver.
+        /// </summary>
+        private void DiscardQueuedInputs(bool acknowledgeNewest)
+        {
+            m_InputBuffer?.Clear();
+            m_QueuedInputSequences?.Clear();
+
+            if (acknowledgeNewest &&
+                m_HasQueuedInputWatermark &&
+                (!m_HasProcessedInputWatermark ||
+                 IsSequenceNewer(m_LastQueuedInput, m_LastProcessedInput)))
+            {
+                m_LastProcessedInput = m_LastQueuedInput;
+                m_HasProcessedInputWatermark = true;
+            }
+
+            m_AcceptedClientTimeThisTick = 0f;
+            m_AcceptedSequenceAdvanceThisTick = 0;
+        }
+
+        private void ResetSimulationTransients(bool closeOwnerAuthority)
+        {
+            m_MoveDirection = Vector3.zero;
+            m_VerticalSpeed = 0f;
+            m_LocalInputSendPhase = 0f;
+            m_LocalInputAccumulator = 0f;
+            m_LocalInputWeightedSum = Vector2.zero;
+            m_LocalInputDeltaQuantizationRemainderMs = 0f;
+            m_LocalJumpPending = false;
+            m_LastExternalMoveDirectionRealtime = -100f;
+            m_LastExplicitMoveDirectionRealtime = -100f;
+            m_PreserveExplicitMoveDirectionWhileTraversal = false;
+            m_SampledRootMotionVelocity = Vector3.zero;
+            m_SampledRootMotionWeight = 0f;
+            m_LastRootMotionSampleFrame = -1;
+            m_TeleportRotationPending = false;
+            m_TeleportRotationPendingFrame = -1;
+
+            if (closeOwnerAuthority)
+            {
+                m_LastOwnerAuthorityPoseRealtime = -100f;
+                m_ServerOwnerMotionWindowUntilRealtime = -100f;
+                m_ServerOwnerMotionOperationId = 0;
+                m_ServerOwnerMotionWindowWasActive = false;
+                m_ServerOwnerMotionExitGraceActive = false;
+                m_LastSuppressedExternalRootWriteRealtime = -100f;
+                m_LastAllowedExternalRootWriteRealtime = -100f;
+            }
+        }
+
+        private void InvalidateQueuedMotionForTeleport()
+        {
+            DiscardQueuedInputs(acknowledgeNewest: true);
+            ResetSimulationTransients(closeOwnerAuthority: true);
+            // A teleport invalidates the animation delta authored against the old root pose.
+            m_LastRootMotionSampleFrame = Time.frameCount;
+
+            if (this.Character != null)
+            {
+                m_GroundTime = this.Character.Time.Time;
+                m_GroundFrame = this.Character.Time.Frame;
+            }
+        }
+
+        private void ConsumeInputWithoutSimulation(ushort sequenceNumber)
+        {
+            bool hasBaseline = m_HasQueuedInputWatermark || m_HasProcessedInputWatermark;
+            ushort baseline = m_HasQueuedInputWatermark
+                ? m_LastQueuedInput
+                : m_LastProcessedInput;
+            if (hasBaseline && !IsSequenceNewer(sequenceNumber, baseline)) return;
+
+            m_LastQueuedInput = sequenceNumber;
+            m_HasQueuedInputWatermark = true;
+            if (!m_HasProcessedInputWatermark ||
+                IsSequenceNewer(sequenceNumber, m_LastProcessedInput))
+            {
+                m_LastProcessedInput = sequenceNumber;
+                m_HasProcessedInputWatermark = true;
+            }
         }
 
         /// <inheritdoc />
         public void OpenServerOwnerMotionWindow(float durationSeconds, uint operationId = 0)
         {
-            if (durationSeconds <= 0f) return;
+            if (durationSeconds <= 0f ||
+                !m_AcceptsNetworkInput ||
+                IsAuthoritativeSimulationSuppressed())
+            {
+                return;
+            }
 
             float until = Time.realtimeSinceStartup + durationSeconds;
             if (until > m_ServerOwnerMotionWindowUntilRealtime)
@@ -306,6 +640,7 @@ namespace Arawn.GameCreator2.Networking
                 m_ServerOwnerMotionWindowUntilRealtime = until;
             }
             m_ServerOwnerMotionWindowWasActive = true;
+            m_ServerOwnerMotionExitGraceActive = false;
 
             if (operationId != 0) m_ServerOwnerMotionOperationId = operationId;
             LogFocusedTraversalMotion(
@@ -322,23 +657,173 @@ namespace Arawn.GameCreator2.Networking
         public void CloseServerOwnerMotionWindow(float graceSeconds = 0f)
         {
             float now = Time.realtimeSinceStartup;
-            float closeAt = now + Mathf.Max(0f, graceSeconds);
+            float grace = Mathf.Max(0f, graceSeconds);
+            bool hadActiveServerWindow = now <= m_ServerOwnerMotionWindowUntilRealtime;
+            float closeAt = now + grace;
             m_ServerOwnerMotionWindowUntilRealtime = Mathf.Min(
                 m_ServerOwnerMotionWindowUntilRealtime,
                 closeAt);
 
-            if (graceSeconds <= 0f) m_ServerOwnerMotionOperationId = 0;
+            // A finite GC2 traversal can finish on the server a few input samples before it
+            // finishes on the owning client. At that point GC2 clears Busy/root motion, but the
+            // final owner-authored root is still the validated terminal pose for the operation.
+            // Preserve that server-approved authorization only for this bounded close grace.
+            // The operation id is diagnostic metadata and is intentionally optional. The normal
+            // gameplay-hook, finite-value and maximum-distance validation still runs before the
+            // pose is applied.
+            m_ServerOwnerMotionExitGraceActive =
+                grace > 0f &&
+                hadActiveServerWindow &&
+                now <= m_ServerOwnerMotionWindowUntilRealtime;
+
+            if (grace <= 0f)
+            {
+                // Time.realtimeSinceStartup is frame-stable. Leaving the deadline at `now`
+                // would keep the gate open for the rest of this frame despite the interface's
+                // immediate-close contract.
+                m_ServerOwnerMotionWindowUntilRealtime = -100f;
+                m_ServerOwnerMotionOperationId = 0;
+                m_ServerOwnerMotionExitGraceActive = false;
+            }
             ScheduleDeferredControllerPhysicsRefresh();
             LogFocusedTraversalMotion(
                 "OwnerWindow",
                 $"side=server operation=close id={m_ServerOwnerMotionOperationId} " +
-                $"grace={Mathf.Max(0f, graceSeconds):F3} until={m_ServerOwnerMotionWindowUntilRealtime:F3}");
+                $"grace={grace:F3} terminal={m_ServerOwnerMotionExitGraceActive} " +
+                $"until={m_ServerOwnerMotionWindowUntilRealtime:F3}");
             LogTraversalPose(
                 $"server-owner-motion-window-close operation={m_ServerOwnerMotionOperationId} " +
-                $"grace={Mathf.Max(0f, graceSeconds):F3} until={m_ServerOwnerMotionWindowUntilRealtime:F3}");
+                $"grace={grace:F3} terminal={m_ServerOwnerMotionExitGraceActive} " +
+                $"until={m_ServerOwnerMotionWindowUntilRealtime:F3}");
         }
 
         // INPUT PROCESSING: ----------------------------------------------------------------------
+
+        /// <summary>
+        /// Captures input from a player running on the same authoritative instance. Host-owned
+        /// characters use the server driver when host prediction is disabled, so their input must
+        /// enter the same validated queue used by remote clients instead of moving the transform
+        /// directly.
+        /// </summary>
+        public void ProcessDirectionalInput(
+            Vector2 inputDirection,
+            Transform cameraTransform,
+            bool jump)
+        {
+            if (!CanGenerateLocalServerInput())
+            {
+                ClearLocalServerInput();
+                return;
+            }
+
+            QueueLocalDirectionalInput(
+                inputDirection,
+                cameraTransform,
+                jump,
+                this.Character.Time.DeltaTime);
+        }
+
+        private void QueueLocalDirectionalInput(
+            Vector2 inputDirection,
+            Transform cameraTransform,
+            bool jump,
+            float deltaTime)
+        {
+            if (!CanGenerateLocalServerInput())
+            {
+                ClearLocalServerInput();
+                return;
+            }
+
+            // A button edge can arrive on a frame whose gameplay clock has not advanced yet.
+            // Preserve it until the next valid sample instead of allowing the player unit to
+            // consume and silently lose the jump.
+            this.m_LocalJumpPending |= jump;
+            if (deltaTime <= 0f || float.IsNaN(deltaTime) || float.IsInfinity(deltaTime)) return;
+
+            Vector2 worldInput = ToWorldSpaceInput(inputDirection, cameraTransform);
+            // Store the time-weighted average over the send interval. Keeping only the newest
+            // render-frame sample loses short taps and exaggerates late direction changes when
+            // the accumulated delta is simulated by the authoritative tick.
+            this.m_LocalInputWeightedSum += worldInput * deltaTime;
+            this.m_LocalInputAccumulator += deltaTime;
+
+            float inputRate = Mathf.Max(1f, this.m_Config.inputSendRate);
+            float inputInterval = 1f / inputRate;
+            if (!NetworkInputCadence.Advance(
+                    ref this.m_LocalInputSendPhase,
+                    deltaTime,
+                    inputInterval)) return;
+
+            Vector2 averagedInput = this.m_LocalInputWeightedSum / this.m_LocalInputAccumulator;
+            if (averagedInput.sqrMagnitude > 1f) averagedInput.Normalize();
+            byte flags = this.m_LocalJumpPending ? NetworkInputState.FLAG_JUMP : (byte)0;
+            float quantizedDeltaTime = NetworkInputCadence.QuantizeElapsedSeconds(
+                this.m_LocalInputAccumulator,
+                ref this.m_LocalInputDeltaQuantizationRemainderMs);
+            NetworkInputState input = NetworkInputState.Create(
+                averagedInput,
+                this.m_LocalInputSequence,
+                quantizedDeltaTime,
+                flags,
+                this.Transform.eulerAngles.y);
+
+            this.m_LocalInputAccumulator = 0f;
+            this.m_LocalInputWeightedSum = Vector2.zero;
+            this.m_LocalJumpPending = false;
+            this.m_LocalInputSequence++;
+            QueueInput(input);
+        }
+
+        /// <summary>
+        /// Only a locally owned strict-authority host character may synthesize input directly on
+        /// the server. Remote server replicas can retain their prefab-authored GC2 player unit
+        /// because CharacterKernel.ChangePlayer ignores null. That unit emits zero input while
+        /// IsPlayer is false; allowing it into this queue would advance the same sequence watermark
+        /// used by the real remote owner and make every client packet look stale.
+        /// </summary>
+        private bool CanGenerateLocalServerInput()
+        {
+            if (!m_AcceptsNetworkInput || IsAuthoritativeSimulationSuppressed()) return false;
+
+            if (m_NetworkCharacter == null && this.Character != null)
+            {
+                m_NetworkCharacter = this.Character.GetComponent<NetworkCharacter>();
+            }
+
+            return m_NetworkCharacter != null &&
+                   m_NetworkCharacter.IsServerInstance &&
+                   m_NetworkCharacter.IsOwnerInstance &&
+                   m_NetworkCharacter.CurrentRole == NetworkCharacter.NetworkRole.Server &&
+                   ReferenceEquals(m_NetworkCharacter.ActiveDriver, this);
+        }
+
+        private void ClearLocalServerInput()
+        {
+            m_LocalInputSendPhase = 0f;
+            m_LocalInputAccumulator = 0f;
+            m_LocalInputWeightedSum = Vector2.zero;
+            m_LocalInputDeltaQuantizationRemainderMs = 0f;
+            m_LocalJumpPending = false;
+        }
+
+        private static Vector2 ToWorldSpaceInput(
+            Vector2 rawInput,
+            Transform cameraTransform)
+        {
+            Vector3 direction = new Vector3(rawInput.x, 0f, rawInput.y);
+            if (cameraTransform != null)
+            {
+                Quaternion cameraRotation = Quaternion.Euler(
+                    0f,
+                    cameraTransform.eulerAngles.y,
+                    0f);
+                direction = cameraRotation * direction;
+            }
+
+            if (direction.sqrMagnitude > 1f) direction.Normalize();
+            return new Vector2(direction.x, direction.z);
+        }
 
         /// <summary>
         /// Queue an input from a client for processing.
@@ -346,33 +831,107 @@ namespace Arawn.GameCreator2.Networking
         /// </summary>
         public void QueueInput(NetworkInputState input)
         {
-            // Reject out-of-order inputs (simple protection)
-            if (IsSequenceNewer(input.sequenceNumber, m_LastProcessedInput))
+            if (!m_AcceptsNetworkInput) return;
+
+            if (IsAuthoritativeSimulationSuppressed())
             {
-                if (m_QueuedInputSequences.Contains(input.sequenceNumber))
-                {
-                    m_SuppressedDuplicateInputs++;
-                    LogServerMotionDiagnostic(
-                        $"suppressed duplicate queued input seq={input.sequenceNumber} " +
-                        $"lastProcessed={m_LastProcessedInput} queued={m_InputBuffer.Count} " +
-                        $"suppressedSinceLast={m_SuppressedDuplicateInputs}");
-                    return;
-                }
-
-                // Cap buffer size to prevent memory growth from floods
-                if (m_InputBuffer.Count >= MAX_BUFFERED_INPUTS)
-                {
-                    NetworkInputState dropped = m_InputBuffer.Dequeue(); // Drop oldest input
-                    m_QueuedInputSequences.Remove(dropped.sequenceNumber);
-                    LogServerMotionDiagnostic(
-                        $"input buffer full; dropped oldest seq={dropped.sequenceNumber} " +
-                        $"incoming={input.sequenceNumber}",
-                        force: true);
-                }
-
-                m_InputBuffer.Enqueue(input);
-                m_QueuedInputSequences.Add(input.sequenceNumber);
+                DiscardQueuedInputs(acknowledgeNewest: true);
+                ConsumeInputWithoutSimulation(input.sequenceNumber);
+                return;
             }
+
+            bool hasBaseline = m_HasQueuedInputWatermark || m_HasProcessedInputWatermark;
+            ushort baseline = m_HasQueuedInputWatermark
+                ? m_LastQueuedInput
+                : m_LastProcessedInput;
+            if (hasBaseline && !IsSequenceNewer(input.sequenceNumber, baseline))
+            {
+                m_SuppressedDuplicateInputs++;
+                LogServerMotionDiagnostic(
+                    $"suppressed duplicate/regressed input seq={input.sequenceNumber} " +
+                    $"watermark={baseline} lastProcessed={m_LastProcessedInput} " +
+                    $"queued={m_InputBuffer.Count} suppressedSinceLast={m_SuppressedDuplicateInputs}");
+                return;
+            }
+
+            int sequenceAdvance = hasBaseline
+                ? SequenceDistance(input.sequenceNumber, baseline)
+                : 1;
+            int maximumSequenceAdvance = GetMaximumSequenceAdvancePerServerTick();
+            int remainingSequenceAdvance = Mathf.Max(
+                0,
+                maximumSequenceAdvance - m_AcceptedSequenceAdvanceThisTick);
+
+            // Always consume a newer sequence watermark even when its simulation allowance is
+            // exhausted. Otherwise a legitimate client returning after packet loss can become
+            // permanently stuck behind a rejected gap, while redundant packets keep retrying it.
+            m_LastQueuedInput = input.sequenceNumber;
+            m_HasQueuedInputWatermark = true;
+
+            if (sequenceAdvance > remainingSequenceAdvance)
+            {
+                m_AcceptedSequenceAdvanceThisTick = maximumSequenceAdvance;
+                LogServerMotionDiagnostic(
+                    $"consumed input without simulation after sequence budget seq={input.sequenceNumber} " +
+                    $"advance={sequenceAdvance} remaining={remainingSequenceAdvance}",
+                    force: true);
+                return;
+            }
+
+            m_AcceptedSequenceAdvanceThisTick += sequenceAdvance;
+
+            float maximumClientTime = GetMaximumClientTimePerServerTick();
+            int remainingMilliseconds = Mathf.FloorToInt(
+                Mathf.Max(0f, maximumClientTime - m_AcceptedClientTimeThisTick) * 1000f);
+            if (remainingMilliseconds <= 0)
+            {
+                LogServerMotionDiagnostic(
+                    $"consumed input without simulation after client-time budget seq={input.sequenceNumber} " +
+                    $"budget={maximumClientTime:F3}",
+                    force: true);
+                return;
+            }
+
+            int requestedMilliseconds = Mathf.Max(1, input.deltaTimeMs);
+            int acceptedMilliseconds = Mathf.Min(requestedMilliseconds, remainingMilliseconds);
+            input.deltaTimeMs = (byte)Mathf.Clamp(acceptedMilliseconds, 1, byte.MaxValue);
+            m_AcceptedClientTimeThisTick += input.GetDeltaTime();
+
+            // Cap buffer size as a final invariant. The per-tick sequence budget normally keeps
+            // this far below the limit even under a packet flood.
+            if (m_InputBuffer.Count >= MAX_BUFFERED_INPUTS)
+            {
+                NetworkInputState dropped = m_InputBuffer.Dequeue();
+                m_QueuedInputSequences.Remove(dropped.sequenceNumber);
+                LogServerMotionDiagnostic(
+                    $"input buffer full; dropped oldest seq={dropped.sequenceNumber} " +
+                    $"incoming={input.sequenceNumber}",
+                    force: true);
+            }
+
+            m_InputBuffer.Enqueue(input);
+            m_QueuedInputSequences.Add(input.sequenceNumber);
+        }
+
+        private float GetMaximumClientTimePerServerTick()
+        {
+            float inputInterval = 1f / Mathf.Max(1f, m_Config.inputSendRate);
+            float serverInterval = Mathf.Max(0.001f, m_PresentationStepDuration);
+            return Mathf.Clamp(
+                Mathf.Max(inputInterval * 2f, serverInterval * 2f),
+                0.016f,
+                MAX_CLIENT_TIME_PER_SERVER_TICK);
+        }
+
+        private int GetMaximumSequenceAdvancePerServerTick()
+        {
+            float inputInterval = 1f / Mathf.Max(1f, m_Config.inputSendRate);
+            int expectedInputs = Mathf.CeilToInt(
+                GetMaximumClientTimePerServerTick() / inputInterval);
+            return Mathf.Clamp(
+                expectedInputs + Mathf.Max(1, m_Config.inputRedundancy),
+                MIN_SEQUENCE_ADVANCE_PER_SERVER_TICK,
+                MAX_SEQUENCE_ADVANCE_PER_SERVER_TICK);
         }
 
         /// <summary>
@@ -381,6 +940,28 @@ namespace Arawn.GameCreator2.Networking
         /// </summary>
         public NetworkPositionState ProcessInputs(Transform cameraTransform = null)
         {
+            if (!m_AcceptsNetworkInput || this.Character == null)
+            {
+                return this.Character != null ? CreateCurrentState() : default;
+            }
+
+            if (IsAuthoritativeSimulationSuppressed())
+            {
+                DiscardQueuedInputs(acknowledgeNewest: true);
+                ResetSimulationTransients(closeOwnerAuthority: true);
+                ReleaseVisualPresentation();
+
+                NetworkPositionState suppressedState = CreateCurrentState();
+                OnStateProduced?.Invoke(suppressedState);
+                return suppressedState;
+            }
+
+            EnsureFiniteAuthoritativeRootPose("tick begin");
+            SampleRootMotionForCurrentFrame();
+            bool capturedPresentationPose = TryCapturePresentationPose(
+                out Vector3 presentationPosition,
+                out Quaternion presentationRotation);
+
             int queuedAtStart = m_InputBuffer.Count;
             if (queuedAtStart > 4)
             {
@@ -389,12 +970,95 @@ namespace Arawn.GameCreator2.Networking
                     $"lastProcessed={m_LastProcessedInput} position={FormatVector(this.Transform.position)}");
             }
 
+            float remainingClientTime = GetMaximumClientTimePerServerTick();
+            int remainingSequenceAdvance = GetMaximumSequenceAdvancePerServerTick();
+            ushort simulationWatermark = m_LastProcessedInput;
+            bool hasSimulationWatermark = m_HasProcessedInputWatermark;
+
             while (m_InputBuffer.Count > 0)
             {
                 var input = m_InputBuffer.Dequeue();
                 m_QueuedInputSequences.Remove(input.sequenceNumber);
-                ProcessSingleInput(input, cameraTransform);
+
+                if (hasSimulationWatermark &&
+                    !IsSequenceNewer(input.sequenceNumber, simulationWatermark))
+                {
+                    continue;
+                }
+
+                int sequenceAdvance = hasSimulationWatermark
+                    ? SequenceDistance(input.sequenceNumber, simulationWatermark)
+                    : 1;
+                if (sequenceAdvance > remainingSequenceAdvance)
+                {
+                    simulationWatermark = input.sequenceNumber;
+                    hasSimulationWatermark = true;
+                    continue;
+                }
+
+                int remainingMilliseconds = Mathf.FloorToInt(
+                    Mathf.Max(0f, remainingClientTime) * 1000f);
+                if (remainingMilliseconds <= 0)
+                {
+                    simulationWatermark = input.sequenceNumber;
+                    hasSimulationWatermark = true;
+                    continue;
+                }
+
+                int acceptedMilliseconds = Mathf.Min(
+                    Mathf.Max(1, input.deltaTimeMs),
+                    remainingMilliseconds);
+                input.deltaTimeMs = (byte)Mathf.Clamp(
+                    acceptedMilliseconds,
+                    1,
+                    byte.MaxValue);
+
+                ProcessSingleInput(
+                    input,
+                    cameraTransform,
+                    m_SampledRootMotionVelocity,
+                    m_SampledRootMotionWeight);
+                remainingClientTime -= input.GetDeltaTime();
+                remainingSequenceAdvance -= sequenceAdvance;
+                simulationWatermark = input.sequenceNumber;
+                hasSimulationWatermark = true;
                 m_LastProcessedInput = input.sequenceNumber;
+                m_HasProcessedInputWatermark = true;
+            }
+
+            // Inputs which were deliberately consumed (but not simulated) because a packet burst
+            // exceeded this tick's budget must still be acknowledged. Keeping the acknowledgement
+            // behind would cause the client redundancy window to replay pre-budget/pre-teleport
+            // inputs indefinitely.
+            if (m_HasQueuedInputWatermark &&
+                (!m_HasProcessedInputWatermark ||
+                 IsSequenceNewer(m_LastQueuedInput, m_LastProcessedInput)))
+            {
+                m_LastProcessedInput = m_LastQueuedInput;
+                m_HasProcessedInputWatermark = true;
+            }
+
+            m_AcceptedClientTimeThisTick = 0f;
+            m_AcceptedSequenceAdvanceThisTick = 0;
+
+            if (!HasUsableRootPose())
+            {
+                // A malformed root-motion or animation sample must not poison this or later
+                // ticks. Restore the persistent finite pose rather than relying on the current
+                // tick's starting Transform, which may itself already have been invalid.
+                EnsureFiniteAuthoritativeRootPose("tick end");
+            }
+            else
+            {
+                CaptureLastKnownGoodAuthoritativePose();
+                if (capturedPresentationPose)
+                {
+                    m_VisualPresentation.BeginRootStepTransition(
+                        presentationPosition,
+                        presentationRotation,
+                        m_PresentationStepDuration,
+                        m_Config.maxReconciliationDistance);
+                }
             }
 
             var state = CreateCurrentState();
@@ -462,7 +1126,11 @@ namespace Arawn.GameCreator2.Networking
             return $"busy={this.Character.Busy.IsBusy} legsBusy={this.Character.Busy.AreLegsBusy}";
         }
 
-        private void ProcessSingleInput(NetworkInputState input, Transform cameraTransform)
+        private void ProcessSingleInput(
+            NetworkInputState input,
+            Transform cameraTransform,
+            Vector3 rootMotionVelocity,
+            float rootMotionWeight)
         {
             Vector2 rawInput = input.GetInputDirection();
             float deltaTime = input.GetDeltaTime();
@@ -545,7 +1213,11 @@ namespace Arawn.GameCreator2.Networking
             }
 
             // Combine movement
-            Vector3 translation = ApplyRootMotionBlend(horizontalMovement);
+            Vector3 translation = ApplyRootMotionBlend(
+                horizontalMovement,
+                deltaTime,
+                rootMotionVelocity,
+                input.HasOwnerAuthorityPosition ? 0f : rootMotionWeight);
             translation = this.m_Axonometry?.ProcessTranslation(this, translation) ?? translation;
 
             Vector3 totalMovement = translation + Vector3.up * m_VerticalSpeed * deltaTime;
@@ -570,10 +1242,19 @@ namespace Arawn.GameCreator2.Networking
                 m_GroundFrame = this.Character.Time.Frame;
             }
 
+            // A clamped ledge has no positional velocity from which the host or observers can
+            // reconstruct the owner's attempted direction. Prefer the sequenced Traversal
+            // presentation sample carried with the ordinary owner input. The semantic motion
+            // command remains useful for one-shot routing, but is no longer the only source of
+            // truth for a held edge pose.
+            bool appliedTraversalPresentation =
+                TryApplyTraversalPresentationDirection(input);
+
             // Store move direction for animation. GC2 Traversal drives the root through
             // Driver.SetPosition/AddPosition outside the normal input simulation path; keep
             // that externally recorded vector long enough for Animim to sample the climb axes.
-            if (!ShouldPreserveExternalMoveDirectionForAnimation())
+            if (!appliedTraversalPresentation &&
+                !ShouldPreserveExternalMoveDirectionForAnimation())
             {
                 m_MoveDirection = translation / deltaTime;
             }
@@ -607,10 +1288,52 @@ namespace Arawn.GameCreator2.Networking
             }
         }
 
-        private Vector3 ApplyRootMotionBlend(Vector3 kineticMovement)
+        private bool TryApplyTraversalPresentationDirection(NetworkInputState input)
         {
-            Vector3 rootMotion = this.Character.Animim.RootMotionDeltaPosition;
-            return Vector3.Lerp(kineticMovement, rootMotion, this.Character.RootMotionPosition);
+            if (this.UpdateKinematics ||
+                !input.HasOwnerAuthorityPosition ||
+                !input.HasTraversalPresentationDirection)
+            {
+                return false;
+            }
+
+            Vector3 direction = input.GetTraversalPresentationDirection();
+            if (!NetworkCharacterVisualPresentation.IsFinite(direction))
+            {
+                direction = Vector3.zero;
+            }
+
+            float maximumSpeed = Mathf.Max(0f, this.Character?.Motion?.LinearSpeed ?? 0f) * 1.5f;
+            if (maximumSpeed > 0f && direction.sqrMagnitude > maximumSpeed * maximumSpeed)
+            {
+                direction = direction.normalized * maximumSpeed;
+            }
+
+            SetExternalMoveDirection(direction, true);
+            if (this.Character?.Motion is UnitMotionNetworkController networkMotion)
+            {
+                networkMotion.ApplyReplicatedTraversalPresentationDirection(direction);
+            }
+
+            return true;
+        }
+
+        private Vector3 ApplyRootMotionBlend(
+            Vector3 kineticMovement,
+            float deltaTime,
+            Vector3 rootMotionVelocity,
+            float rootMotionWeight)
+        {
+            if (!NetworkCharacterVisualPresentation.IsFinite(rootMotionVelocity))
+            {
+                rootMotionVelocity = Vector3.zero;
+            }
+
+            Vector3 rootMotionDelta = rootMotionVelocity * Mathf.Max(0f, deltaTime);
+            return Vector3.Lerp(
+                kineticMovement,
+                rootMotionDelta,
+                Mathf.Clamp01(rootMotionWeight));
         }
 
         private bool TryApplyOwnerAuthorityPosition(
@@ -760,16 +1483,41 @@ namespace Arawn.GameCreator2.Networking
         }
 
         /// <summary>
-        /// Owner-authority reaction/traversal samples must finish with a genuine native
-        /// CharacterController move. A Transform write can leave the managed pose correct while
-        /// the native broadphase capsule remains at an older airborne position. Move also makes
-        /// the server authoritative over collision constraints; callers receive the actual pose.
+        /// Owner-authority reaction samples normally finish with a genuine native
+        /// CharacterController move so the server remains authoritative over collision
+        /// constraints. A gameplay module can explicitly allow its own absolute root writer at
+        /// the requested pose. GC2 Traversal uses that policy because TraverseInteractive drives
+        /// the root through absolute SetPosition calls and intentionally crosses colliders from
+        /// its ignore list. Applying those samples through a sweep pins the server replica at a
+        /// ledge while the owner continues climbing.
         /// </summary>
         private Vector3 ApplyOwnerAuthorityRootPosition(Vector3 rootPosition)
         {
             Vector3 before = this.Transform.position;
             Vector3 requestedDelta = rootPosition - before;
             m_LastOwnerAuthorityRequestedDelta = requestedDelta;
+
+            // This hook is evaluated only after the owner-motion gate, operation correlation,
+            // finite-value checks and distance validation have all succeeded. An allowance
+            // means the active gameplay module is already authorized to issue the equivalent
+            // absolute SetPosition. Match those semantics here, then schedule the existing
+            // verified native-proxy refresh rather than collision-sweeping the traversal pose.
+            if (TryGetExternalRootPositionWriteAllowance(
+                    rootPosition,
+                    out string absoluteWriteReason))
+            {
+                ApplyAbsoluteRootPosition(rootPosition);
+                CaptureLastKnownGoodAuthoritativePose();
+                m_LastOwnerAuthorityAppliedDelta = this.Transform.position - before;
+                LogFocusedTraversalMotion(
+                    "OwnerPoseApply",
+                    $"mode=absolute reason='{absoluteWriteReason}' " +
+                    $"requested={NetworkTraversalClimbDiagnostics.Vector(rootPosition)} " +
+                    $"applied={NetworkTraversalClimbDiagnostics.Vector(this.Transform.position)} " +
+                    $"delta={NetworkTraversalClimbDiagnostics.Vector(m_LastOwnerAuthorityAppliedDelta)}",
+                    $"server-owner-absolute:{this.Character?.GetInstanceID() ?? 0}");
+                return this.Transform.position;
+            }
 
             if (m_Controller != null &&
                 m_Controller.enabled &&
@@ -791,55 +1539,22 @@ namespace Arawn.GameCreator2.Networking
             }
 
             ApplyAbsoluteRootPosition(rootPosition);
+            CaptureLastKnownGoodAuthoritativePose();
             m_LastOwnerAuthorityAppliedDelta = this.Transform.position - before;
             return this.Transform.position;
         }
 
         private void NotifyOwnerAuthorityPositionAccepted(Vector3 position)
         {
-            try
-            {
-                OwnerAuthorityPositionAccepted?.Invoke(this.Character, position);
-            }
-            catch (Exception exception)
-            {
-                Debug.LogError(
-                    $"[TraversalPoseDebug][ServerDriver] {this.Character?.name ?? "Character"} " +
-                    $"owner-authority-pose-accepted hook failed position={FormatVector(position)}: " +
-                    $"{exception.Message}\n{exception.StackTrace}",
-                    this.Character);
-            }
+            NetworkOwnerMotionAuthorityHooks.NotifyPositionAccepted(this.Character, position);
         }
 
         private bool TryGetOwnerAuthorityPositionRejection(Vector3 targetPosition, out string reason)
         {
-            reason = string.Empty;
-            Delegate[] handlers = OwnerAuthorityPositionRejectionRequested?.GetInvocationList();
-            if (handlers == null) return false;
-
-            foreach (Delegate handler in handlers)
-            {
-                if (handler is not Func<Character, Vector3, string> rejectionProvider) continue;
-
-                try
-                {
-                    string candidateReason = rejectionProvider.Invoke(this.Character, targetPosition);
-                    if (string.IsNullOrEmpty(candidateReason)) continue;
-
-                    reason = candidateReason;
-                    return true;
-                }
-                catch (Exception exception)
-                {
-                    Debug.LogError(
-                        $"[TraversalPoseDebug][ServerDriver] {this.Character?.name ?? "Character"} " +
-                        $"owner-authority rejection hook failed target={FormatVector(targetPosition)}: " +
-                        $"{exception.Message}\n{exception.StackTrace}",
-                        this.Character);
-                }
-            }
-
-            return false;
+            return NetworkOwnerMotionAuthorityHooks.TryGetPositionRejection(
+                this.Character,
+                targetPosition,
+                out reason);
         }
 
         private void MarkOwnerAuthorityPoseReceived()
@@ -862,8 +1577,20 @@ namespace Arawn.GameCreator2.Networking
             // the sample with a validated traversal/combat operation.
             if (Time.realtimeSinceStartup > m_ServerOwnerMotionWindowUntilRealtime)
             {
+                m_ServerOwnerMotionExitGraceActive = false;
+                m_ServerOwnerMotionOperationId = 0;
                 reason = "no-server-owner-motion-window";
                 return false;
+            }
+
+            // CloseServerOwnerMotionWindow marks this as the terminal portion of a validated
+            // operation. GC2 may already have cleared Busy/root motion on the server while the
+            // connected owner is still sending the finite link's last samples. Accept those
+            // correlated samples so the authoritative endpoint converges before reconciliation.
+            if (m_ServerOwnerMotionExitGraceActive)
+            {
+                reason = "server-owner-motion-exit-grace";
+                return true;
             }
 
             if (this.Character.RootMotionPosition > OWNER_AUTHORITY_ROOT_MOTION_THRESHOLD)
@@ -1058,12 +1785,259 @@ namespace Arawn.GameCreator2.Networking
             return (short)(a - b) > 0;
         }
 
+        private static int SequenceDistance(ushort newer, ushort older)
+        {
+            return unchecked((ushort)(newer - older));
+        }
+
+        /// <summary>
+        /// Converts GC2's render-frame root delta into a velocity sample once per frame. Server
+        /// input replay then scales that velocity by each bounded simulation chunk instead of
+        /// multiplying the same render delta by every packet in a backlog.
+        /// </summary>
+        private void SampleRootMotionForCurrentFrame()
+        {
+            if (m_LastRootMotionSampleFrame == Time.frameCount) return;
+
+            m_LastRootMotionSampleFrame = Time.frameCount;
+            m_SampledRootMotionVelocity = Vector3.zero;
+            m_SampledRootMotionWeight = this.Character != null
+                ? Mathf.Clamp01(this.Character.RootMotionPosition)
+                : 0f;
+
+            if (this.Character?.Animim == null || m_SampledRootMotionWeight <= 0f) return;
+
+            float sampleDeltaTime = this.Character.Time.DeltaTime;
+            if (sampleDeltaTime <= 0f ||
+                float.IsNaN(sampleDeltaTime) ||
+                float.IsInfinity(sampleDeltaTime))
+            {
+                sampleDeltaTime = Time.deltaTime;
+            }
+
+            if (sampleDeltaTime <= 0f ||
+                float.IsNaN(sampleDeltaTime) ||
+                float.IsInfinity(sampleDeltaTime))
+            {
+                return;
+            }
+
+            Vector3 rootMotionDelta = this.Character.Animim.RootMotionDeltaPosition;
+            if (!NetworkCharacterVisualPresentation.IsFinite(rootMotionDelta)) return;
+            m_SampledRootMotionVelocity = rootMotionDelta / sampleDeltaTime;
+        }
+
+        private bool ShouldUseListenHostPresentation()
+        {
+            if (!IsActiveServerDriver()) return false;
+
+            if (m_NetworkCharacter == null && this.Character != null)
+            {
+                m_NetworkCharacter = this.Character.GetComponent<NetworkCharacter>();
+            }
+
+            // Dedicated servers do not render. A host-owned local character must also remain on
+            // its predicted/current pose. Only authority-owned remote players need a delayed
+            // visual hierarchy on the listen host.
+            return m_NetworkCharacter != null &&
+                   !m_RagdollPresentationSuspended &&
+                   !this.Character.IsDead &&
+                   (this.Character.Ragdoll == null || !this.Character.Ragdoll.IsRagdoll) &&
+                   m_NetworkCharacter.IsHostInstance &&
+                   !m_NetworkCharacter.IsOwnerInstance;
+        }
+
+        private bool IsActiveServerDriver()
+        {
+            if (this.Character == null) return false;
+            if (m_NetworkCharacter == null)
+            {
+                m_NetworkCharacter = this.Character.GetComponent<NetworkCharacter>();
+            }
+
+            return m_NetworkCharacter != null &&
+                   m_NetworkCharacter.CurrentRole == NetworkCharacter.NetworkRole.Server &&
+                   ReferenceEquals(m_NetworkCharacter.ActiveDriver, this);
+        }
+
+        private bool EnsureVisualPresentation()
+        {
+            if (!ShouldUseListenHostPresentation() || this.Character == null) return false;
+            if (m_VisualPresentation == null)
+            {
+                m_VisualPresentation = new NetworkCharacterVisualPresentation(
+                    this.Character,
+                    "ServerDriver");
+            }
+
+            return m_VisualPresentation.TryEnsure(logWarning: true);
+        }
+
+        private bool TryCapturePresentationPose(
+            out Vector3 position,
+            out Quaternion rotation)
+        {
+            position = Vector3.zero;
+            rotation = Quaternion.identity;
+            return EnsureVisualPresentation() &&
+                   m_VisualPresentation.TryGetWorldPose(out position, out rotation);
+        }
+
+        private void ReleaseVisualPresentation()
+        {
+            m_VisualPresentation?.Dispose();
+            m_VisualPresentation = null;
+        }
+
+        private bool HasUsableRootPose()
+        {
+            return this.Transform != null &&
+                   NetworkCharacterVisualPresentation.HasUsablePose(
+                       this.Transform.position,
+                       this.Transform.rotation) &&
+                   NetworkCharacterVisualPresentation.IsFinite(this.Transform.localScale);
+        }
+
+        private void CaptureLastKnownGoodAuthoritativePose()
+        {
+            if (!HasUsableRootPose()) return;
+
+            m_LastKnownGoodAuthoritativePosition = this.Transform.position;
+            m_LastKnownGoodAuthoritativeRotation = this.Transform.rotation;
+            m_LastKnownGoodAuthoritativeScale = this.Transform.localScale;
+            m_HasLastKnownGoodAuthoritativePose = true;
+        }
+
+        private bool EnsureFiniteAuthoritativeRootPose(string phase)
+        {
+            if (HasUsableRootPose())
+            {
+                CaptureLastKnownGoodAuthoritativePose();
+                return true;
+            }
+
+            bool restoredPersistentPose =
+                m_HasLastKnownGoodAuthoritativePose &&
+                NetworkCharacterVisualPresentation.HasUsablePose(
+                    m_LastKnownGoodAuthoritativePosition,
+                    m_LastKnownGoodAuthoritativeRotation) &&
+                NetworkCharacterVisualPresentation.IsFinite(
+                    m_LastKnownGoodAuthoritativeScale);
+
+            if (restoredPersistentPose)
+            {
+                this.Transform.SetPositionAndRotation(
+                    m_LastKnownGoodAuthoritativePosition,
+                    m_LastKnownGoodAuthoritativeRotation);
+                this.Transform.localScale = m_LastKnownGoodAuthoritativeScale;
+            }
+            else if (this.Transform != null)
+            {
+                // An invalid pose before the first completed tick has no historical sample to
+                // restore. Sanitize each component independently so state publication remains
+                // finite and later ticks can establish a persistent recovery point.
+                Vector3 position = NetworkCharacterVisualPresentation.IsFinite(this.Transform.position)
+                    ? this.Transform.position
+                    : Vector3.zero;
+                Quaternion rotation = NetworkCharacterVisualPresentation.IsUsableRotation(
+                    this.Transform.rotation)
+                    ? this.Transform.rotation
+                    : Quaternion.identity;
+                Vector3 scale = NetworkCharacterVisualPresentation.IsFinite(this.Transform.localScale)
+                    ? this.Transform.localScale
+                    : Vector3.one;
+
+                this.Transform.SetPositionAndRotation(position, rotation);
+                this.Transform.localScale = scale;
+            }
+
+            if (this.Transform != null)
+            {
+                Physics.SyncTransforms();
+                ScheduleDeferredControllerPhysicsRefresh();
+            }
+
+            m_VisualPresentation?.ResetOffset();
+            WarnInvalidAuthoritativePose(phase, restoredPersistentPose);
+            CaptureLastKnownGoodAuthoritativePose();
+            return HasUsableRootPose();
+        }
+
+        private void WarnInvalidAuthoritativePose(string phase, bool restoredPersistentPose)
+        {
+            float now = Time.realtimeSinceStartup;
+            if (now - m_LastInvalidPoseWarningRealtime < 2f) return;
+
+            m_LastInvalidPoseWarningRealtime = now;
+            Debug.LogError(
+                $"[NetworkMotionInvariant][ServerDriver] " +
+                $"'{this.Character?.name ?? "Character"}' produced a non-finite authoritative " +
+                $"pose at {phase} during built-in server simulation. " +
+                (restoredPersistentPose
+                    ? "The persistent last-known-good root pose was restored. "
+                    : "A finite fallback root pose was established. ") +
+                "The visual presentation offset was cleared.",
+                this.Character);
+        }
+
         // STANDARD DRIVER METHODS: ---------------------------------------------------------------
 
         public override void OnUpdate()
         {
+            if (this.Character == null) return;
+            if (!IsActiveServerDriver())
+            {
+                ReleaseVisualPresentation();
+                return;
+            }
+
+            if (m_RagdollPresentationSuspended ||
+                (this.Character.Ragdoll != null && this.Character.Ragdoll.IsRagdoll))
+            {
+                ReleaseVisualPresentation();
+                return;
+            }
+
+            if (!ShouldUseListenHostPresentation())
+            {
+                ReleaseVisualPresentation();
+            }
+            else if (this.Character.IsDead)
+            {
+                ReleaseVisualPresentation();
+                return;
+            }
+            else if (EnsureVisualPresentation())
+            {
+                m_VisualPresentation.UpdateRootStepTransition(
+                    Mathf.Max(0f, this.Character.Time.DeltaTime));
+                if (m_VisualPresentation.TryGetWorldPose(
+                        out Vector3 presentationPosition,
+                        out Quaternion presentationRotation))
+                {
+                    LogFocusedTraversalMotion(
+                        "HostPresentationPose",
+                        $"root={NetworkTraversalClimbDiagnostics.Vector(this.Transform.position)} " +
+                        $"presentation={NetworkTraversalClimbDiagnostics.Vector(presentationPosition)} " +
+                        $"offset={NetworkTraversalClimbDiagnostics.Vector(presentationPosition - this.Transform.position)} " +
+                        $"rootYaw={this.Transform.eulerAngles.y:F2} presentationYaw={presentationRotation.eulerAngles.y:F2} " +
+                        $"ownerPoseAge={(m_LastOwnerAuthorityPoseRealtime > -50f ? Time.realtimeSinceStartup - m_LastOwnerAuthorityPoseRealtime : -1f):F3} " +
+                        $"ownerWindowRemaining={Mathf.Max(0f, m_ServerOwnerMotionWindowUntilRealtime - Time.realtimeSinceStartup):F3}",
+                        $"host-presentation-pose:{this.Character.GetInstanceID()}");
+                }
+            }
+
+            if (m_TeleportRotationPending &&
+                Time.frameCount > m_TeleportRotationPendingFrame)
+            {
+                m_TeleportRotationPending = false;
+                m_TeleportRotationPendingFrame = -1;
+            }
+
             if (this.Character.IsDead) return;
             if (this.m_Controller == null) return;
+
+            SampleRootMotionForCurrentFrame();
 
             bool ownerMotionWindowActive =
                 Time.realtimeSinceStartup <= m_ServerOwnerMotionWindowUntilRealtime;
@@ -1071,6 +2045,8 @@ namespace Arawn.GameCreator2.Networking
             {
                 // CloseServerOwnerMotionWindow can run before an airborne reaction has fully
                 // landed. Verify once more when its grace period actually expires.
+                m_ServerOwnerMotionExitGraceActive = false;
+                m_ServerOwnerMotionOperationId = 0;
                 ScheduleDeferredControllerPhysicsRefresh();
             }
             m_ServerOwnerMotionWindowWasActive = ownerMotionWindowActive;
@@ -1162,15 +2138,41 @@ namespace Arawn.GameCreator2.Networking
 
         public override void SetPosition(Vector3 position, bool teleport = false)
         {
+            // Ragdoll/death owns the root until an explicit teleport resets it. Ordinary GC2
+            // motion writers must not pull the authoritative capsule back toward its locomotion
+            // pose while the physics hierarchy is active.
+            if (!teleport && IsAuthoritativeSimulationSuppressed()) return;
+
             Vector3 rootPosition = ToRootPosition(position);
-            if (!teleport && ShouldSuppressExternalRootPositionWrite(rootPosition))
+            if (!NetworkCharacterVisualPresentation.IsFinite(rootPosition)) return;
+            if (!teleport && ShouldSuppressExternalRootPositionWrite(rootPosition, "SetPosition"))
             {
                 return;
             }
 
             Vector3 before = this.Transform.position;
 
+            if (teleport)
+            {
+                InvalidateQueuedMotionForTeleport();
+            }
+
             ApplyAbsoluteRootPosition(rootPosition);
+            CaptureLastKnownGoodAuthoritativePose();
+            LogFocusedServerRootWrite(
+                "SetPosition",
+                "applied",
+                teleport ? "teleport" : "allowed",
+                rootPosition,
+                before,
+                this.Transform.position);
+
+            if (teleport)
+            {
+                m_VisualPresentation?.ResetOffset();
+                m_TeleportRotationPending = true;
+                m_TeleportRotationPendingFrame = Time.frameCount;
+            }
 
             if (!teleport)
             {
@@ -1196,6 +2198,7 @@ namespace Arawn.GameCreator2.Networking
         /// </summary>
         private void ApplyAbsoluteRootPosition(Vector3 rootPosition)
         {
+            if (!NetworkCharacterVisualPresentation.IsFinite(rootPosition)) return;
             this.Transform.position = rootPosition;
             Physics.SyncTransforms();
             ScheduleDeferredControllerPhysicsRefresh();
@@ -1357,14 +2360,43 @@ namespace Arawn.GameCreator2.Networking
                 this.Character);
         }
 
-        private bool ShouldSuppressExternalRootPositionWrite(Vector3 position)
+        private bool ShouldSuppressExternalRootPositionWrite(Vector3 position, string writer)
         {
-            if (!IsRecentOwnerAuthorityPoseActive) return false;
-            if (!IsTraversalLikeAuthorityMotion()) return false;
+            bool recentOwnerPose = IsRecentOwnerAuthorityPoseActive;
+            if (!recentOwnerPose)
+            {
+                LogFocusedServerRootWrite(
+                    writer,
+                    "allowed",
+                    "no-recent-owner-pose",
+                    position,
+                    this.Transform.position,
+                    this.Transform.position);
+                return false;
+            }
+
+            if (!IsTraversalLikeAuthorityMotion())
+            {
+                LogFocusedServerRootWrite(
+                    writer,
+                    "allowed",
+                    "not-traversal-like-motion",
+                    position,
+                    this.Transform.position,
+                    this.Transform.position);
+                return false;
+            }
 
             float now = Time.realtimeSinceStartup;
             if (TryGetExternalRootPositionWriteAllowance(position, out string allowReason))
             {
+                LogFocusedServerRootWrite(
+                    writer,
+                    "allowed",
+                    allowReason,
+                    position,
+                    this.Transform.position,
+                    this.Transform.position);
                 if (now - m_LastAllowedExternalRootWriteRealtime >= 0.25f)
                 {
                     LogTraversalPose(
@@ -1379,6 +2411,13 @@ namespace Arawn.GameCreator2.Networking
                 return false;
             }
 
+            LogFocusedServerRootWrite(
+                writer,
+                "suppressed",
+                "recent-owner-pose-without-allowance",
+                position,
+                this.Transform.position,
+                this.Transform.position);
             if (now - m_LastSuppressedExternalRootWriteRealtime >= 0.25f)
             {
                 LogTraversalPose(
@@ -1393,35 +2432,42 @@ namespace Arawn.GameCreator2.Networking
             return true;
         }
 
+        private void LogFocusedServerRootWrite(
+            string writer,
+            string result,
+            string reason,
+            Vector3 target,
+            Vector3 before,
+            Vector3 after)
+        {
+            if (!NetworkTraversalClimbDiagnostics.IsFocused(this.Character?.gameObject)) return;
+
+            float now = Time.realtimeSinceStartup;
+            float ownerPoseAge = m_LastOwnerAuthorityPoseRealtime > -50f
+                ? Mathf.Max(0f, now - m_LastOwnerAuthorityPoseRealtime)
+                : -1f;
+            LogFocusedTraversalMotion(
+                "ServerRootWrite",
+                $"writer={writer} result={result} reason='{reason}' " +
+                $"target={NetworkTraversalClimbDiagnostics.Vector(target)} " +
+                $"before={NetworkTraversalClimbDiagnostics.Vector(before)} " +
+                $"after={NetworkTraversalClimbDiagnostics.Vector(after)} " +
+                $"requestedDelta={NetworkTraversalClimbDiagnostics.Vector(target - before)} " +
+                $"actualDelta={NetworkTraversalClimbDiagnostics.Vector(after - before)} " +
+                $"ownerPoseAge={ownerPoseAge:F3} " +
+                $"ownerWindowRemaining={Mathf.Max(0f, m_ServerOwnerMotionWindowUntilRealtime - now):F3} " +
+                $"operation={m_ServerOwnerMotionOperationId} updateKinematics={this.UpdateKinematics} " +
+                $"grounded={IsGrounded} rootMotion={this.Character?.RootMotionPosition ?? 0f:F3} " +
+                $"{FormatBusyState()}",
+                $"server-root-write:{this.Character.GetInstanceID()}:{writer}:{result}");
+        }
+
         private bool TryGetExternalRootPositionWriteAllowance(Vector3 position, out string reason)
         {
-            reason = string.Empty;
-            Delegate[] handlers = ExternalRootPositionWriteAllowanceRequested?.GetInvocationList();
-            if (handlers == null) return false;
-
-            foreach (Delegate handler in handlers)
-            {
-                if (handler is not Func<Character, Vector3, string> allowanceProvider) continue;
-
-                try
-                {
-                    string candidateReason = allowanceProvider.Invoke(this.Character, position);
-                    if (string.IsNullOrEmpty(candidateReason)) continue;
-
-                    reason = candidateReason;
-                    return true;
-                }
-                catch (Exception exception)
-                {
-                    Debug.LogError(
-                        $"[TraversalPoseDebug][ServerDriver] {this.Character?.name ?? "Character"} " +
-                        $"external root write allowance hook failed target={FormatVector(position)}: " +
-                        $"{exception.Message}\n{exception.StackTrace}",
-                        this.Character);
-                }
-            }
-
-            return false;
+            return NetworkOwnerMotionAuthorityHooks.TryGetExternalRootWriteAllowance(
+                this.Character,
+                position,
+                out reason);
         }
 
         private bool IsRecentOwnerAuthorityPoseActive =>
@@ -1429,24 +2475,44 @@ namespace Arawn.GameCreator2.Networking
 
         public override void SetRotation(Quaternion rotation)
         {
+            bool completesCurrentTeleport =
+                m_TeleportRotationPending &&
+                m_TeleportRotationPendingFrame == Time.frameCount;
+            if (IsAuthoritativeSimulationSuppressed() && !completesCurrentTeleport) return;
+            if (!NetworkCharacterVisualPresentation.IsUsableRotation(rotation)) return;
             this.Transform.rotation = rotation;
             Physics.SyncTransforms();
+            CaptureLastKnownGoodAuthoritativePose();
+
+            if (m_TeleportRotationPending &&
+                m_TeleportRotationPendingFrame == Time.frameCount)
+            {
+                m_VisualPresentation?.ResetOffset();
+                m_TeleportRotationPending = false;
+                m_TeleportRotationPendingFrame = -1;
+            }
         }
 
         public override void SetScale(Vector3 scale)
         {
+            if (!NetworkCharacterVisualPresentation.IsFinite(scale)) return;
             this.Transform.localScale = scale;
             Physics.SyncTransforms();
+            CaptureLastKnownGoodAuthoritativePose();
         }
 
         public override void AddPosition(Vector3 amount)
         {
+            if (IsAuthoritativeSimulationSuppressed()) return;
+            if (!NetworkCharacterVisualPresentation.IsFinite(amount)) return;
+            Vector3 targetPosition = this.Transform.position + amount;
+            if (!NetworkCharacterVisualPresentation.IsFinite(targetPosition)) return;
             // During an explicitly authorized owner-motion operation the absolute owner pose is
             // the source of truth. GC2 can simultaneously run the same MotionWarp/root-motion
             // state on the server replica; applying its AddPosition as well would double the
             // authored delta between owner samples. Use the same guarded suppression and
             // traversal allowance hooks as SetPosition.
-            if (ShouldSuppressExternalRootPositionWrite(this.Transform.position + amount))
+            if (ShouldSuppressExternalRootPositionWrite(targetPosition, "AddPosition"))
             {
                 return;
             }
@@ -1456,6 +2522,14 @@ namespace Arawn.GameCreator2.Networking
                 Vector3 before = this.Transform.position;
                 m_Controller.Move(amount);
                 RecordExternalMoveVelocity(before);
+                CaptureLastKnownGoodAuthoritativePose();
+                LogFocusedServerRootWrite(
+                    "AddPosition",
+                    "applied",
+                    "allowed",
+                    targetPosition,
+                    before,
+                    this.Transform.position);
             }
         }
 
@@ -1502,14 +2576,22 @@ namespace Arawn.GameCreator2.Networking
 
         public override void AddRotation(Quaternion amount)
         {
-            this.Transform.rotation *= amount;
+            if (IsAuthoritativeSimulationSuppressed()) return;
+            if (!NetworkCharacterVisualPresentation.IsUsableRotation(amount)) return;
+            Quaternion targetRotation = this.Transform.rotation * amount;
+            if (!NetworkCharacterVisualPresentation.IsUsableRotation(targetRotation)) return;
+            this.Transform.rotation = targetRotation;
             Physics.SyncTransforms();
+            CaptureLastKnownGoodAuthoritativePose();
         }
 
         public override void AddScale(Vector3 scale)
         {
-            this.Transform.localScale = Vector3.Scale(this.Transform.localScale, scale);
+            Vector3 targetScale = this.Transform.localScale + scale;
+            if (!NetworkCharacterVisualPresentation.IsFinite(targetScale)) return;
+            this.Transform.localScale = targetScale;
             Physics.SyncTransforms();
+            CaptureLastKnownGoodAuthoritativePose();
         }
 
         public override void ResetVerticalVelocity()

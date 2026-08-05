@@ -411,12 +411,15 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
             if (NetworkTraversalClimbDiagnostics.IsFocused(characterNetworkId))
             {
                 NetworkInputState last = inputs[inputs.Length - 1];
+                int ownerPoseCount = CountOwnerPoseInputs(inputs, out NetworkInputState latestOwnerPose);
                 NetworkTraversalClimbDiagnostics.Log(
                     "PurrNetInputSend",
                     $"actor={characterNetworkId} path={(nm.isServer ? "host-loopback" : "client-server")} " +
                     $"count={inputs.Length} firstSeq={inputs[0].sequenceNumber} lastSeq={last.sequenceNumber} " +
-                    $"hasOwnerPose={last.HasOwnerAuthorityPosition} " +
-                    $"ownerPose={(last.HasOwnerAuthorityPosition ? NetworkTraversalClimbDiagnostics.Vector(last.GetOwnerAuthorityPosition()) : "none")}",
+                    $"ownerPoseCount={ownerPoseCount} latestOwnerSeq={(ownerPoseCount > 0 ? latestOwnerPose.sequenceNumber : 0)} " +
+                    $"ownerPose={(ownerPoseCount > 0 ? NetworkTraversalClimbDiagnostics.Vector(latestOwnerPose.GetOwnerAuthorityPosition()) : "none")} " +
+                    $"hasTraversalDirection={(ownerPoseCount > 0 && latestOwnerPose.HasTraversalPresentationDirection)} " +
+                    $"traversalDirection={(ownerPoseCount > 0 && latestOwnerPose.HasTraversalPresentationDirection ? NetworkTraversalClimbDiagnostics.Vector(latestOwnerPose.GetTraversalPresentationDirection()) : "none")}",
                     this,
                     $"purrnet-input-send:{characterNetworkId}");
             }
@@ -456,7 +459,9 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
                 NetworkTraversalClimbDiagnostics.Log(
                     "PurrNetStateSend",
                     $"actor={characterNetworkId} targetOwner={ownerClientId} seq={state.lastProcessedInput} " +
-                    $"pos={NetworkTraversalClimbDiagnostics.Vector(state.GetPosition())} serverTime={serverTime:F3}",
+                    $"pos={NetworkTraversalClimbDiagnostics.Vector(state.GetPosition())} " +
+                    $"moveVelocity={NetworkTraversalClimbDiagnostics.Vector(state.GetMoveVelocity())} " +
+                    $"serverTime={serverTime:F3}",
                     this,
                     $"purrnet-state-send:{characterNetworkId}");
             }
@@ -608,12 +613,15 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
             if (NetworkTraversalClimbDiagnostics.IsFocused(data.characterNetworkId))
             {
                 NetworkInputState last = data.inputs[data.inputs.Length - 1];
+                int ownerPoseCount = CountOwnerPoseInputs(data.inputs, out NetworkInputState latestOwnerPose);
                 NetworkTraversalClimbDiagnostics.Log(
                     "PurrNetInputReceive",
                     $"actor={data.characterNetworkId} sender={senderClientId} accepted=true " +
                     $"count={data.inputs.Length} firstSeq={data.inputs[0].sequenceNumber} lastSeq={last.sequenceNumber} " +
-                    $"hasOwnerPose={last.HasOwnerAuthorityPosition} " +
-                    $"ownerPose={(last.HasOwnerAuthorityPosition ? NetworkTraversalClimbDiagnostics.Vector(last.GetOwnerAuthorityPosition()) : "none")}",
+                    $"ownerPoseCount={ownerPoseCount} latestOwnerSeq={(ownerPoseCount > 0 ? latestOwnerPose.sequenceNumber : 0)} " +
+                    $"ownerPose={(ownerPoseCount > 0 ? NetworkTraversalClimbDiagnostics.Vector(latestOwnerPose.GetOwnerAuthorityPosition()) : "none")} " +
+                    $"hasTraversalDirection={(ownerPoseCount > 0 && latestOwnerPose.HasTraversalPresentationDirection)} " +
+                    $"traversalDirection={(ownerPoseCount > 0 && latestOwnerPose.HasTraversalPresentationDirection ? NetworkTraversalClimbDiagnostics.Vector(latestOwnerPose.GetTraversalPresentationDirection()) : "none")}",
                     this,
                     $"purrnet-input-receive:{data.characterNetworkId}");
             }
@@ -632,12 +640,31 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
                     "PurrNetStateReceive",
                     $"actor={data.characterNetworkId} sender={senderPlayer.id} " +
                     $"seq={data.state.lastProcessedInput} pos={NetworkTraversalClimbDiagnostics.Vector(data.state.GetPosition())} " +
+                    $"moveVelocity={NetworkTraversalClimbDiagnostics.Vector(data.state.GetMoveVelocity())} " +
                     $"serverTime={data.serverTime:F3}",
                     this,
                     $"purrnet-state-receive:{data.characterNetworkId}");
             }
 
             RaiseStateReceivedClient(data.characterNetworkId, data.state, data.serverTime);
+        }
+
+        private static int CountOwnerPoseInputs(
+            NetworkInputState[] inputs,
+            out NetworkInputState latestOwnerPose)
+        {
+            latestOwnerPose = default;
+            if (inputs == null) return 0;
+
+            int count = 0;
+            for (int i = 0; i < inputs.Length; i++)
+            {
+                if (!inputs[i].HasOwnerAuthorityPosition) continue;
+                latestOwnerPose = inputs[i];
+                count++;
+            }
+
+            return count;
         }
 
         // ------------------------------------------------------------------
