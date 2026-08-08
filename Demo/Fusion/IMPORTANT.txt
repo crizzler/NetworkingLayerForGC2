@@ -1,11 +1,37 @@
 PHOTON FUSION DEMO SCENES
 =========================
 
-These ten ready-to-open scenes mirror the Game Creator 2 PurrNet demo suite
+These thirteen ready-to-open scenes mirror the Game Creator 2 PurrNet demo suite
 while using the independent, server-authoritative Arawn Photon Fusion
 transport. Shared is the default; the session overlay exposes Host, Join Host,
-Create Shared, and Join Shared. Each scene uses a unique session name and a
-32 Hz-compatible project configuration.
+Create Shared, Create Shared With Exact ID, and Join Shared. Each scene uses a
+unique session name and a 32 Hz-compatible project configuration.
+
+The optional Advanced KCC example is installed separately from Game Creator >
+Install... as "Advanced KCC Examples". Install Photon Fusion 2.1.1 and Photon
+Advanced KCC 2.1.0 (or a compatible release accepted by the Fusion wizard)
+before opening it. Its player prefab uses the recommended Shared Owner Movement
+Authority policy and the scene includes a slope, incremental steps, a jump
+obstacle, and a collision slalom for movement testing. The package references
+the Photon addon but never redistributes Photon KCC source or binaries.
+
+The dedicated Stats example demonstrates authoritative changes from either
+peer. Press 1 to damage the local player's HP, 2 to heal it, or 3 to increase
+Strength. The on-screen observer displays every spawned player's replicated HP
+and Strength values so Host/Client and Shared Mode synchronization can be
+verified side by side.
+
+Create Shared now generates a unique Photon backend session and replaces the
+session field with its join code after connecting. Copy that generated code to
+the other player and use Join Shared. The authored scene session name is a
+readable prefix only; unlike Fusion's raw named Shared operation, Create Shared
+will not silently join an existing room with the same prefix.
+
+To choose a short exact ID such as EDL234, enter it and select Create Shared
+With Exact ID. That operation creates EDL234 verbatim and fails if the ID is
+already occupied in the selected Photon app version, region, and lobby. The
+separate Create or Join Shared API/GC2 operation retains Fusion's native exact
+create-or-join behavior for projects that deliberately want it.
 
 Configure a Fusion App ID in Photon App Settings before starting a live
 session. With no App ID the scenes remain editable, but live-session controls

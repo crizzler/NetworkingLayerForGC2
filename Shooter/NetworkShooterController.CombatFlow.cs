@@ -943,17 +943,74 @@ namespace Arawn.GameCreator2.Networking.Shooter
             // Rigidbody force) with no client request fallback.
             if (m_IsLocalClient)
             {
-                bool trustedHost =
-                    bridge.IsHost &&
+                if (bridge.IsHost)
+                {
+                    bool trustedHost =
+                        m_NetworkCharacter != null &&
+                        m_NetworkCharacter.IsHostInstance &&
+                        m_NetworkCharacter.IsOwnerInstance;
+                    reason = trustedHost
+                        ? "host-owner"
+                        : $"local-owner-role-invalid bridgeHost={bridge.IsHost} " +
+                          $"characterHost={(m_NetworkCharacter != null && m_NetworkCharacter.IsHostInstance)} " +
+                          $"characterOwner={(m_NetworkCharacter != null && m_NetworkCharacter.IsOwnerInstance)}";
+                    return trustedHost;
+                }
+
+                // A Shared-authority peer is the logical gameplay server and a graphical client,
+                // but it is deliberately not exposed as transport topology Host. Its local player
+                // may continue the authoritative GC2 hit only while the exact registered character
+                // is still owned by this peer according to the transport-native ownership check.
+                bool trustedLogicalAuthorityRole =
+                    bridge.IsClient &&
                     m_NetworkCharacter != null &&
+                    m_NetworkCharacter.IsServerInstance &&
                     m_NetworkCharacter.IsHostInstance &&
                     m_NetworkCharacter.IsOwnerInstance;
-                reason = trustedHost
-                    ? "host-owner"
-                    : $"local-owner-role-invalid bridgeHost={bridge.IsHost} " +
-                      $"characterHost={(m_NetworkCharacter != null && m_NetworkCharacter.IsHostInstance)} " +
-                      $"characterOwner={(m_NetworkCharacter != null && m_NetworkCharacter.IsOwnerInstance)}";
-                return trustedHost;
+                if (!trustedLogicalAuthorityRole)
+                {
+                    reason =
+                        $"local-logical-authority-role-invalid bridgeClient={bridge.IsClient} " +
+                        $"characterServer={(m_NetworkCharacter != null && m_NetworkCharacter.IsServerInstance)} " +
+                        $"characterHost={(m_NetworkCharacter != null && m_NetworkCharacter.IsHostInstance)} " +
+                        $"characterOwner={(m_NetworkCharacter != null && m_NetworkCharacter.IsOwnerInstance)}";
+                    return false;
+                }
+
+                Character registeredLocalCharacter = bridge.ResolveCharacter(NetworkId);
+                if (registeredLocalCharacter == null)
+                {
+                    reason = "local-logical-authority-character-not-registered";
+                    return false;
+                }
+                if (registeredLocalCharacter != m_Character)
+                {
+                    reason =
+                        $"local-logical-authority-character-mismatch registered={registeredLocalCharacter.name}";
+                    return false;
+                }
+
+                if (!bridge.TryGetLocalClientId(out uint localClientId) ||
+                    !NetworkTransportBridge.IsValidClientId(localClientId))
+                {
+                    reason = "local-logical-authority-client-id-unavailable";
+                    return false;
+                }
+
+                if (!bridge.TryVerifyActorOwnership(
+                        localClientId,
+                        NetworkId,
+                        out uint verifiedOwnerClientId) ||
+                    verifiedOwnerClientId != localClientId)
+                {
+                    reason =
+                        $"local-logical-authority-owner-invalid local={localClientId} " +
+                        $"verifiedOwner={verifiedOwnerClientId}";
+                    return false;
+                }
+
+                reason = $"local-logical-authority-owner owner={localClientId}";
+                return true;
             }
 
             Character registeredCharacter = bridge.ResolveCharacter(NetworkId);

@@ -118,6 +118,15 @@ void SendStatModifyResponseToClient(uint clientId, NetworkStatModifyResponse res
 
 ## Usage
 
+### Game Creator 2 Instructions
+
+Use **Network > Stats > Change Attribute** and **Network > Stats > Change Stat**
+inside a GC2 InstructionList when the change must be authoritative and replicated.
+Both Instructions default to **Local Network Player**, submit through that player's
+`NetworkStatsController`, and work with any configured Networking Layer transport,
+including Fusion and PurrNet. Do not use GC2's local-only Stats change Instructions
+for multiplayer gameplay that must be validated by the server or Shared authority.
+
 ### Modifying Stats (Client-Side)
 
 Instead of directly modifying GC2 stats:

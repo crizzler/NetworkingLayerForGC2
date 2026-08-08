@@ -42,6 +42,11 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                 : null;
         }
 
+        /// <summary>
+        /// Exact Photon room identifier for Host, Join, exact-ID Create, and Create-or-Join
+        /// operations. For <c>CreateSharedAsync</c>, this value is a readable prefix and the
+        /// bootstrap replaces it with a unique backend session name before starting Fusion.
+        /// </summary>
         public string SessionName { get; }
         public string Region { get; }
         public AuthenticationValues AuthenticationValues { get; }

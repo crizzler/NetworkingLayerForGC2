@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
@@ -28,6 +29,9 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
     [DisallowMultipleComponent]
     public sealed class FusionSessionBootstrap : MonoBehaviour
     {
+        private const int MaxSharedSessionNamePrefixLength = 64;
+        private const string ExactSharedCreationClaimPropertyKey = "gc2x";
+
         private readonly struct StartDiagnosticContext
         {
             public StartDiagnosticContext(
@@ -74,6 +78,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         [SerializeField] private NetworkRunner m_RunnerPrefab;
         [SerializeField] private FusionDefaultLaunchMode m_DefaultLaunchMode =
             FusionDefaultLaunchMode.Shared;
+        [Tooltip("Exact session name for Host/Join operations. Create Shared uses it as a readable prefix and generates a unique join code.")]
         [SerializeField] private string m_DefaultSessionName = "GC2-Fusion";
         [Tooltip("Optional Photon region code (for example: us, eu, asia, jp). Empty selects the best region.")]
         [SerializeField] private string m_Region = string.Empty;
@@ -218,12 +223,63 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             return BeginStartSession(GameMode.Client, options, false);
         }
 
+        /// <summary>
+        /// Creates a new Shared session using <paramref name="sessionName"/> as a readable
+        /// prefix. Read the resolved join code from <see cref="ActiveSession"/> after success.
+        /// </summary>
         public Task<StartGameResult> CreateSharedAsync(string sessionName)
         {
             return CreateSharedAsync(CreateDefaultStartOptions(sessionName));
         }
 
+        /// <summary>
+        /// Creates a new Shared session. Fusion's native named Shared start is create-or-join,
+        /// so this method first replaces <see cref="FusionSessionStartOptions.SessionName"/>
+        /// with a unique backend name. After a successful start, use
+        /// <see cref="TryGetActiveSession"/> to obtain the generated name clients must join.
+        /// </summary>
         public Task<StartGameResult> CreateSharedAsync(FusionSessionStartOptions options)
+        {
+            string uniqueSessionName = GenerateUniqueSharedSessionName(options.SessionName);
+            return CreateSharedWithExactSessionNameAsync(
+                CopyOptionsWithSessionName(options, uniqueSessionName));
+        }
+
+        /// <summary>
+        /// Creates a new Shared session with the exact requested Photon session name. If that
+        /// name already exists in the selected app version, region, and lobby, the start fails
+        /// instead of joining the existing session.
+        /// </summary>
+        public Task<StartGameResult> CreateSharedWithExactSessionNameAsync(string sessionName)
+        {
+            return CreateSharedWithExactSessionNameAsync(
+                CreateDefaultStartOptions(sessionName));
+        }
+
+        /// <inheritdoc cref="CreateSharedWithExactSessionNameAsync(string)"/>
+        public Task<StartGameResult> CreateSharedWithExactSessionNameAsync(
+            FusionSessionStartOptions options)
+        {
+            return BeginStartSession(
+                GameMode.Shared,
+                options,
+                true,
+                true);
+        }
+
+        /// <summary>
+        /// Starts Shared Mode with an exact Photon session name. Photon joins the existing
+        /// session when that name is already present, or creates it when it is absent.
+        /// Prefer <see cref="CreateSharedAsync(string)"/> for a true new-session action and
+        /// <see cref="JoinSharedAsync(string)"/> for a join-only action.
+        /// </summary>
+        public Task<StartGameResult> CreateOrJoinSharedAsync(string sessionName)
+        {
+            return CreateOrJoinSharedAsync(CreateDefaultStartOptions(sessionName));
+        }
+
+        /// <inheritdoc cref="CreateOrJoinSharedAsync(string)"/>
+        public Task<StartGameResult> CreateOrJoinSharedAsync(FusionSessionStartOptions options)
         {
             return BeginStartSession(GameMode.Shared, options, true);
         }
@@ -236,6 +292,28 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         public Task<StartGameResult> JoinSharedAsync(FusionSessionStartOptions options)
         {
             return BeginStartSession(GameMode.Shared, options, false);
+        }
+
+        /// <summary>
+        /// Generates the unique Photon backend name used by a new Shared session. The supplied
+        /// value is retained as a readable prefix; it is not used as an exact room identifier.
+        /// </summary>
+        public static string GenerateUniqueSharedSessionName(string sessionNamePrefix)
+        {
+            if (string.IsNullOrWhiteSpace(sessionNamePrefix))
+            {
+                throw new ArgumentException(
+                    "A non-empty Fusion Shared session name prefix is required.",
+                    nameof(sessionNamePrefix));
+            }
+
+            string prefix = sessionNamePrefix.Trim();
+            if (prefix.Length > MaxSharedSessionNamePrefixLength)
+            {
+                prefix = prefix.Substring(0, MaxSharedSessionNamePrefixLength);
+            }
+
+            return $"{prefix}-{Guid.NewGuid():N}";
         }
 
         public Task<StartGameResult> StartDefaultAsync()
@@ -391,8 +469,17 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         private Task<StartGameResult> BeginStartSession(
             GameMode gameMode,
             FusionSessionStartOptions options,
-            bool allowSessionCreation)
+            bool allowSessionCreation,
+            bool requireNewExactSharedSessionName = false)
         {
+            if (requireNewExactSharedSessionName &&
+                (gameMode != GameMode.Shared || !allowSessionCreation))
+            {
+                throw new ArgumentException(
+                    "Exact-name create-only matching is supported only for a creating Shared session.",
+                    nameof(requireNewExactSharedSessionName));
+            }
+
             if (m_StartInProgress ||
                 m_SessionLifecycleState == FusionSessionLifecycleState.Starting)
             {
@@ -431,9 +518,9 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                 Debug.LogWarning(
                     "[FusionSessionBootstrap] Best Region is automatic and may resolve " +
                     "differently on each device. Named sessions are region-scoped; for a " +
-                    "direct Host/Join or Create/Join Shared workflow, select the same explicit " +
-                    "region on every peer or advertise the creator's resolved region through " +
-                    "your lobby/invite service.",
+                    "direct Host/Join, Join Shared, or Create-or-Join Shared workflow, select " +
+                    "the same explicit region on every peer or advertise the creator's " +
+                    "resolved region through your lobby/invite service.",
                     this);
             }
             options = new FusionSessionStartOptions(
@@ -468,15 +555,33 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                     gameMode,
                     options,
                     allowSessionCreation,
+                    requireNewExactSharedSessionName,
                     m_StartCancellation);
             PublishSessionLifecycleStateChanged(FusionSessionLifecycleState.Starting);
             return m_ActiveStartTask;
+        }
+
+        private static FusionSessionStartOptions CopyOptionsWithSessionName(
+            FusionSessionStartOptions options,
+            string sessionName)
+        {
+            return new FusionSessionStartOptions(
+                sessionName,
+                options.Region,
+                options.AuthenticationValues,
+                options.ForcePhotonRelay,
+                options.IsOpen,
+                options.IsVisible,
+                options.CustomLobbyName,
+                options.SessionProperties,
+                options.MaxPlayers);
         }
 
         private async Task<StartGameResult> StartSessionAsync(
             GameMode gameMode,
             FusionSessionStartOptions options,
             bool allowSessionCreation,
+            bool requireNewExactSharedSessionName,
             CancellationTokenSource startCancellation)
         {
             if (m_StartInProgress)
@@ -580,10 +685,33 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
 
                 EnsureRuntimeProjectConfiguration();
 
+                string startGameSessionName = options.SessionName;
+                Func<string> sessionNameGenerator = null;
+                Dictionary<string, SessionProperty> sessionProperties =
+                    options.CopySessionProperties();
+                if (requireNewExactSharedSessionName)
+                {
+                    // Fusion normally treats a named Shared start as create-or-join. Starting
+                    // through random matchmaking with an attempt-unique property prevents a
+                    // match, while SessionNameGenerator requests the exact caller-owned ID for
+                    // the create step. Photon then reports a collision instead of joining it.
+                    string exactSessionName = options.SessionName;
+                    string creationClaim = Guid.NewGuid().ToString("N");
+                    startGameSessionName = null;
+                    sessionNameGenerator = () => exactSessionName;
+                    if (sessionProperties == null)
+                    {
+                        sessionProperties = new Dictionary<string, SessionProperty>();
+                    }
+                    sessionProperties[ExactSharedCreationClaimPropertyKey] =
+                        SessionProperty.Convert(creationClaim);
+                }
+
                 var args = new StartGameArgs
                 {
                     GameMode = gameMode,
-                    SessionName = options.SessionName,
+                    SessionName = startGameSessionName,
+                    SessionNameGenerator = sessionNameGenerator,
                     PlayerCount = options.MaxPlayers ?? Mathf.Max(1, m_MaxPlayers),
                     EnableClientSessionCreation = allowSessionCreation,
                     SceneManager = sceneManager,
@@ -591,7 +719,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                     Scene = sceneInfo,
                     AuthValues = authenticationValues,
                     CustomLobbyName = options.CustomLobbyName,
-                    SessionProperties = options.CopySessionProperties(),
+                    SessionProperties = sessionProperties,
                     DisableNATPunchthrough =
                         gameMode != GameMode.Shared && options.ForcePhotonRelay,
                     StartGameCancellationToken = startCancellation.Token

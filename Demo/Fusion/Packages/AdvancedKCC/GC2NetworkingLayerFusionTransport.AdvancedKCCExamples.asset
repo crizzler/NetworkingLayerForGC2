@@ -1,0 +1,47 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 7734bdb5c6ff542a7a94b0aec1b2782c, type: 3}
+  m_Name: GC2NetworkingLayerFusionTransport.AdvancedKCCExamples
+  m_EditorClassIdentifier: GameCreator.Editor.Core::GameCreator.Editor.Installs.Installer
+  m_Install:
+    m_Name: Advanced KCC Examples
+    m_Module: GC2 Networking Layer Fusion Transport
+    m_Description: Optional Photon Fusion Advanced KCC movement demo for Game Creator
+      2. Requires Photon Fusion 2.1.1 and Photon Advanced KCC 2.1.0 (or a compatible
+      release) before opening the demo.
+    m_Author: Arawn
+    m_Version:
+      major: 1
+      minor: 0
+      patch: 0
+    m_Complexity: 3
+    m_Dependencies:
+    - m_ID: GC2NetworkingLayerFusionTransport.Assets
+      m_MinVersion:
+        major: 1
+        minor: 0
+        patch: 0
+    - m_ID: GameCreator.Characters
+      m_MinVersion:
+        major: 1
+        minor: 3
+        patch: 15
+    - m_ID: GameCreator.Blockout
+      m_MinVersion:
+        major: 1
+        minor: 4
+        patch: 10
+    - m_ID: GameCreator.Examples
+      m_MinVersion:
+        major: 1
+        minor: 9
+        patch: 26

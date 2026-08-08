@@ -67,6 +67,8 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
             "Assets/Photon/Fusion/Resources/NetworkProjectConfig.fusion";
         private const string RuntimeAssemblyName =
             FusionSceneSetupValidation.RuntimeAssemblyName;
+        private const string ProjectRuntimeAssemblyName =
+            FusionSceneSetupValidation.ProjectRuntimeAssemblyName;
         private const string FusionLobbyServiceType =
             "Arawn.GameCreator2.Networking.Transport.Fusion.FusionLobbyService, " +
             RuntimeAssemblyName;
@@ -173,6 +175,8 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
         private int m_ExpectedPlayers = 4;
         private NetworkSessionPreset m_SessionPreset = NetworkSessionPreset.Standard;
         private NetworkPredictionBackend m_PredictionBackend = NetworkPredictionBackend.FusionNative;
+        private FusionKccSharedAuthorityMode m_KccSharedAuthorityMode =
+            FusionKccSharedAuthorityMode.OwnerMovementAuthority;
 
         private bool m_ModuleStats;
         private bool m_ModuleInventory;
@@ -213,6 +217,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
         private string m_RootName = "Fusion Session";
 
         private Vector2 m_Scroll;
+        private bool m_KccDefineRefreshQueued;
 
         [MenuItem("Game Creator/Networking Layer/Fusion Scene Setup Wizard", priority = 2)]
         public static void Open()
@@ -316,7 +321,8 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                     FusionSetupReport report = FusionSceneSetupValidation.Validate(
                         m_PlayerPrefab,
                         false,
-                        m_PredictionBackend);
+                        m_PredictionBackend,
+                        m_KccSharedAuthorityMode);
                     bool runnerSetupConflict = TryGetRunnerSetupConflict(out _);
                     bool modulePreflightError =
                         HasSelectedModulePreflightErrors(out _);
@@ -355,24 +361,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
             m_ExpectedPlayers = EditorGUILayout.IntSlider("Expected Players", m_ExpectedPlayers, 2, 200);
             m_SessionPreset =
                 (NetworkSessionPreset)EditorGUILayout.EnumPopup("Session Preset", m_SessionPreset);
-            if (m_PredictionBackend != NetworkPredictionBackend.BuiltIn &&
-                m_PredictionBackend != NetworkPredictionBackend.FusionNative)
-            {
-                m_PredictionBackend = NetworkPredictionBackend.FusionNative;
-            }
-
-            int predictionChoice = m_PredictionBackend == NetworkPredictionBackend.BuiltIn ? 1 : 0;
-            predictionChoice = EditorGUILayout.Popup(
-                new GUIContent(
-                    "Prediction Backend",
-                    "Fusion Native runs GC2 movement inside Fusion ticks and uses Fusion rollback, " +
-                    "resimulation, and NetworkTRSP render interpolation. Built-in Legacy retains " +
-                    "the transport-neutral RPC snapshot movement path for compatibility."),
-                predictionChoice,
-                new[] { "Fusion Native (Recommended)", "Built-in Legacy" });
-            m_PredictionBackend = predictionChoice == 0
-                ? NetworkPredictionBackend.FusionNative
-                : NetworkPredictionBackend.BuiltIn;
+            DrawPredictionBackendSelector();
             m_RootName = EditorGUILayout.TextField("Scene Root Name", m_RootName);
 
             EditorGUILayout.Space(8);
@@ -380,6 +369,136 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                 "The generated transport always supports both Host and Shared sessions. " +
                 "Templates only select GC2 modules and recommended defaults.",
                 MessageType.None);
+        }
+
+        private void DrawPredictionBackendSelector()
+        {
+            QueueKccDefineRefreshIfNeeded();
+            GUIContent label = new GUIContent(
+                "Prediction Backend",
+                "Fusion Native runs GC2 movement inside Fusion ticks. Fusion Advanced KCC " +
+                "uses Photon's optional Advanced KCC addon through a GC2 driver. Built-in " +
+                "Legacy retains the transport-neutral RPC snapshot path for compatibility.");
+
+            bool kccAvailable = FusionKccEditorIntegration.TryGetAvailableExtension(
+                out _,
+                out string unavailableReason);
+            if (kccAvailable)
+            {
+                if (m_PredictionBackend != NetworkPredictionBackend.FusionNative &&
+                    m_PredictionBackend != NetworkPredictionBackend.FusionKCC &&
+                    m_PredictionBackend != NetworkPredictionBackend.BuiltIn)
+                {
+                    m_PredictionBackend = NetworkPredictionBackend.FusionNative;
+                }
+
+                int choice = m_PredictionBackend switch
+                {
+                    NetworkPredictionBackend.FusionKCC => 1,
+                    NetworkPredictionBackend.BuiltIn => 2,
+                    _ => 0
+                };
+                choice = EditorGUILayout.Popup(
+                    label,
+                    choice,
+                    new[]
+                    {
+                        "Fusion Native (Recommended)",
+                        "Fusion Advanced KCC (Optional Addon)",
+                        "Built-in Legacy"
+                    });
+                m_PredictionBackend = choice switch
+                {
+                    1 => NetworkPredictionBackend.FusionKCC,
+                    2 => NetworkPredictionBackend.BuiltIn,
+                    _ => NetworkPredictionBackend.FusionNative
+                };
+            }
+            else
+            {
+                // A serialized KCC selection must not leave the wizard in an unselectable state
+                // after the optional addon is removed. The prefab itself is left untouched until
+                // the user explicitly applies another backend.
+                if (m_PredictionBackend == NetworkPredictionBackend.FusionKCC ||
+                    (m_PredictionBackend != NetworkPredictionBackend.FusionNative &&
+                     m_PredictionBackend != NetworkPredictionBackend.BuiltIn))
+                {
+                    m_PredictionBackend = NetworkPredictionBackend.FusionNative;
+                }
+
+                int predictionChoice =
+                    m_PredictionBackend == NetworkPredictionBackend.BuiltIn ? 1 : 0;
+                predictionChoice = EditorGUILayout.Popup(
+                    label,
+                    predictionChoice,
+                    new[] { "Fusion Native (Recommended)", "Built-in Legacy" });
+                m_PredictionBackend = predictionChoice == 0
+                    ? NetworkPredictionBackend.FusionNative
+                    : NetworkPredictionBackend.BuiltIn;
+
+                using (new EditorGUI.DisabledScope(true))
+                {
+                    EditorGUILayout.ToggleLeft(
+                        "Fusion Advanced KCC (Optional Addon)",
+                        false);
+                }
+                EditorGUILayout.HelpBox(unavailableReason, MessageType.Info);
+            }
+
+            if (m_PredictionBackend != NetworkPredictionBackend.FusionKCC) return;
+
+            int authorityChoice = m_KccSharedAuthorityMode ==
+                                  FusionKccSharedAuthorityMode.SharedMasterMovementAuthority
+                ? 1
+                : 0;
+            authorityChoice = EditorGUILayout.Popup(
+                new GUIContent(
+                    "KCC Shared Authority",
+                    "Select who advances KCC movement in Fusion Shared Mode. This does not " +
+                    "change Host/Client authority."),
+                authorityChoice,
+                new[]
+                {
+                    "Owner Movement Authority (Recommended)",
+                    "Shared Master Movement Authority"
+                });
+            m_KccSharedAuthorityMode = authorityChoice == 1
+                ? FusionKccSharedAuthorityMode.SharedMasterMovementAuthority
+                : FusionKccSharedAuthorityMode.OwnerMovementAuthority;
+            EditorGUILayout.HelpBox(
+                m_KccSharedAuthorityMode == FusionKccSharedAuthorityMode.OwnerMovementAuthority
+                    ? "In Shared Mode each player owns, predicts, and advances its own KCC. " +
+                      "This is Photon's native Shared authority model and the recommended option."
+                    : "In Shared Mode the Shared master advances movement from validated owner " +
+                      "intent. Choose this only when the project requires centralized movement " +
+                      "authority; it adds an extra routing step for remote owners.",
+                MessageType.None);
+        }
+
+        private void QueueKccDefineRefreshIfNeeded()
+        {
+            if (m_KccDefineRefreshQueued ||
+                !FusionKccEditorIntegration.IsApiInstalled ||
+                GC2NetworkingDefineSymbols.IsFusionKccSymbolDefinedForCurrentBuildTarget())
+            {
+                return;
+            }
+
+            m_KccDefineRefreshQueued = true;
+            EditorApplication.delayCall += () =>
+            {
+                if (this == null) return;
+                if (EditorApplication.isCompiling || EditorApplication.isUpdating)
+                {
+                    m_KccDefineRefreshQueued = false;
+                    Repaint();
+                    return;
+                }
+
+                GC2NetworkingDefineSymbols.RefreshNow();
+                m_KccDefineRefreshQueued = false;
+                Repaint();
+            };
         }
 
         private void DrawModulesPage()
@@ -424,7 +543,13 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
             m_RunnerSetup = (RunnerSetup)EditorGUILayout.EnumPopup("Runner Setup", m_RunnerSetup);
             m_DefaultLaunchMode =
                 (DefaultLaunchMode)EditorGUILayout.EnumPopup("Demo Default Mode", m_DefaultLaunchMode);
-            m_SessionName = EditorGUILayout.TextField("Session Name", m_SessionName);
+            m_SessionName = EditorGUILayout.TextField(
+                new GUIContent(
+                    "Session Name / Shared Prefix",
+                    "Host/Client uses this exact Photon session name. Create Shared keeps it " +
+                    "as a readable prefix and generates a unique join code at runtime. The " +
+                    "runtime UI also offers Create Shared With Exact ID for caller-chosen codes."),
+                m_SessionName);
             m_Region = FusionRegionCatalog.DrawPopup(
                 new GUIContent(
                     "Region",
@@ -449,7 +574,10 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
             {
                 EditorGUILayout.HelpBox(
                     "Shared Mode always uses Photon Cloud Relay; the force-relay option is " +
-                    "retained for Host/Client starts made by the same bootstrap.",
+                    "retained for Host/Client starts made by the same bootstrap. Create Shared " +
+                    "generates a unique backend session name; clients must use the resulting " +
+                    "Fusion Session Name (join code), not only this prefix. Create Shared With " +
+                    "Exact ID uses the entered value verbatim and fails if it is already in use.",
                     MessageType.Info);
             }
             m_TickRate = EditorGUILayout.IntSlider("Dual-Mode Tick Rate", m_TickRate, 10, 32);
@@ -608,7 +736,8 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
             FusionSetupReport report = FusionSceneSetupValidation.Validate(
                 m_PlayerPrefab,
                 false,
-                m_PredictionBackend);
+                m_PredictionBackend,
+                m_KccSharedAuthorityMode);
             bool runnerSetupConflict = TryGetRunnerSetupConflict(out string runnerConflict);
             EditorGUILayout.Space(8);
             EditorGUILayout.LabelField("Validation", EditorStyles.boldLabel);
@@ -675,8 +804,10 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                 HasSelectedModulePreflightErrors(out _))
             {
                 EditorGUILayout.HelpBox(
-                    "Resolve blocking errors before applying. The wizard never silently removes " +
-                    "Ninjutsu, PurrNet, NetworkTransform, or KCC components.",
+                    "Resolve blocking errors before applying. Selecting a different Arawn " +
+                    "movement backend explicitly converts its known Native/KCC components; " +
+                    "unrelated Ninjutsu, PurrNet, and custom movement components are never " +
+                    "silently removed.",
                     MessageType.Error);
             }
         }
@@ -696,13 +827,24 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
             bool playerUsesLocalVariables,
             bool createCharacterSelection,
             bool createChat,
-            bool createControlsUI = true)
+            bool createControlsUI = true,
+            NetworkPredictionBackend predictionBackend =
+                NetworkPredictionBackend.FusionNative,
+            FusionKccSharedAuthorityMode kccSharedAuthorityMode =
+                FusionKccSharedAuthorityMode.OwnerMovementAuthority)
         {
             m_Page = WizardPage.Review;
             m_Template = ProjectTemplate.Custom;
             m_ExpectedPlayers = 4;
             m_SessionPreset = NetworkSessionPreset.Standard;
-            m_PredictionBackend = NetworkPredictionBackend.FusionNative;
+            m_PredictionBackend = predictionBackend switch
+            {
+                NetworkPredictionBackend.FusionNative => predictionBackend,
+                NetworkPredictionBackend.FusionKCC => predictionBackend,
+                NetworkPredictionBackend.BuiltIn => predictionBackend,
+                _ => NetworkPredictionBackend.FusionNative
+            };
+            m_KccSharedAuthorityMode = kccSharedAuthorityMode;
 
             m_ModuleStats = stats;
             m_ModuleInventory = inventory;
@@ -778,7 +920,8 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
             FusionSetupReport preflight = FusionSceneSetupValidation.Validate(
                 m_PlayerPrefab,
                 false,
-                m_PredictionBackend);
+                m_PredictionBackend,
+                m_KccSharedAuthorityMode);
             bool runnerSetupConflict =
                 TryGetRunnerSetupConflict(out string runnerConflict);
             bool modulePreflightError =
@@ -885,7 +1028,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
 
                 EnsureOptionalSceneHelpers(root, bootstrap, spawner);
 
-                ApplyFusionProjectConfiguration();
+                bool weaveRegistrationChanged = ApplyFusionProjectConfiguration();
 
                 ConvertInventoryPickupsIfSelected();
 
@@ -896,7 +1039,8 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                     FusionSceneSetupValidation.Validate(
                         m_PlayerPrefab,
                         true,
-                        m_PredictionBackend);
+                        m_PredictionBackend,
+                        m_KccSharedAuthorityMode);
                 bool postModuleError =
                     HasSelectedModulePreflightErrors(out string postModuleReport);
                 bool postflightFailed = postflight.HasErrors || postModuleError;
@@ -918,6 +1062,21 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                 }
                 assetTransaction.Commit();
                 Undo.CollapseUndoOperations(undoGroup);
+                if (weaveRegistrationChanged)
+                {
+                    // Saving the Fusion config normally refreshes its weaver dependency.
+                    // Request a clean weave explicitly as well so batch/editor automation and
+                    // projects with the automatic trigger disabled receive generated RPC routes.
+                    ILWeaverUtils.RunWeaver();
+                    Debug.Log(
+                        $"[FusionSceneSetupWizard] Registered required Fusion assemblies " +
+                        $"('{RuntimeAssemblyName}'" +
+                        (m_PredictionBackend == NetworkPredictionBackend.FusionKCC
+                            ? $", '{ProjectRuntimeAssemblyName}'"
+                            : string.Empty) +
+                        ") for " +
+                        "Fusion weaving and requested a clean script compilation.");
+                }
                 if (showDialogs)
                 {
                     EditorUtility.DisplayDialog(
@@ -960,6 +1119,22 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                 FusionProjectConfigPath,
                 FusionProjectConfigPath + ".meta"
             };
+
+            try
+            {
+                string globalConfigPath =
+                    FusionGlobalScriptableObjectUtils.GetGlobalAssetPath<NetworkProjectConfigAsset>();
+                if (!string.IsNullOrWhiteSpace(globalConfigPath))
+                {
+                    paths.Add(globalConfigPath);
+                    paths.Add(globalConfigPath + ".meta");
+                }
+            }
+            catch
+            {
+                // Validation reports an unreadable/ambiguous global config. Keep the default
+                // path in the transaction so a normal first-time Fusion install remains safe.
+            }
 
             foreach (GameObject prefab in GetConfiguredPlayerPrefabs())
             {
@@ -1347,6 +1522,18 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
             string path = AssetDatabase.GetAssetPath(prefab);
             if (string.IsNullOrEmpty(path)) return null;
 
+            IFusionKccEditorSetupExtension kccExtension = null;
+            bool hasKccExtension = FusionKccEditorIntegration.TryGetAvailableExtension(
+                out kccExtension,
+                out string kccUnavailableReason);
+            if (m_PredictionBackend == NetworkPredictionBackend.FusionKCC &&
+                !hasKccExtension)
+            {
+                throw new InvalidOperationException(
+                    "Fusion Advanced KCC was selected, but its optional setup extension is " +
+                    $"unavailable: {kccUnavailableReason}");
+            }
+
             GameObject root = PrefabUtility.LoadPrefabContents(path);
             var changes = new List<string>();
 
@@ -1365,6 +1552,12 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                     // well so a prefab prepared and launched in the same editor update already
                     // exposes the native motor as its main spatial TRSP.
                     desired |= NetworkObjectFlags.HasMainNetworkTRSP;
+                }
+                else
+                {
+                    // Advanced KCC owns a nested NetworkObject/TRSP and Built-in Legacy has no
+                    // Fusion TRSP on the GC2 root. Do not retain a stale native bake marker.
+                    desired &= ~NetworkObjectFlags.HasMainNetworkTRSP;
                 }
                 if (networkObject.Flags != desired)
                 {
@@ -1401,12 +1594,21 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                     changes.Add("FusionNetworkIdentity");
                 if (m_PredictionBackend == NetworkPredictionBackend.FusionNative)
                 {
+                    RemoveOptionalKccSetup(root, kccExtension, changes);
+                    RemoveKccBackendProxies(root, changes, "Fusion Native");
+
                     if (EnsurePrefabComponent<FusionNativeNetworkCharacterMotor>(
                             root,
                             out FusionNativeNetworkCharacterMotor nativeMotor))
                     {
                         changes.Add("FusionNativeNetworkCharacterMotor");
                     }
+                    if (!nativeMotor.enabled)
+                    {
+                        nativeMotor.enabled = true;
+                        changes.Add("enabled FusionNativeNetworkCharacterMotor");
+                    }
+                    RemoveDuplicateNativeMotors(root, nativeMotor, changes);
 
                     Transform mannequin = character?.Animim?.Mannequin;
                     Transform presentationRoot = mannequin != null &&
@@ -1429,11 +1631,36 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                             : "cleared unsafe listen-host presentation root");
                     }
                 }
-                else if (root.TryGetComponent(
-                             out FusionNativeNetworkCharacterMotor legacyNativeMotor))
+                else if (m_PredictionBackend == NetworkPredictionBackend.FusionKCC)
                 {
-                    DestroyImmediate(legacyNativeMotor, true);
-                    changes.Add("removed FusionNativeNetworkCharacterMotor for Built-in Legacy");
+                    RemoveNativeMotors(root, changes, "Fusion Advanced KCC");
+                    FusionKccCharacterBackend kccBackend =
+                        EnsureSingleKccBackendProxy(root, changes);
+                    if (ConfigureKccBackend(kccBackend))
+                    {
+                        changes.Add("Fusion KCC Shared authority policy");
+                    }
+
+                    var options = new FusionKccEditorSetupOptions(
+                        m_KccSharedAuthorityMode);
+                    if (!kccExtension.ConfigurePlayerPrefab(
+                            root,
+                            options,
+                            changes,
+                            out string setupError))
+                    {
+                        throw new InvalidOperationException(
+                            string.IsNullOrWhiteSpace(setupError)
+                                ? "The optional Fusion Advanced KCC setup extension failed " +
+                                  $"to configure '{path}'."
+                                : setupError);
+                    }
+                }
+                else
+                {
+                    RemoveOptionalKccSetup(root, kccExtension, changes);
+                    RemoveKccBackendProxies(root, changes, "Built-in Legacy");
+                    RemoveNativeMotors(root, changes, "Built-in Legacy");
                 }
                 if (EnsurePrefabComponent<FusionNetworkCharacterAuto>(root, out _))
                     changes.Add("FusionNetworkCharacterAuto");
@@ -1472,6 +1699,225 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
             return changes.Count == 0
                 ? $"[FusionSceneSetupWizard] Player prefab '{path}' already has the selected setup."
                 : $"[FusionSceneSetupWizard] Prepared '{path}': {string.Join(", ", changes)}.";
+        }
+
+        private void RemoveOptionalKccSetup(
+            GameObject root,
+            IFusionKccEditorSetupExtension extension,
+            IList<string> changes)
+        {
+            if (extension == null)
+            {
+                // If the customer removed Advanced KCC, the define-guarded adapter types no
+                // longer exist and TypeCache cannot create the typed cleanup extension. The
+                // KCC-independent ownership marker remains available, so conversion can remove a
+                // wizard-created object without ever deleting an adopted customer hierarchy.
+                FusionKccCharacterBackend backend =
+                    root != null ? root.GetComponent<FusionKccCharacterBackend>() : null;
+                FusionKccSetupMarker[] setupMarkers = root != null
+                    ? root.GetComponentsInChildren<FusionKccSetupMarker>(true)
+                    : Array.Empty<FusionKccSetupMarker>();
+                if (setupMarkers.Length > 1)
+                {
+                    throw new InvalidOperationException(
+                        $"'{root.name}' contains multiple Fusion KCC ownership markers. " +
+                        "Reinstall KCC and normalize the prefab before converting it.");
+                }
+
+                FusionKccSetupMarker retainedMarker = setupMarkers.SingleOrDefault();
+                Transform orphanedMotor = retainedMarker != null
+                    ? retainedMarker.transform
+                    : root != null
+                        ? root.transform.Find("Fusion KCC Motor")
+                        : null;
+                bool hadKccArtifacts = backend != null || orphanedMotor != null;
+                bool restoredRootControllerSnapshot = false;
+                if (orphanedMotor != null)
+                {
+                    FusionKccSetupMarker marker =
+                        retainedMarker != null
+                            ? retainedMarker
+                            : orphanedMotor.GetComponent<FusionKccSetupMarker>();
+                    if (marker == null || !marker.MotorObjectCreatedByWizard)
+                    {
+                        throw new InvalidOperationException(
+                            $"'{root.name}' contains a custom/adopted Fusion KCC Motor. " +
+                            "Advanced KCC is unavailable, so the wizard cannot safely remove " +
+                            "that customer's hierarchy. Reinstall KCC to convert it or remove " +
+                            "the custom motor manually.");
+                    }
+
+                    bool restoreRootController = marker.HasRootControllerSnapshot &&
+                                                 marker.HadRootCharacterController;
+                    bool rootControllerWasEnabled =
+                        marker.OriginalRootCharacterControllerEnabled;
+                    restoredRootControllerSnapshot = marker.HasRootControllerSnapshot;
+
+                    CharacterController originalController =
+                        root.GetComponent<CharacterController>();
+                    if (restoreRootController && originalController == null)
+                    {
+                        throw new InvalidOperationException(
+                            $"'{root.name}' originally had a CharacterController, but that " +
+                            "component is now missing. The wizard stopped before removing the " +
+                            "orphaned KCC motor.");
+                    }
+
+                    foreach (GameObject processorObject in
+                             marker.WizardOwnedProcessorObjects ?? Array.Empty<GameObject>())
+                    {
+                        if (processorObject == null) continue;
+                        if (processorObject.transform.parent == orphanedMotor) continue;
+                        throw new InvalidOperationException(
+                            $"'{root.name}' has a wizard-owned KCC processor object " +
+                            $"('{processorObject.name}') outside its recorded motor hierarchy. " +
+                            "The wizard stopped before deleting anything. Reinstall KCC and " +
+                            "normalize the prefab first.");
+                    }
+
+                    DestroyImmediate(orphanedMotor.gameObject, true);
+                    changes?.Add(
+                        "removed the orphaned wizard-owned Fusion KCC Motor after addon removal");
+
+                    if (restoreRootController && originalController != null &&
+                        originalController.enabled != rootControllerWasEnabled)
+                    {
+                        originalController.enabled = rootControllerWasEnabled;
+                        EditorUtility.SetDirty(originalController);
+                        changes?.Add(
+                            rootControllerWasEnabled
+                                ? "restored the enabled CharacterController after KCC addon removal"
+                                : "restored the disabled CharacterController after KCC addon removal");
+                    }
+                }
+
+                CharacterController controller =
+                    root != null ? root.GetComponent<CharacterController>() : null;
+                if (hadKccArtifacts && !restoredRootControllerSnapshot && controller != null &&
+                    !controller.enabled)
+                {
+                    controller.enabled = true;
+                    EditorUtility.SetDirty(controller);
+                    changes?.Add(
+                        "re-enabled the CharacterController after KCC addon removal");
+                }
+                return;
+            }
+            if (extension.RemoveFromPlayerPrefab(root, changes, out string error)) return;
+
+            throw new InvalidOperationException(
+                string.IsNullOrWhiteSpace(error)
+                    ? $"The optional Fusion Advanced KCC setup extension failed to remove its " +
+                      $"components from '{root.name}'."
+                    : error);
+        }
+
+        private static FusionKccCharacterBackend EnsureSingleKccBackendProxy(
+            GameObject root,
+            IList<string> changes)
+        {
+            FusionKccCharacterBackend backend =
+                root.GetComponent<FusionKccCharacterBackend>();
+            if (backend == null)
+            {
+                backend = root.AddComponent<FusionKccCharacterBackend>();
+                changes.Add("FusionKccCharacterBackend");
+            }
+            if (!backend.enabled)
+            {
+                backend.enabled = true;
+                changes.Add("enabled FusionKccCharacterBackend");
+            }
+
+            FusionKccCharacterBackend[] all =
+                root.GetComponentsInChildren<FusionKccCharacterBackend>(true);
+            int removed = 0;
+            foreach (FusionKccCharacterBackend candidate in all)
+            {
+                if (candidate == null || candidate == backend) continue;
+                DestroyImmediate(candidate, true);
+                removed++;
+            }
+            if (removed > 0)
+            {
+                changes.Add($"removed {removed} duplicate FusionKccCharacterBackend component(s)");
+            }
+
+            return backend;
+        }
+
+        private bool ConfigureKccBackend(FusionKccCharacterBackend backend)
+        {
+            if (backend == null) return false;
+            var serialized = new SerializedObject(backend);
+            bool changed = SetEnum(
+                serialized,
+                "m_SharedAuthorityMode",
+                (int)m_KccSharedAuthorityMode);
+            if (!changed) return false;
+
+            serialized.ApplyModifiedPropertiesWithoutUndo();
+            EditorUtility.SetDirty(backend);
+            return true;
+        }
+
+        private static void RemoveKccBackendProxies(
+            GameObject root,
+            IList<string> changes,
+            string selectedBackend)
+        {
+            FusionKccCharacterBackend[] backends =
+                root.GetComponentsInChildren<FusionKccCharacterBackend>(true);
+            foreach (FusionKccCharacterBackend backend in backends)
+            {
+                if (backend != null) DestroyImmediate(backend, true);
+            }
+            if (backends.Length > 0)
+            {
+                changes.Add(
+                    $"removed {backends.Length} FusionKccCharacterBackend component(s) for " +
+                    selectedBackend);
+            }
+        }
+
+        private static void RemoveNativeMotors(
+            GameObject root,
+            IList<string> changes,
+            string selectedBackend)
+        {
+            FusionNativeNetworkCharacterMotor[] motors =
+                root.GetComponentsInChildren<FusionNativeNetworkCharacterMotor>(true);
+            foreach (FusionNativeNetworkCharacterMotor motor in motors)
+            {
+                if (motor != null) DestroyImmediate(motor, true);
+            }
+            if (motors.Length > 0)
+            {
+                changes.Add(
+                    $"removed {motors.Length} FusionNativeNetworkCharacterMotor component(s) " +
+                    $"for {selectedBackend}");
+            }
+        }
+
+        private static void RemoveDuplicateNativeMotors(
+            GameObject root,
+            FusionNativeNetworkCharacterMotor retainedMotor,
+            IList<string> changes)
+        {
+            FusionNativeNetworkCharacterMotor[] motors =
+                root.GetComponentsInChildren<FusionNativeNetworkCharacterMotor>(true);
+            int removed = 0;
+            foreach (FusionNativeNetworkCharacterMotor motor in motors)
+            {
+                if (motor == null || motor == retainedMotor) continue;
+                DestroyImmediate(motor, true);
+                removed++;
+            }
+            if (removed > 0)
+            {
+                changes.Add(
+                    $"removed {removed} duplicate FusionNativeNetworkCharacterMotor component(s)");
+            }
         }
 
         private void EnsureSelectedPrefabControllers(GameObject root, List<string> changes)
@@ -1538,7 +1984,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
             return changed;
         }
 
-        private void ApplyFusionProjectConfiguration()
+        private bool ApplyFusionProjectConfiguration()
         {
             var config = new NetworkProjectConfig();
             EditorJsonUtility.FromJsonOverwrite(
@@ -1563,12 +2009,16 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                 NetworkConfiguration.ReliableDataTransfers.ClientToServer |
                 NetworkConfiguration.ReliableDataTransfers.ClientToClientWithServerProxy;
 
-            var assemblies = new List<string>(config.AssembliesToWeave ?? Array.Empty<string>());
-            if (!assemblies.Contains(RuntimeAssemblyName, StringComparer.Ordinal))
+            bool weaveRegistrationChanged = EnsureRuntimeAssemblyWeaveEntry(config);
+            if (m_PredictionBackend == NetworkPredictionBackend.FusionKCC)
             {
-                assemblies.Add(RuntimeAssemblyName);
+                // Advanced KCC and the optional adapter intentionally compile into the project
+                // assembly, because Photon's addon has no runtime asmdef. It contains Networked
+                // state and RPCs and therefore must be explicitly woven.
+                weaveRegistrationChanged |= EnsureAssemblyWeaveEntry(
+                    config,
+                    ProjectRuntimeAssemblyName);
             }
-            config.AssembliesToWeave = assemblies.Distinct(StringComparer.Ordinal).ToArray();
 
             NetworkProjectConfigUtilities.SaveGlobalConfig(config);
             NetworkProjectConfig.UnloadGlobal();
@@ -1578,6 +2028,82 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                 EnsureFusionPrefabLabel(prefab);
             }
             NetworkProjectConfigUtilities.RebuildPrefabTable();
+            return weaveRegistrationChanged;
+        }
+
+        private static bool EnsureRuntimeAssemblyWeaveEntry(NetworkProjectConfig config)
+        {
+            if (config == null) throw new ArgumentNullException(nameof(config));
+
+            string[] current = config.AssembliesToWeave ?? Array.Empty<string>();
+            var normalized = new List<string>(current.Length + 1);
+            bool found = false;
+
+            foreach (string assemblyName in current)
+            {
+                if (string.Equals(
+                        assemblyName,
+                        RuntimeAssemblyName,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    if (!found)
+                    {
+                        normalized.Add(RuntimeAssemblyName);
+                        found = true;
+                    }
+
+                    // Drop additional case variants of our own entry. Do not normalize or
+                    // deduplicate entries owned by Fusion or another customer integration.
+                    continue;
+                }
+
+                normalized.Add(assemblyName);
+            }
+
+            if (!found) normalized.Add(RuntimeAssemblyName);
+
+            string[] result = normalized.ToArray();
+            bool changed = !current.SequenceEqual(result, StringComparer.Ordinal);
+            config.AssembliesToWeave = result;
+            return changed;
+        }
+
+        private static bool EnsureAssemblyWeaveEntry(
+            NetworkProjectConfig config,
+            string requiredAssemblyName)
+        {
+            if (config == null) throw new ArgumentNullException(nameof(config));
+            if (string.IsNullOrWhiteSpace(requiredAssemblyName))
+                throw new ArgumentException(
+                    "A non-empty Fusion weave assembly name is required.",
+                    nameof(requiredAssemblyName));
+
+            string[] current = config.AssembliesToWeave ?? Array.Empty<string>();
+            var normalized = new List<string>(current.Length + 1);
+            bool found = false;
+            foreach (string assemblyName in current)
+            {
+                if (string.Equals(
+                        assemblyName,
+                        requiredAssemblyName,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    if (!found)
+                    {
+                        normalized.Add(requiredAssemblyName);
+                        found = true;
+                    }
+                    continue;
+                }
+
+                normalized.Add(assemblyName);
+            }
+            if (!found) normalized.Add(requiredAssemblyName);
+
+            string[] result = normalized.ToArray();
+            bool changed = !current.SequenceEqual(result, StringComparer.Ordinal);
+            config.AssembliesToWeave = result;
+            return changed;
         }
 
         private bool EnsureRequiredPatches()
@@ -2043,7 +2569,10 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                 {
                     if (prefab == m_PlayerPrefab) continue;
                     FusionSetupReport prefabReport =
-                        FusionSceneSetupValidation.ValidatePlayerPrefabOnly(prefab);
+                        FusionSceneSetupValidation.ValidatePlayerPrefabOnly(
+                            prefab,
+                            m_PredictionBackend,
+                            m_KccSharedAuthorityMode);
                     if (prefabReport.HasErrors)
                     {
                         errors.Add(
@@ -2173,7 +2702,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
             return false;
         }
 
-        private static bool IsCompetingSceneComponent(MonoBehaviour behaviour)
+        private bool IsCompetingSceneComponent(MonoBehaviour behaviour)
         {
             if (behaviour == null || !behaviour.isActiveAndEnabled) return false;
             Type type = behaviour.GetType();
@@ -2190,6 +2719,18 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
             {
                 return true;
             }
+
+            bool isSelectedAdvancedKcc =
+                m_PredictionBackend == NetworkPredictionBackend.FusionKCC &&
+                IsKnownAdvancedKccIntegrationComponent(behaviour);
+            if (isSelectedAdvancedKcc) return false;
+
+            // An adopted customer KCC setup is parked, not removed, when the prefab is
+            // converted to another backend. Its processors may be referenced as sibling
+            // components or provider GameObjects, so they are not necessarily descendants of
+            // the marked motor. Preserve those exact recorded references instead of disabling
+            // them as competing scene movement components.
+            if (IsParkedCustomerAdvancedKccComponent(behaviour)) return false;
 
             if (behaviour is NetworkTRSP &&
                 behaviour is not FusionNativeNetworkCharacterMotor &&
@@ -2210,7 +2751,112 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                    behaviour.GetComponentInParent<NetworkCharacter>(true) != null;
         }
 
-        private static void DisableConflictingSceneComponents()
+        private static bool IsParkedCustomerAdvancedKccComponent(Component component)
+        {
+            if (component == null) return false;
+            string typeNamespace = component.GetType().Namespace ?? string.Empty;
+            if (!typeNamespace.StartsWith("Fusion.Addons.KCC", StringComparison.Ordinal) &&
+                !typeNamespace.StartsWith(
+                    "Arawn.GameCreator2.Networking.Transport.Fusion.KCC",
+                    StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            NetworkCharacter networkCharacter =
+                component.GetComponentInParent<NetworkCharacter>(true);
+            if (networkCharacter == null) return false;
+
+            Transform current = component.transform;
+            while (current != null)
+            {
+                FusionKccSetupMarker marker =
+                    current.GetComponent<FusionKccSetupMarker>();
+                if (marker != null && marker.AdoptedSetupParked) return true;
+                if (current.gameObject == networkCharacter.gameObject) break;
+                current = current.parent;
+            }
+
+            foreach (FusionKccSetupMarker marker in
+                     networkCharacter.GetComponentsInChildren<FusionKccSetupMarker>(true))
+            {
+                if (marker == null || !marker.AdoptedSetupParked) continue;
+                foreach (UnityEngine.Object processorObject in
+                         marker.OriginalKccProcessorObjects ??
+                         Array.Empty<UnityEngine.Object>())
+                {
+                    if (processorObject == component ||
+                        processorObject == component.gameObject)
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        private static bool IsKnownAdvancedKccIntegrationComponent(Component component)
+        {
+            if (component == null) return false;
+            Type type = component.GetType();
+            string typeNamespace = type.Namespace ?? string.Empty;
+            if (typeNamespace.StartsWith(
+                    "Arawn.GameCreator2.Networking.Transport.Fusion.KCC",
+                    StringComparison.Ordinal))
+            {
+                return true;
+            }
+            if (!typeNamespace.StartsWith("Fusion.Addons.KCC", StringComparison.Ordinal))
+                return false;
+
+            NetworkCharacter networkCharacter =
+                component.GetComponentInParent<NetworkCharacter>(true);
+            if (networkCharacter != null)
+            {
+                Component[] customerKccMotors = networkCharacter
+                    .GetComponentsInChildren<Component>(true)
+                    .Where(candidate =>
+                        candidate != null &&
+                        string.Equals(
+                            candidate.GetType().FullName,
+                            "Fusion.Addons.KCC.KCC",
+                            StringComparison.Ordinal))
+                    .ToArray();
+                if (customerKccMotors.Length == 1 &&
+                    customerKccMotors[0].transform.parent == networkCharacter.transform)
+                {
+                    return true;
+                }
+            }
+
+            Transform current = component.transform;
+            while (current != null)
+            {
+                foreach (Component sibling in current.GetComponents<Component>())
+                {
+                    if (sibling == null) continue;
+                    string siblingNamespace = sibling.GetType().Namespace ?? string.Empty;
+                    if (siblingNamespace.StartsWith(
+                            "Arawn.GameCreator2.Networking.Transport.Fusion.KCC",
+                            StringComparison.Ordinal))
+                    {
+                        return true;
+                    }
+                }
+
+                if (networkCharacter != null &&
+                    current.gameObject == networkCharacter.gameObject)
+                {
+                    break;
+                }
+                current = current.parent;
+            }
+
+            return false;
+        }
+
+        private void DisableConflictingSceneComponents()
         {
             foreach (MonoBehaviour behaviour in
                      FusionSceneSetupValidation.FindSceneComponents<MonoBehaviour>()
@@ -2422,6 +3068,9 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                 $"Expected players: {m_ExpectedPlayers}\n" +
                 $"Tick rate: {m_TickRate} Hz\n" +
                 $"Prediction backend: {m_PredictionBackend}\n" +
+                (m_PredictionBackend == NetworkPredictionBackend.FusionKCC
+                    ? $"KCC Shared authority: {m_KccSharedAuthorityMode}\n"
+                    : string.Empty) +
                 $"Session profile: {m_SessionPreset}\n" +
                 $"Generated profile path: {SessionProfilePath}\n" +
                 $"Scene manager ownership: {(m_CreateSceneManager ? "Wizard/default manager" : "External owner")}\n" +

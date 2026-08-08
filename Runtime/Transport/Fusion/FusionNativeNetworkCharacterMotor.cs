@@ -17,6 +17,9 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         public const int FlagJump = 1;
         public const int FlagOwnerPose = 2;
         public const int FlagContinuousOwnerPose = 4;
+        public const int FlagResetVerticalVelocity = 8;
+        public const int FlagCollisionChanged = 16;
+        public const int FlagCollisionEnabled = 32;
 
         public Vector2 Move;
         public float Yaw;
@@ -31,6 +34,10 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         public bool HasOwnerPose => (Flags & FlagOwnerPose) != 0;
         public bool HasContinuousOwnerPose =>
             HasOwnerPose && (Flags & FlagContinuousOwnerPose) != 0;
+        public bool HasResetVerticalVelocity =>
+            (Flags & FlagResetVerticalVelocity) != 0;
+        public bool HasCollisionChange => (Flags & FlagCollisionChanged) != 0;
+        public bool CollisionEnabled => (Flags & FlagCollisionEnabled) != 0;
     }
 
     /// <summary>
@@ -114,7 +121,10 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         IBeforeCopyPreviousState,
         IStateAuthorityChanged,
         INetworkCharacterPredictionBackend,
-        INetworkAuthoritativePoseProvider
+        INetworkAuthoritativePoseProvider,
+        IFusionCharacterInputEndpoint,
+        IFusionSharedCharacterEndpoint,
+        IFusionSharedCharacterRunnerPump
     {
         private const int MotionFlagGrounded = 1;
         private const int MotionFlagJumping = 2;
@@ -125,6 +135,11 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         private const float LiveOwnerSimulationAdvancePositionTolerance = 0.005f;
         private const float LiveOwnerSimulationAdvanceRotationTolerance = 0.25f;
         private const float SharedPresentationPositionEpsilon = 0.0005f;
+
+        public int LastAppliedSharedTransientSourceTick =>
+            Object != null && Object.IsValid
+                ? NativeState.LastAppliedSharedSourceTick
+                : int.MinValue;
         private const float SharedPresentationRotationEpsilon = 0.05f;
         private const int SharedInputTickOffsetDiagnosticThreshold = 8;
         private const int SharedTransientReceiveBacklogCapacity = 128;
@@ -270,6 +285,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             m_ListenHostPresentationVisualRoot;
         public bool UsesFusionInput => Runner != null && Runner.GameMode != GameMode.Shared;
         public bool UsesSharedIntentFallback => Runner != null && Runner.GameMode == GameMode.Shared;
+        public bool RequiresSharedLogicalOwnerProxyPump => true;
         internal bool IsRemoteProxyRole =>
             m_Role == NetworkCharacter.NetworkRole.RemoteClient;
         internal int CurrentSimulationTick => Runner != null ? Runner.Tick.Raw : 0;
@@ -1081,6 +1097,14 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                         input.SourceTick,
                         m_SharedTransientQueue.Count);
                 }
+                else if (localOwner && HasSharedTransientInput(input))
+                {
+                    // The Shared master can also be this character's logical owner. Its
+                    // locally captured one-shot bypasses the RPC receive queue, but still
+                    // needs the same application acknowledgement so the identity can retire
+                    // its migration-safe retry entry.
+                    NativeState.LastAppliedSharedSourceTick = input.SourceTick;
+                }
                 UpdateMotionState();
                 if (localOwner) CaptureSharedPredictedCurrentPose(tick);
                 return;
@@ -1113,7 +1137,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         /// invokes this from its runner-level simulation callback. The ordinary behaviour path
         /// also calls it for forward compatibility; the tick guard prevents two writers.
         /// </summary>
-        internal void SimulateSharedLogicalOwnerProxyTick(
+        public void SimulateSharedLogicalOwnerProxyTick(
             int tick,
             bool restorePredictedPose)
         {
@@ -1210,7 +1234,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         /// called only from the runner-level router while the local player object is not in the
         /// Fusion simulation set.
         /// </summary>
-        internal void RenderSharedLogicalOwnerProxy()
+        public void RenderSharedLogicalOwnerProxy()
         {
             if (!isActiveAndEnabled ||
                 !m_BackendInitialized || !m_HasInitialState || m_Driver == null ||
@@ -1361,15 +1385,16 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
 
         internal static bool HasSharedTransientInput(FusionNativeCharacterInput input)
         {
-            return (input.HasOwnerPose && !input.HasContinuousOwnerPose) || input.HasJump ||
-                   input.RootMotionWeight > 0.001f ||
-                   input.RootMotionDelta.sqrMagnitude > 0.000001f;
+            return FusionCharacterInputUtility.HasSharedTransientInput(input);
         }
 
         private static void ClearSharedTransientInput(
             ref FusionNativeCharacterInput input)
         {
-            input.Flags &= ~FusionNativeCharacterInput.FlagJump;
+            input.Flags &= ~(FusionNativeCharacterInput.FlagJump |
+                             FusionNativeCharacterInput.FlagResetVerticalVelocity |
+                             FusionNativeCharacterInput.FlagCollisionChanged |
+                             FusionNativeCharacterInput.FlagCollisionEnabled);
             if (!input.HasContinuousOwnerPose)
             {
                 input.Flags &= ~(FusionNativeCharacterInput.FlagOwnerPose |
@@ -1398,7 +1423,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                 (m_SharedPredictionStart + 1) % m_SharedPredictionHistory.Length;
         }
 
-        internal void AcceptSharedCharacterInput(
+        public void AcceptSharedCharacterInput(
             PlayerRef source,
             int trustedSourceTick,
             Vector2 move,
@@ -1476,7 +1501,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             }
         }
 
-        internal void AcceptSharedCharacterTransient(
+        public void AcceptSharedCharacterTransient(
             PlayerRef source,
             int trustedSourceTick,
             Vector2 move,
@@ -1525,6 +1550,20 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                     jumpForce);
                 return;
             }
+            if (sourceTick <= LastAppliedSharedTransientSourceTick)
+            {
+                LogSharedTransientRejection(
+                    $"already-applied(last={LastAppliedSharedTransientSourceTick})",
+                    source,
+                    trustedSourceTick,
+                    sourceTick,
+                    flags,
+                    ownerPosition,
+                    rootMotionDelta,
+                    rootMotionWeight,
+                    jumpForce);
+                return;
+            }
             if (!IsFinite(move) || !IsFinite(yaw) || !IsFinite(ownerPosition) ||
                 !IsFinite(rootMotionDelta) || !IsFinite(rootMotionWeight) ||
                 !IsFinite(jumpForce))
@@ -1549,7 +1588,10 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                 Yaw = Mathf.Repeat(yaw, 360f),
                 SourceTick = sourceTick,
                 Flags = flags & (FusionNativeCharacterInput.FlagJump |
-                                 FusionNativeCharacterInput.FlagOwnerPose),
+                                 FusionNativeCharacterInput.FlagOwnerPose |
+                                 FusionNativeCharacterInput.FlagResetVerticalVelocity |
+                                 FusionNativeCharacterInput.FlagCollisionChanged |
+                                 FusionNativeCharacterInput.FlagCollisionEnabled),
                 OwnerPosition = ownerPosition,
                 RootMotionDelta = rootMotionDelta,
                 RootMotionWeight = Mathf.Clamp01(rootMotionWeight),

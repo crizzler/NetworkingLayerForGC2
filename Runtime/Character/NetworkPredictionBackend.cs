@@ -18,7 +18,13 @@ namespace Arawn.GameCreator2.Networking
         /// Uses Fusion's tick simulation, rollback/resimulation, and NetworkTRSP render
         /// interpolation instead of the transport-neutral RPC snapshot movement path.
         /// </summary>
-        FusionNative = 2
+        FusionNative = 2,
+
+        /// <summary>
+        /// Uses Photon's optional Advanced KCC addon for Fusion-native prediction while a
+        /// transport-side proxy keeps the core Networking Layer independent from KCC.
+        /// </summary>
+        FusionKCC = 3
     }
 
     public interface INetworkCharacterPredictionBackend

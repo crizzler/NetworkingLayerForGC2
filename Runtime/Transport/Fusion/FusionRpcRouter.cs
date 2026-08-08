@@ -29,7 +29,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
 
             if (!TryResolveSharedLogicalOwnerProxy(
                     out NetworkObject playerObject,
-                    out FusionNativeNetworkCharacterMotor motor,
+                    out IFusionSharedCharacterRunnerPump sharedPump,
                     out string failure))
             {
                 ReportSharedOwnerResolveFailure(failure);
@@ -37,7 +37,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             }
 
             ClearSharedOwnerResolveFailure();
-            motor.SimulateSharedLogicalOwnerProxyTick(
+            sharedPump.SimulateSharedLogicalOwnerProxyTick(
                 Runner.Tick.Raw,
                 restorePredictedPose: true);
         }
@@ -46,7 +46,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         {
             if (!TryResolveSharedLogicalOwnerProxy(
                     out NetworkObject playerObject,
-                    out FusionNativeNetworkCharacterMotor motor,
+                    out IFusionSharedCharacterRunnerPump sharedPump,
                     out _))
             {
                 return;
@@ -56,17 +56,17 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             // is already active and remains the sole presentation writer.
             if (!playerObject.IsInSimulation)
             {
-                motor.RenderSharedLogicalOwnerProxy();
+                sharedPump.RenderSharedLogicalOwnerProxy();
             }
         }
 
         private bool TryResolveSharedLogicalOwnerProxy(
             out NetworkObject playerObject,
-            out FusionNativeNetworkCharacterMotor motor,
+            out IFusionSharedCharacterRunnerPump sharedPump,
             out string failure)
         {
             playerObject = null;
-            motor = null;
+            sharedPump = null;
             failure = string.Empty;
 
             if (Runner == null || !Runner.IsRunning || Runner.GameMode != GameMode.Shared)
@@ -125,14 +125,18 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                 return false;
             }
 
-            motor = playerObject.GetComponent<FusionNativeNetworkCharacterMotor>();
-            if (motor == null)
+            if (!FusionCharacterEndpointResolver.TryGet(
+                    playerObject,
+                    out sharedPump))
             {
-                failure = $"player object '{playerObject.name}' has no Fusion native motor";
+                failure = $"player object '{playerObject.name}' has no Fusion Shared " +
+                          "character runner-pump endpoint";
                 return false;
             }
 
-            return true;
+            // Owner-authoritative Shared KCC objects run through their own NetworkBehaviour
+            // lifecycle. Only centralized master-authority implementations need this fallback.
+            return sharedPump.RequiresSharedLogicalOwnerProxyPump;
         }
 
         private NetworkObject ResolveSharedLogicalOwnerObject(PlayerRef localPlayer)
@@ -168,7 +172,9 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             return identity != null && identity.Runner == Runner &&
                    identity.IsSpawned && identity.TransportAdmitted &&
                    identity.IsOwnedBy(localPlayer) &&
-                   candidate.GetComponent<FusionNativeNetworkCharacterMotor>() != null;
+                   FusionCharacterEndpointResolver.TryGet(
+                       candidate,
+                       out IFusionSharedCharacterRunnerPump _);
         }
 
         private void ReportSharedOwnerResolveFailure(string failure)

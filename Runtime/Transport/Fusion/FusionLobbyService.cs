@@ -191,10 +191,16 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                         "Leave the current Fusion session before creating another one.");
                 }
 
-                string sessionName = ResolveCreateSessionName(request);
                 string displayName = string.IsNullOrWhiteSpace(request.SessionName)
-                    ? sessionName
+                    ? "Fusion Session"
                     : request.SessionName.Trim();
+                bool usesExactSharedSessionId = false;
+                string sessionName = request.Topology == NetworkLobbyTopology.Shared
+                    ? ResolveSharedCreateSessionName(
+                        displayName,
+                        request.JoinCode,
+                        out usesExactSharedSessionId)
+                    : ResolveCreateSessionName(request);
                 string region = NormalizeRegion(request.Region);
 
                 SetStateIfCurrent(generation, NetworkLobbyState.Creating, "Creating Fusion session...");
@@ -214,7 +220,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                     maxPlayers: request.MaxPlayers);
 
                 Task<StartGameResult> startTask = request.Topology == NetworkLobbyTopology.Shared
-                    ? m_SessionBootstrap.CreateSharedAsync(options)
+                    ? m_SessionBootstrap.CreateSharedWithExactSessionNameAsync(options)
                     : m_SessionBootstrap.StartHostAsync(options);
                 StartGameResult result = await AwaitStartWithCancellationAsync(startTask, token);
                 if (!result.Ok)
@@ -227,9 +233,19 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
 
                 if (IsCurrent(generation))
                 {
-                    SetConnected(sessionName, displayName, $"Hosting {displayName}");
+                    SetConnected(
+                        sessionName,
+                        displayName,
+                        usesExactSharedSessionId
+                            ? $"Hosting {displayName} with exact ID {sessionName}"
+                            : $"Hosting {displayName}");
                 }
-                return NetworkLobbyOperationResult.Success("Fusion session created.");
+                return NetworkLobbyOperationResult.Success(
+                    request.Topology == NetworkLobbyTopology.Shared
+                        ? usesExactSharedSessionId
+                            ? $"Fusion Shared session created with exact ID: {sessionName}"
+                            : $"Fusion session created. Join code: {sessionName}"
+                        : "Fusion session created.");
             }
             catch (OperationCanceledException)
             {
@@ -897,7 +913,23 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         {
             if (!string.IsNullOrWhiteSpace(request.JoinCode)) return request.JoinCode.Trim();
             if (!string.IsNullOrWhiteSpace(request.SessionName)) return request.SessionName.Trim();
-            return $"GC2-{Guid.NewGuid():N}".Substring(0, 12);
+            return $"GC2-{Guid.NewGuid():N}";
+        }
+
+        /// <summary>
+        /// A blank custom ID selects the collision-safe generated Shared workflow. A supplied
+        /// ID selects strict exact-name creation; Photon reports a collision rather than
+        /// joining an existing Shared session.
+        /// </summary>
+        private static string ResolveSharedCreateSessionName(
+            string displayName,
+            string requestedExactSessionId,
+            out bool usesExactSessionId)
+        {
+            usesExactSessionId = !string.IsNullOrWhiteSpace(requestedExactSessionId);
+            return usesExactSessionId
+                ? requestedExactSessionId.Trim()
+                : FusionSessionBootstrap.GenerateUniqueSharedSessionName(displayName);
         }
 
         private static string FormatStartFailure(string prefix, StartGameResult result)

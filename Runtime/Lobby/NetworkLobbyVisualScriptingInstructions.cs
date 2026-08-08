@@ -131,7 +131,7 @@ namespace Arawn.GameCreator2.Networking.Lobby
     [Category("Network/Lobby/Create Session")]
     [Parameter("Player Name", "Local player's display name")]
     [Parameter("Session Name", "Name shown in browsers and invitations")]
-    [Parameter("Join Code", "Optional room or invitation code")]
+    [Parameter("Join Code", "Optional exact room/session ID used when the provider supports custom IDs; leave blank to generate one")]
     [Parameter("Region", "Optional provider region")]
     [Parameter("Topology", "Requested client/server or shared topology")]
     [Parameter("Max Players", "Maximum session capacity")]

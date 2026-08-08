@@ -60,6 +60,10 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
         internal const string RuntimeAssemblyName =
             "Arawn.GameCreator2.Networking.Transport.Fusion";
 
+        internal const string ProjectRuntimeAssemblyName = "Assembly-CSharp";
+
+        internal const string ForceWeavingDefine = "FUSION_FORCE_WEAVING";
+
         internal const string RuntimeAssemblyDefinitionPath =
             "Assets/Arawn/NetworkingLayerForGC2/Runtime/Transport/Fusion/" +
             "Arawn.GameCreator2.Networking.Transport.Fusion.asmdef";
@@ -71,12 +75,20 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
         {
             public string name;
             public bool allowUnsafeCode;
+            public AssemblyDefinitionVersionDefine[] versionDefines;
+        }
+
+        [Serializable]
+        private sealed class AssemblyDefinitionVersionDefine
+        {
+            public string define;
         }
 
         public static FusionSetupReport Validate(
             GameObject playerPrefab,
             bool requireAppliedInfrastructure = false,
-            NetworkPredictionBackend? expectedBackend = null)
+            NetworkPredictionBackend? expectedBackend = null,
+            FusionKccSharedAuthorityMode? expectedKccSharedAuthorityMode = null)
         {
             var report = new FusionSetupReport();
 
@@ -84,12 +96,20 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
             ValidatePhotonSettings(report);
             ValidateRuntimeAssemblyDefinition(report);
             ValidateMonoPlayerBuildCompatibility(report);
-            ValidateProjectConfig(report);
+            ValidateProjectConfig(
+                report,
+                requireAppliedInfrastructure,
+                expectedBackend);
             ValidateSceneOwners(report);
             ValidateSceneCharacters(report);
             ValidateModuleRegistrations(report);
             ValidateInventoryRuntimePickups(report);
-            ValidatePlayerPrefab(report, playerPrefab, expectedBackend);
+            ValidatePlayerPrefab(
+                report,
+                playerPrefab,
+                expectedBackend,
+                expectedKccSharedAuthorityMode,
+                requireAppliedInfrastructure);
             if (requireAppliedInfrastructure)
             {
                 ValidateRequiredInfrastructure(report);
@@ -98,10 +118,18 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
             return report;
         }
 
-        internal static FusionSetupReport ValidatePlayerPrefabOnly(GameObject playerPrefab)
+        internal static FusionSetupReport ValidatePlayerPrefabOnly(
+            GameObject playerPrefab,
+            NetworkPredictionBackend? expectedBackend = null,
+            FusionKccSharedAuthorityMode? expectedKccSharedAuthorityMode = null)
         {
             var report = new FusionSetupReport();
-            ValidatePlayerPrefab(report, playerPrefab, null);
+            ValidatePlayerPrefab(
+                report,
+                playerPrefab,
+                expectedBackend,
+                expectedKccSharedAuthorityMode,
+                false);
             return report;
         }
 
@@ -166,7 +194,10 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
             }
         }
 
-        private static void ValidateProjectConfig(FusionSetupReport report)
+        private static void ValidateProjectConfig(
+            FusionSetupReport report,
+            bool requireAppliedInfrastructure,
+            NetworkPredictionBackend? expectedBackend)
         {
             NetworkProjectConfig config;
             try
@@ -199,11 +230,15 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                 SimulationConfig.InputTransferModes.Redundancy)
             {
                 report.Add(
-                    FusionSetupIssueSeverity.Error,
+                    requireAppliedInfrastructure
+                        ? FusionSetupIssueSeverity.Error
+                        : FusionSetupIssueSeverity.Warning,
                     "Fusion Input Transfer Mode must be Redundancy. GC2 native movement, " +
                     "Traversal and root-motion prediction require tick-complete input history; " +
-                    "Latest State causes connected-owner rollback stutter. Re-run the Fusion " +
-                    "Scene Setup Wizard to repair NetworkProjectConfig.");
+                    "Latest State causes connected-owner rollback stutter. " +
+                    (requireAppliedInfrastructure
+                        ? "The applied Fusion project configuration is still invalid."
+                        : "Create / Update Scene Setup will repair it automatically."));
             }
 
             int tickRate = config.Simulation.TickRateSelection.Client;
@@ -226,12 +261,41 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
             }
 
             if (config.AssembliesToWeave == null ||
-                !config.AssembliesToWeave.Contains(RuntimeAssemblyName, StringComparer.Ordinal))
+                !config.AssembliesToWeave.Contains(
+                    RuntimeAssemblyName,
+                    StringComparer.OrdinalIgnoreCase))
             {
                 report.Add(
-                    FusionSetupIssueSeverity.Error,
-                    $"'{RuntimeAssemblyName}' is missing from Assemblies To Weave. " +
-                    "Fusion RPC routing cannot work until the assembly is woven.");
+                    requireAppliedInfrastructure
+                        ? FusionSetupIssueSeverity.Error
+                        : FusionSetupIssueSeverity.Info,
+                    requireAppliedInfrastructure
+                        ? $"'{RuntimeAssemblyName}' was not registered in Assemblies To Weave " +
+                          "after applying the Fusion project configuration."
+                        : $"'{RuntimeAssemblyName}' is not yet registered in Assemblies To " +
+                          "Weave. Its assembly definition forces safe Fusion weaving immediately; " +
+                          "Create / Update Scene Setup will also add the compatibility entry " +
+                          "automatically.");
+            }
+
+            if (expectedBackend == NetworkPredictionBackend.FusionKCC &&
+                (config.AssembliesToWeave == null ||
+                 !config.AssembliesToWeave.Contains(
+                     ProjectRuntimeAssemblyName,
+                     StringComparer.OrdinalIgnoreCase)))
+            {
+                report.Add(
+                    requireAppliedInfrastructure
+                        ? FusionSetupIssueSeverity.Error
+                        : FusionSetupIssueSeverity.Info,
+                    requireAppliedInfrastructure
+                        ? $"'{ProjectRuntimeAssemblyName}' was not registered in Assemblies To " +
+                          "Weave after applying the Fusion Advanced KCC setup. The optional KCC " +
+                          "adapter's Networked state and RPCs cannot run until it is woven."
+                        : $"Fusion Advanced KCC requires '{ProjectRuntimeAssemblyName}' in " +
+                          "Assemblies To Weave because Photon KCC and the optional adapter compile " +
+                          "into the project assembly. Create / Update Scene Setup adds it " +
+                          "automatically without removing customer entries.");
             }
         }
 
@@ -280,6 +344,21 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                     $"'{RuntimeAssemblyName}' must enable Allow Unsafe Code. Fusion's IL weaver " +
                     "requires it for generated RPC entry points; recompile and rebuild the player " +
                     "after enabling it.");
+            }
+
+            if (definition.versionDefines == null ||
+                !definition.versionDefines.Any(versionDefine =>
+                    versionDefine != null &&
+                    string.Equals(
+                        versionDefine.define,
+                        ForceWeavingDefine,
+                        StringComparison.Ordinal)))
+            {
+                report.Add(
+                    FusionSetupIssueSeverity.Error,
+                    $"'{RuntimeAssemblyName}' must define {ForceWeavingDefine}. This makes " +
+                    "Fusion weave the transport RPC assembly immediately after import, before " +
+                    "any project-specific setup or migration is applied.");
             }
         }
 
@@ -460,18 +539,33 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
             foreach (NetworkCharacter networkCharacter in FindSceneComponents<NetworkCharacter>())
             {
                 if (networkCharacter == null || !networkCharacter.isActiveAndEnabled) continue;
+                NetworkPredictionBackend selectedBackend =
+                    networkCharacter.PredictionBackend;
                 foreach (Component component in
                          networkCharacter.GetComponentsInChildren<Component>(true))
                 {
                     if (!IsComponentActive(component) ||
-                        !IsCompetingMovementComponent(component))
+                        !IsCompetingMovementComponent(
+                            component,
+                            selectedBackend,
+                            networkCharacter.gameObject))
                     {
                         continue;
                     }
+                    bool knownConvertible = IsKnownConvertibleBackendComponent(
+                        component,
+                        networkCharacter.gameObject);
                     report.Add(
-                        FusionSetupIssueSeverity.Error,
-                        $"GC2 network character '{networkCharacter.name}' contains the competing " +
-                        $"Fusion movement synchronizer {component.GetType().FullName}.",
+                        knownConvertible
+                            ? FusionSetupIssueSeverity.Warning
+                            : FusionSetupIssueSeverity.Error,
+                        knownConvertible
+                            ? $"GC2 network character '{networkCharacter.name}' still contains " +
+                              $"the known alternate backend {component.GetType().FullName}. " +
+                              "Applying the selected wizard backend will convert its prefab."
+                            : $"GC2 network character '{networkCharacter.name}' contains the " +
+                              $"competing Fusion movement synchronizer " +
+                              $"{component.GetType().FullName}.",
                         component);
                 }
             }
@@ -1076,7 +1170,9 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
         private static void ValidatePlayerPrefab(
             FusionSetupReport report,
             GameObject playerPrefab,
-            NetworkPredictionBackend? expectedBackend)
+            NetworkPredictionBackend? expectedBackend,
+            FusionKccSharedAuthorityMode? expectedKccSharedAuthorityMode,
+            bool requireAppliedSetup)
         {
             if (playerPrefab == null)
             {
@@ -1108,6 +1204,30 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                 return;
             }
 
+            NetworkCharacter networkCharacter = playerPrefab.GetComponent<NetworkCharacter>();
+            NetworkPredictionBackend serializedBackend =
+                networkCharacter != null
+                    ? networkCharacter.PredictionBackend
+                    : NetworkPredictionBackend.BuiltIn;
+            NetworkPredictionBackend desiredBackend = expectedBackend ?? serializedBackend;
+            bool expectsNativeMotor =
+                desiredBackend == NetworkPredictionBackend.FusionNative;
+            bool expectsKcc = desiredBackend == NetworkPredictionBackend.FusionKCC;
+
+            IFusionKccEditorSetupExtension kccExtension = null;
+            bool kccExtensionAvailable =
+                FusionKccEditorIntegration.TryGetAvailableExtension(
+                    out kccExtension,
+                    out string kccUnavailableReason);
+            if (expectsKcc && !kccExtensionAvailable)
+            {
+                report.Add(
+                    FusionSetupIssueSeverity.Error,
+                    "Fusion Advanced KCC is selected, but the optional GC2 KCC integration " +
+                    $"cannot be used: {kccUnavailableReason}",
+                    playerPrefab);
+            }
+
             foreach (Component component in playerPrefab.GetComponentsInChildren<Component>(true))
             {
                 if (component == null || !IsComponentActive(component)) continue;
@@ -1135,7 +1255,11 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                         playerPrefab);
                 }
 
-                if (IsCompetingMovementComponent(component))
+                if (IsCompetingMovementComponent(
+                        component,
+                        desiredBackend,
+                        playerPrefab) &&
+                    !IsKnownConvertibleBackendComponent(component, playerPrefab))
                 {
                     report.Add(
                         FusionSetupIssueSeverity.Error,
@@ -1175,6 +1299,19 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                         playerPrefab);
                 }
 
+                if (!expectsNativeMotor &&
+                    (networkObject.Flags & NetworkObjectFlags.HasMainNetworkTRSP) != 0)
+                {
+                    report.Add(
+                        requireAppliedSetup
+                            ? FusionSetupIssueSeverity.Error
+                            : FusionSetupIssueSeverity.Warning,
+                        $"The {desiredBackend} GC2 root retains Fusion's main NetworkTRSP " +
+                        "bake flag from an earlier Fusion Native setup. The wizard will clear " +
+                        "it; Advanced KCC owns a separate nested NetworkObject/TRSP.",
+                        playerPrefab);
+                }
+
                 if (!NetworkProjectConfigUtilities.TryGetPrefabId(path, out _))
                 {
                     report.Add(
@@ -1185,8 +1322,6 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                 }
             }
 
-            NetworkCharacter networkCharacter = playerPrefab.GetComponent<NetworkCharacter>();
-            bool expectsNativeMotor = expectedBackend == NetworkPredictionBackend.FusionNative;
             if (networkCharacter != null)
             {
                 var serialized = new SerializedObject(networkCharacter);
@@ -1201,15 +1336,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                         "movement input. The wizard will enable it.",
                         playerPrefab);
                 }
-
-
                 SerializedProperty backend = serialized.FindProperty("m_PredictionBackend");
-                NetworkPredictionBackend serializedBackend = backend != null
-                    ? (NetworkPredictionBackend)backend.enumValueIndex
-                    : NetworkPredictionBackend.BuiltIn;
-                NetworkPredictionBackend desiredBackend =
-                    expectedBackend ?? serializedBackend;
-                expectsNativeMotor = desiredBackend == NetworkPredictionBackend.FusionNative;
                 if (backend == null || serializedBackend != desiredBackend)
                 {
                     report.Add(
@@ -1219,25 +1346,143 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                         playerPrefab);
                 }
             }
-
-            FusionNativeNetworkCharacterMotor nativeMotor =
-                playerPrefab.GetComponent<FusionNativeNetworkCharacterMotor>();
-            if (expectsNativeMotor && (nativeMotor == null || !nativeMotor.enabled))
+            else
             {
                 report.Add(
                     FusionSetupIssueSeverity.Warning,
-                    "The Fusion player prefab has no enabled " +
-                    "FusionNativeNetworkCharacterMotor. The wizard will add it.",
+                    "The player prefab has no NetworkCharacter. The wizard will add it and " +
+                    $"select the {desiredBackend} prediction backend.",
                     playerPrefab);
             }
-            else if (!expectsNativeMotor && nativeMotor != null)
+
+            FusionNativeNetworkCharacterMotor[] nativeMotors =
+                playerPrefab.GetComponentsInChildren<FusionNativeNetworkCharacterMotor>(true);
+            FusionNativeNetworkCharacterMotor nativeMotor =
+                playerPrefab.GetComponent<FusionNativeNetworkCharacterMotor>();
+            if (expectsNativeMotor &&
+                (nativeMotor == null || !nativeMotor.enabled || nativeMotors.Length != 1))
             {
                 report.Add(
                     FusionSetupIssueSeverity.Warning,
-                    "The player prefab uses Built-in Legacy movement but still contains a " +
-                    "FusionNativeNetworkCharacterMotor. The wizard will remove the inactive " +
-                    "native TRSP so it cannot compete for Fusion's main transform slot.",
+                    "Fusion Native requires exactly one enabled root " +
+                    "FusionNativeNetworkCharacterMotor. The wizard will normalize it.",
                     playerPrefab);
+            }
+            else if (!expectsNativeMotor && nativeMotors.Length > 0)
+            {
+                report.Add(
+                    FusionSetupIssueSeverity.Warning,
+                    $"The player prefab selects {desiredBackend} but still contains " +
+                    $"{nativeMotors.Length} FusionNativeNetworkCharacterMotor component(s). " +
+                    "The wizard will remove the old native backend during conversion.",
+                    playerPrefab);
+            }
+
+            FusionKccCharacterBackend[] kccBackends =
+                playerPrefab.GetComponentsInChildren<FusionKccCharacterBackend>(true);
+            FusionKccCharacterBackend kccBackend =
+                playerPrefab.GetComponent<FusionKccCharacterBackend>();
+            if (expectsKcc &&
+                (kccBackend == null || !kccBackend.enabled || kccBackends.Length != 1))
+            {
+                report.Add(
+                    requireAppliedSetup
+                        ? FusionSetupIssueSeverity.Error
+                        : FusionSetupIssueSeverity.Warning,
+                    "Fusion Advanced KCC requires exactly one enabled root " +
+                    "FusionKccCharacterBackend proxy. The wizard will normalize it.",
+                    playerPrefab);
+            }
+            else if (!expectsKcc && kccBackends.Length > 0)
+            {
+                report.Add(
+                    FusionSetupIssueSeverity.Warning,
+                    $"The player prefab selects {desiredBackend} but still contains " +
+                    $"{kccBackends.Length} FusionKccCharacterBackend component(s). The wizard " +
+                    "will remove the old optional backend during conversion.",
+                    playerPrefab);
+            }
+
+            FusionKccSharedAuthorityMode desiredKccAuthority =
+                expectedKccSharedAuthorityMode ??
+                (kccBackend != null
+                    ? kccBackend.SharedAuthorityMode
+                    : FusionKccSharedAuthorityMode.OwnerMovementAuthority);
+            if (expectsKcc && kccBackend != null &&
+                kccBackend.SharedAuthorityMode != desiredKccAuthority)
+            {
+                report.Add(
+                    FusionSetupIssueSeverity.Warning,
+                    $"The Fusion KCC backend uses {kccBackend.SharedAuthorityMode}, but the " +
+                    $"wizard selection is {desiredKccAuthority}. The wizard will update it.",
+                    playerPrefab);
+            }
+            if (expectsKcc && kccBackend != null && !kccBackend.IsRuntimeAvailable)
+            {
+                report.Add(
+                    requireAppliedSetup
+                        ? FusionSetupIssueSeverity.Error
+                        : FusionSetupIssueSeverity.Warning,
+                    "FusionKccCharacterBackend has no optional IFusionKccRuntimeAdapter on the " +
+                    "GC2 root. The wizard will assign the adapter during conversion.",
+                    playerPrefab);
+            }
+
+            Component[] knownKccComponents = playerPrefab
+                .GetComponentsInChildren<Component>(true)
+                .Where(component =>
+                    component != null &&
+                    IsKnownOptionalKccSetupComponent(component, playerPrefab))
+                .ToArray();
+            bool onlyParkedCustomerKcc = knownKccComponents.Length > 0 &&
+                                         knownKccComponents.All(component =>
+                                             IsParkedCustomerKccComponent(
+                                                 component,
+                                                 playerPrefab));
+            if (!expectsKcc && knownKccComponents.Length > 0 && !onlyParkedCustomerKcc)
+            {
+                report.Add(
+                    FusionSetupIssueSeverity.Warning,
+                    $"The player prefab retains {knownKccComponents.Length} component(s) from " +
+                    "the optional Fusion KCC setup. The wizard will remove that known setup " +
+                    $"when converting to {desiredBackend}.",
+                    playerPrefab);
+            }
+
+            if (expectsKcc && kccExtensionAvailable)
+            {
+                var extensionIssues = new List<FusionKccEditorValidationIssue>();
+                try
+                {
+                    kccExtension.ValidatePlayerPrefab(
+                        playerPrefab,
+                        new FusionKccEditorSetupOptions(
+                            desiredKccAuthority,
+                            requireAppliedSetup),
+                        extensionIssues);
+                }
+                catch (Exception exception)
+                {
+                    report.Add(
+                        FusionSetupIssueSeverity.Error,
+                        "The optional Fusion Advanced KCC validation extension threw an " +
+                        $"exception: {exception.Message}",
+                        playerPrefab);
+                }
+
+                foreach (FusionKccEditorValidationIssue issue in extensionIssues)
+                {
+                    FusionSetupIssueSeverity severity = issue.Severity switch
+                    {
+                        FusionKccEditorIssueSeverity.Error => FusionSetupIssueSeverity.Error,
+                        FusionKccEditorIssueSeverity.Warning => FusionSetupIssueSeverity.Warning,
+                        _ => FusionSetupIssueSeverity.Info
+                    };
+                    report.Add(
+                        severity,
+                        issue.Message,
+                        issue.Context != null ? issue.Context : playerPrefab);
+                }
             }
 
             if (expectsNativeMotor && nativeMotor != null && networkObject != null)
@@ -1284,14 +1529,28 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
             }
         }
 
-        private static bool IsCompetingMovementComponent(Component component)
+        private static bool IsCompetingMovementComponent(
+            Component component,
+            NetworkPredictionBackend selectedBackend,
+            GameObject playerRoot)
         {
             if (component == null) return false;
-            if (component is NetworkTRSP &&
-                component is not FusionNativeNetworkCharacterMotor)
+            if (component is FusionNativeNetworkCharacterMotor)
             {
-                return true;
+                return selectedBackend != NetworkPredictionBackend.FusionNative;
             }
+
+            if (component is FusionKccCharacterBackend)
+                return selectedBackend != NetworkPredictionBackend.FusionKCC;
+
+            if (IsAdvancedKccComponent(component))
+            {
+                if (selectedBackend != NetworkPredictionBackend.FusionKCC) return true;
+                return !IsKnownOptionalKccSetupComponent(component, playerRoot) &&
+                       !IsAdoptableCustomerKccComponent(component, playerRoot);
+            }
+
+            if (component is NetworkTRSP) return true;
 
             Type type = component.GetType();
             string typeNamespace = type.Namespace ?? string.Empty;
@@ -1302,6 +1561,129 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                     type.Name.Contains("NetworkCharacterController", StringComparison.Ordinal) ||
                     type.Name.Contains("NetworkTRSP", StringComparison.Ordinal) ||
                     type.Name.Contains("NetworkMecanimAnimator", StringComparison.Ordinal));
+        }
+
+        private static bool IsAdvancedKccComponent(Component component)
+        {
+            if (component == null) return false;
+            string typeNamespace = component.GetType().Namespace ?? string.Empty;
+            return typeNamespace.StartsWith(
+                       "Fusion.Addons.KCC",
+                       StringComparison.Ordinal) ||
+                   typeNamespace.StartsWith(
+                       "Arawn.GameCreator2.Networking.Transport.Fusion.KCC",
+                       StringComparison.Ordinal);
+        }
+
+        private static bool IsKnownConvertibleBackendComponent(
+            Component component,
+            GameObject playerRoot)
+        {
+            return component is FusionNativeNetworkCharacterMotor ||
+                   component is FusionKccCharacterBackend ||
+                   IsKnownOptionalKccSetupComponent(component, playerRoot) ||
+                   IsParkedCustomerKccComponent(component, playerRoot);
+        }
+
+        private static bool IsKnownOptionalKccSetupComponent(
+            Component component,
+            GameObject playerRoot)
+        {
+            if (component == null || playerRoot == null) return false;
+            if (component is FusionKccSetupMarker) return true;
+            string typeNamespace = component.GetType().Namespace ?? string.Empty;
+            if (typeNamespace.StartsWith(
+                    "Arawn.GameCreator2.Networking.Transport.Fusion.KCC",
+                    StringComparison.Ordinal))
+            {
+                return true;
+            }
+
+            if (!typeNamespace.StartsWith("Fusion.Addons.KCC", StringComparison.Ordinal))
+                return false;
+
+            Transform current = component.transform;
+            while (current != null)
+            {
+                foreach (Component sibling in current.GetComponents<Component>())
+                {
+                    if (sibling == null) continue;
+                    string siblingNamespace = sibling.GetType().Namespace ?? string.Empty;
+                    if (siblingNamespace.StartsWith(
+                            "Arawn.GameCreator2.Networking.Transport.Fusion.KCC",
+                            StringComparison.Ordinal))
+                    {
+                        return true;
+                    }
+                }
+
+                if (current.gameObject == playerRoot) break;
+                current = current.parent;
+            }
+
+            return false;
+        }
+
+        private static bool IsParkedCustomerKccComponent(
+            Component component,
+            GameObject playerRoot)
+        {
+            if (component == null || playerRoot == null) return false;
+
+            Transform current = component.transform;
+            while (current != null)
+            {
+                FusionKccSetupMarker marker =
+                    current.GetComponent<FusionKccSetupMarker>();
+                if (marker != null && marker.AdoptedSetupParked) return true;
+                if (current.gameObject == playerRoot) break;
+                current = current.parent;
+            }
+
+            // Customer processor objects may be siblings of the adopted KCC motor or external
+            // children referenced through KCCSettings.Processors. The motor marker preserves
+            // those exact component/GameObject references, so recognize them as part of the
+            // parked customer setup without marking or mutating the customer objects.
+            if (!IsAdvancedKccComponent(component)) return false;
+            foreach (FusionKccSetupMarker marker in
+                     playerRoot.GetComponentsInChildren<FusionKccSetupMarker>(true))
+            {
+                if (marker == null || !marker.AdoptedSetupParked) continue;
+                foreach (UnityEngine.Object processorObject in
+                         marker.OriginalKccProcessorObjects ??
+                         Array.Empty<UnityEngine.Object>())
+                {
+                    if (processorObject == component ||
+                        processorObject == component.gameObject)
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        private static bool IsAdoptableCustomerKccComponent(
+            Component component,
+            GameObject playerRoot)
+        {
+            if (component == null || playerRoot == null) return false;
+            string typeNamespace = component.GetType().Namespace ?? string.Empty;
+            if (!typeNamespace.StartsWith("Fusion.Addons.KCC", StringComparison.Ordinal))
+                return false;
+
+            Component[] kccMotors = playerRoot
+                .GetComponentsInChildren<Component>(true)
+                .Where(candidate =>
+                    candidate != null &&
+                    string.Equals(
+                        candidate.GetType().FullName,
+                        "Fusion.Addons.KCC.KCC",
+                        StringComparison.Ordinal))
+                .ToArray();
+            return kccMotors.Length == 1 &&
+                   kccMotors[0].transform.parent == playerRoot.transform;
         }
 
         private static void ValidateDuplicate<T>(

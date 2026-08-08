@@ -19,6 +19,8 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         [SerializeField] private Button m_StartHost;
         [SerializeField] private Button m_JoinHost;
         [SerializeField] private Button m_CreateShared;
+        [Tooltip("Creates a new Photon Shared session with the entered exact ID. The operation fails instead of joining when that ID already exists.")]
+        [SerializeField] private Button m_CreateSharedExact;
         [SerializeField] private Button m_JoinShared;
         [SerializeField] private Button m_Shutdown;
         [SerializeField] private Text m_Status;
@@ -26,6 +28,8 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         private bool m_Busy;
         private string m_RuntimeSessionName;
         private string m_RuntimeStatus = "Offline";
+        private string m_LastSharedSessionPrefix = string.Empty;
+        private string m_LastGeneratedSharedJoinCode = string.Empty;
 
         [Header("Zero-Setup Overlay")]
         [SerializeField] private bool m_ShowOverlayWhenControlsAreUnassigned = true;
@@ -47,6 +51,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             m_StartHost?.onClick.AddListener(StartHost);
             m_JoinHost?.onClick.AddListener(JoinHost);
             m_CreateShared?.onClick.AddListener(CreateShared);
+            m_CreateSharedExact?.onClick.AddListener(CreateSharedExact);
             m_JoinShared?.onClick.AddListener(JoinShared);
             m_Shutdown?.onClick.AddListener(Shutdown);
             if (!HasLiveAppId())
@@ -66,7 +71,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             if (!m_ShowOverlayWhenControlsAreUnassigned || HasAssignedControls()) return;
 
             GUILayout.BeginArea(
-                new Rect(m_OverlayPosition.x, m_OverlayPosition.y, m_OverlayWidth, 238f),
+                new Rect(m_OverlayPosition.x, m_OverlayPosition.y, m_OverlayWidth, 266f),
                 GUI.skin.box);
             GUILayout.Label("Fusion Multiplayer");
             m_RuntimeSessionName = GUILayout.TextField(m_RuntimeSessionName ?? string.Empty);
@@ -85,6 +90,10 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             if (GUILayout.Button("Create Shared")) CreateShared();
             if (GUILayout.Button("Join Shared")) JoinShared();
             GUILayout.EndHorizontal();
+            if (GUILayout.Button("Create Shared With Exact ID"))
+            {
+                CreateSharedExact();
+            }
 
             GUI.enabled = !m_Busy &&
                           m_SessionBootstrap != null &&
@@ -100,6 +109,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             m_StartHost?.onClick.RemoveListener(StartHost);
             m_JoinHost?.onClick.RemoveListener(JoinHost);
             m_CreateShared?.onClick.RemoveListener(CreateShared);
+            m_CreateSharedExact?.onClick.RemoveListener(CreateSharedExact);
             m_JoinShared?.onClick.RemoveListener(JoinShared);
             m_Shutdown?.onClick.RemoveListener(Shutdown);
         }
@@ -112,13 +122,47 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             name => m_SessionBootstrap.JoinHostAsync(name),
             "Joining Host");
 
-        private void CreateShared() => RunStart(
-            name => m_SessionBootstrap.CreateSharedAsync(name),
-            "Creating Shared session");
+        private void CreateShared()
+        {
+            string prefix = ReadSessionName();
+            if (string.Equals(
+                    prefix,
+                    m_LastGeneratedSharedJoinCode,
+                    StringComparison.Ordinal) &&
+                !string.IsNullOrWhiteSpace(m_LastSharedSessionPrefix))
+            {
+                prefix = m_LastSharedSessionPrefix;
+            }
+            if (string.IsNullOrWhiteSpace(prefix))
+            {
+                SetStatus("Enter a session name prefix.");
+                return;
+            }
+
+            m_LastSharedSessionPrefix = prefix;
+            m_LastGeneratedSharedJoinCode =
+                FusionSessionBootstrap.GenerateUniqueSharedSessionName(prefix);
+            RunStart(
+                name => m_SessionBootstrap.CreateSharedWithExactSessionNameAsync(name),
+                "Creating Shared session",
+                true,
+                m_LastGeneratedSharedJoinCode);
+        }
 
         private void JoinShared() => RunStart(
             name => m_SessionBootstrap.JoinSharedAsync(name),
             "Joining Shared session");
+
+        /// <summary>
+        /// Creates a new Shared session using the entered value as its exact Photon ID. A
+        /// collision fails rather than joining the existing session.
+        /// </summary>
+        public void CreateSharedExact()
+        {
+            RunStart(
+                name => m_SessionBootstrap.CreateSharedWithExactSessionNameAsync(name),
+                "Creating Shared session with exact ID");
+        }
 
         private async void Shutdown()
         {
@@ -149,14 +193,14 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
 
         private async void RunStart(
             Func<string, Task<StartGameResult>> start,
-            string operation)
+            string operation,
+            bool exposeGeneratedSharedJoinCode = false,
+            string sessionNameOverride = null)
         {
             if (m_SessionBootstrap == null || m_Busy) return;
-            string sessionName = m_SessionName != null ? m_SessionName.text.Trim() : string.Empty;
-            if (m_SessionName == null)
-            {
-                sessionName = m_RuntimeSessionName?.Trim() ?? string.Empty;
-            }
+            string sessionName = string.IsNullOrWhiteSpace(sessionNameOverride)
+                ? ReadSessionName()
+                : sessionNameOverride.Trim();
             if (string.IsNullOrEmpty(sessionName))
             {
                 SetStatus("Enter a session name.");
@@ -168,9 +212,20 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             try
             {
                 StartGameResult result = await start(sessionName);
-                SetStatus(result.Ok
-                    ? $"Connected: {sessionName}"
-                    : $"Connection failed: {result.ShutdownReason} {result.ErrorMessage}");
+                if (!result.Ok)
+                {
+                    SetStatus(
+                        $"Connection failed: {result.ShutdownReason} {result.ErrorMessage}");
+                }
+                else if (exposeGeneratedSharedJoinCode)
+                {
+                    SetSessionName(sessionName);
+                    SetStatus($"Shared session created. Join code: {sessionName}");
+                }
+                else
+                {
+                    SetStatus($"Connected: {ResolveActiveSessionName(sessionName)}");
+                }
             }
             catch (Exception exception)
             {
@@ -196,6 +251,10 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             if (m_StartHost != null) m_StartHost.interactable = canStart;
             if (m_JoinHost != null) m_JoinHost.interactable = canStart;
             if (m_CreateShared != null) m_CreateShared.interactable = canStart;
+            if (m_CreateSharedExact != null)
+            {
+                m_CreateSharedExact.interactable = canStart;
+            }
             if (m_JoinShared != null) m_JoinShared.interactable = canStart;
             if (m_Shutdown != null) m_Shutdown.interactable = canStop;
             if (m_SessionName != null) m_SessionName.interactable = canStart;
@@ -207,11 +266,34 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             if (m_Status != null) m_Status.text = value;
         }
 
+        private string ReadSessionName()
+        {
+            return m_SessionName != null
+                ? m_SessionName.text.Trim()
+                : m_RuntimeSessionName?.Trim() ?? string.Empty;
+        }
+
+        private string ResolveActiveSessionName(string fallback)
+        {
+            return m_SessionBootstrap != null &&
+                   m_SessionBootstrap.TryGetActiveSession(out FusionSessionSnapshot session) &&
+                   !string.IsNullOrWhiteSpace(session.SessionName)
+                ? session.SessionName
+                : fallback;
+        }
+
+        private void SetSessionName(string value)
+        {
+            m_RuntimeSessionName = value ?? string.Empty;
+            if (m_SessionName != null) m_SessionName.text = m_RuntimeSessionName;
+        }
+
         private bool HasAssignedControls()
         {
             return m_StartHost != null ||
                    m_JoinHost != null ||
                    m_CreateShared != null ||
+                   m_CreateSharedExact != null ||
                    m_JoinShared != null ||
                    m_Shutdown != null;
         }
