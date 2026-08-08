@@ -1,6 +1,20 @@
-IMPORTANT
-=========
+PURRNET DEMO SCENES
+===================
 
-All demo scenes require the GC2 Demo packages for Melee, Shooter, etc. as dependencies.
+Install these examples from Game Creator > Install. Each feature is packaged
+separately so Game Creator can install the exact official demo dependencies it
+needs. Shared materials, selectable characters, and the common PurrNet session
+profile are provided by the Assets installer and are pulled in automatically.
 
-If the scripts have not loaded even though the Scripting Define Symbols are set correctly, restart Unity.
+The LAN browser and staging-room examples depend on the PurrNet Shooter
+examples because they spawn that package's player prefab. The Steam lobby is a
+separate optional installer and additionally requires Steamworks.NET plus the
+PurrNet Steam transport integration.
+
+The dedicated Stats example demonstrates server-authoritative changes from
+either peer. Press 1 to damage the local player's HP, 2 to heal it, or 3 to
+increase Strength. Its on-screen observer displays every spawned player's
+replicated HP and Strength values.
+
+If scripts have not loaded even though the Scripting Define Symbols are set
+correctly, restart Unity and reopen the scene.

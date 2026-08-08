@@ -111,6 +111,9 @@ namespace Arawn.GameCreator2.Networking.Lobby
         private Button m_LeaveButton;
         private Text m_CurrentSessionText;
         private Text m_ConnectedStatusText;
+        private GameObject m_ConnectedJoinCodeRow;
+        private InputField m_ConnectedJoinCodeField;
+        private Button m_CopyJoinCodeButton;
 
         public MonoBehaviour ServiceBehaviour => m_ServiceBehaviour;
         public INetworkLobbyService Service => m_Service;
@@ -323,6 +326,13 @@ namespace Arawn.GameCreator2.Networking.Lobby
         public void LeaveSession()
         {
             RunOperation(token => m_Service.LeaveAsync(token));
+        }
+
+        public void CopyCurrentSessionId()
+        {
+            string sessionId = m_Service?.CurrentSessionId;
+            if (string.IsNullOrWhiteSpace(sessionId)) return;
+            GUIUtility.systemCopyBuffer = sessionId;
         }
 
         public void SelectSession(string sessionId)
@@ -540,6 +550,15 @@ namespace Arawn.GameCreator2.Networking.Lobby
                 m_ConnectedStatusText.text = string.IsNullOrWhiteSpace(m_Service.StatusMessage)
                     ? "Gameplay transport is active"
                     : m_Service.StatusMessage;
+
+                bool showJoinCode =
+                    Has(capabilities, NetworkLobbyCapabilities.JoinByCode) &&
+                    !string.IsNullOrWhiteSpace(m_Service.CurrentSessionId);
+                m_ConnectedJoinCodeRow.SetActive(showJoinCode);
+                if (showJoinCode)
+                {
+                    m_ConnectedJoinCodeField.text = m_Service.CurrentSessionId;
+                }
             }
         }
 
@@ -609,6 +628,9 @@ namespace Arawn.GameCreator2.Networking.Lobby
             SetInteractable(m_JoinSelectedButton,
                 ready && SelectedSession != null && SelectedSession.CanJoin);
             SetInteractable(m_LeaveButton, ready);
+            SetInteractable(
+                m_CopyJoinCodeButton,
+                ready && !string.IsNullOrWhiteSpace(m_Service?.CurrentSessionId));
 
             SetInteractable(m_SessionNameField, ready);
             SetInteractable(m_PlayerNameField, ready);
@@ -1092,7 +1114,8 @@ namespace Arawn.GameCreator2.Networking.Lobby
 
             m_JoinCodeRow = NewEmpty("JoinCode", m_SetupRoot.transform);
             m_JoinCodeField = NewInput("JoinCode", m_JoinCodeRow.transform, m_DefaultJoinCode,
-                Vector2.zero, new Vector2(0.72f, 1f), Vector2.zero, new Vector2(-5f, 0f), "Session or room code");
+                Vector2.zero, new Vector2(0.72f, 1f), Vector2.zero, new Vector2(-5f, 0f),
+                "Optional custom ID / join code");
             m_JoinCodeButton = NewButton("Join", m_JoinCodeRow.transform, ColorNeutral, "Join Code",
                 new Vector2(0.72f, 0f), Vector2.one, new Vector2(5f, 0f), Vector2.zero);
             m_JoinCodeButton.onClick.AddListener(JoinByCode);
@@ -1202,7 +1225,7 @@ namespace Arawn.GameCreator2.Networking.Lobby
                 ColorPanel,
                 Vector2.one,
                 Vector2.one,
-                new Vector2(-440f, -190f),
+                new Vector2(-440f, -235f),
                 new Vector2(-20f, -20f));
 
             GameObject accent = NewPanel(
@@ -1251,6 +1274,44 @@ namespace Arawn.GameCreator2.Networking.Lobby
                 new Vector2(22f, -106f),
                 new Vector2(-18f, -78f),
                 TextAnchor.MiddleLeft);
+            m_ConnectedJoinCodeRow = NewEmpty(
+                "JoinCode",
+                m_ConnectedRoot.transform,
+                new Vector2(0f, 1f),
+                Vector2.one,
+                new Vector2(22f, -155f),
+                new Vector2(-18f, -115f));
+            NewText(
+                "Label",
+                m_ConnectedJoinCodeRow.transform,
+                "JOIN CODE",
+                10,
+                FontStyle.Bold,
+                ColorDim,
+                Vector2.zero,
+                new Vector2(0.22f, 1f),
+                Vector2.zero,
+                new Vector2(-7f, 0f),
+                TextAnchor.MiddleLeft);
+            m_ConnectedJoinCodeField = NewInput(
+                "Value",
+                m_ConnectedJoinCodeRow.transform,
+                string.Empty,
+                new Vector2(0.22f, 0f),
+                new Vector2(0.78f, 1f),
+                Vector2.zero,
+                new Vector2(-5f, 0f));
+            m_ConnectedJoinCodeField.readOnly = true;
+            m_CopyJoinCodeButton = NewButton(
+                "Copy",
+                m_ConnectedJoinCodeRow.transform,
+                ColorNeutral,
+                "Copy",
+                new Vector2(0.78f, 0f),
+                Vector2.one,
+                new Vector2(5f, 0f),
+                Vector2.zero);
+            m_CopyJoinCodeButton.onClick.AddListener(CopyCurrentSessionId);
             m_LeaveButton = NewButton(
                 "Leave",
                 m_ConnectedRoot.transform,

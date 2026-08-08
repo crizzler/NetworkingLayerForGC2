@@ -16,6 +16,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
     public sealed class FusionNetworkIdentity : NetworkBehaviour
     {
         private const int SharedTransientSendBacklogCapacity = 128;
+        private const float SharedTransientRetryInterval = 0.25f;
 
         [Networked] public PlayerRef LogicalOwner { get; set; }
         [Networked] public NetworkBool AuthorityAdmitted { get; private set; }
@@ -29,6 +30,10 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             new Queue<FusionNativeCharacterInput>(16);
         private bool m_SharedTransientSendOverflowLatched;
         private float m_NextSharedTransientSendWarningTime;
+        private float m_NextSharedTransientRetryTime;
+        private int m_LastSharedTransientEnqueuedTick = int.MinValue;
+        private int m_LastSharedTransientSentTick = int.MinValue;
+        private PlayerRef m_LastSharedTransientRpcTarget = PlayerRef.Invalid;
 
         public event Action<FusionNetworkIdentity> IdentityChanged;
         public event Action<FusionIdentityObservation> IdentityObservedChanged;
@@ -225,10 +230,11 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
 
         /// <summary>
         /// Sends one Shared-mode owner input sample to the centralized State Authority.
-        /// The native character motor is manually state-woven and therefore cannot own RPCs:
-        /// Fusion skips RPC weaving on behaviours carrying NetworkBehaviourWeavedAttribute.
+        /// Manually state-woven character backends cannot own RPCs because Fusion skips RPC
+        /// weaving on behaviours carrying NetworkBehaviourWeavedAttribute. The normally-woven
+        /// identity therefore owns the transport RPC and forwards it through the public endpoint.
         /// </summary>
-        internal bool TrySubmitSharedCharacterInput(
+        public bool TrySubmitSharedCharacterInput(
             FusionNativeCharacterInput input,
             out RpcInvokeInfo invokeInfo)
         {
@@ -255,7 +261,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                 continuousFlags,
                 input.HasContinuousOwnerPose ? input.OwnerPosition : Vector3.zero);
 
-            if (FusionNativeNetworkCharacterMotor.HasSharedTransientInput(input))
+            if (FusionCharacterInputUtility.HasSharedTransientInput(input))
             {
                 EnqueueSharedCharacterTransient(input);
             }
@@ -266,6 +272,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         private void EnqueueSharedCharacterTransient(FusionNativeCharacterInput input)
         {
             if (m_SharedTransientSendOverflowLatched) return;
+            if (input.SourceTick <= m_LastSharedTransientEnqueuedTick) return;
             if (m_SharedTransientSendBacklog.Count >= SharedTransientSendBacklogCapacity)
             {
                 // Dropping an entry and later sending a higher sequence would let the master's
@@ -273,7 +280,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                 // this object until its ownership/session boundary resets the queue.
                 m_SharedTransientSendOverflowLatched = true;
                 Debug.LogError(
-                    $"[FusionNativeCharacter] Reliable Shared transient send backlog exceeded " +
+                    $"[FusionCharacter] Reliable Shared transient send backlog exceeded " +
                     $"{SharedTransientSendBacklogCapacity} samples for '{name}'. " +
                     "Further traversal input is blocked to preserve acknowledgement integrity; " +
                     "reconnect the player and inspect network health.",
@@ -282,13 +289,55 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             }
 
             m_SharedTransientSendBacklog.Enqueue(input);
+            m_LastSharedTransientEnqueuedTick = input.SourceTick;
         }
 
         private void TrySendQueuedSharedCharacterTransient()
         {
+            int acknowledgedTick = int.MinValue;
+            if (FusionCharacterEndpointResolver.TryGet(
+                    this,
+                    out IFusionSharedCharacterEndpoint endpoint))
+            {
+                acknowledgedTick = endpoint.LastAppliedSharedTransientSourceTick;
+            }
+
+            PlayerRef rpcTarget = Object != null && Object.IsValid
+                ? Object.StateAuthority
+                : PlayerRef.Invalid;
+            if (rpcTarget != m_LastSharedTransientRpcTarget)
+            {
+                // Authority migration changes the reliable RPC destination. Re-open the
+                // unacknowledged pipeline so every retained entry is offered to the new master.
+                m_LastSharedTransientRpcTarget = rpcTarget;
+                m_LastSharedTransientSentTick = acknowledgedTick;
+                m_NextSharedTransientRetryTime = 0f;
+            }
+
+            while (m_SharedTransientSendBacklog.Count > 0 &&
+                   m_SharedTransientSendBacklog.Peek().SourceTick <= acknowledgedTick)
+            {
+                m_SharedTransientSendBacklog.Dequeue();
+            }
             if (m_SharedTransientSendBacklog.Count == 0) return;
 
-            FusionNativeCharacterInput pending = m_SharedTransientSendBacklog.Peek();
+            float now = Time.unscaledTime;
+            FusionNativeCharacterInput pending = default;
+            bool hasUnsent = false;
+            foreach (FusionNativeCharacterInput candidate in
+                     m_SharedTransientSendBacklog)
+            {
+                if (candidate.SourceTick <= m_LastSharedTransientSentTick) continue;
+                pending = candidate;
+                hasUnsent = true;
+                break;
+            }
+            if (!hasUnsent)
+            {
+                if (now < m_NextSharedTransientRetryTime) return;
+                pending = m_SharedTransientSendBacklog.Peek();
+            }
+
             RpcInvokeInfo transientInvokeInfo = RPC_SubmitSharedCharacterTransient(
                 pending.Move,
                 pending.Yaw,
@@ -300,15 +349,21 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                 pending.JumpForce);
             if (transientInvokeInfo.SendMessageResult == RpcSendMessageResult.Sent)
             {
-                m_SharedTransientSendBacklog.Dequeue();
+                // A successful send is not an application acknowledgement. Retain this
+                // idempotent, monotonically sequenced sample until the movement endpoint's
+                // replicated applied tick covers it. This also lets the owner resend to a new
+                // Shared master if authority migrates between receipt and simulation.
+                m_LastSharedTransientSentTick = Math.Max(
+                    m_LastSharedTransientSentTick,
+                    pending.SourceTick);
+                m_NextSharedTransientRetryTime = now + SharedTransientRetryInterval;
                 return;
             }
 
-            float now = Time.unscaledTime;
             if (now < m_NextSharedTransientSendWarningTime) return;
             m_NextSharedTransientSendWarningTime = now + 1f;
             Debug.LogWarning(
-                $"[FusionNativeCharacter] Retaining reliable Shared transient " +
+                $"[FusionCharacter] Retaining reliable Shared transient " +
                 $"payloadTick={pending.SourceTick} for retry on '{name}': " +
                 $"{transientInvokeInfo}",
                 this);
@@ -319,6 +374,10 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             m_SharedTransientSendBacklog.Clear();
             m_SharedTransientSendOverflowLatched = false;
             m_NextSharedTransientSendWarningTime = 0f;
+            m_NextSharedTransientRetryTime = 0f;
+            m_LastSharedTransientEnqueuedTick = int.MinValue;
+            m_LastSharedTransientSentTick = int.MinValue;
+            m_LastSharedTransientRpcTarget = PlayerRef.Invalid;
         }
 
         [Rpc(
@@ -341,9 +400,10 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                 return default;
             }
 
-            FusionNativeNetworkCharacterMotor motor =
-                GetComponent<FusionNativeNetworkCharacterMotor>();
-            motor?.AcceptSharedCharacterInput(
+            FusionCharacterEndpointResolver.TryGet(
+                this,
+                out IFusionSharedCharacterEndpoint endpoint);
+            endpoint?.AcceptSharedCharacterInput(
                 info.Source,
                 info.Tick.Raw,
                 move,
@@ -377,9 +437,10 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                 return default;
             }
 
-            FusionNativeNetworkCharacterMotor motor =
-                GetComponent<FusionNativeNetworkCharacterMotor>();
-            motor?.AcceptSharedCharacterTransient(
+            FusionCharacterEndpointResolver.TryGet(
+                this,
+                out IFusionSharedCharacterEndpoint endpoint);
+            endpoint?.AcceptSharedCharacterTransient(
                 info.Source,
                 info.Tick.Raw,
                 move,

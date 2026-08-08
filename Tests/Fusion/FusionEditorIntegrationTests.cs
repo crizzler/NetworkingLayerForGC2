@@ -154,16 +154,113 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
                 "\"name\": \"Arawn.GameCreator2.Networking.Transport.Fusion\"",
                 assemblyDefinition);
             StringAssert.Contains("\"allowUnsafeCode\": true", assemblyDefinition);
+            StringAssert.Contains("\"define\": \"FUSION_FORCE_WEAVING\"", assemblyDefinition);
 
             string validation = ReadAssetSource(
                 "Arawn/NetworkingLayerForGC2/Editor/Transport/Fusion/" +
                 "FusionSceneSetupValidation.cs");
             StringAssert.Contains("ValidateRuntimeAssemblyDefinition(report)", validation);
             StringAssert.Contains("if (!definition.allowUnsafeCode)", validation);
+            StringAssert.Contains("ForceWeavingDefine", validation);
             StringAssert.Contains("AssetDatabase.FindAssets(\"t:asmdef\")", validation);
             StringAssert.Contains(
-                "Fusion RPC routing cannot work until the assembly is woven",
+                "Fusion weave the transport RPC assembly immediately after import",
                 validation);
+        }
+
+        [Test]
+        public void FusionWizard_NormalizesOnlyItsRuntimeWeaveRegistration()
+        {
+            const string runtimeAssembly =
+                "Arawn.GameCreator2.Networking.Transport.Fusion";
+            Type wizardType = RequireEditorType(
+                "Arawn.GameCreator2.Networking.Transport.Fusion.Editor." +
+                "FusionSceneSetupWizard");
+            MethodInfo ensureEntry = wizardType.GetMethod(
+                "EnsureRuntimeAssemblyWeaveEntry",
+                StaticNonPublic);
+            Assert.NotNull(ensureEntry);
+
+            var empty = new NetworkProjectConfig { AssembliesToWeave = null };
+            Assert.IsTrue((bool)ensureEntry.Invoke(null, new object[] { empty }));
+            CollectionAssert.AreEqual(
+                new[] { runtimeAssembly },
+                empty.AssembliesToWeave);
+
+            var missing = new NetworkProjectConfig
+            {
+                AssembliesToWeave = new[] { "Fusion.Unity", "Customer.Transport" }
+            };
+            Assert.IsTrue((bool)ensureEntry.Invoke(null, new object[] { missing }));
+            CollectionAssert.AreEqual(
+                new[] { "Fusion.Unity", "Customer.Transport", runtimeAssembly },
+                missing.AssembliesToWeave);
+
+            var exact = new NetworkProjectConfig
+            {
+                AssembliesToWeave = new[] { "Fusion.Unity", runtimeAssembly }
+            };
+            Assert.IsFalse((bool)ensureEntry.Invoke(null, new object[] { exact }));
+            CollectionAssert.AreEqual(
+                new[] { "Fusion.Unity", runtimeAssembly },
+                exact.AssembliesToWeave);
+
+            var caseVariants = new NetworkProjectConfig
+            {
+                AssembliesToWeave = new[]
+                {
+                    "Fusion.Unity",
+                    runtimeAssembly.ToLowerInvariant(),
+                    "Customer.Transport",
+                    runtimeAssembly,
+                    "Customer.Transport"
+                }
+            };
+            Assert.IsTrue((bool)ensureEntry.Invoke(null, new object[] { caseVariants }));
+            CollectionAssert.AreEqual(
+                new[]
+                {
+                    "Fusion.Unity",
+                    runtimeAssembly,
+                    "Customer.Transport",
+                    "Customer.Transport"
+                },
+                caseVariants.AssembliesToWeave,
+                "Only the Arawn entry should be canonicalized/deduplicated; unrelated customer " +
+                "entries and ordering must be preserved.");
+        }
+
+        [Test]
+        public void FusionWizard_RepairsProjectConfigWithoutPreflightDeadlock()
+        {
+            string validation = ReadAssetSource(
+                "Arawn/NetworkingLayerForGC2/Editor/Transport/Fusion/" +
+                "FusionSceneSetupValidation.cs");
+            string validateProjectConfig = ExtractMethodBody(
+                validation,
+                "private static void ValidateProjectConfig(");
+            StringAssert.Contains("requireAppliedInfrastructure", validateProjectConfig);
+            StringAssert.Contains("FusionSetupIssueSeverity.Warning", validateProjectConfig);
+            StringAssert.Contains("FusionSetupIssueSeverity.Info", validateProjectConfig);
+            StringAssert.Contains("StringComparer.OrdinalIgnoreCase", validateProjectConfig);
+            StringAssert.Contains(
+                "Create / Update Scene Setup will repair it automatically",
+                validateProjectConfig);
+
+            string wizard = ReadAssetSource(
+                "Arawn/NetworkingLayerForGC2/Editor/Transport/Fusion/" +
+                "FusionSceneSetupWizard.cs");
+            string runSetup = ExtractMethodBody(
+                wizard,
+                "private bool RunSetup(bool showDialogs)");
+            StringAssert.Contains(
+                "bool weaveRegistrationChanged = ApplyFusionProjectConfiguration();",
+                runSetup);
+            StringAssert.Contains("ILWeaverUtils.RunWeaver();", runSetup);
+            AssertAppearsBefore(
+                runSetup,
+                "assetTransaction.Commit();",
+                "ILWeaverUtils.RunWeaver();");
         }
 
         [Test]
@@ -359,7 +456,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
                 identity,
                 "TrySubmitSharedCharacterInput");
             StringAssert.Contains(
-                "FusionNativeNetworkCharacterMotor.HasSharedTransientInput(input)",
+                "FusionCharacterInputUtility.HasSharedTransientInput(input)",
                 submitInput);
             StringAssert.Contains(
                 "input.HasContinuousOwnerPose",
@@ -367,6 +464,22 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
                 "Replaceable MotionInteractive poses must travel with latest-state intent.");
             StringAssert.Contains("EnqueueSharedCharacterTransient(input)", submitInput);
             StringAssert.Contains("TrySendQueuedSharedCharacterTransient()", submitInput);
+            string routeContinuous = ExtractDeclaredMethodBody(
+                identity,
+                "RPC_SubmitSharedCharacterInput");
+            StringAssert.Contains("IFusionSharedCharacterEndpoint endpoint", routeContinuous);
+            StringAssert.Contains("endpoint?.AcceptSharedCharacterInput", routeContinuous);
+            StringAssert.DoesNotContain(
+                "FusionNativeNetworkCharacterMotor",
+                routeContinuous);
+            string routeTransient = ExtractDeclaredMethodBody(
+                identity,
+                "RPC_SubmitSharedCharacterTransient");
+            StringAssert.Contains("IFusionSharedCharacterEndpoint endpoint", routeTransient);
+            StringAssert.Contains("endpoint?.AcceptSharedCharacterTransient", routeTransient);
+            StringAssert.DoesNotContain(
+                "FusionNativeNetworkCharacterMotor",
+                routeTransient);
             string sendTransient = ExtractDeclaredMethodBody(
                 identity,
                 "TrySendQueuedSharedCharacterTransient");
@@ -511,7 +624,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
             StringAssert.Contains("!Runner.IsForward", runnerTick);
             StringAssert.Contains("TryResolveSharedLogicalOwnerProxy", runnerTick);
             StringAssert.Contains(
-                "motor.SimulateSharedLogicalOwnerProxyTick",
+                "sharedPump.SimulateSharedLogicalOwnerProxyTick",
                 runnerTick);
             StringAssert.Contains("restorePredictedPose: true", runnerTick);
 
@@ -519,7 +632,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
                 router,
                 "public override void Render()");
             StringAssert.Contains("!playerObject.IsInSimulation", runnerRender);
-            StringAssert.Contains("motor.RenderSharedLogicalOwnerProxy()", runnerRender);
+            StringAssert.Contains("sharedPump.RenderSharedLogicalOwnerProxy()", runnerRender);
 
             string resolveProxy = ExtractDeclaredMethodBody(
                 router,
@@ -542,7 +655,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
             StringAssert.Contains("identity.TransportAdmitted", validateLogicalOwner);
             StringAssert.Contains("identity.IsOwnedBy(localPlayer)", validateLogicalOwner);
             StringAssert.Contains(
-                "GetComponent<FusionNativeNetworkCharacterMotor>()",
+                "IFusionSharedCharacterRunnerPump",
                 validateLogicalOwner);
 
             string proxyTick = ExtractDeclaredMethodBody(
@@ -618,19 +731,11 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
                 "The Fusion player prefab has authority-owner prediction disabled",
                 validation);
 
-            string demoRoot = Path.Combine(
-                Application.dataPath,
-                "Arawn/NetworkingLayerForGC2/Demo/Fusion");
-            string[] fusionPrefabs = Directory
-                .EnumerateFiles(demoRoot, "*.prefab", SearchOption.AllDirectories)
-                .ToArray();
+            string[] fusionPrefabs = GetFusionDemoPrefabAssetPaths();
 
             int networkCharacterPrefabCount = 0;
-            foreach (string prefabPath in fusionPrefabs)
+            foreach (string assetPath in fusionPrefabs)
             {
-                string assetPath = "Assets" + prefabPath
-                    .Substring(Application.dataPath.Length)
-                    .Replace('\\', '/');
                 GameObject prefab = AssetDatabase.LoadAssetAtPath<GameObject>(assetPath);
                 NetworkCharacter character =
                     prefab != null
@@ -654,7 +759,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
         }
 
         [Test]
-        public void FusionWizard_DefaultsToNativeMovementAndExposesLegacyFallback()
+        public void FusionWizard_DefaultsToNativeMovementAndExposesOptionalBackends()
         {
             string wizard = ReadAssetSource(
                 "Arawn/NetworkingLayerForGC2/Editor/Transport/Fusion/" +
@@ -665,14 +770,22 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
                 wizard);
 
             string projectPage = ExtractMethodBody(wizard, "private void DrawProjectPage()");
-            StringAssert.Contains("\"Fusion Native (Recommended)\"", projectPage);
-            StringAssert.Contains("\"Built-in Legacy\"", projectPage);
+            StringAssert.Contains("DrawPredictionBackendSelector();", projectPage);
+
+            string predictionSelector = ExtractMethodBody(
+                wizard,
+                "private void DrawPredictionBackendSelector()");
+            StringAssert.Contains("\"Fusion Native (Recommended)\"", predictionSelector);
             StringAssert.Contains(
-                "? NetworkPredictionBackend.FusionNative",
-                projectPage);
+                "\"Fusion Advanced KCC (Optional Addon)\"",
+                predictionSelector);
+            StringAssert.Contains("\"Built-in Legacy\"", predictionSelector);
             StringAssert.Contains(
-                ": NetworkPredictionBackend.BuiltIn",
-                projectPage);
+                "_ => NetworkPredictionBackend.FusionNative",
+                predictionSelector);
+            StringAssert.Contains(
+                "2 => NetworkPredictionBackend.BuiltIn",
+                predictionSelector);
 
             string preparePlayer = ExtractMethodBody(
                 wizard,
@@ -692,7 +805,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
         }
 
         [Test]
-        public void FusionTransportBridge_CentralizesNativeCharacterInputCollection()
+        public void FusionTransportBridge_CentralizesCharacterInputThroughEndpointContract()
         {
             string bridge = ReadAssetSource(
                 "Arawn/NetworkingLayerForGC2/Runtime/Transport/Fusion/" +
@@ -703,9 +816,13 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
 
             StringAssert.Contains("runner.TryGetPlayerObject(runner.LocalPlayer", onInput);
             StringAssert.Contains(
-                "playerObject.GetComponent<FusionNativeNetworkCharacterMotor>()",
+                "IFusionCharacterInputEndpoint endpoint",
                 onInput);
-            StringAssert.Contains("motor?.TryConsumeNetworkInput(runner, input)", onInput);
+            StringAssert.Contains("endpoint.TryConsumeNetworkInput(runner, input)", onInput);
+            StringAssert.DoesNotContain(
+                "FusionNativeNetworkCharacterMotor",
+                onInput,
+                "Runner input collection must remain open to optional Fusion backends.");
             Assert.AreEqual(1, CountOccurrences(bridge, "TryConsumeNetworkInput("));
 
             Assert.IsTrue(
@@ -722,6 +839,110 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
                 "FusionNativeNetworkCharacterMotor.cs");
             StringAssert.DoesNotContain("AddCallbacks(", motor);
             StringAssert.DoesNotContain("RemoveCallbacks(", motor);
+        }
+
+        [Test]
+        public void FusionKccBackend_UsesPublicOptionalTransportContracts()
+        {
+            Assert.AreEqual(3, (int)NetworkPredictionBackend.FusionKCC);
+            Assert.AreEqual(
+                0,
+                (int)FusionKccSharedAuthorityMode.OwnerMovementAuthority);
+            Assert.AreEqual(
+                1,
+                (int)FusionKccSharedAuthorityMode.SharedMasterMovementAuthority);
+
+            Assert.IsTrue(typeof(IFusionCharacterInputEndpoint).IsPublic);
+            Assert.IsTrue(typeof(IFusionSharedCharacterEndpoint).IsPublic);
+            Assert.IsTrue(typeof(IFusionSharedCharacterRunnerPump).IsPublic);
+            Assert.IsTrue(typeof(IFusionKccRuntimeAdapter).IsPublic);
+            Assert.IsTrue(typeof(FusionKccCharacterBackend).IsPublic);
+
+            Assert.IsTrue(
+                typeof(INetworkCharacterPredictionBackend).IsAssignableFrom(
+                    typeof(FusionKccCharacterBackend)));
+            Assert.IsTrue(
+                typeof(INetworkAuthoritativePoseProvider).IsAssignableFrom(
+                    typeof(FusionKccCharacterBackend)));
+            Assert.IsTrue(
+                typeof(IFusionCharacterInputEndpoint).IsAssignableFrom(
+                    typeof(FusionNativeNetworkCharacterMotor)));
+            Assert.IsTrue(
+                typeof(IFusionSharedCharacterEndpoint).IsAssignableFrom(
+                    typeof(FusionNativeNetworkCharacterMotor)));
+            Assert.IsTrue(
+                typeof(IFusionSharedCharacterRunnerPump).IsAssignableFrom(
+                    typeof(FusionNativeNetworkCharacterMotor)));
+
+            string contracts = ReadAssetSource(
+                "Arawn/NetworkingLayerForGC2/Runtime/Transport/Fusion/" +
+                "FusionCharacterRuntimeContracts.cs");
+            string backend = ReadAssetSource(
+                "Arawn/NetworkingLayerForGC2/Runtime/Transport/Fusion/" +
+                "FusionKccCharacterBackend.cs");
+            StringAssert.DoesNotContain("using Fusion.Addons.KCC", contracts);
+            StringAssert.DoesNotContain("using Fusion.Addons.KCC", backend);
+            StringAssert.Contains(
+                "m_SharedAuthorityMode =\n" +
+                "            FusionKccSharedAuthorityMode.OwnerMovementAuthority",
+                backend,
+                "Owner movement authority must remain the safe Shared-mode default.");
+            StringAssert.Contains("MonoBehaviour m_RuntimeAdapter", backend);
+            StringAssert.Contains("ResolveAdapter", backend);
+
+            string createDriver = ExtractDeclaredMethodBody(backend, "CreateDriver");
+            StringAssert.Contains("if (driver == null)", createDriver);
+            StringAssert.Contains(
+                "RestoreBuiltInControllerForFallback()",
+                createDriver,
+                "Removing or omitting optional KCC code must leave Built-in fallback movable.");
+            string restoreFallback = ExtractDeclaredMethodBody(
+                backend,
+                "RestoreBuiltInControllerForFallback");
+            StringAssert.Contains(
+                "GetComponent<CharacterController>()",
+                restoreFallback);
+            StringAssert.Contains("controller.enabled = true", restoreFallback);
+        }
+
+        [Test]
+        public void FusionCharacterInputUtility_ClassifiesOnlyTransientSharedPayloads()
+        {
+            Assert.IsFalse(FusionCharacterInputUtility.HasSharedTransientInput(default));
+
+            var continuousOwnerPose = new FusionNativeCharacterInput
+            {
+                Flags = FusionNativeCharacterInput.FlagOwnerPose |
+                        FusionNativeCharacterInput.FlagContinuousOwnerPose,
+                OwnerPosition = Vector3.one
+            };
+            Assert.IsFalse(
+                FusionCharacterInputUtility.HasSharedTransientInput(continuousOwnerPose));
+
+            continuousOwnerPose.Flags = FusionNativeCharacterInput.FlagOwnerPose;
+            Assert.IsTrue(
+                FusionCharacterInputUtility.HasSharedTransientInput(continuousOwnerPose));
+
+            Assert.IsTrue(FusionCharacterInputUtility.HasSharedTransientInput(
+                new FusionNativeCharacterInput
+                {
+                    Flags = FusionNativeCharacterInput.FlagJump
+                }));
+            Assert.IsTrue(FusionCharacterInputUtility.HasSharedTransientInput(
+                new FusionNativeCharacterInput
+                {
+                    Flags = FusionNativeCharacterInput.FlagResetVerticalVelocity
+                }));
+            Assert.IsTrue(FusionCharacterInputUtility.HasSharedTransientInput(
+                new FusionNativeCharacterInput
+                {
+                    Flags = FusionNativeCharacterInput.FlagCollisionChanged
+                }));
+            Assert.IsTrue(FusionCharacterInputUtility.HasSharedTransientInput(
+                new FusionNativeCharacterInput
+                {
+                    RootMotionDelta = Vector3.forward * 0.01f
+                }));
         }
 
         [Test]
@@ -1469,8 +1690,20 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
                 motor,
                 "HasSharedTransientInput");
             StringAssert.Contains(
-                "input.HasOwnerPose && !input.HasContinuousOwnerPose",
+                "FusionCharacterInputUtility.HasSharedTransientInput(input)",
                 transientClassifier,
+                "Fusion Native must use the transport-neutral transient classifier shared " +
+                "with optional movement backends.");
+
+            string runtimeContracts = ReadAssetSource(
+                "Arawn/NetworkingLayerForGC2/Runtime/Transport/Fusion/" +
+                "FusionCharacterRuntimeContracts.cs");
+            string sharedTransientClassifier = ExtractDeclaredMethodBody(
+                runtimeContracts,
+                "HasSharedTransientInput");
+            StringAssert.Contains(
+                "input.HasOwnerPose && !input.HasContinuousOwnerPose",
+                sharedTransientClassifier,
                 "Continuous climb poses must not build a reliable one-shot backlog.");
         }
 
@@ -1525,8 +1758,10 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
                 driver,
                 "Fusion resimulation must not rewind live TraversalStance relative state.");
             StringAssert.Contains(
-                "input.HasOwnerPose && !input.HasContinuousOwnerPose",
-                motor);
+                "FusionCharacterInputUtility.HasSharedTransientInput(input)",
+                motor,
+                "Fusion Native and optional movement backends share the same continuous " +
+                "traversal/transient-input classification.");
 
             StringAssert.Contains(
                 "public const int EXTRA_WORDS = 17",
@@ -1557,7 +1792,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
                 "NativeState.TraversalPresentationVelocity = direction",
                 updateMotionState);
 
-            string render = ExtractDeclaredMethodBody(motor, "Render");
+            string render = ExtractMethodBody(motor, "public override void Render()");
             StringAssert.Contains(
                 "fromState.TraversalPresentationVelocity",
                 render);
@@ -1666,23 +1901,33 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
         }
 
         [Test]
-        public void FusionTraversalDemoPlayer_IsInTheGlobalRuntimePrefabTable()
+        public void FusionTraversalDemoPlayers_AreInTheGlobalRuntimePrefabTable()
         {
-            const string prefabPath =
-                "Assets/Arawn/NetworkingLayerForGC2/Demo/Fusion/Prefabs/" +
-                "FusionDemoPlayer-Traversal.prefab";
-            string assetGuid = AssetDatabase.AssetPathToGUID(prefabPath);
-            Assert.IsNotEmpty(assetGuid, $"Prefab asset was not found: {prefabPath}");
+            string[] prefabPaths = GetFusionDemoPrefabAssetPaths()
+                .Where(path => string.Equals(
+                    Path.GetFileName(path),
+                    "FusionDemoPlayer-Traversal.prefab",
+                    StringComparison.Ordinal))
+                .ToArray();
+            Assert.IsNotEmpty(
+                prefabPaths,
+                "No installed or legacy Fusion Traversal demo player prefab was found.");
 
             NetworkProjectConfig config = NetworkProjectConfig.Global;
             Assert.NotNull(config);
             Assert.NotNull(config.PrefabTable);
 
-            var networkGuid = new NetworkObjectGuid(assetGuid);
-            NetworkPrefabId prefabId = config.PrefabTable.GetId(networkGuid);
-            Assert.IsTrue(
-                prefabId.IsValid,
-                $"Fusion's global prefab table cannot resolve {prefabPath} ({networkGuid}).");
+            foreach (string prefabPath in prefabPaths)
+            {
+                string assetGuid = AssetDatabase.AssetPathToGUID(prefabPath);
+                Assert.IsNotEmpty(assetGuid, $"Prefab asset was not found: {prefabPath}");
+
+                var networkGuid = new NetworkObjectGuid(assetGuid);
+                NetworkPrefabId prefabId = config.PrefabTable.GetId(networkGuid);
+                Assert.IsTrue(
+                    prefabId.IsValid,
+                    $"Fusion's global prefab table cannot resolve {prefabPath} ({networkGuid}).");
+            }
         }
 
         [Test]
@@ -1702,19 +1947,15 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
         [Test]
         public void FusionDemoPlayers_ArePreparedForFusionNativeMovement()
         {
-            string demoRoot = Path.Combine(
-                Application.dataPath,
-                "Arawn/NetworkingLayerForGC2/Demo/Fusion");
-            string[] fusionPrefabs = Directory
-                .EnumerateFiles(demoRoot, "*.prefab", SearchOption.AllDirectories)
+            string[] fusionPrefabs = GetFusionDemoPrefabAssetPaths()
+                .Where(path => path.IndexOf(
+                    "/GC2NetworkingLayerFusionTransport.AdvancedKCCExamples@",
+                    StringComparison.Ordinal) < 0)
                 .ToArray();
 
             int networkCharacterPrefabCount = 0;
-            foreach (string prefabPath in fusionPrefabs)
+            foreach (string assetPath in fusionPrefabs)
             {
-                string assetPath = "Assets" + prefabPath
-                    .Substring(Application.dataPath.Length)
-                    .Replace('\\', '/');
                 GameObject prefab = AssetDatabase.LoadAssetAtPath<GameObject>(assetPath);
                 NetworkCharacter character =
                     prefab != null
@@ -2580,6 +2821,40 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
                 "private IEnumerable<string> GetAssetUndoPaths()");
             StringAssert.Contains("GeneratedFolder", undoPaths);
             StringAssert.Contains("GeneratedFolder + \".meta\"", undoPaths);
+        }
+
+        private static string[] GetFusionDemoPrefabAssetPaths()
+        {
+            var roots = new List<string>();
+            string legacyRoot = Path.Combine(
+                Application.dataPath,
+                "Arawn/NetworkingLayerForGC2/Demo/Fusion");
+            if (Directory.Exists(legacyRoot)) roots.Add(legacyRoot);
+
+            string installsRoot = Path.Combine(
+                Application.dataPath,
+                "Plugins/GameCreator/Installs");
+            if (Directory.Exists(installsRoot))
+            {
+                roots.AddRange(Directory
+                    .EnumerateDirectories(installsRoot, "*", SearchOption.TopDirectoryOnly)
+                    .Where(path => Path.GetFileName(path).StartsWith(
+                        "GC2NetworkingLayerFusionTransport.",
+                        StringComparison.Ordinal)));
+            }
+
+            return roots
+                .Distinct(StringComparer.Ordinal)
+                .SelectMany(root => Directory.EnumerateFiles(
+                    root,
+                    "*.prefab",
+                    SearchOption.AllDirectories))
+                .Select(path => "Assets" + path
+                    .Substring(Application.dataPath.Length)
+                    .Replace('\\', '/'))
+                .Distinct(StringComparer.Ordinal)
+                .OrderBy(path => path, StringComparer.Ordinal)
+                .ToArray();
         }
 
         private static void CreateBootstrap(Scene scene, string name)

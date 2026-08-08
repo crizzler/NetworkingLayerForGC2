@@ -2686,9 +2686,12 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                 return;
             }
 
-            FusionNativeNetworkCharacterMotor motor =
-                playerObject.GetComponent<FusionNativeNetworkCharacterMotor>();
-            motor?.TryConsumeNetworkInput(runner, input);
+            if (FusionCharacterEndpointResolver.TryGet(
+                    playerObject,
+                    out IFusionCharacterInputEndpoint endpoint))
+            {
+                endpoint.TryConsumeNetworkInput(runner, input);
+            }
         }
         public void OnInputMissing(NetworkRunner runner, PlayerRef player, NetworkInput input) { }
         public void OnConnectRequest(

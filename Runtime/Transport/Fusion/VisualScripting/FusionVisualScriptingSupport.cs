@@ -37,6 +37,22 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                    bridge.TryGetActiveSession(out session);
         }
 
+        public static bool ActiveSessionNameEquals(
+            GameObject context,
+            string expectedSessionName)
+        {
+            if (string.IsNullOrWhiteSpace(expectedSessionName) ||
+                !TryGetActiveSession(context, out FusionSessionSnapshot session))
+            {
+                return false;
+            }
+
+            return string.Equals(
+                session.SessionName,
+                expectedSessionName.Trim(),
+                StringComparison.Ordinal);
+        }
+
         public static FusionNetworkIdentity ResolveIdentity(
             PropertyGetGameObject target,
             Args args)

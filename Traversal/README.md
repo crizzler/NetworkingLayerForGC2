@@ -38,10 +38,12 @@ until the complete patch passes validation.
 
 For PurrNet projects, enable **Traversal** on the PurrNet wizard Modules page. The wizard creates/reuses `NetworkTraversalManager` and `PurrNetTraversalTransportBridge`.
 
-Traversal currently requires the Networking Layer's **Built-in** movement
-backend. The wizard rejects Traversal with PurrDiction because its adapters do
-not yet implement `INetworkOwnerMotionAuthority`; allowing reconciliation to
-run without that capability can overwrite traversal-driven poses.
+Traversal support is capability-based. **Built-in** remains the stable fallback.
+The optional **PurrDiction Native (Experimental)** backend can be selected only
+when its compiled movement adapter implements both
+`INetworkOwnerMotionAuthority` and `INetworkServerOwnerMotionAuthority`. The
+wizard and runtime route fail closed when either capability is absent so
+reconciliation cannot overwrite traversal-driven poses.
 
 When a Player Prefab is assigned on the Scene page and prefab preparation is enabled, selecting Traversal adds `NetworkTraversalController` to that prefab.
 

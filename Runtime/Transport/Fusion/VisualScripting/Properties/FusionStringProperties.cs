@@ -5,8 +5,8 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
 {
     [Title("Fusion Session Name")]
     [Category("Network/Fusion/Session/Session Name")]
-    [Description("The active Photon Fusion session name")]
-    [Keywords("Network", "Fusion", "Photon", "Session", "Name", "Code")]
+    [Description("The active exact Photon Fusion backend session ID or join code")]
+    [Keywords("Network", "Fusion", "Photon", "Session", "Name", "ID", "Join", "Code")]
     [Image(typeof(IconString), ColorTheme.Type.Blue)]
     [Serializable]
     public sealed class GetStringFusionSessionName : PropertyTypeGetString

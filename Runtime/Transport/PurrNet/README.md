@@ -169,11 +169,27 @@ because both systems will try to write position/rotation. Use the
 `NetworkSessionProfile` to tune `serverStateBroadcastRate`,
 `stateApplyRate`, and `interpolationDelay` for your target game.
 
+The built-in backend always keeps the Character root and its
+`CharacterController` at the newest authoritative simulation pose. Interpolation
+is applied only to a generated visual frame around the direct-child GC2
+`Mannequin`. That visual frame fails closed when the Mannequin hierarchy contains
+a `CharacterController`, collider, Rigidbody, navigation agent, or networking
+component; in that case gameplay correctness takes priority over presentation
+smoothing. Keep physics and network components on the Character root and reserve
+the Mannequin subtree for renderers, bones, and other visual-only components.
+
 Owner-side reconciliation corrects the authoritative root immediately and
 smooths the visible GC2 model through `UnitDriverNetworkClient`. If a custom
 camera follows the character root directly and still shows correction bumps,
 offset the camera target using `ReconciliationVisualOffset` while
 `IsReconciling` is true, or follow the model/mannequin instead of the root.
+
+The optional **PurrDiction Native** backend advances directional and NavMesh
+movement only on PurrDiction prediction ticks and supports rollback/resimulation.
+It is currently marked experimental in the PurrNet wizard and is compiled only
+when `ARAWN_GC2_PURRDICTION` is defined. Use the built-in backend as the stable
+default unless the project already uses PurrDiction and can run dedicated
+host/client packet-loss and traversal tests.
 
 Lag compensation is separate from visual smoothing. The
 `LagCompensationManager` records historical server-side positions so hitscan,

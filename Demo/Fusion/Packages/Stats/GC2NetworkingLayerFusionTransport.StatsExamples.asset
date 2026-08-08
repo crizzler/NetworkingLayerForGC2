@@ -1,0 +1,41 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 7734bdb5c6ff542a7a94b0aec1b2782c, type: 3}
+  m_Name: GC2NetworkingLayerFusionTransport.StatsExamples
+  m_EditorClassIdentifier: GameCreator.Editor.Core::GameCreator.Editor.Installs.Installer
+  m_Install:
+    m_Name: Stats Examples
+    m_Module: GC2 Networking Layer Fusion Transport
+    m_Description: Dedicated Fusion network Stats example with authoritative HP and
+      Strength controls for Host, Client, and Shared sessions.
+    m_Author: Arawn
+    m_Version:
+      major: 1
+      minor: 0
+      patch: 0
+    m_Complexity: 0
+    m_Dependencies:
+    - m_ID: GC2NetworkingLayerFusionTransport.Assets
+      m_MinVersion:
+        major: 1
+        minor: 0
+        patch: 0
+    - m_ID: Stats.Examples
+      m_MinVersion:
+        major: 1
+        minor: 6
+        patch: 12
+    - m_ID: Stats.Classes
+      m_MinVersion:
+        major: 1
+        minor: 3
+        patch: 7

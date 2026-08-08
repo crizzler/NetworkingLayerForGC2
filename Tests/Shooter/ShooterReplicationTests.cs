@@ -18,11 +18,18 @@ namespace Arawn.GameCreator2.Networking.Shooter.Tests
         public bool Server { get; set; } = true;
         public bool Client { get; set; }
         public bool Host { get; set; }
+        public uint LocalClientId { get; set; } = NetworkTransportBridge.InvalidClientId;
 
         public override bool IsServer => Server;
         public override bool IsClient => Client;
         public override bool IsHost => Host;
         public override float ServerTime => Time.time;
+
+        public override bool TryGetLocalClientId(out uint clientId)
+        {
+            clientId = LocalClientId;
+            return Client && NetworkTransportBridge.IsValidClientId(clientId);
+        }
 
         public override void SendToServer(uint characterNetworkId, NetworkInputState[] inputs) { }
         public override void SendToOwner(
@@ -715,6 +722,11 @@ namespace Arawn.GameCreator2.Networking.Shooter.Tests
             Character character = shooterObject.AddComponent<Character>();
             NetworkCharacter networkCharacter = shooterObject.AddComponent<NetworkCharacter>();
             networkCharacter.SetManualNetworkId(53);
+            SetNetworkCharacterRuntimeRole(
+                networkCharacter,
+                isServer: true,
+                isOwner: true,
+                isHost: true);
             NetworkShooterController shooter = shooterObject.AddComponent<NetworkShooterController>();
             SetPrivateField(shooter, "m_LogDiagnostics", false);
             shooter.Initialize(true, true);
@@ -1255,6 +1267,111 @@ namespace Arawn.GameCreator2.Networking.Shooter.Tests
         }
 
         [Test]
+        public void SharedMasterLocalHit_QueuesTrustedNativeHit()
+        {
+            const uint actorNetworkId = 73;
+            const uint localClientId = 41;
+
+            ShooterTestTransportBridge bridge = Track(
+                    new GameObject("Shooter Shared Authority Test Transport"))
+                .AddComponent<ShooterTestTransportBridge>();
+            bridge.Server = true;
+            bridge.Client = true;
+            bridge.Host = false;
+            bridge.LocalClientId = localClientId;
+            NetworkShooterManager manager = CreateManager(true, true);
+
+            GameObject shooterObject = Track(new GameObject("Shooter Shared Authority Attacker"));
+            Character character = shooterObject.AddComponent<Character>();
+            NetworkCharacter networkCharacter = shooterObject.AddComponent<NetworkCharacter>();
+            networkCharacter.SetManualNetworkId(actorNetworkId);
+            SetNetworkCharacterRuntimeRole(
+                networkCharacter,
+                isServer: true,
+                isOwner: true,
+                isHost: true);
+            bridge.ResolvedCharacter = character;
+            bridge.SetCharacterOwner(actorNetworkId, localClientId);
+
+            NetworkShooterController shooter = shooterObject.AddComponent<NetworkShooterController>();
+            SetPrivateField(shooter, "m_LogDiagnostics", false);
+            shooter.Initialize(true, true);
+            manager.RegisterController(actorNetworkId, shooter);
+
+            bool processNative = InvokePrivate<bool>(
+                shooter,
+                "InterceptHit",
+                Track(new GameObject("Shooter Shared Authority Target")),
+                Vector3.one,
+                Vector3.up,
+                1f,
+                null,
+                (byte)0,
+                true,
+                false);
+
+            Assert.That(
+                processNative,
+                Is.True,
+                "A Shared master is the logical gameplay authority even though transport IsHost is false.");
+            Assert.That(
+                CountEnumerable(GetPrivateField<IEnumerable>(manager, "m_ServerHitQueue")),
+                Is.EqualTo(1),
+                "The trusted Shared-master hit must enter the authoritative queue and broadcast path.");
+        }
+
+        [Test]
+        public void SharedMasterLocalHit_WithMismatchedRegisteredOwner_FailsClosed()
+        {
+            const uint actorNetworkId = 74;
+            const uint localClientId = 51;
+
+            ShooterTestTransportBridge bridge = Track(
+                    new GameObject("Shooter Shared Owner Mismatch Test Transport"))
+                .AddComponent<ShooterTestTransportBridge>();
+            bridge.Server = true;
+            bridge.Client = true;
+            bridge.Host = false;
+            bridge.LocalClientId = localClientId;
+            NetworkShooterManager manager = CreateManager(true, true);
+
+            GameObject shooterObject = Track(new GameObject("Shooter Shared Owner Mismatch Attacker"));
+            Character character = shooterObject.AddComponent<Character>();
+            NetworkCharacter networkCharacter = shooterObject.AddComponent<NetworkCharacter>();
+            networkCharacter.SetManualNetworkId(actorNetworkId);
+            SetNetworkCharacterRuntimeRole(
+                networkCharacter,
+                isServer: true,
+                isOwner: true,
+                isHost: true);
+            bridge.ResolvedCharacter = character;
+            bridge.SetCharacterOwner(actorNetworkId, localClientId + 1);
+
+            NetworkShooterController shooter = shooterObject.AddComponent<NetworkShooterController>();
+            SetPrivateField(shooter, "m_LogDiagnostics", false);
+            shooter.Initialize(true, true);
+            manager.RegisterController(actorNetworkId, shooter);
+
+            bool processNative = InvokePrivate<bool>(
+                shooter,
+                "InterceptHit",
+                Track(new GameObject("Shooter Shared Owner Mismatch Target")),
+                Vector3.one,
+                Vector3.up,
+                1f,
+                null,
+                (byte)0,
+                true,
+                false);
+
+            Assert.That(processNative, Is.False);
+            Assert.That(
+                CountEnumerable(GetPrivateField<IEnumerable>(manager, "m_ServerHitQueue")),
+                Is.Zero,
+                "A stale or mismatched Shared owner must not be promoted to trusted authority.");
+        }
+
+        [Test]
         public void DamageHandler_DoesNotSuppressAuthoritativeReactionHandler()
         {
             NetworkShooterManager manager = CreateManager(true, false);
@@ -1463,6 +1580,11 @@ namespace Arawn.GameCreator2.Networking.Shooter.Tests
             shooterObject.AddComponent<Character>();
             NetworkCharacter shooterCharacter = shooterObject.AddComponent<NetworkCharacter>();
             shooterCharacter.SetManualNetworkId(71);
+            SetNetworkCharacterRuntimeRole(
+                shooterCharacter,
+                isServer: true,
+                isOwner: true,
+                isHost: true);
             NetworkShooterController shooter = shooterObject.AddComponent<NetworkShooterController>();
             SetPrivateField(shooter, "m_LogDiagnostics", false);
             shooter.Initialize(true, true);
@@ -1689,6 +1811,17 @@ namespace Arawn.GameCreator2.Networking.Shooter.Tests
                 BindingFlags.Instance | BindingFlags.NonPublic);
             Assert.That(field, Is.Not.Null, $"Missing field {name}");
             field.SetValue(target, value);
+        }
+
+        private static void SetNetworkCharacterRuntimeRole(
+            NetworkCharacter character,
+            bool isServer,
+            bool isOwner,
+            bool isHost)
+        {
+            SetPrivateField(character, "m_RuntimeIsServer", isServer);
+            SetPrivateField(character, "m_RuntimeIsOwner", isOwner);
+            SetPrivateField(character, "m_RuntimeIsHost", isHost);
         }
 
         private static void InvokePrivate(object target, string name, params object[] arguments)

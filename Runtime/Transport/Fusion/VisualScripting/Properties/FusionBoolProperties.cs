@@ -22,6 +22,27 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         public override string String => "Fusion Has Active Session";
     }
 
+    [Title("Fusion Session Name Is")]
+    [Category("Network/Fusion/Session/Session Name Is")]
+    [Description("True when the active Photon Fusion session uses the exact supplied session ID or join code")]
+    [Keywords("Network", "Fusion", "Photon", "Session", "Name", "ID", "Code", "Equals")]
+    [Image(typeof(IconString), ColorTheme.Type.Blue, typeof(OverlayTick))]
+    [Serializable]
+    public sealed class GetBoolFusionSessionNameIs : PropertyTypeGetBool
+    {
+        [SerializeField]
+        private PropertyGetString m_SessionName = new PropertyGetString(string.Empty);
+
+        public override bool Get(Args args)
+        {
+            return FusionVisualScriptingSupport.ActiveSessionNameEquals(
+                args.Self,
+                m_SessionName.Get(args));
+        }
+
+        public override string String => $"Fusion Session Name Is {m_SessionName}";
+    }
+
     [Title("Fusion Connection Is Relayed")]
     [Category("Network/Fusion/Connection/Is Relayed")]
     [Description("True when the active Fusion connection is using Photon Relay")]
