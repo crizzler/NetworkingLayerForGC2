@@ -339,8 +339,25 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             m_Registered.Clear();
         }
 
-        private void SendRequest(NetworkActionRequest request) =>
-            SendToAuthority((ushort)MessageType.Request, request, true);
+        private void SendRequest(NetworkActionRequest request)
+        {
+            FusionTransportBridge bridge = TransportBridge;
+            NetworkActionManager manager = m_WiredManager ?? GetManager();
+            if (bridge == null || !bridge.IsLocalGameplayReady)
+            {
+                manager?.RejectLocalActionRequest(
+                    in request,
+                    NetworkActionRejectReason.NotRunning);
+                return;
+            }
+
+            if (!SendToAuthority((ushort)MessageType.Request, request, true))
+            {
+                manager?.RejectLocalActionRequest(
+                    in request,
+                    NetworkActionRejectReason.TransportUnavailable);
+            }
+        }
 
         private void SendResponse(uint clientId, NetworkActionResponse response) =>
             SendToClient(clientId, (ushort)MessageType.Response, response, true);

@@ -648,6 +648,21 @@ namespace Arawn.GameCreator2.Networking
                 $"target={request.TargetNetworkId} revision={broadcast.Revision}");
         }
 
+        /// <summary>
+        /// Completes a locally-created request when a transport cannot enqueue it. Adapters use
+        /// this instead of leaving GC2 Instructions waiting for an avoidable timeout.
+        /// </summary>
+        public void RejectLocalActionRequest(
+            in NetworkActionRequest request,
+            NetworkActionRejectReason reason)
+        {
+            if (reason == NetworkActionRejectReason.None)
+                reason = NetworkActionRejectReason.TransportUnavailable;
+            NetworkActionResponse response = BuildRejectedResponse(request, reason);
+            response.ServerTime = GetServerTime();
+            ReceiveActionResponse(response);
+        }
+
         public void ReceiveActionResponse(NetworkActionResponse response)
         {
             ulong key = PendingKey(response.ActorNetworkId, response.CorrelationId);

@@ -630,6 +630,16 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         }
 
         public bool IsClientReady(uint clientId) => m_GameplayReadyClients.Contains(clientId);
+
+        /// <summary>
+        /// Local gameplay requests are safe once this peer has consumed the authority snapshot
+        /// and enqueued its acknowledgement. The acknowledgement and subsequent reliable
+        /// requests share the same ordered client-to-authority stream, so authority observes
+        /// readiness first.
+        /// </summary>
+        public override bool IsLocalGameplayReady =>
+            IsRunnerUsable && IsClient && m_LocalSceneReady && m_LocalGameplayReadyIntent &&
+            m_AuthorityEpoch != 0 && m_LocalSnapshotCompletedEpoch == m_AuthorityEpoch;
         public bool IsClientSceneReady(uint clientId) => m_SceneReadyClients.Contains(clientId);
 
         /// <summary>

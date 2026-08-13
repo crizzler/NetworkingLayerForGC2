@@ -162,6 +162,13 @@ namespace Arawn.GameCreator2.Networking
         public abstract bool IsHost { get; }
         public abstract float ServerTime { get; }
 
+        /// <summary>
+        /// True when this peer may submit ordinary gameplay requests. Most transports become
+        /// ready with their connection; transports with a snapshot/readiness handshake override
+        /// this so UI and modules do not race authority admission.
+        /// </summary>
+        public virtual bool IsLocalGameplayReady => IsRunning && IsClient;
+
         public virtual bool TryGetLocalClientId(out uint clientId)
         {
             clientId = InvalidClientId;

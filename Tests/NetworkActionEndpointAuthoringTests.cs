@@ -1,9 +1,12 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using NUnit.Framework;
 using UnityEditor;
 using UnityEngine;
+using UnityEngine.UIElements;
 
 namespace Arawn.GameCreator2.Networking.Tests
 {
@@ -58,6 +61,44 @@ namespace Arawn.GameCreator2.Networking.Tests
             finally
             {
                 if (editor != null) UnityEngine.Object.DestroyImmediate(editor);
+                UnityEngine.Object.DestroyImmediate(gameObject);
+            }
+        }
+
+        [Test]
+        public void BindingDrawer_UsesNativeGc2ConditionAndInstructionListTools()
+        {
+            var gameObject = new GameObject("Endpoint Binding Drawer Test");
+            try
+            {
+                NetworkActionEndpoint endpoint =
+                    gameObject.AddComponent<NetworkActionEndpoint>();
+                var serializedEndpoint = new SerializedObject(endpoint);
+                SerializedProperty actions = serializedEndpoint.FindProperty("m_Actions");
+                actions.arraySize = 1;
+                serializedEndpoint.ApplyModifiedPropertiesWithoutUndo();
+                serializedEndpoint.Update();
+
+                Type drawerType = Type.GetType(
+                    "Arawn.GameCreator2.Networking.Editor.NetworkActionBindingDrawer, " +
+                    "Arawn.GameCreator2.Networking.Editor");
+                Assert.That(drawerType, Is.Not.Null);
+                var drawer = (PropertyDrawer)Activator.CreateInstance(drawerType);
+                VisualElement root = drawer.CreatePropertyGUI(
+                    actions.GetArrayElementAtIndex(0));
+
+                List<VisualElement> elements = root.Query<VisualElement>().ToList();
+                Assert.That(elements.Count(element =>
+                        element.GetType().FullName ==
+                        "GameCreator.Editor.VisualScripting.ConditionListTool"),
+                    Is.EqualTo(1));
+                Assert.That(elements.Count(element =>
+                        element.GetType().FullName ==
+                        "GameCreator.Editor.VisualScripting.InstructionListTool"),
+                    Is.EqualTo(3));
+            }
+            finally
+            {
                 UnityEngine.Object.DestroyImmediate(gameObject);
             }
         }

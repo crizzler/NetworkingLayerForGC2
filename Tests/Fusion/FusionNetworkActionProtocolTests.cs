@@ -213,6 +213,23 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
             StringAssert.Contains("FusionNetworkActionTransportBridge", validation);
         }
 
+        [Test]
+        public void ActionBridge_GatesClientRequestsUntilGameplaySnapshotIsReady()
+        {
+            string actionBridge = ReadSource(
+                "Runtime/Transport/Fusion/Actions/FusionNetworkActionTransportBridge.cs");
+            StringAssert.Contains("bridge.IsLocalGameplayReady", actionBridge);
+            StringAssert.Contains("RejectLocalActionRequest", actionBridge);
+            StringAssert.Contains("NetworkActionRejectReason.NotRunning", actionBridge);
+
+            string transportBridge = ReadSource(
+                "Runtime/Transport/Fusion/FusionTransportBridge.cs");
+            StringAssert.Contains("public override bool IsLocalGameplayReady", transportBridge);
+            StringAssert.Contains(
+                "m_LocalSnapshotCompletedEpoch == m_AuthorityEpoch",
+                transportBridge);
+        }
+
         private static T RoundTrip<T>(T value)
         {
             return FusionWireSerializer.Deserialize<T>(

@@ -344,6 +344,47 @@ namespace Arawn.GameCreator2.Networking.Tests
         }
 
         [Test]
+        public void TransportPreflightRejection_CompletesCallbackImmediatelyAndClearsPendingEntry()
+        {
+            NetworkActionManager manager = CreateManager(false);
+            CreateEndpoint(manager, "Client Actor", 1001,
+                Array.Empty<NetworkActionDefinition>());
+            NetworkActionDefinition definition = CreateDefinition(
+                "door.open",
+                NetworkActionPayloadType.Boolean,
+                NetworkActionEffectKind.PersistentState,
+                NetworkActionAuthorityPolicy.OwnerRequest,
+                NetworkActionRecipientPolicy.RelevantObservers,
+                true);
+            NetworkActionEndpoint door = CreateEndpoint(
+                manager, "Client Door", 2001, new[] { definition });
+
+            int callbackCount = 0;
+            NetworkActionResponse response = default;
+            manager.OnSendActionRequest = request => manager.RejectLocalActionRequest(
+                in request, NetworkActionRejectReason.NotRunning);
+
+            Assert.That(manager.RequestAction(
+                1001,
+                door,
+                definition,
+                NetworkActionPayload.FromBoolean(true),
+                callback: value =>
+                {
+                    callbackCount++;
+                    response = value;
+                }), Is.True);
+
+            Assert.That(callbackCount, Is.EqualTo(1));
+            Assert.That(response.Authorized, Is.False);
+            Assert.That(response.RejectReason, Is.EqualTo(NetworkActionRejectReason.NotRunning));
+            Assert.That(response.TargetNetworkId, Is.EqualTo(door.NetworkId));
+            Assert.That(response.EndpointHash, Is.EqualTo(door.EndpointHash));
+            Assert.That(GetPendingCount(manager), Is.Zero,
+                "A local transport preflight failure must not linger until request timeout.");
+        }
+
+        [Test]
         public void AuthorityOnlyRequest_RemainsLocalWhenTransportDelegateIsWired()
         {
             NetworkActionManager manager = CreateManager(true);
