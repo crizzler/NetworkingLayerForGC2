@@ -294,14 +294,17 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
         {
             p.Write(v.RequestId); p.Write(v.ActorNetworkId); p.Write(v.CorrelationId);
             p.Write(v.CharacterNetworkId); p.Write(v.TargetNetworkId); p.Write(v.TargetHash);
+            p.Write((byte)v.InteractionType);
             WriteVector3(p, v.InteractionPosition); p.Write(v.ClientTime);
         }
 
         [UsedByIL]
         public static void Read(this BitPacker p, ref NetworkInteractionRequest v)
         {
+            byte type = 0;
             p.Read(ref v.RequestId); p.Read(ref v.ActorNetworkId); p.Read(ref v.CorrelationId);
             p.Read(ref v.CharacterNetworkId); p.Read(ref v.TargetNetworkId); p.Read(ref v.TargetHash);
+            p.Read(ref type); v.InteractionType = (InteractionType)type;
             ReadVector3(p, ref v.InteractionPosition); p.Read(ref v.ClientTime);
         }
 
@@ -309,14 +312,19 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
         public static void Write(this BitPacker p, NetworkInteractionResponse v)
         {
             p.Write(v.RequestId); p.Write(v.ActorNetworkId); p.Write(v.CorrelationId);
+            p.Write(v.CharacterNetworkId); p.Write(v.TargetNetworkId); p.Write(v.TargetHash);
+            p.Write((byte)v.InteractionType);
             p.Write(v.Approved); p.Write((byte)v.RejectReason); p.Write(v.ResultData);
         }
 
         [UsedByIL]
         public static void Read(this BitPacker p, ref NetworkInteractionResponse v)
         {
+            byte type = 0;
             byte reason = 0;
             p.Read(ref v.RequestId); p.Read(ref v.ActorNetworkId); p.Read(ref v.CorrelationId);
+            p.Read(ref v.CharacterNetworkId); p.Read(ref v.TargetNetworkId); p.Read(ref v.TargetHash);
+            p.Read(ref type); v.InteractionType = (InteractionType)type;
             p.Read(ref v.Approved); p.Read(ref reason); p.Read(ref v.ResultData);
             v.RejectReason = (InteractionRejectReason)reason;
         }
@@ -324,16 +332,19 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
         [UsedByIL]
         public static void Write(this BitPacker p, NetworkInteractionBroadcast v)
         {
+            p.Write(v.RequestId); p.Write(v.ActorNetworkId); p.Write(v.CorrelationId);
             p.Write(v.CharacterNetworkId); p.Write(v.TargetNetworkId); p.Write(v.TargetHash);
-            p.Write((byte)v.InteractionType); p.Write(v.ServerTime);
+            p.Write((byte)v.InteractionType); p.Write(v.ResultData); p.Write(v.ServerTime);
         }
 
         [UsedByIL]
         public static void Read(this BitPacker p, ref NetworkInteractionBroadcast v)
         {
             byte type = 0;
+            p.Read(ref v.RequestId); p.Read(ref v.ActorNetworkId); p.Read(ref v.CorrelationId);
             p.Read(ref v.CharacterNetworkId); p.Read(ref v.TargetNetworkId); p.Read(ref v.TargetHash);
-            p.Read(ref type); p.Read(ref v.ServerTime); v.InteractionType = (InteractionType)type;
+            p.Read(ref type); p.Read(ref v.ResultData); p.Read(ref v.ServerTime);
+            v.InteractionType = (InteractionType)type;
         }
 
         [UsedByIL]

@@ -3,7 +3,8 @@
     "rootNamespace": "Arawn.GameCreator2.Networking.Tests",
     "references": [
         "Arawn.GameCreator2.Networking",
-        "Arawn.GameCreator2.Networking.Editor"
+        "Arawn.GameCreator2.Networking.Editor",
+        "GameCreator.Runtime.Core"
     ],
     "includePlatforms": [
         "Editor"

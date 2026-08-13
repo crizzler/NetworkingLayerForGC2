@@ -15,14 +15,13 @@ MonoBehaviour:
   m_Install:
     m_Name: Shooter Examples
     m_Module: GC2 Networking Layer Fusion Transport
-    m_Description: 'GC2 Networking Shooter Example
-
-'
+    m_Description: Fusion Shooter and Stats example with a demo-owned AK weapon,
+      server-authoritative hit validation, and replicated HP damage.
     m_Author: Arawn
     m_Version:
       major: 1
       minor: 0
-      patch: 0
+      patch: 2
     m_Complexity: 0
     m_Dependencies:
     - m_ID: GC2NetworkingLayerFusionTransport.Assets

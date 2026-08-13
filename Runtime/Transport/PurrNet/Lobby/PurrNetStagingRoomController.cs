@@ -263,8 +263,11 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Lobby
         private void Awake()
         {
             m_ReadOnlyPlayers = m_Players.AsReadOnly();
+            string initialDisplayName = m_ChatBox != null
+                ? m_ChatBox.DisplayName
+                : m_DefaultDisplayName;
             m_LocalDisplayName = PurrNetStagingRules.SanitizeDisplayName(
-                m_DefaultDisplayName,
+                initialDisplayName,
                 m_MaxDisplayNameLength,
                 "Player");
             CaptureAndCloseGameplayGate();

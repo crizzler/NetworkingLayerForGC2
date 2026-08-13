@@ -370,18 +370,30 @@ namespace Arawn.GameCreator2.Networking
 
             public bool TryInvokeTimeout()
             {
-                if (Callback == null) return false;
-
-                Callback.Invoke(new NetworkInteractionResponse
+                var response = new NetworkInteractionResponse
                 {
                     RequestId = Request.RequestId,
                     ActorNetworkId = Request.ActorNetworkId,
                     CorrelationId = Request.CorrelationId,
+                    CharacterNetworkId = Request.CharacterNetworkId,
+                    TargetNetworkId = Request.TargetNetworkId,
+                    TargetHash = Request.TargetHash,
+                    InteractionType = Request.InteractionType,
                     Approved = false,
                     RejectReason = InteractionRejectReason.Timeout,
                     ResultData = 0
-                });
-                return true;
+                };
+
+                try
+                {
+                    Callback?.Invoke(response);
+                }
+                finally
+                {
+                    NetworkInteractionEvents.RaiseResponse(response);
+                }
+
+                return Callback != null;
             }
         }
 

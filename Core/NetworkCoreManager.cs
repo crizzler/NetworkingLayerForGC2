@@ -856,6 +856,10 @@ namespace Arawn.GameCreator2.Networking
                     RequestId = request.RequestId,
                     ActorNetworkId = request.ActorNetworkId,
                     CorrelationId = request.CorrelationId,
+                    CharacterNetworkId = request.CharacterNetworkId,
+                    TargetNetworkId = request.TargetNetworkId,
+                    TargetHash = request.TargetHash,
+                    InteractionType = request.InteractionType,
                     Approved = false,
                     RejectReason = IsProtocolMismatch(request.ActorNetworkId, request.CorrelationId)
                         ? InteractionRejectReason.ProtocolMismatch
@@ -876,6 +880,10 @@ namespace Arawn.GameCreator2.Networking
                     RequestId = request.RequestId,
                     ActorNetworkId = request.ActorNetworkId,
                     CorrelationId = request.CorrelationId,
+                    CharacterNetworkId = request.CharacterNetworkId,
+                    TargetNetworkId = request.TargetNetworkId,
+                    TargetHash = request.TargetHash,
+                    InteractionType = request.InteractionType,
                     Approved = false,
                     RejectReason = interactionProtocolMismatch
                         ? InteractionRejectReason.ProtocolMismatch
@@ -1040,6 +1048,54 @@ namespace Arawn.GameCreator2.Networking
         {
             m_CoreController?.RequestInteraction(characterNetworkId, targetNetworkId, 0,
                 interactionPosition, callback);
+        }
+
+        /// <summary>
+        /// [Client] Request a typed interaction and return its generated correlation context.
+        /// </summary>
+        public bool TryRequestInteraction(
+            uint characterNetworkId,
+            uint targetNetworkId,
+            int targetHash,
+            Vector3 interactionPosition,
+            InteractionType interactionType,
+            out NetworkInteractionRequest request,
+            Action<NetworkInteractionResponse> callback = null)
+        {
+            request = default;
+            if (m_CoreController == null || !m_CoreController.IsClient ||
+                SendInteractionRequestToServer == null)
+            {
+                return false;
+            }
+
+            return m_CoreController.TryRequestInteraction(
+                characterNetworkId,
+                targetNetworkId,
+                targetHash,
+                interactionPosition,
+                interactionType,
+                out request,
+                callback);
+        }
+
+        /// <summary>[Client] Request a typed interaction.</summary>
+        public void RequestInteraction(
+            uint characterNetworkId,
+            uint targetNetworkId,
+            int targetHash,
+            Vector3 interactionPosition,
+            InteractionType interactionType,
+            Action<NetworkInteractionResponse> callback = null)
+        {
+            TryRequestInteraction(
+                characterNetworkId,
+                targetNetworkId,
+                targetHash,
+                interactionPosition,
+                interactionType,
+                out _,
+                callback);
         }
 
         // ════════════════════════════════════════════════════════════════════════════════════════

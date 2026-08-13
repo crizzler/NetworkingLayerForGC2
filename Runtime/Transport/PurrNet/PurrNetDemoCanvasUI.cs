@@ -29,6 +29,10 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
         [Tooltip("Optional reference to a specific NetworkManager. Leave empty to use NetworkManager.main.")]
         [SerializeField] private NetworkManager m_NetworkManager;
 
+        [Tooltip("Optional informational panel that the generated session card must not cover. " +
+                 "The demo setup uses this for its top-right Controls Panel.")]
+        [SerializeField] private RectTransform m_ReservedControlsPanel;
+
         [Header("Defaults")]
         [SerializeField] private string m_DefaultAddress = "127.0.0.1";
         [SerializeField] private ushort m_DefaultPort = 5000;
@@ -41,6 +45,12 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
 
         [Tooltip("Build a sortingOrder=1000 Canvas so it always renders on top of game UI.")]
         [SerializeField] private int m_SortingOrder = 1000;
+
+        private const float PanelMargin = 24f;
+        private const float PanelGap = 12f;
+        private const float PanelWidth = 360f;
+        private const float DisconnectedPanelHeight = 280f;
+        private const float ConnectedClientPanelHeight = 200f;
 
         // Theme
         private static readonly Color BG_PANEL    = new Color(0.08f, 0.09f, 0.11f, 0.94f);
@@ -59,6 +69,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
 
         private Canvas m_Canvas;
         private GameObject m_Panel;
+        private RectTransform m_PanelRect;
         private GameObject m_AddressLabel;
         private GameObject m_PortLabel;
         private InputField m_AddressField;
@@ -72,14 +83,32 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
         private Text m_RoleText;
         private bool m_StartRequestInFlight;
         private bool m_DisconnectRequestInFlight;
+        private bool m_HidReservedControlsPanel;
+        private readonly Vector3[] m_WorldCorners = new Vector3[4];
 
         private NetworkManager ActiveManager => m_NetworkManager ? m_NetworkManager : NetworkManager.main;
+
+        /// <summary>
+        /// True while the generated session card is active and available to the player.
+        /// </summary>
+        public bool IsRuntimeOverlayVisible =>
+            isActiveAndEnabled && m_Panel != null && m_Panel.activeInHierarchy;
+
+        /// <summary>
+        /// Current session-card bounds in IMGUI coordinates (origin at the top-left).
+        /// This lets other optional demo overlays reserve the same screen region.
+        /// </summary>
+        public Rect RuntimeOverlayRect => IsRuntimeOverlayVisible
+            ? GetGuiRect(m_PanelRect)
+            : Rect.zero;
 
         private void Awake()
         {
             if (m_NetworkManager == null) m_NetworkManager = NetworkManager.main;
             BuildUI();
             EnsureEventSystem();
+            Canvas.ForceUpdateCanvases();
+            RefreshPanelLayout();
         }
 
         private void OnEnable()
@@ -89,10 +118,13 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
             nm.onServerConnectionState += OnServerState;
             nm.onClientConnectionState += OnClientState;
             RefreshUI();
+            RefreshPanelLayout();
         }
 
         private void OnDisable()
         {
+            RestoreReservedControlsPanel();
+
             var nm = ActiveManager;
             if (nm == null) return;
             nm.onServerConnectionState -= OnServerState;
@@ -103,6 +135,16 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
         {
             if (!m_StartRequestInFlight && !m_DisconnectRequestInFlight) return;
             RefreshUI();
+        }
+
+        private void LateUpdate()
+        {
+            RefreshPanelLayout();
+        }
+
+        private void OnDestroy()
+        {
+            RestoreReservedControlsPanel();
         }
 
         private void OnServerState(ConnectionState state) { RefreshUI(); }
@@ -133,8 +175,9 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
             m_Panel = NewUI("Panel", transform, BG_PANEL,
                 anchorMin: new Vector2(0f, 1f), anchorMax: new Vector2(0f, 1f),
                 pivot: new Vector2(0f, 1f),
-                anchoredPos: new Vector2(24f, -24f),
-                size: new Vector2(360f, 280f));
+                anchoredPos: new Vector2(PanelMargin, -PanelMargin),
+                size: new Vector2(PanelWidth, DisconnectedPanelHeight));
+            m_PanelRect = m_Panel.GetComponent<RectTransform>();
 
             // Header
             var header = NewUI("Header", m_Panel.transform, BG_HEADER,
@@ -404,12 +447,230 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
                 var nm = ActiveManager;
                 if (nm != null && nm.clientState == ConnectionState.Connected && !nm.isHost)
                 {
-                    rt.sizeDelta = new Vector2(rt.sizeDelta.x, 200f);
+                    rt.sizeDelta = new Vector2(rt.sizeDelta.x, ConnectedClientPanelHeight);
+                    RefreshPanelLayout();
                     return;
                 }
             }
 
-            rt.sizeDelta = new Vector2(rt.sizeDelta.x, 280f);
+            rt.sizeDelta = new Vector2(rt.sizeDelta.x, DisconnectedPanelHeight);
+            RefreshPanelLayout();
+        }
+
+        // -------------------------------------------------------------
+        // Responsive demo layout
+        // -------------------------------------------------------------
+
+        /// <summary>
+        /// Returns the closest placement that keeps a preferred overlay inside the viewport and
+        /// out of a reserved rectangle. Rectangles use top-left screen coordinates. A zero-height
+        /// result means both panels cannot fit simultaneously.
+        /// </summary>
+        public static Rect CalculatePanelRect(
+            Rect preferredTopOrigin,
+            Rect reservedTopOrigin,
+            Rect viewportTopOrigin,
+            float gap)
+        {
+            gap = Mathf.Max(0f, gap);
+            if (!CanFit(preferredTopOrigin, viewportTopOrigin)) return Rect.zero;
+
+            Rect preferred = ClampInside(preferredTopOrigin, viewportTopOrigin);
+            if (!IsValidObstacle(reservedTopOrigin) ||
+                !preferred.Overlaps(reservedTopOrigin))
+            {
+                return preferred;
+            }
+
+            Rect[] candidates =
+            {
+                new Rect(
+                    reservedTopOrigin.xMin - gap - preferred.width,
+                    preferred.y,
+                    preferred.width,
+                    preferred.height),
+                new Rect(
+                    reservedTopOrigin.xMax + gap,
+                    preferred.y,
+                    preferred.width,
+                    preferred.height),
+                new Rect(
+                    preferred.x,
+                    reservedTopOrigin.yMax + gap,
+                    preferred.width,
+                    preferred.height),
+                new Rect(
+                    preferred.x,
+                    reservedTopOrigin.yMin - gap - preferred.height,
+                    preferred.width,
+                    preferred.height)
+            };
+
+            Rect best = Rect.zero;
+            float bestDistance = float.PositiveInfinity;
+            for (int i = 0; i < candidates.Length; i++)
+            {
+                Rect candidate = ClampInside(candidates[i], viewportTopOrigin);
+                if (!IsInside(candidate, viewportTopOrigin) ||
+                    !HasRequiredSeparation(candidate, reservedTopOrigin, gap))
+                {
+                    continue;
+                }
+
+                float distance = (candidate.position - preferred.position).sqrMagnitude;
+                if (distance >= bestDistance) continue;
+
+                best = candidate;
+                bestDistance = distance;
+            }
+
+            return float.IsPositiveInfinity(bestDistance) ? Rect.zero : best;
+        }
+
+        private void RefreshPanelLayout()
+        {
+            if (m_PanelRect == null || m_Canvas == null) return;
+
+            float scale = Mathf.Max(0.0001f, m_Canvas.scaleFactor);
+            var preferred = new Rect(
+                PanelMargin * scale,
+                PanelMargin * scale,
+                m_PanelRect.rect.width * scale,
+                m_PanelRect.rect.height * scale);
+            Rect reserved = GetReservedControlsGuiRect();
+            var viewport = new Rect(0f, 0f, Screen.width, Screen.height);
+
+            Rect placement = CalculatePanelRect(
+                preferred,
+                reserved,
+                viewport,
+                PanelGap);
+
+            if (placement.height <= 0f && IsValidObstacle(reserved))
+            {
+                // The host/join controls are essential; the reserved card is informational.
+                // On an impossibly constrained view, suppress only that optional card rather
+                // than covering either UI or making the session controls inaccessible.
+                HideReservedControlsPanel();
+                placement = CalculatePanelRect(preferred, Rect.zero, viewport, 0f);
+            }
+            else
+            {
+                RestoreReservedControlsPanel();
+            }
+
+            if (placement.height <= 0f) return;
+
+            m_PanelRect.anchoredPosition = new Vector2(
+                placement.xMin / scale,
+                -placement.yMin / scale);
+        }
+
+        private Rect GetReservedControlsGuiRect()
+        {
+            if (m_ReservedControlsPanel == null) return Rect.zero;
+            if (!m_ReservedControlsPanel.gameObject.activeInHierarchy &&
+                !m_HidReservedControlsPanel)
+            {
+                return Rect.zero;
+            }
+
+            return GetGuiRect(m_ReservedControlsPanel);
+        }
+
+        private Rect GetGuiRect(RectTransform rectTransform)
+        {
+            if (rectTransform == null) return Rect.zero;
+
+            Canvas canvas = rectTransform.GetComponentInParent<Canvas>();
+            Camera camera = canvas != null && canvas.renderMode != RenderMode.ScreenSpaceOverlay
+                ? canvas.worldCamera
+                : null;
+
+            rectTransform.GetWorldCorners(m_WorldCorners);
+            float minX = float.PositiveInfinity;
+            float maxX = float.NegativeInfinity;
+            float minY = float.PositiveInfinity;
+            float maxY = float.NegativeInfinity;
+
+            for (int i = 0; i < m_WorldCorners.Length; i++)
+            {
+                Vector2 screenPoint = RectTransformUtility.WorldToScreenPoint(
+                    camera,
+                    m_WorldCorners[i]);
+                minX = Mathf.Min(minX, screenPoint.x);
+                maxX = Mathf.Max(maxX, screenPoint.x);
+                minY = Mathf.Min(minY, screenPoint.y);
+                maxY = Mathf.Max(maxY, screenPoint.y);
+            }
+
+            return Rect.MinMaxRect(
+                minX,
+                Screen.height - maxY,
+                maxX,
+                Screen.height - minY);
+        }
+
+        private void HideReservedControlsPanel()
+        {
+            if (m_ReservedControlsPanel == null || m_HidReservedControlsPanel ||
+                !m_ReservedControlsPanel.gameObject.activeSelf)
+            {
+                return;
+            }
+
+            m_HidReservedControlsPanel = true;
+            m_ReservedControlsPanel.gameObject.SetActive(false);
+        }
+
+        private void RestoreReservedControlsPanel()
+        {
+            if (!m_HidReservedControlsPanel) return;
+
+            m_HidReservedControlsPanel = false;
+            if (m_ReservedControlsPanel != null)
+            {
+                m_ReservedControlsPanel.gameObject.SetActive(true);
+            }
+        }
+
+        private static bool IsValidObstacle(Rect rect)
+        {
+            return rect.width > 0f && rect.height > 0f;
+        }
+
+        private static bool HasRequiredSeparation(Rect first, Rect second, float gap)
+        {
+            return first.xMax + gap <= second.xMin ||
+                   first.xMin >= second.xMax + gap ||
+                   first.yMax + gap <= second.yMin ||
+                   first.yMin >= second.yMax + gap;
+        }
+
+        private static bool CanFit(Rect rect, Rect viewport)
+        {
+            return rect.width > 0f && rect.height > 0f &&
+                   viewport.width > 0f && viewport.height > 0f &&
+                   rect.width <= viewport.width && rect.height <= viewport.height;
+        }
+
+        private static Rect ClampInside(Rect rect, Rect viewport)
+        {
+            if (!CanFit(rect, viewport)) return Rect.zero;
+
+            rect.x = Mathf.Clamp(rect.x, viewport.xMin, viewport.xMax - rect.width);
+            rect.y = Mathf.Clamp(rect.y, viewport.yMin, viewport.yMax - rect.height);
+            return rect;
+        }
+
+        private static bool IsInside(Rect rect, Rect viewport)
+        {
+            const float epsilon = 0.01f;
+            return rect.width > 0f && rect.height > 0f &&
+                   rect.xMin >= viewport.xMin - epsilon &&
+                   rect.yMin >= viewport.yMin - epsilon &&
+                   rect.xMax <= viewport.xMax + epsilon &&
+                   rect.yMax <= viewport.yMax + epsilon;
         }
 
         private void SetStatus(string message, Color pillColor, string pillLabel)

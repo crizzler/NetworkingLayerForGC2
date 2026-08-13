@@ -102,6 +102,10 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                 expectedBackend);
             ValidateSceneOwners(report);
             ValidateSceneCharacters(report);
+            ValidateNetworkActionEndpoints(
+                report,
+                FindSceneComponents<NetworkActionEndpoint>(),
+                "scene");
             ValidateModuleRegistrations(report);
             ValidateInventoryRuntimePickups(report);
             ValidatePlayerPrefab(
@@ -488,6 +492,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
             ValidateDuplicate<NetworkAnimationManager>(report, "NetworkAnimationManager");
             ValidateDuplicate<NetworkMotionManager>(report, "NetworkMotionManager");
             ValidateDuplicate<NetworkVariableManager>(report, "NetworkVariableManager");
+            ValidateDuplicate<NetworkActionManager>(report, "NetworkActionManager");
 
             ValidateDuplicateType(
                 report,
@@ -499,6 +504,11 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                 "Arawn.GameCreator2.Networking.Transport.Fusion.FusionVariableTransportBridge, " +
                 RuntimeAssemblyName,
                 "Fusion Variable Bridge");
+            ValidateDuplicateType(
+                report,
+                "Arawn.GameCreator2.Networking.Transport.Fusion." +
+                "FusionNetworkActionTransportBridge, " + RuntimeAssemblyName,
+                "Fusion Network Actions Bridge");
             ValidateDuplicateType(
                 report,
                 "Arawn.GameCreator2.Networking.Transport.Fusion.FusionAnimationMotionTransportBridge, " +
@@ -590,6 +600,10 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
             RequireSingle<NetworkAnimationManager>(report, "NetworkAnimationManager");
             RequireSingle<NetworkMotionManager>(report, "NetworkMotionManager");
             RequireSingle<NetworkVariableManager>(report, "NetworkVariableManager");
+            bool requireNetworkActions =
+                FindSceneComponents<NetworkActionEndpoint>().Length > 0;
+            if (requireNetworkActions)
+                RequireSingle<NetworkActionManager>(report, "NetworkActionManager");
 
             Component coreBridge = RequireSingleType(
                 report,
@@ -601,6 +615,13 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                 "Arawn.GameCreator2.Networking.Transport.Fusion.FusionVariableTransportBridge, " +
                 RuntimeAssemblyName,
                 "Fusion Variable Bridge");
+            Component actionBridge = requireNetworkActions
+                ? RequireSingleType(
+                    report,
+                    "Arawn.GameCreator2.Networking.Transport.Fusion." +
+                    "FusionNetworkActionTransportBridge, " + RuntimeAssemblyName,
+                    "Fusion Network Actions Bridge")
+                : null;
             Component animationMotionBridge = RequireSingleType(
                 report,
                 "Arawn.GameCreator2.Networking.Transport.Fusion." +
@@ -682,6 +703,15 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                 "m_TransportBridge",
                 transport,
                 "Fusion Variable Bridge transport");
+            if (requireNetworkActions)
+            {
+                ValidateObjectReference(
+                    report,
+                    actionBridge,
+                    "m_TransportBridge",
+                    transport,
+                    "Fusion Network Actions Bridge transport");
+            }
             ValidateObjectReference(
                 report,
                 animationMotionBridge,
@@ -1524,7 +1554,146 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                         FusionSetupIssueSeverity.Warning,
                         "FusionNativeNetworkCharacterMotor is not the prefab's first baked " +
                         "NetworkBehaviour/main TRSP. Rebuild the Fusion prefab table before play.",
-                        playerPrefab);
+                    playerPrefab);
+                }
+            }
+
+            ValidateNetworkActionEndpoints(
+                report,
+                playerPrefab.GetComponentsInChildren<NetworkActionEndpoint>(true),
+                "player prefab");
+        }
+
+        private static void ValidateNetworkActionEndpoints(
+            FusionSetupReport report,
+            IReadOnlyList<NetworkActionEndpoint> endpoints,
+            string sourceLabel)
+        {
+            if (endpoints == null || endpoints.Count == 0) return;
+
+            var endpointKeys = new Dictionary<NetworkActionEndpointKey, NetworkActionEndpoint>();
+            for (int i = 0; i < endpoints.Count; i++)
+            {
+                NetworkActionEndpoint endpoint = endpoints[i];
+                if (endpoint == null) continue;
+
+                FusionNetworkIdentity identity =
+                    endpoint.GetComponentInParent<FusionNetworkIdentity>();
+                if (identity == null)
+                {
+                    report.Add(
+                        FusionSetupIssueSeverity.Error,
+                        $"Network Action Endpoint '{endpoint.name}' in the {sourceLabel} has no " +
+                        "parent FusionNetworkIdentity. It cannot receive a transport Network ID " +
+                        "and will never register at runtime.",
+                        endpoint);
+                }
+
+                if (string.IsNullOrWhiteSpace(endpoint.EndpointId) || endpoint.EndpointHash == 0)
+                {
+                    report.Add(
+                        FusionSetupIssueSeverity.Error,
+                        $"Network Action Endpoint '{endpoint.name}' has no valid stable Endpoint " +
+                        "ID. Open and save the prefab/scene or assign a unique Endpoint ID before " +
+                        "building.",
+                        endpoint);
+                }
+                else if (identity != null)
+                {
+                    var key = new NetworkActionEndpointKey(
+                        unchecked((uint)identity.GetInstanceID()), endpoint.EndpointHash);
+                    if (endpointKeys.TryGetValue(key, out NetworkActionEndpoint existing) &&
+                        existing != endpoint)
+                    {
+                        report.Add(
+                            FusionSetupIssueSeverity.Error,
+                            $"Network Action Endpoints '{existing.name}' and '{endpoint.name}' " +
+                            $"under Fusion identity '{identity.name}' have an Endpoint ID/hash " +
+                            $"collision ('{existing.EndpointId}' and '{endpoint.EndpointId}'). " +
+                            "Give sibling endpoints unique stable IDs.",
+                            endpoint);
+                    }
+                    else
+                    {
+                        endpointKeys[key] = endpoint;
+                    }
+                }
+
+                IReadOnlyList<NetworkActionBinding> bindings = endpoint.Actions;
+                if (bindings == null || bindings.Count == 0)
+                {
+                    report.Add(
+                        FusionSetupIssueSeverity.Warning,
+                        $"Network Action Endpoint '{endpoint.name}' has no action bindings and " +
+                        "cannot accept any network action.",
+                        endpoint);
+                    continue;
+                }
+
+                var actionContracts = new Dictionary<string, NetworkActionDefinition>(
+                    StringComparer.Ordinal);
+                for (int bindingIndex = 0; bindingIndex < bindings.Count; bindingIndex++)
+                {
+                    NetworkActionDefinition definition = bindings[bindingIndex]?.Definition;
+                    if (definition == null)
+                    {
+                        report.Add(
+                            FusionSetupIssueSeverity.Error,
+                            $"Network Action Endpoint '{endpoint.name}' binding {bindingIndex} " +
+                            "has no Action Definition.",
+                            endpoint);
+                        continue;
+                    }
+
+                    if (string.IsNullOrWhiteSpace(definition.ActionId) ||
+                        definition.ActionId.Length > NetworkActionManager.MaxActionIdCharacters ||
+                        definition.ActionHash == 0)
+                    {
+                        report.Add(
+                            FusionSetupIssueSeverity.Error,
+                            $"Network Action Definition '{definition.name}' on endpoint " +
+                            $"'{endpoint.name}' has an invalid stable Action ID.",
+                            definition);
+                    }
+
+                    if (!definition.HasValidContract)
+                    {
+                        report.Add(
+                            FusionSetupIssueSeverity.Error,
+                            $"Persistent Network Action '{definition.name}' uses recipient policy " +
+                            $"{definition.RecipientPolicy}. Persistent state must target Relevant " +
+                            "Observers or All Clients so late join and authority migration remain " +
+                            "reconstructable.",
+                            definition);
+                    }
+
+                    if (!definition.TryValidatePayload(
+                            definition.InitialPayload, out NetworkActionRejectReason _))
+                    {
+                        report.Add(
+                            FusionSetupIssueSeverity.Error,
+                            $"Network Action Definition '{definition.name}' has an invalid initial " +
+                            "payload for its declared payload type.",
+                            definition);
+                    }
+
+                    string contractKey =
+                        $"{definition.ActionHash}:{definition.ActionId}";
+                    if (actionContracts.TryGetValue(
+                            contractKey, out NetworkActionDefinition existingDefinition))
+                    {
+                        report.Add(
+                            FusionSetupIssueSeverity.Error,
+                            $"Network Action Endpoint '{endpoint.name}' binds action " +
+                            $"'{definition.ActionId}' more than once ('{existingDefinition.name}' " +
+                            $"and '{definition.name}'). The first match shadows subsequent " +
+                            "contracts, including other schema versions.",
+                            endpoint);
+                    }
+                    else
+                    {
+                        actionContracts[contractKey] = definition;
+                    }
                 }
             }
         }

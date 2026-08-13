@@ -14,6 +14,8 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
     [AddComponentMenu("Game Creator/Network/Transport/Fusion Demo Session UI")]
     public class FusionDemoSessionUI : MonoBehaviour
     {
+        private const float RuntimeOverlayHeight = 266f;
+
         [SerializeField] private FusionSessionBootstrap m_SessionBootstrap;
         [SerializeField] private InputField m_SessionName;
         [SerializeField] private Button m_StartHost;
@@ -36,6 +38,20 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         [SerializeField] private Vector2 m_OverlayPosition = new Vector2(16f, 16f);
         [Min(220f)]
         [SerializeField] private float m_OverlayWidth = 300f;
+
+        /// <summary>
+        /// True while this component is drawing its fallback IMGUI controls rather than using
+        /// assigned uGUI controls. Demo overlays can use this to avoid occupying the same area.
+        /// </summary>
+        public bool IsRuntimeOverlayVisible =>
+            m_ShowOverlayWhenControlsAreUnassigned && !HasAssignedControls();
+
+        /// <summary>Current fallback overlay rectangle in top-left-origin IMGUI coordinates.</summary>
+        public Rect RuntimeOverlayRect => new Rect(
+            m_OverlayPosition.x,
+            m_OverlayPosition.y,
+            m_OverlayWidth,
+            RuntimeOverlayHeight);
 
         private void Awake()
         {
@@ -68,10 +84,10 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
 
         private void OnGUI()
         {
-            if (!m_ShowOverlayWhenControlsAreUnassigned || HasAssignedControls()) return;
+            if (!IsRuntimeOverlayVisible) return;
 
             GUILayout.BeginArea(
-                new Rect(m_OverlayPosition.x, m_OverlayPosition.y, m_OverlayWidth, 266f),
+                RuntimeOverlayRect,
                 GUI.skin.box);
             GUILayout.Label("Fusion Multiplayer");
             m_RuntimeSessionName = GUILayout.TextField(m_RuntimeSessionName ?? string.Empty);

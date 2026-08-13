@@ -83,6 +83,8 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
             "Assets/Plugins/GameCreator/Installs/Shooter.Weapons@1.1.4/Prefabs/AK_Weapon.prefab";
         private const string AkWeaponHandlePath =
             "Assets/Plugins/GameCreator/Installs/Shooter.Weapons@1.1.4/Handles/Ak_Weapon_Handle.asset";
+        private const string HealthAttributePath =
+            "Assets/Plugins/GameCreator/Installs/Stats.Classes@1.3.7/_Stats/Health/HP.asset";
         private const string AbilityFireballSprayPath =
             "Assets/Plugins/GameCreator/Installs/Abilities.Examples@1.6.0/Abilities/FireballSpray/A_FireballSpray.asset";
         private const string AbilityFireballNovaPath =
@@ -102,6 +104,9 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
         private const string FusionVariableBridgeType =
             "Arawn.GameCreator2.Networking.Transport.Fusion.FusionVariableTransportBridge, " +
             "Arawn.GameCreator2.Networking.Transport.Fusion";
+        private const string FusionNetworkActionBridgeType =
+            "Arawn.GameCreator2.Networking.Transport.Fusion.FusionNetworkActionTransportBridge, " +
+            "Arawn.GameCreator2.Networking.Transport.Fusion";
         private const string FusionAnimationMotionBridgeType =
             "Arawn.GameCreator2.Networking.Transport.Fusion.FusionAnimationMotionTransportBridge, " +
             "Arawn.GameCreator2.Networking.Transport.Fusion";
@@ -113,6 +118,12 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
         private const string FusionStatsBridgeType =
             "Arawn.GameCreator2.Networking.Stats.Transport.Fusion.FusionStatsTransportBridge, " +
             "Arawn.GameCreator2.Networking.Stats.Transport.Fusion";
+        private const string NetworkMeleeStatsDamageBridgeType =
+            "Arawn.GameCreator2.Networking.Stats.Melee.NetworkMeleeStatsDamageBridge, " +
+            "Arawn.GameCreator2.Networking.Stats.Melee";
+        private const string NetworkShooterStatsDamageBridgeType =
+            "Arawn.GameCreator2.Networking.Stats.Shooter.NetworkShooterStatsDamageBridge, " +
+            "Arawn.GameCreator2.Networking.Stats.Shooter";
 
         private const string NetworkInventoryManagerType =
             "Arawn.GameCreator2.Networking.Inventory.NetworkInventoryManager, Arawn.GameCreator2.Networking.Inventory";
@@ -187,6 +198,8 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
         private bool m_ModuleTraversal;
         private bool m_ModuleAbilities;
         private bool m_RegisterInstalledDemoAssets = true;
+        private bool m_CreateMeleeStatsDamageBridge = true;
+        private bool m_CreateShooterStatsDamageBridge = true;
 
         private RunnerSetup m_RunnerSetup = RunnerSetup.CreateOrReuseArawnBootstrap;
         private DefaultLaunchMode m_DefaultLaunchMode = DefaultLaunchMode.Shared;
@@ -533,6 +546,25 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                     "without replacing custom bridge registrations."),
                 m_RegisterInstalledDemoAssets);
 
+            using (new EditorGUI.DisabledScope(!m_ModuleMelee || !m_ModuleStats))
+            {
+                m_CreateMeleeStatsDamageBridge = EditorGUILayout.ToggleLeft(
+                    new GUIContent(
+                        "Add Melee -> Stats damage bridge",
+                        "Applies validated Melee damage to the selected GC2 health Attribute."),
+                    m_CreateMeleeStatsDamageBridge);
+            }
+
+            using (new EditorGUI.DisabledScope(!m_ModuleShooter || !m_ModuleStats))
+            {
+                m_CreateShooterStatsDamageBridge = EditorGUILayout.ToggleLeft(
+                    new GUIContent(
+                        "Add Shooter -> Stats damage bridge",
+                        "Applies validated Shooter damage to GC2 Stats for remote-owner hit " +
+                        "requests while authority-local On Hit instructions remain supported."),
+                    m_CreateShooterStatsDamageBridge);
+            }
+
             DrawPatchStatus();
         }
 
@@ -855,6 +887,8 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
             m_ModuleTraversal = traversal;
             m_ModuleAbilities = abilities;
             m_RegisterInstalledDemoAssets = true;
+            m_CreateMeleeStatsDamageBridge = melee && stats;
+            m_CreateShooterStatsDamageBridge = shooter && stats;
 
             m_RunnerSetup = RunnerSetup.CreateOrReuseArawnBootstrap;
             m_DefaultLaunchMode = DefaultLaunchMode.Shared;
@@ -1278,6 +1312,12 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                 transport);
             ConfigureBridge(
                 EnsureComponentByType(
+                    FusionNetworkActionBridgeType,
+                    "Fusion Network Actions Bridge",
+                    root),
+                transport);
+            ConfigureBridge(
+                EnsureComponentByType(
                     FusionAnimationMotionBridgeType,
                     "Fusion Animation Motion Bridge",
                     root),
@@ -1302,6 +1342,41 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                 EnsureComponentByType(NetworkTraversalManagerType, "Network Traversal Manager", root);
             if (m_ModuleAbilities)
                 EnsureComponentByType(NetworkAbilitiesControllerType, "Network Abilities Controller", root);
+
+            if (m_ModuleMelee && m_ModuleStats && m_CreateMeleeStatsDamageBridge)
+            {
+                ConfigureStatsDamageBridge(
+                    EnsureComponentByType(
+                        NetworkMeleeStatsDamageBridgeType,
+                        "Network Melee Stats Damage Bridge",
+                        root));
+            }
+
+            if (m_ModuleShooter && m_ModuleStats && m_CreateShooterStatsDamageBridge)
+            {
+                ConfigureStatsDamageBridge(
+                    EnsureComponentByType(
+                        NetworkShooterStatsDamageBridgeType,
+                        "Network Shooter Stats Damage Bridge",
+                        root));
+            }
+        }
+
+        private static void ConfigureStatsDamageBridge(Component bridge)
+        {
+            if (bridge == null) return;
+
+            var serialized = new SerializedObject(bridge);
+            UnityEngine.Object health =
+                AssetDatabase.LoadMainAssetAtPath(HealthAttributePath);
+            if (health != null)
+            {
+                SetObject(serialized, "m_HealthAttribute", health);
+            }
+
+            SetString(serialized, "m_FallbackHealthAttributeId", "hp");
+            serialized.ApplyModifiedPropertiesWithoutUndo();
+            EditorUtility.SetDirty(bridge);
         }
 
         private void EnsureSelectedModuleBridges(GameObject root, FusionTransportBridge transport)
@@ -3053,6 +3128,9 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                     m_SessionPreset = NetworkSessionPreset.Standard;
                     break;
             }
+
+            m_CreateMeleeStatsDamageBridge = m_ModuleMelee && m_ModuleStats;
+            m_CreateShooterStatsDamageBridge = m_ModuleShooter && m_ModuleStats;
         }
 
         private string BuildSummary()
@@ -3081,6 +3159,8 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                 $"Modules: Core, Variables, Animation/Motion" +
                 $"{SelectedModulesSummary()}\n" +
                 $"Append installed example registrations: {YesNo(m_RegisterInstalledDemoAssets)}\n" +
+                $"Melee -> Stats damage bridge: {YesNo(m_ModuleMelee && m_ModuleStats && m_CreateMeleeStatsDamageBridge)}\n" +
+                $"Shooter -> Stats damage bridge: {YesNo(m_ModuleShooter && m_ModuleStats && m_CreateShooterStatsDamageBridge)}\n" +
                 "Core managers/bridges + security: Yes\n" +
                 "Project config: PeerMode.Single, required reliable modes, weave list, " +
                 $"prefab table, {m_TickRate} Hz\n" +

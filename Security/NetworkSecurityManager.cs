@@ -31,6 +31,7 @@ namespace Arawn.GameCreator2.Networking.Security
         [SerializeField] private NetworkSecurityConfig m_ShooterConfig;
         [SerializeField] private NetworkSecurityConfig m_AbilitiesConfig;
         [SerializeField] private NetworkSecurityConfig m_VariablesConfig;
+        [SerializeField] private NetworkSecurityConfig m_ActionsConfig;
 
         [Header("Debug")]
         [SerializeField] private bool m_LogViolations = true;
@@ -162,6 +163,7 @@ namespace Arawn.GameCreator2.Networking.Security
                 CreateRateLimiter("Shooter");
                 CreateRateLimiter("Abilities");
                 CreateRateLimiter("Variables");
+                CreateRateLimiter("Actions");
             }
 
             Debug.Log($"[NetworkSecurity] Initialized - Server: {isServer}");
@@ -208,6 +210,7 @@ namespace Arawn.GameCreator2.Networking.Security
                 "Shooter" => m_ShooterConfig ?? m_Config,
                 "Abilities" => m_AbilitiesConfig ?? m_Config,
                 "Variables" => m_VariablesConfig ?? m_Config,
+                "Actions" => m_ActionsConfig ?? m_Config,
                 _ => m_Config
             };
         }

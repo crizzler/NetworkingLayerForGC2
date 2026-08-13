@@ -225,6 +225,19 @@ namespace Arawn.GameCreator2.Networking
                 return;
             }
 
+            if (!this.m_IsControllable)
+            {
+                if (m_IsHolding && m_StopOnRelease)
+                {
+                    RequestStopMovement();
+                }
+
+                m_IsHolding = false;
+                m_PressThisFrame = false;
+                m_MovePerformedThisFrame = false;
+                return;
+            }
+
             if (NetworkGameplayInputBlocker.IsTextInputFocused())
             {
                 if (m_IsHolding && m_StopOnRelease)

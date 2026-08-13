@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Text;
 using Fusion;
+using GameCreator.Runtime.Common;
 using UnityEngine;
 using UnityEngine.UI;
 
@@ -15,7 +16,8 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
     [AddComponentMenu("Game Creator/Network/Transport/Fusion Chat Box UI")]
     [DefaultExecutionOrder(-280)]
     [DisallowMultipleComponent]
-    public sealed class FusionChatBoxUI : MonoBehaviour, IFusionFullSnapshotProducer
+    public sealed class FusionChatBoxUI : MonoBehaviour, IFusionFullSnapshotProducer,
+        ISerializationCallbackReceiver
     {
         private const ushort ChatRequestMessage = 1;
         private const ushort ChatBroadcastMessage = 2;
@@ -26,7 +28,15 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         [SerializeField] private FusionTransportBridge m_TransportBridge;
 
         [Header("Limits")]
-        [SerializeField] private string m_DefaultDisplayName = "Player";
+        [Tooltip("GC2 string property resolved in this component's GameObject context when chat initializes.")]
+        [SerializeField, InspectorName("Default Display Name")]
+        private PropertyGetString m_DefaultDisplayNameProperty =
+            new PropertyGetString("Player");
+
+        // Keep the original scalar field so scenes authored before PropertyGetString was
+        // introduced can be migrated without losing a customized display name.
+        [SerializeField, HideInInspector] private string m_DefaultDisplayName = "Player";
+        [SerializeField, HideInInspector] private bool m_DefaultDisplayNameMigrated;
         [Min(1)]
         [SerializeField] private int m_MaxDisplayNameLength = 24;
         [Min(1)]
@@ -62,6 +72,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             new Dictionary<uint, float>();
 
         private FusionTransportBridge m_BoundBridge;
+        private string m_ResolvedDefaultDisplayName = "Player";
         private string m_DisplayName;
         private string m_DraftMessage = string.Empty;
         private string m_Status = "Offline";
@@ -89,12 +100,23 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
 
         private void Awake()
         {
-            m_DisplayName = string.IsNullOrWhiteSpace(m_DefaultDisplayName)
-                ? "Player"
-                : m_DefaultDisplayName;
-            if (m_NameField != null && !string.IsNullOrWhiteSpace(m_NameField.text))
+            MigrateLegacyDefaultDisplayName();
+            m_ResolvedDefaultDisplayName = ResolveDefaultDisplayName();
+            m_DisplayName = m_ResolvedDefaultDisplayName;
+            if (m_NameField != null)
             {
-                m_DisplayName = m_NameField.text;
+                // "Player" is the value authored by the old demo/wizard and therefore a
+                // placeholder. Preserve a genuinely customized legacy InputField value,
+                // but let the new GC2 property replace that placeholder.
+                if (!IsDefaultNamePlaceholder(m_NameField.text))
+                {
+                    m_DisplayName = SanitizeText(
+                        m_NameField.text,
+                        Mathf.Max(1, m_MaxDisplayNameLength),
+                        m_ResolvedDefaultDisplayName);
+                }
+
+                m_NameField.text = m_DisplayName;
             }
             ResolveDependencies();
             TryBindTransport(true);
@@ -191,7 +213,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             string name = SanitizeText(
                 m_NameField != null ? m_NameField.text : m_DisplayName,
                 Mathf.Max(1, m_MaxDisplayNameLength),
-                m_DefaultDisplayName);
+                m_ResolvedDefaultDisplayName);
             string message = SanitizeText(
                 m_MessageField != null ? m_MessageField.text : m_DraftMessage,
                 Mathf.Max(1, m_MaxMessageLength),
@@ -227,6 +249,44 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         {
             m_Lines.Clear();
             RefreshDesignerUI();
+        }
+
+        public void OnBeforeSerialize()
+        { }
+
+        public void OnAfterDeserialize()
+        {
+            MigrateLegacyDefaultDisplayName();
+        }
+
+        private void OnValidate()
+        {
+            MigrateLegacyDefaultDisplayName();
+        }
+
+        private void MigrateLegacyDefaultDisplayName()
+        {
+            if (m_DefaultDisplayNameMigrated)
+            {
+                m_DefaultDisplayNameProperty ??= new PropertyGetString("Player");
+                return;
+            }
+
+            string legacyValue = string.IsNullOrWhiteSpace(m_DefaultDisplayName)
+                ? "Player"
+                : m_DefaultDisplayName;
+            m_DefaultDisplayNameProperty = new PropertyGetString(legacyValue);
+            m_DefaultDisplayName = string.Empty;
+            m_DefaultDisplayNameMigrated = true;
+        }
+
+        private string ResolveDefaultDisplayName()
+        {
+            string value = m_DefaultDisplayNameProperty?.Get(gameObject);
+            return SanitizeText(
+                value,
+                Mathf.Max(1, m_MaxDisplayNameLength),
+                "Player");
         }
 
         private void ResolveDependencies()
@@ -394,7 +454,9 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                     string.Empty);
                 reader.ReadSingle(); // Authority time is retained on wire for diagnostics/replays.
                 if (!reader.End || string.IsNullOrEmpty(text)) return;
-                AppendLine($"{name} [{senderClientId}]: {text}");
+                AppendLine(
+                    $"{EscapeRichText(name)} [{senderClientId}]: " +
+                    EscapeRichText(text));
             }
             catch (FormatException exception)
             {
@@ -494,6 +556,22 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             }
 
             return builder.ToString().Trim();
+        }
+
+        private static string EscapeRichText(string value)
+        {
+            if (string.IsNullOrEmpty(value)) return string.Empty;
+
+            return value
+                .Replace("&", "&amp;")
+                .Replace("<", "&lt;")
+                .Replace(">", "&gt;");
+        }
+
+        private static bool IsDefaultNamePlaceholder(string value)
+        {
+            return string.IsNullOrWhiteSpace(value) ||
+                   string.Equals(value.Trim(), "Player", StringComparison.Ordinal);
         }
     }
 }

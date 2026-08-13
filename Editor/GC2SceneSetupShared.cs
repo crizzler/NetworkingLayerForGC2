@@ -41,6 +41,10 @@ namespace Arawn.GameCreator2.Networking.Editor
                 typeof(NetworkVariableManager),
                 "Network Variable Manager",
                 root);
+            ensureComponent(
+                typeof(NetworkActionManager),
+                "Network Action Manager",
+                root);
         }
 
         public static bool ConfigureNetworkReadyCharacterKernel(

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using GameCreator.Runtime.Common;
 using PurrNet;
 using PurrNet.Packing;
 using PurrNet.Transports;
@@ -32,7 +33,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
     /// </summary>
     [AddComponentMenu("Game Creator/Network/Transport/PurrNet Chat Box UI")]
     [DefaultExecutionOrder(-280)]
-    public sealed class PurrNetChatBoxUI : MonoBehaviour
+    public sealed class PurrNetChatBoxUI : MonoBehaviour, ISerializationCallbackReceiver
     {
         [Header("References")]
         [Tooltip("Optional reference to a specific NetworkManager. Leave empty to use NetworkManager.main.")]
@@ -40,7 +41,15 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
 
         [Header("Defaults")]
         [SerializeField] private string m_Title = "Chat";
-        [SerializeField] private string m_DefaultDisplayName = "Player";
+        [Tooltip("GC2 string property resolved in this component's GameObject context when chat initializes.")]
+        [SerializeField, InspectorName("Default Display Name")]
+        private PropertyGetString m_DefaultDisplayNameProperty =
+            new PropertyGetString("Player");
+
+        // Retain the old serialized scalar solely so existing customer scenes can be
+        // migrated to the GC2 property without discarding a customized value.
+        [SerializeField, HideInInspector] private string m_DefaultDisplayName = "Player";
+        [SerializeField, HideInInspector] private bool m_DefaultDisplayNameMigrated;
         [SerializeField] private int m_MaxVisibleMessages = 64;
         [SerializeField] private int m_MaxMessageLength = 160;
         [SerializeField, Min(0f)] private float m_MinSendInterval = 0.25f;
@@ -86,6 +95,10 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
         private bool m_LastConnectedState;
         private string m_LastRoleStatus;
         private bool m_RestoreMessageFieldFocus;
+        private string m_ResolvedDefaultDisplayName = "Player";
+        private bool m_HasResolvedDefaultDisplayName;
+        private string m_RuntimeDisplayNameOverride;
+        private bool m_Initialized;
 
         private NetworkManager ActiveManager => m_NetworkManager ? m_NetworkManager : NetworkManager.main;
 
@@ -93,19 +106,21 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
         /// Current local chat display name. Staging-room UIs can use this to keep
         /// the authoritative roster name and the chat sender label in sync.
         /// </summary>
-        public string DisplayName => CleanName(
-            m_NameField != null ? m_NameField.text : m_DefaultDisplayName);
+        public string DisplayName => CleanLocalName(GetCurrentDisplayNameSource());
 
         public void SetDisplayName(string displayName)
         {
-            string cleaned = CleanName(displayName);
-            m_DefaultDisplayName = cleaned;
+            string cleaned = CleanLocalName(displayName);
+            m_RuntimeDisplayNameOverride = cleaned;
             if (m_NameField != null && m_NameField.text != cleaned)
                 m_NameField.text = cleaned;
         }
 
         private void Awake()
         {
+            MigrateLegacyDefaultDisplayName();
+            m_ResolvedDefaultDisplayName = ResolveDefaultDisplayName();
+            m_HasResolvedDefaultDisplayName = true;
             if (m_NetworkManager == null) m_NetworkManager = NetworkManager.main;
             LogDebug($"Awake. createMissingUI={m_CreateMissingUI}. manager={DescribeManager(m_NetworkManager)}");
 
@@ -125,6 +140,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
             }
 
             ConfigureUI();
+            m_Initialized = true;
             LogUIState("After ConfigureUI");
             EnsureEventSystem();
             AppendSystem("Chat ready.");
@@ -167,7 +183,9 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
         {
             NetworkManager manager = ActiveManager;
             string rawMessage = m_MessageField != null ? m_MessageField.text : string.Empty;
-            string rawName = m_NameField != null ? m_NameField.text : m_DefaultDisplayName;
+            string rawName = m_NameField != null
+                ? m_NameField.text
+                : m_RuntimeDisplayNameOverride;
 
             LogDebug(
                 $"SendCurrentMessage invoked. manager={DescribeManager(manager)}, " +
@@ -203,7 +221,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
 
             var request = new GC2PurrNetChatRequestPacket
             {
-                senderName = CleanName(rawName),
+                senderName = CleanLocalName(rawName),
                 message = message,
                 sequence = m_LocalSequence
             };
@@ -370,7 +388,9 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
             var broadcast = new GC2PurrNetChatBroadcastPacket
             {
                 senderPlayerId = sender.id,
-                senderName = CleanName(request.senderName),
+                senderName = CleanNetworkName(
+                    request.senderName,
+                    $"Player {sender.id}"),
                 message = message,
                 sequence = request.sequence,
                 serverTime = manager.tickModule != null
@@ -424,7 +444,9 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
                 return;
             }
 
-            string sender = CleanName(broadcast.senderName);
+            string sender = CleanNetworkName(
+                broadcast.senderName,
+                $"Player {broadcast.senderPlayerId}");
             string message = CleanMessage(broadcast.message);
             if (string.IsNullOrEmpty(message))
             {
@@ -542,9 +564,35 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
             return cleaned.Length <= max ? cleaned : cleaned.Substring(0, max);
         }
 
-        private string CleanName(string value)
+        private string CleanLocalName(string value)
         {
-            if (string.IsNullOrWhiteSpace(value)) value = m_DefaultDisplayName;
+            string fallback = !string.IsNullOrWhiteSpace(m_RuntimeDisplayNameOverride)
+                ? m_RuntimeDisplayNameOverride
+                : GetResolvedDefaultDisplayName();
+            return CleanNetworkName(value, fallback);
+        }
+
+        private string GetCurrentDisplayNameSource()
+        {
+            if (m_Initialized && m_NameField != null) return m_NameField.text;
+            if (!string.IsNullOrWhiteSpace(m_RuntimeDisplayNameOverride))
+                return m_RuntimeDisplayNameOverride;
+
+            // Wizard-authored chat fields historically contained the literal "Player".
+            // Treat only that value as a placeholder before Awake so an earlier staging
+            // controller resolves the GC2 property, while preserving genuinely customized
+            // legacy InputField values.
+            return m_NameField != null && !IsDefaultNamePlaceholder(m_NameField.text)
+                ? m_NameField.text
+                : null;
+        }
+
+        private static string CleanNetworkName(string value, string fallback)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                value = string.IsNullOrWhiteSpace(fallback) ? "Player" : fallback;
+            }
 
             string cleaned = value
                 .Replace('\r', ' ')
@@ -553,6 +601,59 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
 
             if (string.IsNullOrEmpty(cleaned)) cleaned = "Player";
             return cleaned.Length <= 24 ? cleaned : cleaned.Substring(0, 24);
+        }
+
+        private static bool IsDefaultNamePlaceholder(string value)
+        {
+            return string.IsNullOrWhiteSpace(value) ||
+                   string.Equals(value.Trim(), "Player", StringComparison.Ordinal);
+        }
+
+        public void OnBeforeSerialize()
+        { }
+
+        public void OnAfterDeserialize()
+        {
+            m_HasResolvedDefaultDisplayName = false;
+            MigrateLegacyDefaultDisplayName();
+        }
+
+        private void OnValidate()
+        {
+            m_HasResolvedDefaultDisplayName = false;
+            MigrateLegacyDefaultDisplayName();
+        }
+
+        private void MigrateLegacyDefaultDisplayName()
+        {
+            if (m_DefaultDisplayNameMigrated)
+            {
+                m_DefaultDisplayNameProperty ??= new PropertyGetString("Player");
+                return;
+            }
+
+            string legacyValue = string.IsNullOrWhiteSpace(m_DefaultDisplayName)
+                ? "Player"
+                : m_DefaultDisplayName;
+            m_DefaultDisplayNameProperty = new PropertyGetString(legacyValue);
+            m_DefaultDisplayName = string.Empty;
+            m_DefaultDisplayNameMigrated = true;
+        }
+
+        private string ResolveDefaultDisplayName()
+        {
+            string value = m_DefaultDisplayNameProperty?.Get(gameObject);
+            return CleanNetworkName(value, "Player");
+        }
+
+        private string GetResolvedDefaultDisplayName()
+        {
+            if (m_HasResolvedDefaultDisplayName) return m_ResolvedDefaultDisplayName;
+
+            MigrateLegacyDefaultDisplayName();
+            m_ResolvedDefaultDisplayName = ResolveDefaultDisplayName();
+            m_HasResolvedDefaultDisplayName = true;
+            return m_ResolvedDefaultDisplayName;
         }
 
         private static string EscapeRichText(string value)
@@ -647,9 +748,13 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
             if (m_NameField != null)
             {
                 m_NameField.characterLimit = 24;
-                if (string.IsNullOrWhiteSpace(m_NameField.text))
+                if (!string.IsNullOrWhiteSpace(m_RuntimeDisplayNameOverride))
                 {
-                    m_NameField.text = m_DefaultDisplayName;
+                    m_NameField.text = m_RuntimeDisplayNameOverride;
+                }
+                else if (IsDefaultNamePlaceholder(m_NameField.text))
+                {
+                    m_NameField.text = GetResolvedDefaultDisplayName();
                 }
             }
 
@@ -867,7 +972,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
                 "Name Field",
                 m_Panel.transform,
                 BG_FIELD,
-                m_DefaultDisplayName,
+                GetResolvedDefaultDisplayName(),
                 new Vector2(0f, 0f),
                 new Vector2(0f, 0f),
                 new Vector2(12f, 12f),

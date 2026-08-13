@@ -18,6 +18,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         public const ushort Core = 10;
         public const ushort Variables = 11;
         public const ushort AnimationMotion = 12;
+        public const ushort NetworkActions = 13;
         public const ushort Stats = 20;
         public const ushort Inventory = 21;
         public const ushort Melee = 30;

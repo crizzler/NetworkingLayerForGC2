@@ -150,10 +150,24 @@ namespace Arawn.GameCreator2.Networking
                 return;
             }
 
+            if (!this.m_IsControllable)
+            {
+                m_CurrentInput = Vector2.zero;
+                m_JumpPressed = false;
+                m_JumpConsumed = false;
+                this.InputDirection = Vector3.zero;
+                ClearMotionDirection();
+
+                RefreshNetworkDriver();
+                m_InputSink?.ProcessDirectionalInput(
+                    Vector2.zero,
+                    GetCameraTransform(),
+                    false);
+                return;
+            }
+
             // Capture raw input
-            m_CurrentInput = this.m_IsControllable
-                ? m_InputMove.Read()
-                : Vector2.zero;
+            m_CurrentInput = m_InputMove.Read();
 
             // Clamp magnitude to prevent cheating with modified input
             if (m_CurrentInput.sqrMagnitude > 1f)
@@ -233,6 +247,7 @@ namespace Arawn.GameCreator2.Networking
         private void OnJumpPerformed()
         {
             if (m_IsInputEnabled &&
+                this.m_IsControllable &&
                 !NetworkGameplayInputBlocker.IsTextInputFocused() &&
                 this.Character != null &&
                 this.Character.IsPlayer)
@@ -282,6 +297,17 @@ namespace Arawn.GameCreator2.Networking
         /// </summary>
         public void InjectInput(Vector2 moveInput, bool jump = false)
         {
+            if (!m_IsInputEnabled || !this.m_IsControllable)
+            {
+                m_CurrentInput = Vector2.zero;
+                m_JumpPressed = false;
+                m_JumpConsumed = false;
+                this.InputDirection = Vector3.zero;
+                ClearMotionDirection();
+                ClearNetworkInputSink();
+                return;
+            }
+
             m_CurrentInput = moveInput;
             m_JumpPressed = jump;
 

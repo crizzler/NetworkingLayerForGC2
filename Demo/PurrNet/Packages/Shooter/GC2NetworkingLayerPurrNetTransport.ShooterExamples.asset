@@ -21,7 +21,7 @@ MonoBehaviour:
     m_Version:
       major: 1
       minor: 0
-      patch: 0
+      patch: 2
     m_Complexity: 0
     m_Dependencies:
     - m_ID: GC2NetworkingLayerPurrNetTransport.Assets

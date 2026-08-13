@@ -25,17 +25,29 @@ Transport-agnostic, server-authoritative multiplayer support for Game Creator 2.
 
 The Fusion integration uses Fusion/Photon connectivity. It does not replace Fusion's transport with Steam Datagram Relay. In Host/Client mode Fusion can use direct UDP or Photon Relay; Shared Mode uses Photon Relay.
 
-Version 2.1.0 was validated against PurrNet 1.21.0 and Photon Fusion 2.1.1. The optional Advanced KCC driver was validated with Photon Advanced KCC 2.1.0. The complete public source snapshot contains both transport integrations, so install the corresponding SDK assemblies before importing or compiling their transport folders.
+Version 2.2.0 was validated against PurrNet 1.21.0 and Photon Fusion 2.1.1. The optional Advanced KCC driver was validated with Photon Advanced KCC 2.1.0. The complete public source snapshot contains both transport integrations, so install the corresponding SDK assemblies before importing or compiling their transport folders.
 
 ## Optional Fusion Advanced KCC Driver
 
-Version 2.1.0 adds an optional Game Creator 2 movement driver for Photon Fusion Advanced KCC. Fusion Native remains the built-in, recommended default. Choose Advanced KCC when your project specifically wants its collision, prediction, resimulation, and render-presentation workflow.
+The optional Game Creator 2 movement driver for Photon Fusion Advanced KCC, introduced in version 2.1.0, remains available in version 2.2.0. Fusion Native remains the built-in, recommended default. Choose Advanced KCC when your project specifically wants its collision, prediction, resimulation, and render-presentation workflow.
 
 - Photon Advanced KCC is a separate dependency and is not redistributed by this repository.
 - The Fusion Scene Setup Wizard detects a compatible KCC API, manages `ARAWN_GC2_FUSION_KCC`, configures the nested KCC motor and GC2 driver, and validates authority and Fusion weaving setup.
 - The optional adapter source is stored at [`OptionalIntegrations~/NetworkingLayerForGC2.FusionAdvancedKCC`](OptionalIntegrations~/NetworkingLayerForGC2.FusionAdvancedKCC) so Unity ignores it in this repository's flattened source layout.
 - In a Unity project, install that folder as `Assets/Arawn/NetworkingLayerForGC2.FusionAdvancedKCC`, beside `Assets/Arawn/NetworkingLayerForGC2`. Keep the companion folder's `.meta` file and do not add an assembly definition to it.
 - After installing Photon Advanced KCC, the optional movement-course demo can be installed from `Game Creator > Install...` as **Advanced KCC Examples**.
+
+## Network Actions and Replicated Object State
+
+Version 2.2.0 adds transport-neutral Network Actions for authority-validated gameplay requests, confirmed transient events, and persistent replicated object state.
+
+- `NetworkActionDefinition` assets provide the trusted payload, authority, recipient, validation, reliability, and persistence contract.
+- `NetworkActionEndpoint` components allow-list actions on admitted Fusion or PurrNet objects and bind authority checks plus local GC2 apply and snapshot Instructions.
+- Persistent Boolean, Number, String, and Vector3 values are revisioned, broadcast through the selected transport, and reconstructed for late joiners and clients entering relevance.
+- GC2 Instructions, Conditions, Events, and Properties cover requests, results, object-state reads, interaction context, and local state application for transforms, active objects, renderers, behaviours, colliders, layers, tags, visual variants, Animator parameters/states, and character controllability presentation.
+- The Fusion and PurrNet Core Examples installers include an authority-validated replicated door-state example.
+
+Network Actions replicate a trusted semantic value; they do not serialize or remotely execute arbitrary GC2 Instruction Lists. Authority commits the value once, then each receiving replica applies its locally authored presentation. Use absolute, idempotent snapshot Instructions for persistent state.
 
 ## Supported Modules
 
@@ -58,6 +70,8 @@ Both transport integrations include bridges for the shared core and supported op
 
 The wizards create or reuse the transport session objects, shared GC2 managers, transport bridges, selected module bridges, player-prefab components, session profiles, registration assets, and optional demo UI. Use each wizard's Review and validation pages before applying changes to an existing scene.
 
+Install examples through `Game Creator > Install...`. The former aggregate Fusion and PurrNet demo `.unitypackage` files were retired in version 2.2.0; the per-feature installers are the supported source of demo content and preserve explicit dependencies and upgrade versions.
+
 ## Lobby Workflows
 
 - The transport-neutral lobby API and canvas UI provide a common front end for hosting, discovery, joining, compatibility checks, and session capacity.
@@ -77,7 +91,7 @@ Use `Game Creator > Networking Layer > Patches` outside Play Mode. Each transpor
 
 ## Compatibility
 
-Servers and clients must use the same Networking Layer version. Version 2.1.0 extends the Fusion transport and character-driver contracts and must not be mixed with older builds. Every peer in an Advanced KCC session must also use the compatible optional adapter and Photon addon version.
+Servers and clients must use the same Networking Layer version. Version 2.2.0 adds new Network Actions and Core interaction wire contracts and must not be mixed with older builds. Every peer in an Advanced KCC session must also use the compatible optional adapter and Photon addon version.
 
 ## Documentation
 

@@ -170,6 +170,19 @@ namespace Arawn.GameCreator2.Networking
                 return;
             }
 
+            if (!this.m_IsControllable)
+            {
+                this.m_PointerPress = false;
+                this.m_Pointer = Vector3.zero;
+                this.m_Direction = Vector3.zero;
+                this.m_WasPressed = false;
+                this.InputDirection = Vector3.zero;
+                SendStopToNetwork();
+                RefreshNetworkDriver();
+                m_NetworkDriver?.ProcessDirectionalInput(Vector2.zero, null, false);
+                return;
+            }
+
             if (NetworkGameplayInputBlocker.IsTextInputFocused())
             {
                 this.m_PointerPress = false;
@@ -267,6 +280,7 @@ namespace Arawn.GameCreator2.Networking
         private void OnPerformPointer()
         {
             if (!this.Character.IsPlayer) return;
+            if (!this.m_IsControllable) return;
             if (!m_IsInputEnabled) return;
             if (NetworkGameplayInputBlocker.IsTextInputFocused()) return;
 

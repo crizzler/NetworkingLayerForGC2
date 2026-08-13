@@ -417,6 +417,7 @@ namespace Arawn.GameCreator2.Networking.CorePurrNet.Tests
                 CharacterNetworkId = 106,
                 TargetNetworkId = 501,
                 TargetHash = 6002,
+                InteractionType = InteractionType.Open,
                 InteractionPosition = new Vector3(3f, 4f, -5f),
                 ClientTime = 21.25f
             };
@@ -430,6 +431,7 @@ namespace Arawn.GameCreator2.Networking.CorePurrNet.Tests
             Assert.That(requestActual.CharacterNetworkId, Is.EqualTo(request.CharacterNetworkId));
             Assert.That(requestActual.TargetNetworkId, Is.EqualTo(request.TargetNetworkId));
             Assert.That(requestActual.TargetHash, Is.EqualTo(request.TargetHash));
+            Assert.That(requestActual.InteractionType, Is.EqualTo(request.InteractionType));
             Assert.That(requestActual.InteractionPosition, Is.EqualTo(request.InteractionPosition));
             Assert.That(requestActual.ClientTime, Is.EqualTo(request.ClientTime));
 
@@ -438,6 +440,10 @@ namespace Arawn.GameCreator2.Networking.CorePurrNet.Tests
                 RequestId = 16,
                 ActorNetworkId = 106,
                 CorrelationId = 207,
+                CharacterNetworkId = 106,
+                TargetNetworkId = 501,
+                TargetHash = 6002,
+                InteractionType = InteractionType.Open,
                 Approved = true,
                 RejectReason = InteractionRejectReason.None,
                 ResultData = 808
@@ -449,26 +455,38 @@ namespace Arawn.GameCreator2.Networking.CorePurrNet.Tests
             Assert.That(responseActual.RequestId, Is.EqualTo(response.RequestId));
             Assert.That(responseActual.ActorNetworkId, Is.EqualTo(response.ActorNetworkId));
             Assert.That(responseActual.CorrelationId, Is.EqualTo(response.CorrelationId));
+            Assert.That(responseActual.CharacterNetworkId, Is.EqualTo(response.CharacterNetworkId));
+            Assert.That(responseActual.TargetNetworkId, Is.EqualTo(response.TargetNetworkId));
+            Assert.That(responseActual.TargetHash, Is.EqualTo(response.TargetHash));
+            Assert.That(responseActual.InteractionType, Is.EqualTo(response.InteractionType));
             Assert.That(responseActual.Approved, Is.EqualTo(response.Approved));
             Assert.That(responseActual.RejectReason, Is.EqualTo(response.RejectReason));
             Assert.That(responseActual.ResultData, Is.EqualTo(response.ResultData));
 
             var broadcast = new NetworkInteractionBroadcast
             {
+                RequestId = 16,
+                ActorNetworkId = 106,
+                CorrelationId = 207,
                 CharacterNetworkId = 106,
                 TargetNetworkId = 501,
                 TargetHash = 6002,
                 InteractionType = InteractionType.Open,
+                ResultData = 808,
                 ServerTime = 100.75f
             };
             NetworkInteractionBroadcast broadcastActual = RoundTrip(
                 broadcast,
                 PurrNetCoreValuePackers.Write,
                 PurrNetCoreValuePackers.Read);
+            Assert.That(broadcastActual.RequestId, Is.EqualTo(broadcast.RequestId));
+            Assert.That(broadcastActual.ActorNetworkId, Is.EqualTo(broadcast.ActorNetworkId));
+            Assert.That(broadcastActual.CorrelationId, Is.EqualTo(broadcast.CorrelationId));
             Assert.That(broadcastActual.CharacterNetworkId, Is.EqualTo(broadcast.CharacterNetworkId));
             Assert.That(broadcastActual.TargetNetworkId, Is.EqualTo(broadcast.TargetNetworkId));
             Assert.That(broadcastActual.TargetHash, Is.EqualTo(broadcast.TargetHash));
             Assert.That(broadcastActual.InteractionType, Is.EqualTo(broadcast.InteractionType));
+            Assert.That(broadcastActual.ResultData, Is.EqualTo(broadcast.ResultData));
             Assert.That(broadcastActual.ServerTime, Is.EqualTo(broadcast.ServerTime));
 
             var focus = new NetworkInteractionFocusBroadcast

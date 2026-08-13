@@ -690,13 +690,16 @@ namespace Arawn.GameCreator2.Networking
         /// <summary>Hash of the interaction target (for non-networked objects).</summary>
         public int TargetHash;
 
+        /// <summary>Semantic interaction requested by the client.</summary>
+        public InteractionType InteractionType;
+
         /// <summary>Position of interaction (for validation).</summary>
         public Vector3 InteractionPosition;
 
         /// <summary>Client timestamp.</summary>
         public float ClientTime;
 
-        public const int SIZE_BYTES = 30;
+        public const int SIZE_BYTES = 39;
     }
 
     /// <summary>
@@ -710,6 +713,24 @@ namespace Arawn.GameCreator2.Networking
         public uint ActorNetworkId;
         public uint CorrelationId;
 
+        /// <summary>Network ID of the character that attempted the interaction.</summary>
+        public uint CharacterNetworkId;
+
+        /// <summary>
+        /// Server-resolved target ID once resolution succeeds; otherwise the target ID claimed
+        /// by the rejected request.
+        /// </summary>
+        public uint TargetNetworkId;
+
+        /// <summary>
+        /// Server-resolved stable target hash once resolution succeeds; otherwise the target
+        /// hash claimed by the rejected request.
+        /// </summary>
+        public int TargetHash;
+
+        /// <summary>Semantic interaction associated with this response.</summary>
+        public InteractionType InteractionType;
+
         /// <summary>Whether the interaction was approved.</summary>
         public bool Approved;
 
@@ -719,7 +740,7 @@ namespace Arawn.GameCreator2.Networking
         /// <summary>Result data from the interaction (optional).</summary>
         public int ResultData;
 
-        public const int SIZE_BYTES = 8;
+        public const int SIZE_BYTES = 29;
     }
 
     /// <summary>
@@ -729,6 +750,15 @@ namespace Arawn.GameCreator2.Networking
     [Serializable]
     public struct NetworkInteractionBroadcast
     {
+        /// <summary>Matches the originating request.</summary>
+        public ushort RequestId;
+
+        /// <summary>Security actor associated with the originating request.</summary>
+        public uint ActorNetworkId;
+
+        /// <summary>Stable correlation ID associated with the originating request.</summary>
+        public uint CorrelationId;
+
         /// <summary>Network ID of the interacting character.</summary>
         public uint CharacterNetworkId;
 
@@ -741,10 +771,13 @@ namespace Arawn.GameCreator2.Networking
         /// <summary>Type of interaction that occurred.</summary>
         public InteractionType InteractionType;
 
+        /// <summary>Authoritative result data associated with the interaction.</summary>
+        public int ResultData;
+
         /// <summary>Server timestamp.</summary>
         public float ServerTime;
 
-        public const int SIZE_BYTES = 17;
+        public const int SIZE_BYTES = 31;
     }
 
     /// <summary>
@@ -812,7 +845,8 @@ namespace Arawn.GameCreator2.Networking
         NotOwner = 9,
         ProtocolMismatch = 10,
         SecurityViolation = 11,
-        Timeout = 12
+        Timeout = 12,
+        InvalidValue = 13
     }
 
     // ════════════════════════════════════════════════════════════════════════════════════════

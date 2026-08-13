@@ -214,7 +214,11 @@ namespace Arawn.GameCreator2.Networking
         /// </summary>
         public void InjectInput(Vector2 input)
         {
-            if (!m_IsInputEnabled) return;
+            if (!m_IsInputEnabled || !this.m_IsControllable)
+            {
+                m_CurrentInput = Vector2.zero;
+                return;
+            }
             m_CurrentInput = input.sqrMagnitude > 1f ? input.normalized : input;
         }
 

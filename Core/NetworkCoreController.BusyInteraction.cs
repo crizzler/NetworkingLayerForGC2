@@ -229,9 +229,37 @@ namespace Arawn.GameCreator2.Networking
         public void RequestInteraction(uint characterNetworkId, uint targetNetworkId, int targetHash,
             Vector3 interactionPosition, Action<NetworkInteractionResponse> callback = null)
         {
-            if (!m_IsClient) return;
+            TryRequestInteraction(
+                characterNetworkId,
+                targetNetworkId,
+                targetHash,
+                interactionPosition,
+                InteractionType.Generic,
+                out _,
+                callback);
+        }
 
-            var request = new NetworkInteractionRequest
+        /// <summary>
+        /// [Client] Request a typed interaction while preserving the generated request context.
+        /// Returns false when this controller cannot issue the request locally.
+        /// </summary>
+        public bool TryRequestInteraction(
+            uint characterNetworkId,
+            uint targetNetworkId,
+            int targetHash,
+            Vector3 interactionPosition,
+            InteractionType interactionType,
+            out NetworkInteractionRequest request,
+            Action<NetworkInteractionResponse> callback = null)
+        {
+            request = default;
+            if (!m_IsClient || characterNetworkId == 0) return false;
+            if (!IsFinite(interactionPosition) || !IsSupportedInteractionType(interactionType))
+            {
+                return false;
+            }
+
+            request = new NetworkInteractionRequest
             {
                 RequestId = GetNextRequestId(),
                 ActorNetworkId = characterNetworkId,
@@ -239,6 +267,7 @@ namespace Arawn.GameCreator2.Networking
                 CharacterNetworkId = characterNetworkId,
                 TargetNetworkId = targetNetworkId,
                 TargetHash = targetHash,
+                InteractionType = interactionType,
                 InteractionPosition = interactionPosition,
                 ClientTime = GetServerTime?.Invoke() ?? Time.time
             };
@@ -253,6 +282,7 @@ namespace Arawn.GameCreator2.Networking
             m_Stats.InteractionRequestsSent++;
             SendInteractionRequestToServer?.Invoke(request);
             OnInteractionRequestSent?.Invoke(request);
+            return true;
         }
 
         // ════════════════════════════════════════════════════════════════════════════════════════
@@ -272,16 +302,24 @@ namespace Arawn.GameCreator2.Networking
             var character = GetCharacterByNetworkId?.Invoke(request.CharacterNetworkId);
             if (character == null)
             {
-                SendInteractionResponse(senderNetworkId, request.RequestId, false,
-                    InteractionRejectReason.CharacterNotFound, 0, request.ActorNetworkId, request.CorrelationId);
+                SendInteractionResponse(senderNetworkId, request, false,
+                    InteractionRejectReason.CharacterNotFound, 0);
+                m_Stats.InteractionRejected++;
                 return;
             }
 
             if (!IsFinite(request.InteractionPosition) || !IsFinite(request.ClientTime))
             {
-                SendInteractionResponse(senderNetworkId, request.RequestId, false,
-                    InteractionRejectReason.SecurityViolation, 0,
-                    request.ActorNetworkId, request.CorrelationId);
+                SendInteractionResponse(senderNetworkId, request, false,
+                    InteractionRejectReason.SecurityViolation, 0);
+                m_Stats.InteractionRejected++;
+                return;
+            }
+
+            if (!IsSupportedInteractionType(request.InteractionType))
+            {
+                SendInteractionResponse(senderNetworkId, request, false,
+                    InteractionRejectReason.InvalidValue, 0);
                 m_Stats.InteractionRejected++;
                 return;
             }
@@ -295,9 +333,8 @@ namespace Arawn.GameCreator2.Networking
                     out uint resolvedTargetNetworkId,
                     out int resolvedTargetHash))
             {
-                SendInteractionResponse(senderNetworkId, request.RequestId, false,
-                    InteractionRejectReason.TargetNotFound, 0,
-                    request.ActorNetworkId, request.CorrelationId);
+                SendInteractionResponse(senderNetworkId, request, false,
+                    InteractionRejectReason.TargetNotFound, 0);
                 m_Stats.InteractionRejected++;
                 return;
             }
@@ -310,8 +347,9 @@ namespace Arawn.GameCreator2.Networking
             var cooldownKey = (request.CharacterNetworkId, targetCooldownId);
             if (m_InteractionCooldowns.TryGetValue(cooldownKey, out float cooldownEnd) && currentTime < cooldownEnd)
             {
-                SendInteractionResponse(senderNetworkId, request.RequestId, false,
-                    InteractionRejectReason.OnCooldown, 0, request.ActorNetworkId, request.CorrelationId);
+                SendInteractionResponse(senderNetworkId, request, false,
+                    InteractionRejectReason.OnCooldown, 0,
+                    resolvedTargetNetworkId, resolvedTargetHash);
                 m_Stats.InteractionRejected++;
                 return;
             }
@@ -321,8 +359,9 @@ namespace Arawn.GameCreator2.Networking
             float distance = Vector3.Distance(character.transform.position, target.Position);
             if (!IsFinite(distance) || distance > Mathf.Max(0f, m_MaxInteractionRange))
             {
-                SendInteractionResponse(senderNetworkId, request.RequestId, false,
-                    InteractionRejectReason.OutOfRange, 0, request.ActorNetworkId, request.CorrelationId);
+                SendInteractionResponse(senderNetworkId, request, false,
+                    InteractionRejectReason.OutOfRange, 0,
+                    resolvedTargetNetworkId, resolvedTargetHash);
                 m_Stats.InteractionRejected++;
                 return;
             }
@@ -330,9 +369,9 @@ namespace Arawn.GameCreator2.Networking
 
             if (target.IsInteracting)
             {
-                SendInteractionResponse(senderNetworkId, request.RequestId, false,
+                SendInteractionResponse(senderNetworkId, request, false,
                     InteractionRejectReason.TargetBusy, 0,
-                    request.ActorNetworkId, request.CorrelationId);
+                    resolvedTargetNetworkId, resolvedTargetHash);
                 m_Stats.InteractionRejected++;
                 return;
             }
@@ -340,8 +379,9 @@ namespace Arawn.GameCreator2.Networking
             // Check if character can interact
             if (character.Interaction.Target == target && !character.Interaction.CanInteract)
             {
-                SendInteractionResponse(senderNetworkId, request.RequestId, false,
-                    InteractionRejectReason.CharacterBusy, 0, request.ActorNetworkId, request.CorrelationId);
+                SendInteractionResponse(senderNetworkId, request, false,
+                    InteractionRejectReason.CharacterBusy, 0,
+                    resolvedTargetNetworkId, resolvedTargetHash);
                 m_Stats.InteractionRejected++;
                 return;
             }
@@ -361,9 +401,9 @@ namespace Arawn.GameCreator2.Networking
 
             if (!interacted)
             {
-                SendInteractionResponse(senderNetworkId, request.RequestId, false,
+                SendInteractionResponse(senderNetworkId, request, false,
                     InteractionRejectReason.ConditionsFailed, 0,
-                    request.ActorNetworkId, request.CorrelationId);
+                    resolvedTargetNetworkId, resolvedTargetHash);
                 m_Stats.InteractionRejected++;
                 return;
             }
@@ -371,18 +411,25 @@ namespace Arawn.GameCreator2.Networking
             // Update cooldown
             m_InteractionCooldowns[cooldownKey] = currentTime + m_InteractionCooldown;
 
+            const int resultData = 0;
+
             // Send response
-            SendInteractionResponse(senderNetworkId, request.RequestId, true,
-                InteractionRejectReason.None, 0, request.ActorNetworkId, request.CorrelationId);
+            SendInteractionResponse(senderNetworkId, request, true,
+                InteractionRejectReason.None, resultData,
+                resolvedTargetNetworkId, resolvedTargetHash);
             m_Stats.InteractionApproved++;
 
             // Broadcast
             var broadcast = new NetworkInteractionBroadcast
             {
+                RequestId = request.RequestId,
+                ActorNetworkId = request.ActorNetworkId,
+                CorrelationId = request.CorrelationId,
                 CharacterNetworkId = request.CharacterNetworkId,
                 TargetNetworkId = resolvedTargetNetworkId,
                 TargetHash = resolvedTargetHash,
-                InteractionType = InteractionType.Generic,
+                InteractionType = request.InteractionType,
+                ResultData = resultData,
                 ServerTime = currentTime
             };
 
@@ -473,7 +520,7 @@ namespace Arawn.GameCreator2.Networking
             return request.TargetHash == 0 || request.TargetHash == targetHash;
         }
 
-        private static int GetStableInteractionTargetHash(GameObject target)
+        public static int GetStableInteractionTargetHash(GameObject target)
         {
             if (target == null) return 0;
 
@@ -491,14 +538,41 @@ namespace Arawn.GameCreator2.Networking
             return StableHashUtility.GetStableHash($"{scene}|{path}|CoreInteraction");
         }
 
-        private void SendInteractionResponse(uint clientId, ushort requestId, bool approved,
-            InteractionRejectReason reason, int resultData, uint actorNetworkId = 0, uint correlationId = 0)
+        private void SendInteractionResponse(
+            uint clientId,
+            NetworkInteractionRequest request,
+            bool approved,
+            InteractionRejectReason reason,
+            int resultData)
+        {
+            SendInteractionResponse(
+                clientId,
+                request,
+                approved,
+                reason,
+                resultData,
+                request.TargetNetworkId,
+                request.TargetHash);
+        }
+
+        private void SendInteractionResponse(
+            uint clientId,
+            NetworkInteractionRequest request,
+            bool approved,
+            InteractionRejectReason reason,
+            int resultData,
+            uint targetNetworkId,
+            int targetHash)
         {
             var response = new NetworkInteractionResponse
             {
-                RequestId = requestId,
-                ActorNetworkId = actorNetworkId,
-                CorrelationId = correlationId,
+                RequestId = request.RequestId,
+                ActorNetworkId = request.ActorNetworkId,
+                CorrelationId = request.CorrelationId,
+                CharacterNetworkId = request.CharacterNetworkId,
+                TargetNetworkId = targetNetworkId,
+                TargetHash = targetHash,
+                InteractionType = request.InteractionType,
                 Approved = approved,
                 RejectReason = reason,
                 ResultData = resultData
@@ -518,9 +592,17 @@ namespace Arawn.GameCreator2.Networking
             if (m_PendingInteractionRequests.TryGetValue(pendingKey, out var pending))
             {
                 m_PendingInteractionRequests.Remove(pendingKey);
-                pending.Callback?.Invoke(response);
+                try
+                {
+                    pending.Callback?.Invoke(response);
+                }
+                catch (Exception exception)
+                {
+                    Debug.LogException(exception, this);
+                }
             }
 
+            NetworkInteractionEvents.RaiseResponse(response);
             OnInteractionResponseReceived?.Invoke(response);
         }
 
@@ -532,7 +614,20 @@ namespace Arawn.GameCreator2.Networking
             if (m_IsServer) return;
 
             // Interaction effects/animations can be triggered here
+            NetworkInteractionEvents.RaiseBroadcast(broadcast);
             OnInteractionBroadcastReceived?.Invoke(broadcast);
+        }
+
+        private static bool IsSupportedInteractionType(InteractionType interactionType)
+        {
+            return interactionType == InteractionType.Generic ||
+                   interactionType == InteractionType.Pickup ||
+                   interactionType == InteractionType.Use ||
+                   interactionType == InteractionType.Open ||
+                   interactionType == InteractionType.Close ||
+                   interactionType == InteractionType.Talk ||
+                   interactionType == InteractionType.Read ||
+                   interactionType == InteractionType.Custom;
         }
 
         /// <summary>[Client] Handle an interaction focus/blur presentation broadcast.</summary>

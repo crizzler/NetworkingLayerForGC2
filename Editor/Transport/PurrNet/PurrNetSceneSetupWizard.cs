@@ -5,6 +5,7 @@ using Arawn.GameCreator2.Networking.Editor;
 using Arawn.GameCreator2.Networking.Security;
 using Arawn.GameCreator2.Networking.Transport.PurrNet;
 using GameCreator.Runtime.Characters;
+using GameCreator.Runtime.Common;
 using GameCreator.Runtime.Common.UnityUI;
 using GameCreator.Runtime.Variables;
 using PurrNet;
@@ -2279,6 +2280,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
             {
                 EditorGUILayout.Space(8);
                 EditorGUILayout.LabelField("Current Scene Validation", EditorStyles.miniBoldLabel);
+                DrawNetworkActionValidationWarnings();
 
                 if (rawManager != null)
                 {
@@ -2304,6 +2306,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
 
             EditorGUILayout.Space(8);
             EditorGUILayout.LabelField("Current Scene Validation", EditorStyles.miniBoldLabel);
+            DrawNetworkActionValidationWarnings();
 
             if (rawManager != null)
             {
@@ -2317,6 +2320,179 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
             DrawTransportConfigurationWarnings(manager);
             DrawBridgeManagerReferenceWarnings(manager);
             DrawDemoUIAutoStartWarning(manager);
+        }
+
+        private void DrawNetworkActionValidationWarnings()
+        {
+            NetworkActionEndpoint[] sceneEndpoints =
+                FindSceneComponents<NetworkActionEndpoint>();
+            if (sceneEndpoints.Length > 0)
+            {
+                NetworkActionManager[] actionManagers =
+                    FindSceneComponents<NetworkActionManager>();
+                if (actionManagers.Length == 0)
+                {
+                    EditorGUILayout.HelpBox(
+                        "The scene contains Network Action Endpoints but no Network Action " +
+                        "Manager. Keep Core Managers enabled and apply the wizard.",
+                        MessageType.Error);
+                }
+                else if (actionManagers.Length > 1)
+                {
+                    EditorGUILayout.HelpBox(
+                        $"The scene contains {actionManagers.Length} Network Action Managers. " +
+                        "Keep exactly one or requests and persistent state can bind to different " +
+                        "singletons.",
+                        MessageType.Error);
+                }
+
+                PurrNetNetworkActionTransportBridge[] actionBridges =
+                    FindSceneComponents<PurrNetNetworkActionTransportBridge>();
+                if (actionBridges.Length == 0)
+                {
+                    EditorGUILayout.HelpBox(
+                        "The scene contains Network Action Endpoints but no PurrNet Network " +
+                        "Actions Bridge. Keep Core Bridges enabled and apply the wizard.",
+                        MessageType.Error);
+                }
+                else if (actionBridges.Length > 1)
+                {
+                    EditorGUILayout.HelpBox(
+                        $"The scene contains {actionBridges.Length} PurrNet Network Actions " +
+                        "Bridges. Keep exactly one to avoid duplicate subscriptions and sends.",
+                        MessageType.Error);
+                }
+            }
+
+            DrawNetworkActionEndpointWarnings(sceneEndpoints, "scene");
+            if (m_PlayerPrefab != null)
+            {
+                DrawNetworkActionEndpointWarnings(
+                    m_PlayerPrefab.GetComponentsInChildren<NetworkActionEndpoint>(true),
+                    "selected player prefab");
+            }
+        }
+
+        private static void DrawNetworkActionEndpointWarnings(
+            IReadOnlyList<NetworkActionEndpoint> endpoints,
+            string sourceLabel)
+        {
+            if (endpoints == null || endpoints.Count == 0) return;
+
+            var endpointKeys = new Dictionary<NetworkActionEndpointKey, NetworkActionEndpoint>();
+            for (int i = 0; i < endpoints.Count; i++)
+            {
+                NetworkActionEndpoint endpoint = endpoints[i];
+                if (endpoint == null) continue;
+
+                NetworkIdentity identity = endpoint.GetComponentInParent<NetworkIdentity>();
+                if (identity == null)
+                {
+                    EditorGUILayout.HelpBox(
+                        $"Network Action Endpoint '{endpoint.name}' in the {sourceLabel} has no " +
+                        "parent PurrNet NetworkIdentity. It cannot receive a transport Network ID " +
+                        "and will never register at runtime.",
+                        MessageType.Error);
+                }
+
+                if (string.IsNullOrWhiteSpace(endpoint.EndpointId) || endpoint.EndpointHash == 0)
+                {
+                    EditorGUILayout.HelpBox(
+                        $"Network Action Endpoint '{endpoint.name}' has no valid stable Endpoint " +
+                        "ID. Open and save the prefab/scene or assign a unique Endpoint ID before " +
+                        "building.",
+                        MessageType.Error);
+                }
+                else if (identity != null)
+                {
+                    var key = new NetworkActionEndpointKey(
+                        unchecked((uint)identity.GetInstanceID()), endpoint.EndpointHash);
+                    if (endpointKeys.TryGetValue(key, out NetworkActionEndpoint existing) &&
+                        existing != endpoint)
+                    {
+                        EditorGUILayout.HelpBox(
+                            $"Network Action Endpoints '{existing.name}' and '{endpoint.name}' " +
+                            $"under PurrNet identity '{identity.name}' have an Endpoint ID/hash " +
+                            $"collision ('{existing.EndpointId}' and '{endpoint.EndpointId}'). " +
+                            "Give sibling endpoints unique stable IDs.",
+                            MessageType.Error);
+                    }
+                    else
+                    {
+                        endpointKeys[key] = endpoint;
+                    }
+                }
+
+                IReadOnlyList<NetworkActionBinding> bindings = endpoint.Actions;
+                if (bindings == null || bindings.Count == 0)
+                {
+                    EditorGUILayout.HelpBox(
+                        $"Network Action Endpoint '{endpoint.name}' has no action bindings and " +
+                        "cannot accept any network action.",
+                        MessageType.Warning);
+                    continue;
+                }
+
+                var actionContracts = new Dictionary<string, NetworkActionDefinition>(
+                    StringComparer.Ordinal);
+                for (int bindingIndex = 0; bindingIndex < bindings.Count; bindingIndex++)
+                {
+                    NetworkActionDefinition definition = bindings[bindingIndex]?.Definition;
+                    if (definition == null)
+                    {
+                        EditorGUILayout.HelpBox(
+                            $"Network Action Endpoint '{endpoint.name}' binding {bindingIndex} " +
+                            "has no Action Definition.",
+                            MessageType.Error);
+                        continue;
+                    }
+
+                    if (string.IsNullOrWhiteSpace(definition.ActionId) ||
+                        definition.ActionId.Length > NetworkActionManager.MaxActionIdCharacters ||
+                        definition.ActionHash == 0)
+                    {
+                        EditorGUILayout.HelpBox(
+                            $"Network Action Definition '{definition.name}' on endpoint " +
+                            $"'{endpoint.name}' has an invalid stable Action ID.",
+                            MessageType.Error);
+                    }
+
+                    if (!definition.HasValidContract)
+                    {
+                        EditorGUILayout.HelpBox(
+                            $"Persistent Network Action '{definition.name}' uses recipient policy " +
+                            $"{definition.RecipientPolicy}. Persistent state must target Relevant " +
+                            "Observers or All Clients so late join remains reconstructable.",
+                            MessageType.Error);
+                    }
+
+                    if (!definition.TryValidatePayload(
+                            definition.InitialPayload, out NetworkActionRejectReason _))
+                    {
+                        EditorGUILayout.HelpBox(
+                            $"Network Action Definition '{definition.name}' has an invalid initial " +
+                            "payload for its declared payload type.",
+                            MessageType.Error);
+                    }
+
+                    string contractKey =
+                        $"{definition.ActionHash}:{definition.ActionId}";
+                    if (actionContracts.TryGetValue(
+                            contractKey, out NetworkActionDefinition existingDefinition))
+                    {
+                        EditorGUILayout.HelpBox(
+                            $"Network Action Endpoint '{endpoint.name}' binds action " +
+                            $"'{definition.ActionId}' more than once ('{existingDefinition.name}' " +
+                            $"and '{definition.name}'). The first match shadows subsequent " +
+                            "contracts, including other schema versions.",
+                            MessageType.Error);
+                    }
+                    else
+                    {
+                        actionContracts[contractKey] = definition;
+                    }
+                }
+            }
         }
 
         private void DrawTransportConfigurationWarnings(NetworkManager manager)
@@ -2580,6 +2756,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
                     coreBridge = EnsureCoreTransportBridge(root, manager, sessionProfile);
                     EnsureCoreFeatureTransportBridge(root, manager);
                     EnsureVariableBridge(root, manager, coreBridge);
+                    EnsureNetworkActionBridge(root, manager, coreBridge);
                     EnsureAnimationMotionBridge(root, manager);
                 }
 
@@ -2792,6 +2969,21 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
             EditorUtility.SetDirty(bridge);
         }
 
+        private void EnsureNetworkActionBridge(
+            GameObject root,
+            NetworkManager manager,
+            PurrNetTransportBridge coreBridge)
+        {
+            var bridge = FindOrCreateComponent<PurrNetNetworkActionTransportBridge>(
+                "PurrNet Network Actions Bridge", root);
+            var so = new SerializedObject(bridge);
+            AssignObjectReference(so, "m_NetworkManager", manager);
+            AssignObjectReference(so, "m_CoreBridge", coreBridge);
+            SetBool(so, "m_LogNetworkMessages", false);
+            so.ApplyModifiedPropertiesWithoutUndo();
+            EditorUtility.SetDirty(bridge);
+        }
+
         private void EnsureAnimationMotionBridge(GameObject root, NetworkManager manager)
         {
             var bridge = FindOrCreateComponent<PurrNetAnimationMotionTransportBridge>("PurrNet Animation Motion Bridge", root);
@@ -2839,6 +3031,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
                     var so = new SerializedObject(bridge);
                     var healthAttribute = LoadAsset(HEALTH_ATTRIBUTE_PATH);
                     if (healthAttribute != null) AssignObjectReference(so, "m_HealthAttribute", healthAttribute);
+                    SetString(so, "m_FallbackHealthAttributeId", "hp");
                     so.ApplyModifiedPropertiesWithoutUndo();
                     EditorUtility.SetDirty(bridge);
                 }
@@ -2856,6 +3049,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
                     var so = new SerializedObject(bridge);
                     var healthAttribute = LoadAsset(HEALTH_ATTRIBUTE_PATH);
                     if (healthAttribute != null) AssignObjectReference(so, "m_HealthAttribute", healthAttribute);
+                    SetString(so, "m_FallbackHealthAttributeId", "hp");
                     so.ApplyModifiedPropertiesWithoutUndo();
                     EditorUtility.SetDirty(bridge);
                 }
@@ -3792,7 +3986,14 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
             var so = new SerializedObject(chat);
             AssignObjectReference(so, "m_NetworkManager", manager);
             SetString(so, "m_Title", "Chat");
-            SetString(so, "m_DefaultDisplayName", "Player");
+            SerializedProperty defaultDisplayName =
+                so.FindProperty("m_DefaultDisplayNameProperty")?
+                    .FindPropertyRelative("m_Property");
+            if (defaultDisplayName != null &&
+                defaultDisplayName.managedReferenceValue == null)
+            {
+                defaultDisplayName.managedReferenceValue = new GetStringString("Player");
+            }
             SetInt(so, "m_MaxVisibleMessages", 64);
             SetInt(so, "m_MaxMessageLength", 160);
             SetFloat(so, "m_MinSendInterval", 0.25f);
@@ -5089,8 +5290,10 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
         private string BuildSummary()
         {
             return "Will create/reuse: NetworkManager, PurrNet Transport Bridge, PurrNet Variable Bridge, " +
+                   "PurrNet Network Actions Bridge, " +
                    "PurrNet Animation Motion Bridge, Network Security Manager, Network Core Manager, " +
-                   "Network Animation Manager, Network Motion Manager, Network Variable Manager" +
+                   "Network Animation Manager, Network Motion Manager, Network Variable Manager, " +
+                   "Network Action Manager" +
                    SelectedModuleSummary(prefix: ", selected modules: ");
         }
 
