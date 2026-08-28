@@ -1516,8 +1516,9 @@ namespace Arawn.GameCreator2.Networking
                 if (collider.enabled) enabledRootColliders++;
             }
 
-            m_RigidbodyScratch.Clear();
-            character.GetComponentsInChildren(true, m_RigidbodyScratch);
+            NetworkRagdollPhysicsGuard.CollectRagdollRigidbodies(
+                character,
+                m_RigidbodyScratch);
             int dynamicRigidbodies = 0;
             for (int i = 0; i < m_RigidbodyScratch.Count; ++i)
             {

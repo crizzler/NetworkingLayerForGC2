@@ -201,10 +201,16 @@ namespace Arawn.GameCreator2.Networking
                 // Small delay to let ragdoll physics activate
                 await System.Threading.Tasks.Task.Yield();
 
-                var rigidbodies = character.GetComponentsInChildren<Rigidbody>();
-                foreach (var rb in rigidbodies)
+                var rigidbodies = new List<Rigidbody>(24);
+                NetworkRagdollPhysicsGuard.CollectRagdollRigidbodies(
+                    character,
+                    rigidbodies);
+                foreach (Rigidbody rb in rigidbodies)
                 {
-                    rb.AddForceAtPosition(force, forcePoint, ForceMode.Impulse);
+                    if (rb != null && !rb.isKinematic)
+                    {
+                        rb.AddForceAtPosition(force, forcePoint, ForceMode.Impulse);
+                    }
                 }
             }
         }

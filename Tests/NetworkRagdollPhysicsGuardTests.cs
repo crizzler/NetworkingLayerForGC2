@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Reflection;
 using GameCreator.Runtime.Characters;
 using NUnit.Framework;
@@ -193,6 +194,112 @@ namespace Arawn.GameCreator2.Networking.Tests
         }
 
         [Test]
+        public void RagdollBodyCollector_UsesConfiguredAnimatorAfterGc2DetachesItsHierarchy()
+        {
+            var root = new GameObject("Detached Ragdoll Character");
+            var model = new GameObject("Detached Animator Model");
+            root.SetActive(false);
+
+            try
+            {
+                Character character = root.AddComponent<Character>();
+                model.transform.SetParent(root.transform, false);
+                Animator animator = model.AddComponent<Animator>();
+                character.Animim.Animator = animator;
+
+                var bone = new GameObject("Dynamic Bone");
+                bone.transform.SetParent(model.transform, false);
+                Rigidbody dynamicBody = bone.AddComponent<Rigidbody>();
+                dynamicBody.isKinematic = false;
+
+                // This is the hierarchy change performed by GC2's RagdollDefault.StartRagdoll.
+                model.transform.SetParent(null, true);
+                Assert.That(
+                    root.GetComponentsInChildren<Rigidbody>(true),
+                    Is.Empty,
+                    "The test must reproduce the Character-subtree blind spot first.");
+
+                var bodies = new List<Rigidbody> { root.AddComponent<Rigidbody>() };
+                InvokeRagdollBodyCollector(character, bodies);
+
+                Assert.That(bodies, Has.Count.EqualTo(1));
+                Assert.That(bodies[0], Is.SameAs(dynamicBody));
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(model);
+                UnityEngine.Object.DestroyImmediate(root);
+            }
+        }
+
+        [Test]
+        public void DemoDiagnostics_DetachedAnimatorReportsDynamicBoneAndProtectedState()
+        {
+            var root = new GameObject("Detached Ragdoll Diagnostics");
+            var model = new GameObject("Detached Animator Model");
+            root.SetActive(false);
+
+            object observation = null;
+            try
+            {
+                Character character = root.AddComponent<Character>();
+                CharacterController controller = root.AddComponent<CharacterController>();
+                controller.enabled = false;
+                controller.detectCollisions = false;
+                root.AddComponent<NetworkRagdollPhysicsGuard>();
+
+                model.transform.SetParent(root.transform, false);
+                Animator animator = model.AddComponent<Animator>();
+                character.Animim.Animator = animator;
+
+                var bone = new GameObject("Dynamic Bone");
+                bone.transform.SetParent(model.transform, false);
+                Rigidbody dynamicBody = bone.AddComponent<Rigidbody>();
+                dynamicBody.isKinematic = false;
+
+                SetRagdollSystem(character.Ragdoll, new RagdollDefault());
+                SetRagdollState(character.Ragdoll, true);
+                animator.enabled = false;
+                model.transform.SetParent(null, true);
+
+                NetworkCharacter networkCharacter = root.AddComponent<NetworkCharacter>();
+                SetField(networkCharacter, "m_Character", character);
+
+                System.Type observationType = typeof(NetworkRagdollDemoUI).GetNestedType(
+                    "ActorObservation",
+                    BindingFlags.NonPublic);
+                Assert.That(observationType, Is.Not.Null);
+                ConstructorInfo constructor = observationType.GetConstructor(
+                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                    null,
+                    new[] { typeof(NetworkCharacter) },
+                    null);
+                Assert.That(constructor, Is.Not.Null);
+                observation = constructor.Invoke(new object[] { networkCharacter });
+
+                NetworkRagdollDemoUI ui = root.AddComponent<NetworkRagdollDemoUI>();
+                MethodInfo capture = typeof(NetworkRagdollDemoUI).GetMethod(
+                    "CaptureDiagnostics",
+                    BindingFlags.Instance | BindingFlags.NonPublic);
+                Assert.That(capture, Is.Not.Null);
+                object diagnostics = capture.Invoke(ui, new[] { observation });
+
+                Assert.That(GetField<int>(diagnostics, "RigidbodyCount"), Is.EqualTo(1));
+                Assert.That(
+                    GetField<int>(diagnostics, "DynamicRigidbodyCount"),
+                    Is.EqualTo(1));
+                Assert.That(GetProperty<bool>(diagnostics, "RootPhysicsSuspended"), Is.True);
+                Assert.That(GetProperty<bool>(diagnostics, "IsExpectedState"), Is.True);
+            }
+            finally
+            {
+                (observation as System.IDisposable)?.Dispose();
+                UnityEngine.Object.DestroyImmediate(model);
+                UnityEngine.Object.DestroyImmediate(root);
+            }
+        }
+
+        [Test]
         public void DemoResponseMatching_RequiresIssuedRequestAndCorrelationTuple()
         {
             var root = new GameObject("Ragdoll Demo Response Correlation");
@@ -293,6 +400,35 @@ namespace Arawn.GameCreator2.Networking.Tests
             });
         }
 
+        private static void InvokeRagdollBodyCollector(
+            Character character,
+            List<Rigidbody> destination)
+        {
+            MethodInfo method = typeof(NetworkRagdollPhysicsGuard).GetMethod(
+                "CollectRagdollRigidbodies",
+                BindingFlags.Static | BindingFlags.NonPublic);
+            Assert.That(method, Is.Not.Null, "Missing shared ragdoll Rigidbody collector");
+            method.Invoke(null, new object[] { character, destination });
+        }
+
+        private static void SetRagdollSystem(Ragdoll ragdoll, TRagdollSystem system)
+        {
+            FieldInfo field = typeof(Ragdoll).GetField(
+                "m_Ragdoll",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.That(field, Is.Not.Null);
+            field.SetValue(ragdoll, system);
+        }
+
+        private static void SetRagdollState(Ragdoll ragdoll, bool value)
+        {
+            PropertyInfo property = typeof(Ragdoll).GetProperty(
+                nameof(Ragdoll.IsRagdoll),
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            Assert.That(property, Is.Not.Null);
+            property.SetValue(ragdoll, value);
+        }
+
         private static void InvokePrivate(
             object target,
             string methodName,
@@ -309,7 +445,7 @@ namespace Arawn.GameCreator2.Networking.Tests
         {
             FieldInfo field = target.GetType().GetField(
                 fieldName,
-                BindingFlags.Instance | BindingFlags.NonPublic);
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
             Assert.That(field, Is.Not.Null, $"Missing field {fieldName}");
             field.SetValue(target, value);
         }
@@ -318,9 +454,18 @@ namespace Arawn.GameCreator2.Networking.Tests
         {
             FieldInfo field = target.GetType().GetField(
                 fieldName,
-                BindingFlags.Instance | BindingFlags.NonPublic);
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
             Assert.That(field, Is.Not.Null, $"Missing field {fieldName}");
             return (T)field.GetValue(target);
+        }
+
+        private static T GetProperty<T>(object target, string propertyName)
+        {
+            PropertyInfo property = target.GetType().GetProperty(
+                propertyName,
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            Assert.That(property, Is.Not.Null, $"Missing property {propertyName}");
+            return (T)property.GetValue(target);
         }
 
         private static void InvokeLifecycle(

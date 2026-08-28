@@ -136,6 +136,31 @@ namespace Arawn.GameCreator2.Networking
             guard?.UnregisterComponent(component);
         }
 
+        /// <summary>
+        /// Collects the GC2 ragdoll bone bodies from the Animator hierarchy. RagdollDefault
+        /// temporarily detaches that hierarchy from the Character while its bodies are dynamic,
+        /// so a Character-subtree query cannot observe or affect them during physical ragdoll.
+        /// </summary>
+        internal static void CollectRagdollRigidbodies(
+            Character character,
+            List<Rigidbody> destination)
+        {
+            if (destination == null) return;
+            destination.Clear();
+            if (character == null) return;
+
+            Animator animator = character.Animim?.Animator;
+            if (animator != null)
+            {
+                animator.GetComponentsInChildren(true, destination);
+                return;
+            }
+
+            // Preserve the former fallback for custom ragdoll systems which do not expose a GC2
+            // Animator but keep their bodies below the Character root.
+            character.GetComponentsInChildren(true, destination);
+        }
+
         private static NetworkRagdollPhysicsGuard Require(Character character)
         {
             NetworkRagdollPhysicsGuard guard =

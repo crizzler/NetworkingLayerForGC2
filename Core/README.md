@@ -266,9 +266,17 @@ and requires the same components and states during recovery. Actor rows report
 only that peer's current replicas; they do not correlate delivery across two
 processes. Authority approval is correlated to the exact emitted request and
 correlation IDs, including synchronous Host loopback. A completed three-cycle
-run is an in-session local-replica hang/regression check; the focused EditMode suites remain the automated
-lifecycle evidence, and a two-process smoke is still required for observer
-delivery/convergence evidence.
+run is an in-session local-replica hang/regression check; the focused EditMode
+suites remain the automated lifecycle evidence, and a two-process smoke is still
+required for observer delivery/convergence evidence.
+
+GC2's default ragdoll temporarily unparents the configured Animator while its
+bone bodies are dynamic. Diagnostics and optional ragdoll-force application
+therefore follow `Character.Animim.Animator` instead of assuming that the bone
+hierarchy remains below the Character root. A post-ragdoll
+`NetworkCharacterPresentation` warning can indicate the fail-closed visual
+interpolation fallback after GC2 has generated physics components beneath the
+model; it is not by itself a Core request or ragdoll-replication failure.
 
 These scenes use GC2's standard Mannequin with its matching stock Skeleton.
 Create and tune a separate GC2 Skeleton for a character with substantially
