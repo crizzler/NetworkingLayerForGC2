@@ -110,8 +110,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                 return context.Fail("NetworkCoreManager is unavailable or not initialized.");
             }
 
-            NetworkCharacter[] characters = FindObjectsByType<NetworkCharacter>(
-                FindObjectsInactive.Exclude, FindObjectsSortMode.None);
+            NetworkCharacter[] characters = UnityObjectSearch.FindAll<NetworkCharacter>(FindObjectsInactive.Exclude);
             var sent = new HashSet<uint>();
             for (int i = 0; i < characters.Length; i++)
             {
@@ -411,7 +410,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         {
             return NetworkCoreManager.Instance != null
                 ? NetworkCoreManager.Instance
-                : FindFirstObjectByType<NetworkCoreManager>(FindObjectsInactive.Include);
+                : UnityObjectSearch.FindAny<NetworkCoreManager>(FindObjectsInactive.Include);
         }
     }
 }

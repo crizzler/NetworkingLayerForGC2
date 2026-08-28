@@ -139,9 +139,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
             }
 
             m_LocalController = null;
-            NetworkInventoryController[] controllers = FindObjectsByType<NetworkInventoryController>(
-                FindObjectsInactive.Exclude,
-                FindObjectsSortMode.None);
+            NetworkInventoryController[] controllers = UnityObjectSearch.FindAll<NetworkInventoryController>(FindObjectsInactive.Exclude);
 
             for (int i = 0; i < controllers.Length; i++)
             {

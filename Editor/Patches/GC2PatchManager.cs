@@ -187,8 +187,51 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
         // COMMON OPERATIONS
         // ════════════════════════════════════════════════════════════════════════════════════════
 
+        /// <summary>
+        /// Returns a user-facing reason when patch source must not be changed. The explicit
+        /// arguments keep the policy deterministic for editor regression tests.
+        /// </summary>
+        public static string GetPatchOperationBlockReason(
+            bool isCompiling,
+            bool scriptCompilationFailed)
+        {
+            if (isCompiling)
+            {
+                return "Unity is currently compiling scripts. Wait for compilation and the " +
+                       "following assembly reload to finish, then try again.";
+            }
+
+            if (scriptCompilationFailed)
+            {
+                return "Unity script compilation has failed. The Editor may still be running " +
+                       "an older Networking Layer patcher assembly. Fix the first compiler " +
+                       "error, allow a successful domain reload, and then try again.";
+            }
+
+            return null;
+        }
+
+        private static bool EnsurePatchOperationsAvailable(bool showDialog)
+        {
+            string blockReason = GetPatchOperationBlockReason(
+                EditorApplication.isCompiling,
+                EditorUtility.scriptCompilationFailed);
+            if (string.IsNullOrEmpty(blockReason)) return true;
+
+            const string title = "Patch Operation Unavailable";
+            Debug.LogError($"[GC2 Networking] {title}: {blockReason}");
+            if (showDialog)
+            {
+                EditorUtility.DisplayDialog(title, blockReason, "OK");
+            }
+
+            return false;
+        }
+
         private static void ApplyPatch(string moduleName)
         {
+            if (!EnsurePatchOperationsAvailable(showDialog: true)) return;
+
             var patcher = GetPatcher(moduleName);
             if (patcher == null)
             {
@@ -206,6 +249,69 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                 return;
             }
 
+            if (patcher.TryVerifyInstalledPatch(
+                    out bool requiresMarkerPromotion,
+                    out string installedVerificationFailure))
+            {
+                if (requiresMarkerPromotion)
+                {
+                    bool promoted = patcher.ApplyPatch();
+                    if (!promoted ||
+                        patcher.LastApplyOutcome != PatchApplyOutcome.VerifiedMarkersPromoted)
+                    {
+                        EditorUtility.DisplayDialog(
+                            "Patch Metadata Update Failed",
+                            $"The {patcher.DisplayName} hooks appear to be installed, but their " +
+                            "older version markers could not be updated safely. No hook bodies " +
+                            "were intentionally rewritten. Check the Console for details.",
+                            "OK");
+                        return;
+                    }
+
+                    string backupNotice = patcher.HasBackups()
+                        ? "Pristine backups are available, so the patch can still be removed from the patch menu."
+                        : "No complete pristine backup set exists. The verified patch can be used normally, " +
+                          "but removing it requires restoring or reinstalling the original GC2 package source.";
+                    EditorUtility.DisplayDialog(
+                        "Already Patched",
+                        $"The {patcher.DisplayName} system was already structurally patched.\n\n" +
+                        $"Every required hook was verified against patch {patcher.PatchVersion}. " +
+                        "Only the older version-marker metadata was updated; hook bodies were not rewritten.\n\n" +
+                        backupNotice,
+                        "OK");
+                    return;
+                }
+
+                string currentBackupNotice = patcher.HasBackups()
+                    ? "Pristine backups are available if you later choose Unpatch."
+                    : "No complete pristine backup set exists. The patch can be used normally, " +
+                      "but removing it requires restoring or reinstalling the original GC2 package source.";
+                EditorUtility.DisplayDialog(
+                    "Already Patched",
+                    $"The {patcher.DisplayName} system already has the complete, verified " +
+                    $"{patcher.PatchVersion} patch. No files need to be changed.\n\n" +
+                    currentBackupNotice,
+                    "OK");
+                return;
+            }
+
+            if (patcher.HasInstalledPatchMarkers() &&
+                !patcher.CanSafelyPatchExistingSources(out string patchSafetyFailure))
+            {
+                EditorUtility.DisplayDialog(
+                    "Incomplete or Outdated Patch",
+                    $"The {patcher.DisplayName} system is not fully patched with " +
+                    $"{patcher.PatchVersion}. It cannot be reported as Already Patched.\n\n" +
+                    $"{installedVerificationFailure}\n\n{patchSafetyFailure}\n\n" +
+                    "Restore or reinstall the original GC2 package source, then apply the " +
+                    "Networking Layer patch again. Existing source and backups were not modified.",
+                    "OK");
+                Debug.LogWarning(
+                    $"[GC2 Networking] {patcher.DisplayName} has an incomplete or outdated " +
+                    $"patch installation. {installedVerificationFailure} {patchSafetyFailure}");
+                return;
+            }
+
             if (!patcher.TryValidateVersionCompatibility(out string compatibilityMessage))
             {
                 bool continueAnyway = EditorUtility.DisplayDialog(
@@ -220,16 +326,6 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                 {
                     return;
                 }
-            }
-
-            if (patcher.IsPatched())
-            {
-                EditorUtility.DisplayDialog(
-                    "Already Patched",
-                    $"The {patcher.DisplayName} system has already been patched.\n\n" +
-                    $"If you want to re-apply the patch, please unpatch first.",
-                    "OK");
-                return;
             }
 
             bool isRequiredSightPatch = moduleName == "ShooterSight";
@@ -255,7 +351,8 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                   "• A backup will be created before patching";
 
             bool confirm = EditorUtility.DisplayDialog(
-                $"Patch {patcher.DisplayName} for Server Authority",
+                $"Patch {patcher.DisplayName} {patcher.PatchVersion} for Server Authority",
+                $"Patch revision: {patcher.PatchVersion}\n\n" +
                 $"{patcher.PatchDescription}\n\n" +
                 changeText + "\n\n" +
                 patchKindText + "\n\n" +
@@ -269,6 +366,19 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
 
             if (success)
             {
+                if (patcher.LastApplyOutcome == PatchApplyOutcome.AlreadyApplied ||
+                    patcher.LastApplyOutcome == PatchApplyOutcome.VerifiedMarkersPromoted)
+                {
+                    string action = patcher.LastApplyOutcome == PatchApplyOutcome.AlreadyApplied
+                        ? "was already completely applied; no files were modified"
+                        : "was already structurally applied; only verified version markers were updated";
+                    EditorUtility.DisplayDialog(
+                        "Already Patched",
+                        $"The {patcher.DisplayName} patch {patcher.PatchVersion} {action}.",
+                        "OK");
+                    return;
+                }
+
                 EditorUtility.DisplayDialog(
                     "Patch Applied Successfully",
                     $"The {patcher.DisplayName} system has been patched.\n\n" +
@@ -289,8 +399,11 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
 
         internal static bool ApplyAllInstalledPatches(bool showDialogs)
         {
+            if (!EnsurePatchOperationsAvailable(showDialogs)) return false;
+
             var pendingPatchers = new List<GC2PatcherBase>();
             var compatibilityWarnings = new List<string>();
+            var blockedPatchers = new List<string>();
 
             foreach (GC2PatcherBase patcher in GetAllPatchers())
             {
@@ -299,11 +412,42 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                     continue;
                 }
 
+                bool completeExistingPatch = patcher.TryVerifyInstalledPatch(
+                    out _,
+                    out string verificationFailure);
+                if (!completeExistingPatch &&
+                    patcher.HasInstalledPatchMarkers() &&
+                    !patcher.CanSafelyPatchExistingSources(out string patchSafetyFailure))
+                {
+                    blockedPatchers.Add(
+                        $"{patcher.DisplayName}: {verificationFailure} {patchSafetyFailure}");
+                    continue;
+                }
+
                 pendingPatchers.Add(patcher);
                 if (!patcher.TryValidateVersionCompatibility(out string compatibilityMessage))
                 {
                     compatibilityWarnings.Add($"{patcher.DisplayName}: {compatibilityMessage}");
                 }
+            }
+
+            if (blockedPatchers.Count > 0)
+            {
+                string blockedMessage =
+                    "Patch All stopped before modifying any module because these installations " +
+                    "are partial or incompatible and lack a pristine backup:\n\n" +
+                    string.Join("\n\n", blockedPatchers) +
+                    "\n\nRestore or reinstall the listed GC2 package source, then run Patch All again.";
+                Debug.LogError("[GC2 Networking] " + blockedMessage);
+                if (showDialogs)
+                {
+                    EditorUtility.DisplayDialog(
+                        "Patch All Blocked by Incomplete Patch",
+                        blockedMessage,
+                        "OK");
+                }
+
+                return false;
             }
 
             if (pendingPatchers.Count == 0)
@@ -326,7 +470,8 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                     "Patch All Installed GC2 Modules",
                     "This will patch every installed, currently unpatched GC2 module in the order shown in the status window.\n\n" +
                     moduleList + "\n\n" +
-                    "Backups will be created before each module is patched.",
+                    "Pristine modules are backed up before patching. A structurally verified " +
+                    "older patch only has its version-marker metadata updated.",
                     "Patch All",
                     "Cancel");
 
@@ -352,6 +497,9 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                 }
             }
 
+            int appliedCount = 0;
+            int promotedCount = 0;
+            int alreadyCurrentCount = 0;
             try
             {
                 for (int i = 0; i < pendingPatchers.Count; i++)
@@ -378,6 +526,18 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
 
                     if (patcher.ApplyPatch())
                     {
+                        switch (patcher.LastApplyOutcome)
+                        {
+                            case PatchApplyOutcome.Applied:
+                                appliedCount++;
+                                break;
+                            case PatchApplyOutcome.VerifiedMarkersPromoted:
+                                promotedCount++;
+                                break;
+                            case PatchApplyOutcome.AlreadyApplied:
+                                alreadyCurrentCount++;
+                                break;
+                        }
                         continue;
                     }
 
@@ -403,7 +563,8 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
             {
                 EditorUtility.DisplayDialog(
                     "Patch All Complete",
-                    $"Applied {pendingPatchers.Count} GC2 networking patch(es).",
+                    $"Applied {appliedCount} patch(es), updated verified marker metadata for " +
+                    $"{promotedCount}, and found {alreadyCurrentCount} already current.",
                     "OK");
             }
 
@@ -415,7 +576,11 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
             var lines = new List<string>(patchers.Count);
             foreach (GC2PatcherBase patcher in patchers)
             {
-                lines.Add($"- {patcher.DisplayName}");
+                PatchStatus status = patcher.GetStatus();
+                string suffix = status.RequiresMarkerPromotion
+                    ? " (verified hooks; marker metadata only)"
+                    : string.Empty;
+                lines.Add($"- {patcher.DisplayName}{suffix}");
             }
 
             return string.Join("\n", lines);
@@ -423,6 +588,8 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
 
         private static void RemovePatch(string moduleName)
         {
+            if (!EnsurePatchOperationsAvailable(showDialog: true)) return;
+
             var patcher = GetPatcher(moduleName);
             if (patcher == null)
             {
@@ -462,7 +629,7 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
             {
                 string successTail = moduleName == "Inventory"
                     ? "Pristine GC2 Inventory remains available. Server-authoritative Networking Layer " +
-                      "Inventory assemblies are disabled until patch 3.0.0-inventory is applied again."
+                      "Inventory assemblies are disabled until patch 3.1.0-inventory is applied again."
                     : moduleName == "ShooterSight"
                     ? "Remote shooter sight transitions can again execute local Sight OnEnter/OnExit instructions until the hook is re-applied."
                     : "The networking solution will now use interception-based validation.";
@@ -495,8 +662,24 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
             var status = patcher.GetStatus();
 
             string installed = status.IsInstalled ? "✓ Installed" : "✗ Not Found";
-            string patched = status.IsPatched ? "✓ PATCHED" : "○ Not Patched";
+            string patched = status.IsPatched
+                ? "✓ PATCHED"
+                : status.RequiresMarkerPromotion
+                    ? "✓ Hooks Verified (metadata update available)"
+                    : status.HasInstalledMarkers
+                        ? "⚠ Incomplete or Outdated"
+                        : "○ Not Patched";
             string backups = status.HasBackups ? "✓ Available" : "○ None";
+            string statusExplanation = status.IsPatched
+                ? "Server-authoritative networking hooks are active."
+                : status.RequiresMarkerPromotion
+                    ? "All current hooks are structurally verified. Choose Patch once to update only the older version-marker metadata."
+                    : status.HasInstalledMarkers
+                        ? "This is a partial or incompatible patch installation, not an Already Patched state. " +
+                          status.VerificationFailure
+                        : moduleName == "Inventory"
+                            ? "Inventory networking assemblies are disabled until the required patch is applied."
+                            : "Using interception-based validation.";
 
             EditorUtility.DisplayDialog(
                 $"{status.DisplayName} Patch Status",
@@ -504,11 +687,7 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                 $"Patch Status: {patched}\n" +
                 $"Backups: {backups}\n" +
                 $"Patch Version: {status.PatchVersion}\n\n" +
-                (status.IsPatched
-                    ? "Server-authoritative networking hooks are active."
-                    : moduleName == "Inventory"
-                        ? "Inventory networking assemblies are disabled until the required patch is applied."
-                        : "Using interception-based validation."),
+                statusExplanation,
                 "OK");
         }
     }
@@ -693,8 +872,15 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
             EditorGUILayout.BeginHorizontal();
 
             // Status icon
-            string icon = !status.IsInstalled ? "⚠" : (status.IsPatched ? "✓" : "○");
-            Color color = !status.IsInstalled ? Color.yellow : (status.IsPatched ? Color.green : Color.gray);
+            bool needsAttention = status.HasInstalledMarkers && !status.IsStructurallyVerified;
+            string icon = !status.IsInstalled
+                ? "⚠"
+                : status.IsStructurallyVerified
+                    ? "✓"
+                    : needsAttention ? "⚠" : "○";
+            Color color = !status.IsInstalled || needsAttention
+                ? Color.yellow
+                : status.IsStructurallyVerified ? Color.green : Color.gray;
 
             var oldColor = GUI.color;
             GUI.color = color;
@@ -707,7 +893,13 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
             GUILayout.FlexibleSpace();
 
             // Status text
-            string statusText = !status.IsInstalled ? "Not Installed" : (status.IsPatched ? "Patched" : "Not Patched");
+            string statusText = !status.IsInstalled
+                ? "Not Installed"
+                : status.IsPatched
+                    ? "Patched"
+                    : status.RequiresMarkerPromotion
+                        ? "Update Marker"
+                        : needsAttention ? "Incomplete" : "Not Patched";
             EditorGUILayout.LabelField(statusText, GUILayout.Width(100));
 
             EditorGUILayout.EndHorizontal();
@@ -724,7 +916,9 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                     GUIUtility.ExitGUI();
                 }
 
-                GUI.enabled = status.IsPatched && !m_IsOperationRunning;
+                GUI.enabled = status.HasBackups &&
+                              (status.IsPatched || status.HasInstalledMarkers) &&
+                              !m_IsOperationRunning;
                 if (GUILayout.Button("Unpatch", GUILayout.Width(80)))
                 {
                     QueuePatchOperation(moduleName, applyPatch: false);

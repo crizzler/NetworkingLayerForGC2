@@ -454,7 +454,7 @@ namespace Arawn.GameCreator2.Networking
                 $"{AxisSign(speedBefore)}:{AxisSign(speedAfter)}:{AxisSign(m_LocalSpeed)}:" +
                 $"{AxisSign(intentBefore)}:{AxisSign(intentAfter)}:{AxisSign(m_Intent)}:{overrideApplied}";
             bool changed = NetworkTraversalClimbDiagnostics.HasChanged(
-                $"animim-axis:{Character.GetInstanceID()}",
+                $"animim-axis:{Character.GetLegacyInstanceId()}",
                 signs);
 
             NetworkTraversalClimbDiagnostics.Log(
@@ -473,7 +473,7 @@ namespace Arawn.GameCreator2.Networking
                 $"smoothSpeed={NetworkTraversalClimbDiagnostics.Vector(m_LocalSpeed)} " +
                 $"override={overrideApplied}",
                 Character,
-                changed ? null : $"animim:{Character.GetInstanceID()}");
+                changed ? null : $"animim:{Character.GetLegacyInstanceId()}");
         }
 
         private static string AxisSign(Vector3 value)

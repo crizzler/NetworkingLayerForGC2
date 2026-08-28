@@ -119,7 +119,7 @@ namespace Arawn.GameCreator2.Networking.Quests.Transport.Fusion
         {
             FusionTransportBridge candidate = m_TransportBridge;
             if (candidate == null) candidate = NetworkTransportBridge.Active as FusionTransportBridge;
-            if (candidate == null) candidate = FindFirstObjectByType<FusionTransportBridge>();
+            if (candidate == null) candidate = UnityObjectSearch.FindAny<FusionTransportBridge>();
 
             if (!force && candidate == m_BoundBridge) return;
             if (candidate == m_BoundBridge) return;
@@ -247,9 +247,7 @@ namespace Arawn.GameCreator2.Networking.Quests.Transport.Fusion
             PruneControllerRegistry(manager);
             if (!m_AutoRegisterSceneControllers && !force) return;
 
-            NetworkQuestsController[] controllers = FindObjectsByType<NetworkQuestsController>(
-                FindObjectsInactive.Exclude,
-                FindObjectsSortMode.None);
+            NetworkQuestsController[] controllers = UnityObjectSearch.FindAll<NetworkQuestsController>(FindObjectsInactive.Exclude);
             for (int i = 0; i < controllers.Length; i++) RegisterController(manager, controllers[i]);
         }
 
@@ -406,7 +404,7 @@ namespace Arawn.GameCreator2.Networking.Quests.Transport.Fusion
         {
             return NetworkQuestsManager.Instance != null
                 ? NetworkQuestsManager.Instance
-                : FindFirstObjectByType<NetworkQuestsManager>();
+                : UnityObjectSearch.FindAny<NetworkQuestsManager>();
         }
     }
 }

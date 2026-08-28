@@ -226,9 +226,7 @@ namespace Arawn.GameCreator2.Networking.Dialogue.Transport.PurrNet
 
             if (!m_AutoRegisterSceneControllers && !force) return;
 
-            NetworkDialogueController[] controllers = FindObjectsByType<NetworkDialogueController>(
-                FindObjectsInactive.Exclude,
-                FindObjectsSortMode.None);
+            NetworkDialogueController[] controllers = UnityObjectSearch.FindAll<NetworkDialogueController>(FindObjectsInactive.Exclude);
 
             for (int i = 0; i < controllers.Length; i++)
             {
@@ -405,7 +403,7 @@ namespace Arawn.GameCreator2.Networking.Dialogue.Transport.PurrNet
         {
             return NetworkDialogueManager.Instance != null
                 ? NetworkDialogueManager.Instance
-                : FindFirstObjectByType<NetworkDialogueManager>();
+                : UnityObjectSearch.FindAny<NetworkDialogueManager>();
         }
 
         private static uint PlayerIdToClientId(PlayerID playerId)

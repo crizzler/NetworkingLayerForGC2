@@ -573,14 +573,12 @@ namespace Arawn.GameCreator2.Networking.Inventory.Transport.Fusion
             if (!m_AutoRegisterSceneControllers && !force) return;
 
             NetworkInventoryController[] controllers =
-                FindObjectsByType<NetworkInventoryController>(
-                    FindObjectsInactive.Exclude, FindObjectsSortMode.None);
+                UnityObjectSearch.FindAll<NetworkInventoryController>(FindObjectsInactive.Exclude);
             for (int i = 0; i < controllers.Length; i++)
                 RegisterController(manager, controllers[i]);
 
             if (!m_AutoAddControllersToBags) return;
-            Bag[] bags = FindObjectsByType<Bag>(
-                FindObjectsInactive.Exclude, FindObjectsSortMode.None);
+            Bag[] bags = UnityObjectSearch.FindAll<Bag>(FindObjectsInactive.Exclude);
             for (int i = 0; i < bags.Length; i++)
             {
                 Bag bag = bags[i];
@@ -685,8 +683,7 @@ namespace Arawn.GameCreator2.Networking.Inventory.Transport.Fusion
             m_RuntimePickupCandidates.Clear();
             m_DuplicateRuntimePickupIds.Clear();
             FusionInventoryRuntimePickupIdentityAdapter[] adapters =
-                FindObjectsByType<FusionInventoryRuntimePickupIdentityAdapter>(
-                    FindObjectsInactive.Exclude, FindObjectsSortMode.None);
+                UnityObjectSearch.FindAll<FusionInventoryRuntimePickupIdentityAdapter>(FindObjectsInactive.Exclude);
 
             for (int i = 0; i < adapters.Length; i++)
             {
@@ -700,7 +697,7 @@ namespace Arawn.GameCreator2.Networking.Inventory.Transport.Fusion
                 if (source == null || !ReferenceEquals(source.RuntimeIdentity, adapter))
                 {
                     WarnOnce(
-                        $"source:{adapter.GetInstanceID()}",
+                        $"source:{adapter.GetLegacyInstanceId()}",
                         $"Runtime pickup '{adapter.name}' must have a same-object " +
                         "NetworkInventoryPickupSource referencing its Fusion identity adapter.");
                     continue;
@@ -966,7 +963,7 @@ namespace Arawn.GameCreator2.Networking.Inventory.Transport.Fusion
         {
             return NetworkInventoryManager.Instance != null
                 ? NetworkInventoryManager.Instance
-                : FindFirstObjectByType<NetworkInventoryManager>(FindObjectsInactive.Include);
+                : UnityObjectSearch.FindAny<NetworkInventoryManager>(FindObjectsInactive.Include);
         }
     }
 }

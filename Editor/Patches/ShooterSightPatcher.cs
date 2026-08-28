@@ -16,7 +16,7 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
             "Plugins/GameCreator/Packages/Shooter/Runtime/ScriptableObjects/Sight.cs";
 
         public override string ModuleName => "ShooterSight";
-        public override string PatchVersion => "2.2.4-shooter-sight";
+        public override string PatchVersion => "2.3.0-shooter-sight";
         public override string DisplayName => "Shooter Sight Hook (Game Creator 2)";
 
         public override string PatchDescription =>
@@ -31,7 +31,10 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
         {
             return new[]
             {
-                VersionRequirement("Plugins/GameCreator/Packages/Shooter/Editor/Version.txt", "2.2.*")
+                VersionRequirement(
+                    "Plugins/GameCreator/Packages/Shooter/Editor/Version.txt",
+                    "2.2.*",
+                    "2.3.*")
             };
         }
 

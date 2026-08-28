@@ -5,6 +5,7 @@
         "Arawn.GameCreator2.Networking",
         "Arawn.GameCreator2.Networking.Melee",
         "Arawn.GameCreator2.Networking.Transport.Fusion",
+        "Photon.Realtime",
         "GameCreator.Runtime.Core",
         "GameCreator.Runtime.Melee"
     ],

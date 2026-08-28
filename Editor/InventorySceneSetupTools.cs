@@ -30,7 +30,7 @@ namespace Arawn.GameCreator2.Networking.Editor
         private static ValidationSummary s_CachedValidation;
         private static bool s_HasCachedSceneValidation;
         private static double s_NextSceneValidationTime;
-        private static int s_CachedSceneHandle;
+        private static ulong s_CachedSceneHandle;
         private static ValidationSummary s_CachedSceneValidation;
 
         public readonly struct ValidationSummary
@@ -133,7 +133,7 @@ namespace Arawn.GameCreator2.Networking.Editor
         {
             if (!scene.IsValid() || !scene.isLoaded) return default;
             if (!force && s_HasCachedSceneValidation &&
-                s_CachedSceneHandle == scene.handle &&
+                s_CachedSceneHandle == GetSceneHandle(scene) &&
                 EditorApplication.timeSinceStartup < s_NextSceneValidationTime)
             {
                 return s_CachedSceneValidation;
@@ -141,10 +141,19 @@ namespace Arawn.GameCreator2.Networking.Editor
 
             ValidationSummary summary = ValidateSceneScope(scene);
             s_CachedSceneValidation = summary;
-            s_CachedSceneHandle = scene.handle;
+            s_CachedSceneHandle = GetSceneHandle(scene);
             s_HasCachedSceneValidation = true;
             s_NextSceneValidationTime = EditorApplication.timeSinceStartup + 0.5d;
             return summary;
+        }
+
+        private static ulong GetSceneHandle(Scene scene)
+        {
+            #if UNITY_6000_5_OR_NEWER
+            return scene.handle.GetRawData();
+            #else
+            return unchecked((uint) scene.handle);
+            #endif
         }
 
         private static ValidationSummary ValidateSceneScope(Scene? targetScene)
@@ -490,9 +499,7 @@ namespace Arawn.GameCreator2.Networking.Editor
         private static MonoBehaviour[] FindSceneMonoBehaviours(Scene? targetScene = null)
         {
 #if UNITY_2023_1_OR_NEWER
-            MonoBehaviour[] values = UnityEngine.Object.FindObjectsByType<MonoBehaviour>(
-                FindObjectsInactive.Include,
-                FindObjectsSortMode.None);
+            MonoBehaviour[] values = UnityObjectSearch.FindAll<MonoBehaviour>(FindObjectsInactive.Include);
 #else
             MonoBehaviour[] values = UnityEngine.Object.FindObjectsOfType<MonoBehaviour>(true);
 #endif
@@ -514,10 +521,7 @@ namespace Arawn.GameCreator2.Networking.Editor
         {
             if (type == null) return Array.Empty<Component>();
 #if UNITY_2023_1_OR_NEWER
-            UnityEngine.Object[] values = UnityEngine.Object.FindObjectsByType(
-                type,
-                FindObjectsInactive.Include,
-                FindObjectsSortMode.None);
+            UnityEngine.Object[] values = UnityObjectSearch.FindAll(type, FindObjectsInactive.Include);
 #else
             UnityEngine.Object[] values = UnityEngine.Object.FindObjectsOfType(type, true);
 #endif

@@ -382,7 +382,7 @@ namespace Arawn.GameCreator2.Networking
             if (character == null) return null;
             if (hash == 0) return character.transform;
 
-            var key = (character.GetInstanceID(), hash);
+            var key = (character.GetLegacyInstanceId(), hash);
             if (m_BoneHashCache.TryGetValue(key, out Transform cached) && cached != null &&
                 (cached == character.transform || cached.IsChildOf(character.transform)))
             {
@@ -403,14 +403,14 @@ namespace Arawn.GameCreator2.Networking
 
         private void DisableLegacyCoreControllers()
         {
-            NetworkCoreController[] controllers = FindObjectsByType<NetworkCoreController>(
-                FindObjectsInactive.Include, FindObjectsSortMode.None);
+            NetworkCoreController[] controllers = UnityObjectSearch.FindAll<NetworkCoreController>(
+                FindObjectsInactive.Include);
             for (int i = 0; i < controllers.Length; i++)
             {
                 NetworkCoreController controller = controllers[i];
                 if (controller == null || controller == m_CoreController) continue;
                 controller.enabled = false;
-                if (m_LegacyControllerWarnings.Add(controller.GetInstanceID()))
+                if (m_LegacyControllerWarnings.Add(controller.GetLegacyInstanceId()))
                 {
                     Debug.LogWarning(
                         $"[NetworkCoreManager] Disabled legacy per-character NetworkCoreController on " +

@@ -248,6 +248,12 @@ namespace Arawn.GameCreator2.Networking.Melee
 
         /// <summary>Charge duration (if charge release).</summary>
         public float ChargeDuration;
+
+        /// <summary>Optional, authority-validated semantic context for an extended melee action.</summary>
+        public NetworkMeleeSkillActionFlags ActionFlags;
+
+        /// <summary>Revision of the authority-owned state consumed by the extended action.</summary>
+        public uint ActionStateRevision;
     }
 
     // ════════════════════════════════════════════════════════════════════════════════════════════
@@ -416,6 +422,8 @@ namespace Arawn.GameCreator2.Networking.Melee
         public NetworkMeleeWeaponState WeaponState;
         public bool HasBlockState;
         public NetworkBlockBroadcast BlockState;
+        public bool HasFreeFlowState;
+        public NetworkFreeFlowCombatState FreeFlowState;
 
         public static NetworkMeleeCharacterSnapshot Create(uint characterNetworkId)
         {
@@ -429,7 +437,9 @@ namespace Arawn.GameCreator2.Networking.Melee
                 {
                     CharacterNetworkId = characterNetworkId,
                     Action = NetworkBlockAction.Lower
-                }
+                },
+                HasFreeFlowState = false,
+                FreeFlowState = NetworkFreeFlowCombatState.Create(characterNetworkId)
             };
         }
     }
@@ -624,7 +634,8 @@ namespace Arawn.GameCreator2.Networking.Melee
         InsufficientResources = 6,
         InvalidComboTransition = 7,
         ChargeNotValid = 8,
-        CheatSuspected = 9
+        CheatSuspected = 9,
+        InvalidActionContext = 10
     }
 
     /// <summary>

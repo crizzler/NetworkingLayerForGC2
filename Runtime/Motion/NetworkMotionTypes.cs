@@ -433,8 +433,20 @@ namespace Arawn.GameCreator2.Networking
 
         private static int s_ActiveManagerCount;
 
-        public static bool Enabled => s_ActiveManagerCount > 0;
+        public static bool Enabled
+        {
+            get
+            {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+                return NetworkCiTrace.Enabled && s_ActiveManagerCount > 0;
+#else
+                return false;
+#endif
+            }
+        }
 
+        [System.Diagnostics.Conditional("UNITY_EDITOR")]
+        [System.Diagnostics.Conditional("DEVELOPMENT_BUILD")]
         public static void SetManagerActive(bool active)
         {
             s_ActiveManagerCount = Mathf.Max(0, s_ActiveManagerCount + (active ? 1 : -1));
@@ -446,12 +458,14 @@ namespace Arawn.GameCreator2.Networking
             s_FocusedNetworkIds.Clear();
         }
 
+        [System.Diagnostics.Conditional("UNITY_EDITOR")]
+        [System.Diagnostics.Conditional("DEVELOPMENT_BUILD")]
         public static void SetCharacterFocus(GameObject character, uint networkId, bool focused)
         {
             if (character != null)
             {
-                if (focused) s_FocusedCharacters.Add(character.GetInstanceID());
-                else s_FocusedCharacters.Remove(character.GetInstanceID());
+                if (focused) s_FocusedCharacters.Add(character.GetLegacyInstanceId());
+                else s_FocusedCharacters.Remove(character.GetLegacyInstanceId());
             }
 
             if (networkId == 0) return;
@@ -462,7 +476,7 @@ namespace Arawn.GameCreator2.Networking
         public static bool IsFocused(GameObject character)
         {
             return Enabled && character != null &&
-                   s_FocusedCharacters.Contains(character.GetInstanceID());
+                   s_FocusedCharacters.Contains(character.GetLegacyInstanceId());
         }
 
         public static bool IsFocused(uint networkId)
@@ -496,6 +510,8 @@ namespace Arawn.GameCreator2.Networking
             return true;
         }
 
+        [System.Diagnostics.Conditional("UNITY_EDITOR")]
+        [System.Diagnostics.Conditional("DEVELOPMENT_BUILD")]
         public static void Log(
             string stage,
             string message,

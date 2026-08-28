@@ -27,7 +27,7 @@ namespace Arawn.GameCreator2.Networking.Traversal
             {
                 if (s_Instance == null)
                 {
-                    s_Instance = FindFirstObjectByType<NetworkTraversalManager>();
+                    s_Instance = UnityObjectSearch.FindAny<NetworkTraversalManager>();
                 }
 
                 return s_Instance;
@@ -109,6 +109,12 @@ namespace Arawn.GameCreator2.Networking.Traversal
         private static float s_LastOwnerAuthorityPoseSyncLogRealtime = -100f;
         private static bool s_LoggedMissingTransitionProperty;
 
+        // GC2 writes continuous interactive poses directly onto the authored traversal plane.
+        // Keep a small world-space allowance for transport quantization and floating-point
+        // reconstruction without turning the absolute-root path into a general teleport route.
+        private const float INTERACTIVE_OWNER_POSE_SURFACE_TOLERANCE = 0.02f;
+        private const float INTERACTIVE_TRANSFORM_MINIMUM_SCALE = 0.0001f;
+
         public bool IsServer
         {
             get => m_IsServer;
@@ -127,7 +133,8 @@ namespace Arawn.GameCreator2.Networking.Traversal
         public bool FocusedClimbDiagnosticsEnabled =>
             m_LogNetworkMessages ||
             m_LogFocusedClimbDiagnostics ||
-            NetworkTraversalDebug.ForceClimbDiagnostics;
+            NetworkTraversalDebug.ForceClimbDiagnostics ||
+            NetworkCiTrace.Enabled;
 
         private void OnEnable()
         {
@@ -179,8 +186,8 @@ namespace Arawn.GameCreator2.Networking.Traversal
         {
             NetworkOwnerMotionAuthorityHooks.PositionAccepted -= SyncTraversalRelativePositionFromOwnerAuthority;
             NetworkOwnerMotionAuthorityHooks.PositionAccepted += SyncTraversalRelativePositionFromOwnerAuthority;
-            NetworkOwnerMotionAuthorityHooks.PositionRejectionRequested -= RejectOwnerAuthorityPoseDuringInteractiveTransition;
-            NetworkOwnerMotionAuthorityHooks.PositionRejectionRequested += RejectOwnerAuthorityPoseDuringInteractiveTransition;
+            NetworkOwnerMotionAuthorityHooks.PositionRejectionRequested -= RejectInvalidInteractiveOwnerAuthorityPose;
+            NetworkOwnerMotionAuthorityHooks.PositionRejectionRequested += RejectInvalidInteractiveOwnerAuthorityPose;
             NetworkOwnerMotionAuthorityHooks.ExternalRootWriteAllowanceRequested -= AllowInteractiveTraversalRootWrite;
             NetworkOwnerMotionAuthorityHooks.ExternalRootWriteAllowanceRequested += AllowInteractiveTraversalRootWrite;
             NetworkOwnerMotionAuthorityHooks.ContinuousOwnerPoseRequested -= IsContinuousInteractiveOwnerPose;
@@ -190,7 +197,7 @@ namespace Arawn.GameCreator2.Networking.Traversal
         private static void UninstallOwnerAuthorityPoseSyncHook()
         {
             NetworkOwnerMotionAuthorityHooks.PositionAccepted -= SyncTraversalRelativePositionFromOwnerAuthority;
-            NetworkOwnerMotionAuthorityHooks.PositionRejectionRequested -= RejectOwnerAuthorityPoseDuringInteractiveTransition;
+            NetworkOwnerMotionAuthorityHooks.PositionRejectionRequested -= RejectInvalidInteractiveOwnerAuthorityPose;
             NetworkOwnerMotionAuthorityHooks.ExternalRootWriteAllowanceRequested -= AllowInteractiveTraversalRootWrite;
             NetworkOwnerMotionAuthorityHooks.ContinuousOwnerPoseRequested -= IsContinuousInteractiveOwnerPose;
         }
@@ -212,19 +219,79 @@ namespace Arawn.GameCreator2.Networking.Traversal
                    !inTransition;
         }
 
-        private static string RejectOwnerAuthorityPoseDuringInteractiveTransition(Character character, Vector3 ownerAuthorityPosition)
+        private static string RejectInvalidInteractiveOwnerAuthorityPose(
+            Character character,
+            Vector3 ownerAuthorityPosition)
         {
             if (!TryGetActiveInteractiveTraversal(character, out TraversalStance stance, out TraverseInteractive interactive))
             {
                 return string.Empty;
             }
 
-            if (!TryGetInInteractiveTransition(character, stance, out bool inTransition) || !inTransition)
+            if (TryGetInInteractiveTransition(character, stance, out bool inTransition) &&
+                inTransition)
+            {
+                // A listen Host/Shared authority may own both sides of this character locally.
+                // Fusion still feeds the GC2-authored transition root back through its owner-pose
+                // input so native state captures every eased sample. A Shared master may instead
+                // consume the authenticated logical owner's sample through the transport-owned
+                // scope below. Ordinary connected-client replicas remain excluded.
+                if (IsTrustedAuthorityLocalTransitionProducer(character) ||
+                    IsAuthorizedAuthenticatedRemoteTransitionPose(
+                        character,
+                        interactive,
+                        ownerAuthorityPosition))
+                {
+                    return string.Empty;
+                }
+
+                return LogOwnerAuthorityPoseRejection(
+                    character,
+                    interactive,
+                    ownerAuthorityPosition,
+                    $"traversal-interactive-transition:{interactive.name}",
+                    inTransition,
+                    0f);
+            }
+
+            if (TryValidateInteractiveOwnerRoot(
+                    character,
+                    interactive,
+                    ownerAuthorityPosition,
+                    out float surfaceDistance))
             {
                 return string.Empty;
             }
 
-            string reason = $"traversal-interactive-transition:{interactive.name}";
+            // Reliable Shared-owner samples can arrive after State Authority's local copy of
+            // GC2 has cleared InInteractiveTransition. Retain only the matching server-issued
+            // operation and its authored root corridor; ordinary off-surface poses still fail
+            // the normal surface validator below.
+            if (IsAuthorizedAuthenticatedRemoteTransitionPose(
+                    character,
+                    interactive,
+                    ownerAuthorityPosition))
+            {
+                return string.Empty;
+            }
+
+            return LogOwnerAuthorityPoseRejection(
+                character,
+                interactive,
+                ownerAuthorityPosition,
+                $"traversal-interactive-off-surface:{interactive.name}",
+                false,
+                surfaceDistance);
+        }
+
+        private static string LogOwnerAuthorityPoseRejection(
+            Character character,
+            TraverseInteractive interactive,
+            Vector3 ownerAuthorityPosition,
+            string reason,
+            bool inTransition,
+            float surfaceDistance)
+        {
             if (NetworkTraversalClimbDiagnostics.IsFocused(character.gameObject))
             {
                 NetworkCharacter networkCharacter = character.GetComponent<NetworkCharacter>();
@@ -233,7 +300,9 @@ namespace Arawn.GameCreator2.Networking.Traversal
                     $"actor={networkCharacter?.NetworkId ?? 0} role={networkCharacter?.CurrentRole.ToString() ?? "none"} " +
                     $"result=rejected reason='{reason}' requested={NetworkTraversalClimbDiagnostics.Vector(ownerAuthorityPosition)} " +
                     $"current={NetworkTraversalClimbDiagnostics.Vector(character.transform.position)} " +
-                    $"traverse='{interactive.name}' transition={inTransition}",
+                    $"traverse='{interactive.name}' transition={inTransition} " +
+                    $"surfaceDistance={surfaceDistance:F4} " +
+                    $"surfaceTolerance={INTERACTIVE_OWNER_POSE_SURFACE_TOLERANCE:F4}",
                     character);
             }
 
@@ -247,9 +316,119 @@ namespace Arawn.GameCreator2.Networking.Traversal
                 return string.Empty;
             }
 
-            return TryGetInInteractiveTransition(character, stance, out bool inTransition) && inTransition
-                ? $"traversal-interactive-transition:{interactive.name}"
-                : $"traversal-interactive:{interactive.name}";
+            if (TryGetInInteractiveTransition(character, stance, out bool inTransition) &&
+                inTransition)
+            {
+                // Local GC2 entry/exit animation still needs its authored absolute root writes.
+                // Connected-client submissions remain rejected above; an authenticated
+                // authority-local producer may feed the same authored writes into native state.
+                bool authenticatedRemoteProducer =
+                    IsTrustedAuthenticatedRemoteTransitionProducer(character);
+                if (!authenticatedRemoteProducer)
+                {
+                    return $"traversal-interactive-transition:{interactive.name}";
+                }
+
+                // A transport-authenticated remote pose remains subject to the exact operation,
+                // target and corridor authorization. Do not let an allowance-only caller fall
+                // back to the broader surface rule when that capability does not match; the
+                // rejection hook is normally evaluated first, but this hook is fail-closed on
+                // its own as well.
+                return IsAuthorizedAuthenticatedRemoteTransitionPose(
+                        character,
+                        interactive,
+                        rootPosition)
+                    ? $"traversal-interactive-transition:{interactive.name}"
+                    : string.Empty;
+            }
+
+            if (IsAuthorizedAuthenticatedRemoteTransitionPose(
+                    character,
+                    interactive,
+                    rootPosition))
+            {
+                return $"traversal-interactive-transition:{interactive.name}";
+            }
+
+            return TryValidateInteractiveOwnerRoot(
+                    character,
+                    interactive,
+                    rootPosition,
+                    out _)
+                ? $"traversal-interactive:{interactive.name}"
+                : string.Empty;
+        }
+
+        private static bool TryValidateInteractiveOwnerRoot(
+            Character character,
+            TraverseInteractive interactive,
+            Vector3 ownerRootPosition,
+            out float surfaceDistance)
+        {
+            surfaceDistance = float.PositiveInfinity;
+            if (character?.Motion == null || interactive == null ||
+                interactive.MotionInteractive == null ||
+                !IsFinite(ownerRootPosition) ||
+                !float.IsFinite(character.Motion.Height) ||
+                character.Motion.Height <= 0f ||
+                !float.IsFinite(interactive.Width) ||
+                interactive.Width < 0f ||
+                !float.IsFinite(interactive.PositionA) ||
+                !float.IsFinite(interactive.PositionB) ||
+                interactive.PositionA > interactive.PositionB)
+            {
+                return false;
+            }
+
+            Vector3 traversalScale = interactive.Transform.lossyScale;
+            if (!IsFinite(traversalScale) ||
+                Mathf.Abs(traversalScale.x) < INTERACTIVE_TRANSFORM_MINIMUM_SCALE ||
+                Mathf.Abs(traversalScale.y) < INTERACTIVE_TRANSFORM_MINIMUM_SCALE ||
+                Mathf.Abs(traversalScale.z) < INTERACTIVE_TRANSFORM_MINIMUM_SCALE)
+            {
+                return false;
+            }
+
+            Vector3 anchorPosition = ownerRootPosition + GetInteractiveAnchorOffset(
+                character,
+                interactive.MotionInteractive.Anchor);
+            Vector3 localPosition = interactive.Transform.InverseTransformPoint(anchorPosition);
+            if (!IsFinite(localPosition)) return false;
+
+            float halfWidth = interactive.Width * 0.5f;
+            Vector3 nearestLocalPosition = new Vector3(
+                Mathf.Clamp(localPosition.x, -halfWidth, halfWidth),
+                0f,
+                Mathf.Clamp(
+                    localPosition.z,
+                    interactive.PositionA,
+                    interactive.PositionB));
+            Vector3 nearestAnchorPosition =
+                interactive.Transform.TransformPoint(nearestLocalPosition);
+            if (!IsFinite(nearestAnchorPosition)) return false;
+
+            surfaceDistance = Vector3.Distance(anchorPosition, nearestAnchorPosition);
+            return float.IsFinite(surfaceDistance) &&
+                   surfaceDistance <= INTERACTIVE_OWNER_POSE_SURFACE_TOLERANCE;
+        }
+
+        private static Vector3 GetInteractiveAnchorOffset(Character character, Anchor anchor)
+        {
+            float halfHeight = character.Motion.Height * 0.5f;
+            return anchor switch
+            {
+                Anchor.Crown => Vector3.up * halfHeight,
+                Anchor.Center => Vector3.zero,
+                Anchor.Feet => Vector3.down * halfHeight,
+                _ => throw new ArgumentOutOfRangeException(nameof(anchor), anchor, null)
+            };
+        }
+
+        private static bool IsFinite(Vector3 value)
+        {
+            return float.IsFinite(value.x) &&
+                   float.IsFinite(value.y) &&
+                   float.IsFinite(value.z);
         }
 
         private static void SyncTraversalRelativePositionFromOwnerAuthority(Character character, Vector3 ownerAuthorityPosition)
@@ -260,6 +439,32 @@ namespace Arawn.GameCreator2.Networking.Traversal
             }
 
             if (interactive.MotionInteractive == null) return;
+
+            // PositionAccepted runs only after the movement backend has passed every remaining
+            // gate and actually committed the pose. A surface-valid preflight can still fail a
+            // driver reconciliation check, so transition authorization must never be consumed
+            // from the earlier rejection hook.
+            if (IsAuthorizedAuthenticatedRemoteTransitionPose(
+                    character,
+                    interactive,
+                    ownerAuthorityPosition))
+            {
+                CompleteAuthenticatedRemoteInteractiveTransitionPose(
+                    character,
+                    interactive,
+                    ownerAuthorityPosition);
+                return;
+            }
+
+            // MotionInteractive stores the destination pose in RelativePosition before it eases
+            // the root from the previous traverse. Replacing that destination with each accepted
+            // intermediate Host pose shortens or bends the authored transition on the next frame.
+            // Continuous interactive movement resumes syncing after GC2 clears this flag.
+            if (TryGetInInteractiveTransition(character, stance, out bool inTransition) &&
+                inTransition)
+            {
+                return;
+            }
 
             if (s_TraversalStanceRelativePositionProperty == null)
             {
@@ -275,14 +480,9 @@ namespace Arawn.GameCreator2.Networking.Traversal
             // is intended for initial placement and subtracts Driver.SkinWidth; using it for
             // every accepted owner pose makes the server write that skin-width offset back on
             // its next interactive update, producing a vertical owner/server feedback loop.
-            float halfHeight = character.Motion.Height * 0.5f;
-            Vector3 anchorOffset = interactive.MotionInteractive.Anchor switch
-            {
-                Anchor.Crown => Vector3.up * halfHeight,
-                Anchor.Center => Vector3.zero,
-                Anchor.Feet => Vector3.down * halfHeight,
-                _ => throw new ArgumentOutOfRangeException()
-            };
+            Vector3 anchorOffset = GetInteractiveAnchorOffset(
+                character,
+                interactive.MotionInteractive.Anchor);
             Vector3 anchorPosition = ownerAuthorityPosition + anchorOffset;
             Vector3 localPosition = interactive.Transform.InverseTransformPoint(anchorPosition);
             Vector3 previousRelative = s_TraversalStanceRelativePositionProperty.GetValue(stance) is Vector3 previous
@@ -308,7 +508,7 @@ namespace Arawn.GameCreator2.Networking.Traversal
                     $"after={NetworkTraversalClimbDiagnostics.Vector(localPosition)} " +
                     $"bounds={interactive.PositionA:F3}/{interactive.PositionB:F3} width={interactive.Width:F3}",
                     character,
-                    $"relative-pose:{character.GetInstanceID()}");
+                    $"relative-pose:{character.GetLegacyInstanceId()}");
             }
 
             float now = Time.realtimeSinceStartup;
@@ -379,6 +579,82 @@ namespace Arawn.GameCreator2.Networking.Traversal
 
             inTransition = value;
             return true;
+        }
+
+        private static bool IsTrustedAuthorityLocalTransitionProducer(Character character)
+        {
+            if (character == null) return false;
+
+            NetworkCharacter networkCharacter = character.GetComponent<NetworkCharacter>();
+            NetworkTraversalController controller =
+                character.GetComponent<NetworkTraversalController>();
+
+            return networkCharacter != null &&
+                   controller != null &&
+                   networkCharacter.IsServerInstance &&
+                   networkCharacter.IsOwnerInstance &&
+                   networkCharacter.HasAuthenticatedPlayerOwner &&
+                   controller.IsServer &&
+                   controller.IsLocalClient &&
+                   !controller.IsRemoteClient;
+        }
+
+        private static bool IsTrustedAuthenticatedRemoteTransitionProducer(
+            Character character)
+        {
+            if (character == null) return false;
+
+            NetworkCharacter networkCharacter = character.GetComponent<NetworkCharacter>();
+            NetworkTraversalController controller =
+                character.GetComponent<NetworkTraversalController>();
+
+            // The transport-owned context is asserted only around one sender-authenticated
+            // Shared owner sample. Keep all actor/role checks here as defense in depth: an NPC,
+            // an unauthenticated object, or an ordinary Host connected-client replica cannot
+            // turn the capability into a transition-pose bypass.
+            return networkCharacter != null &&
+                   controller != null &&
+                   networkCharacter.IsServerInstance &&
+                   !networkCharacter.IsOwnerInstance &&
+                   networkCharacter.HasAuthenticatedPlayerOwner &&
+                   networkCharacter.IsPlayerOwnedActor &&
+                   controller.IsServer &&
+                   !controller.IsLocalClient &&
+                   character.Driver is INetworkAuthenticatedRemoteOwnerPoseContext
+                   {
+                       IsApplyingAuthenticatedRemoteOwnerPose: true
+                   };
+        }
+
+        private static bool IsAuthorizedAuthenticatedRemoteTransitionPose(
+            Character character,
+            TraverseInteractive activeInteractive,
+            Vector3 ownerRootPosition)
+        {
+            if (!IsTrustedAuthenticatedRemoteTransitionProducer(character))
+            {
+                return false;
+            }
+
+            NetworkTraversalController controller =
+                character.GetComponent<NetworkTraversalController>();
+            return controller != null &&
+                   controller.AllowsAuthenticatedRemoteInteractiveTransitionPose(
+                       activeInteractive,
+                       ownerRootPosition);
+        }
+
+        private static void CompleteAuthenticatedRemoteInteractiveTransitionPose(
+            Character character,
+            TraverseInteractive activeInteractive,
+            Vector3 acceptedRootPosition)
+        {
+            if (!IsTrustedAuthenticatedRemoteTransitionProducer(character)) return;
+
+            character.GetComponent<NetworkTraversalController>()?
+                .CompleteAuthenticatedRemoteInteractiveTransitionPose(
+                    activeInteractive,
+                    acceptedRootPosition);
         }
 
         public void RegisterController(uint networkId, NetworkTraversalController controller)
@@ -533,6 +809,15 @@ namespace Arawn.GameCreator2.Networking.Traversal
             uint senderClientId = GetSenderClientId(clientId);
             bool pendingIncremented = false;
 
+            NetworkCiTrace.Log(
+                "traversal-route",
+                "authority-request-received",
+                request.ActorNetworkId,
+                request.CorrelationId,
+                $"rawSender={clientId} sender={senderClientId} request={request.RequestId} " +
+                $"action={request.Action} target={request.TargetNetworkId}",
+                this);
+
             TraceTraversal(
                 $"receive request rawClient={clientId} sender={senderClientId} requestId={request.RequestId} " +
                 $"actor={request.ActorNetworkId} target={request.TargetNetworkId} correlation={request.CorrelationId} " +
@@ -610,6 +895,15 @@ namespace Arawn.GameCreator2.Networking.Traversal
                     $"send response requestId={response.RequestId} sender={senderClientId} " +
                     $"authorized={response.Authorized} applied={response.Applied} rejection={response.RejectionReason} " +
                     $"traversing={response.IsTraversing} traverse='{response.TraverseIdString}' error='{response.Error}'");
+                NetworkCiTrace.Log(
+                    "traversal-route",
+                    "authority-response-send",
+                    response.ActorNetworkId,
+                    response.CorrelationId,
+                    $"sender={senderClientId} request={response.RequestId} action={response.Action} " +
+                    $"authorized={response.Authorized} applied={response.Applied} " +
+                    $"rejection={response.RejectionReason} version={response.StateVersion}",
+                    this);
                 OnSendTraversalResponse?.Invoke(senderClientId, response);
             }
             catch (Exception exception)

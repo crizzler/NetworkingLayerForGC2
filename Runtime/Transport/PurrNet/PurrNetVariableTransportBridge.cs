@@ -251,9 +251,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
 
             if (!m_AutoRegisterSceneControllers && !force) return;
 
-            var controllers = FindObjectsByType<NetworkVariableController>(
-                FindObjectsInactive.Exclude,
-                FindObjectsSortMode.None);
+            var controllers = UnityObjectSearch.FindAll<NetworkVariableController>(FindObjectsInactive.Exclude);
 
             for (int i = 0; i < controllers.Length; i++)
             {
@@ -616,7 +614,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
         {
             return NetworkVariableManager.Instance != null
                 ? NetworkVariableManager.Instance
-                : FindFirstObjectByType<NetworkVariableManager>();
+                : UnityObjectSearch.FindAny<NetworkVariableManager>();
         }
 
         private static uint PlayerIdToClientId(PlayerID playerId)

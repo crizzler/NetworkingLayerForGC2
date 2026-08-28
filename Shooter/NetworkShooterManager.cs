@@ -624,7 +624,8 @@ namespace Arawn.GameCreator2.Networking.Shooter
         {
             if (!m_IsServer ||
                 request.ActorNetworkId == 0 ||
-                request.ActorNetworkId != request.ShooterNetworkId)
+                request.ActorNetworkId != request.ShooterNetworkId ||
+                !IsTrustedServerOriginActor(request.ActorNetworkId))
             {
                 return false;
             }
@@ -758,7 +759,8 @@ namespace Arawn.GameCreator2.Networking.Shooter
         {
             if (!m_IsServer ||
                 request.ActorNetworkId == 0 ||
-                request.ActorNetworkId != request.ShooterNetworkId)
+                request.ActorNetworkId != request.ShooterNetworkId ||
+                !IsTrustedServerOriginActor(request.ActorNetworkId))
             {
                 return false;
             }
@@ -819,6 +821,33 @@ namespace Arawn.GameCreator2.Networking.Shooter
             });
             m_Stats.HitRequestsReceived++;
             return true;
+        }
+
+        private static bool IsTrustedServerOriginActor(uint actorNetworkId)
+        {
+            NetworkTransportBridge bridge = NetworkTransportBridge.Active;
+            if (bridge == null || !bridge.IsServer) return false;
+
+            Character character = bridge.ResolveCharacter(actorNetworkId);
+            NetworkCharacter networkCharacter =
+                character != null ? character.GetComponent<NetworkCharacter>() : null;
+            if (networkCharacter == null ||
+                !networkCharacter.IsServerInstance ||
+                !networkCharacter.HasSimulationAuthority)
+            {
+                return false;
+            }
+
+            if (networkCharacter.IsServerAuthoritativeNPC)
+            {
+                return !bridge.TryGetCharacterOwner(actorNetworkId, out _);
+            }
+
+            // The only player that can originate a trusted native event is the server's own
+            // authenticated local actor. Remote player replicas must use validated requests.
+            return networkCharacter.IsPlayerOwnedActor &&
+                networkCharacter.HasAuthenticatedPlayerOwner &&
+                networkCharacter.IsOwnerInstance;
         }
 
         /// <summary>

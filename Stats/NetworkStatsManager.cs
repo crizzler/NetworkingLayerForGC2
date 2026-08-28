@@ -33,13 +33,13 @@ namespace Arawn.GameCreator2.Networking.Stats
         // SINGLETON (lazy-find override)
         // ════════════════════════════════════════════════════════════════════════════════════════
 
-        /// <summary>Singleton instance. Falls back to FindFirstObjectByType if not yet assigned.</summary>
+        /// <summary>Singleton instance. Falls back to UnityObjectSearch.FindAny if not yet assigned.</summary>
         public new static NetworkStatsManager Instance
         {
             get
             {
                 if (s_Instance == null)
-                    s_Instance = FindFirstObjectByType<NetworkStatsManager>();
+                    s_Instance = UnityObjectSearch.FindAny<NetworkStatsManager>();
                 return s_Instance;
             }
         }

@@ -25,11 +25,11 @@ Transport-agnostic, server-authoritative multiplayer support for Game Creator 2.
 
 The Fusion integration uses Fusion/Photon connectivity. It does not replace Fusion's transport with Steam Datagram Relay. In Host/Client mode Fusion can use direct UDP or Photon Relay; Shared Mode uses Photon Relay.
 
-Version 2.2.1 was validated against PurrNet 1.21.0 and Photon Fusion 2.1.1. The optional Advanced KCC driver was validated with Photon Advanced KCC 2.1.0. The complete public source snapshot contains both transport integrations, so install the corresponding SDK assemblies before importing or compiling their transport folders.
+Version 2.3.0 was validated against PurrNet 1.22.1-beta.3 and Photon Fusion 2.1.1. The optional Advanced KCC driver was validated with Photon Advanced KCC 2.1.0. The complete public source snapshot contains both transport integrations, so install the corresponding SDK assemblies before importing or compiling their transport folders.
 
 ## Optional Fusion Advanced KCC Driver
 
-The optional Game Creator 2 movement driver for Photon Fusion Advanced KCC, introduced in version 2.1.0, remains available in version 2.2.1. Fusion Native remains the built-in, recommended default. Choose Advanced KCC when your project specifically wants its collision, prediction, resimulation, and render-presentation workflow.
+The optional Game Creator 2 movement driver for Photon Fusion Advanced KCC, introduced in version 2.1.0, remains available in version 2.3.0. Fusion Native remains the built-in, recommended default. Choose Advanced KCC when your project specifically wants its collision, prediction, resimulation, and render-presentation workflow.
 
 - Photon Advanced KCC is a separate dependency and is not redistributed by this repository.
 - The Fusion Scene Setup Wizard detects a compatible KCC API, manages `ARAWN_GC2_FUSION_KCC`, configures the nested KCC motor and GC2 driver, and validates authority and Fusion weaving setup.
@@ -50,6 +50,16 @@ Version 2.2.1 fixes the Fusion client-readiness race that could reject a Network
 - The Fusion and PurrNet Core Examples installers include an authority-validated replicated door-state example.
 
 Network Actions replicate a trusted semantic value; they do not serialize or remotely execute arbitrary GC2 Instruction Lists. Authority commits the value once, then each receiving replica applies its locally authored presentation. Use absolute, idempotent snapshot Instructions for persistent state.
+
+## Server-Authoritative NPCs and Free Flow Combat
+
+Version 2.3.0 separates GC2's local `Character.IsPlayer` presentation flag from authenticated network ownership through explicit `PlayerOwned` and `NPC` actor types.
+
+- Server-authoritative NPCs run AI, navigation, Shooter, Stats, Melee, and other durable gameplay only on the server or current Fusion Shared master; observer replicas interpolate the authoritative pose.
+- Authority gates, deterministic target selection, transport-neutral pose sampling, and setup-wizard validation prevent client replicas or runtime `IsPlayer` changes from granting gameplay authority.
+- Optional bot-backed player slots atomically replace bots with joining players and restore fresh bots after disconnects while replicating durable slot membership.
+- Separate Fusion and PurrNet Enemy Shooter installers demonstrate server-owned enemies and bot slots without replacing the existing PvP Shooter+Stats demos.
+- The optional Free Flow Combat integration routes attacks, counters, Motion Warp context, telegraphs, hits, and late-join state through the server-authoritative Melee pipeline. Its example installers contain only Networking Layer-owned demo content and require the separately installed Free Flow Combat and GC2 Melee dependencies.
 
 ## Supported Modules
 
@@ -93,13 +103,15 @@ Use `Game Creator > Networking Layer > Patches` outside Play Mode. Each transpor
 
 ## Compatibility
 
-Servers and clients must use the same Networking Layer version. Version 2.2.1 contains the Network Actions and Core interaction wire contracts introduced in 2.2.0 and must not be mixed with older builds. Every peer in an Advanced KCC session must also use the compatible optional adapter and Photon addon version.
+Servers and clients must use the same Networking Layer version. Version 2.3.0 changes role initialization, trusted combat handling, Melee Skill and Free Flow state payloads, bot-slot membership replication, and persistent-state paths, so it must not be mixed with older builds. Every peer in an Advanced KCC session must also use the compatible optional adapter and Photon addon version.
 
 ## Documentation
 
 - [General quickstart](https://arawn-software-publishing.gitbook.io/networking-layer-for-gc2/getting-started/quickstart)
 - [PurrNet overview](https://arawn-software-publishing.gitbook.io/networking-layer-for-gc2/purrnet-overview)
 - [Fusion overview](https://arawn-software-publishing.gitbook.io/networking-layer-for-gc2/fusion-overview)
+- [Server-authoritative NPCs and bot slots](Documentation/Server%20Authoritative%20NPCs%20and%20Bot%20Slots.md)
+- [Server-authoritative Free Flow Combat](Documentation/Server%20Authoritative%20Free%20Flow%20Combat.md)
 - [Fusion Advanced KCC companion guide](OptionalIntegrations~/NetworkingLayerForGC2.FusionAdvancedKCC/README.md)
 
 ## Contributing

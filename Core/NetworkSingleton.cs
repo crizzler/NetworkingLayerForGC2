@@ -25,7 +25,7 @@ namespace Arawn.GameCreator2.Networking
     /// </para>
     /// <para>
     /// <b>Lazy Find:</b>
-    /// For managers that should auto-discover via <c>FindFirstObjectByType</c>,
+    /// For managers that should auto-discover via <c>UnityObjectSearch.FindAny</c>,
     /// shadow the <c>Instance</c> property with <c>new static</c> in the subclass:
     /// <code>
     /// public new static MyManager Instance
@@ -33,7 +33,7 @@ namespace Arawn.GameCreator2.Networking
     ///     get
     ///     {
     ///         if (s_Instance == null)
-    ///             s_Instance = FindFirstObjectByType&lt;MyManager&gt;();
+    ///             s_Instance = UnityObjectSearch.FindAny&lt;MyManager&gt;();
     ///         return s_Instance;
     ///     }
     /// }

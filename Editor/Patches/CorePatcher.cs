@@ -17,7 +17,7 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
     public class CorePatcher : GC2PatcherBase
     {
         public override string ModuleName => "Core";
-        public override string PatchVersion => "2.1.0-core";
+        public override string PatchVersion => "2.2.0-core";
         public override string DisplayName => "Core (Game Creator 2)";
 
         public override string PatchDescription =>
@@ -44,7 +44,10 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
         {
             return new[]
             {
-                VersionRequirement("Plugins/GameCreator/Packages/Core/Editor/Version.txt", "2.18.*")
+                VersionRequirement(
+                    "Plugins/GameCreator/Packages/Core/Editor/Version.txt",
+                    "2.18.*",
+                    "2.19.*")
             };
         }
 

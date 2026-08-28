@@ -10,7 +10,7 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
     public class TraversalPatcher : GC2PatcherBase
     {
         public override string ModuleName => "Traversal";
-        public override string PatchVersion => "2.6.0-traversal";
+        public override string PatchVersion => "2.9.0-traversal";
         public override string DisplayName => "Traversal (Game Creator 2)";
 
         public override string PatchDescription =>
@@ -19,10 +19,15 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
             "TraverseLink.Run, TraverseInteractive.Enter, MotionInteractive edge\n" +
             "connections, and TraversalStance action APIs will be validated\n" +
             "through network hooks before local execution. TraversalStance also\n" +
-            "receives presentation-only snapshot restore/clear entry points.";
+            "receives presentation-only snapshot restore/clear entry points.\n" +
+            "An edge request that synchronously cancels its current motion cannot\n" +
+            "publish one final stale clamped pose before the replacement starts.\n" +
+            "Malformed or destroyed ignored-collider references are skipped so a\n" +
+            "bad scene override cannot poison an authoritative traversal task.";
 
         protected override string[] FilesToPatch => new[]
         {
+            "Plugins/GameCreator/Packages/Traversal/Runtime/Components/Traverse.cs",
             "Plugins/GameCreator/Packages/Traversal/Runtime/Components/TraverseLink.cs",
             "Plugins/GameCreator/Packages/Traversal/Runtime/Components/TraverseInteractive.cs",
             "Plugins/GameCreator/Packages/Traversal/Runtime/ScriptableObjects/MotionInteractive.cs",
@@ -33,12 +38,20 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
         {
             return new[]
             {
-                VersionRequirement("Plugins/GameCreator/Packages/Traversal/Editor/Version.txt", "2.0.*")
+                VersionRequirement(
+                    "Plugins/GameCreator/Packages/Traversal/Editor/Version.txt",
+                    "2.0.*",
+                    "2.1.*")
             };
         }
 
         protected override string[] GetRequiredPatchTokens(string relativePath)
         {
+            if (relativePath.EndsWith("Traverse.cs"))
+            {
+                return new[] { "ignoreCollider == null" };
+            }
+
             if (relativePath.EndsWith("TraverseLink.cs"))
             {
                 return new[] { "NetworkRunValidator", "token.IsCancelled" };
@@ -84,6 +97,14 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
 
         protected override Dictionary<string, int> GetRequiredPatchTokenCounts(string relativePath)
         {
+            if (relativePath.EndsWith("Traverse.cs"))
+            {
+                return new Dictionary<string, int>
+                {
+                    { "if (ignoreCollider == null) continue;", 1 }
+                };
+            }
+
             if (relativePath.EndsWith("TraverseLink.cs"))
             {
                 return new Dictionary<string, int>
@@ -109,6 +130,7 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                     { "NetworkEdgeConnectionResolver.Invoke", 2 },
                     { "NetworkEdgeConnectionResolver != null", 2 },
                     { "Traverse networkConnection = NetworkEdgeConnectionResolver.Invoke", 2 },
+                    { "if (cancel.IsCancelled)", 1 },
                     { "return networkConnection;", 2 },
                     { "NetworkConnectionSkipTransitionResolver.Invoke", 1 },
                     { "NetworkResumeInteractiveSnapshot", 1 }
@@ -149,6 +171,10 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                     {
                         @"PushingOutB\s*\(.*?Traverse\s+networkConnection\s*=\s*NetworkEdgeConnectionResolver\.Invoke\s*\(.*?true\s*\)\s*;\s*if\s*\(\s*networkConnection\s*!=\s*null\s*\)\s*\{\s*return\s+networkConnection\s*;\s*\}.*?else\s+if\s*\(\s*traverseInteractive\.ContinueB",
                         1
+                    },
+                    {
+                        @"if\s*\(\s*cancel\.IsCancelled\s*\)\s*\{\s*return\s+null\s*;\s*\}.*?nextLocalPosition\s*=\s*traverseInteractive\.ClampInBounds",
+                        1
                     }
                 };
             }
@@ -163,6 +189,11 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
             ExistingPatchState existingPatchState = PrepareContentForPatch(relativePath, ref content);
             if (existingPatchState == ExistingPatchState.SkipAlreadyPatched) return true;
             if (existingPatchState == ExistingPatchState.Failed) return false;
+
+            if (relativePath.EndsWith("Traverse.cs"))
+            {
+                return PatchTraverse(relativePath, content);
+            }
 
             if (relativePath.EndsWith("TraverseLink.cs"))
             {
@@ -185,6 +216,34 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
             }
 
             return false;
+        }
+
+        private bool PatchTraverse(string relativePath, string content)
+        {
+            if (!TryInsertAfterMethodAnchors(
+                    ref content,
+                    "RefreshCollisions",
+                    "ignoreCollider == null",
+                    @"
+
+                // [GC2_NETWORK_PATCH] Unity keeps destroyed prefab references as fake-null.
+                // Skip them so collision refresh cannot strand a network traversal half-entered.
+                if (ignoreCollider == null) continue;
+                // [GC2_NETWORK_PATCH_END]",
+                    out string failureReason,
+                    @"foreach\s*\(\s*Collider\s+ignoreCollider\s+in\s+this\.m_IgnoreColliders\s*\)\s*\{"))
+            {
+                return LogPatchFailure("Traverse.RefreshCollisions destroyed-collider guard", failureReason);
+            }
+
+            if (!EnsurePatchMarkerBeforeNamespace(ref content, "GameCreator.Runtime.Traversal"))
+            {
+                return false;
+            }
+
+            WriteFile(relativePath, content);
+            Debug.Log($"[GC2 Networking] Patched {relativePath}");
+            return true;
         }
 
         private bool PatchTraverseLink(string relativePath, string content)
@@ -459,6 +518,25 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                     out failureReason))
             {
                 return LogPatchFailure("MotionInteractive edge B connection resolver", failureReason);
+            }
+
+            if (!TryReplaceRegexInMethod(
+                    ref content,
+                    "OnUpdate",
+                    "Stop before the outgoing motion writes its clamped pose",
+                    @"(?m)^[ \t]*nextLocalPosition\s*=\s*traverseInteractive\.ClampInBounds\s*\(\s*nextLocalPosition\s*\)\s*;",
+                    @"                // [GC2_NETWORK_PATCH] A listen Host can validate an edge request and
+                // cancel this motion synchronously while this update is still on the stack.
+                // Do not publish the outgoing motion's stale clamped pose after cancellation.
+                if (cancel.IsCancelled)
+                {
+                    return null;
+                }
+                // [GC2_NETWORK_PATCH_END]
+                nextLocalPosition = traverseInteractive.ClampInBounds(nextLocalPosition);",
+                    out failureReason))
+            {
+                return LogPatchFailure("MotionInteractive cancelled edge pose barrier", failureReason);
             }
 
             if (!EnsurePatchMarkerBeforeNamespace(ref content, "GameCreator.Runtime.Traversal"))

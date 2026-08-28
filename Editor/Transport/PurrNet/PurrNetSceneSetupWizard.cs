@@ -102,6 +102,11 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
             "Arawn.GameCreator2.Networking.Melee.NetworkMeleeManager, Arawn.GameCreator2.Networking.Melee";
         private const string NETWORK_MELEE_CONTROLLER_TYPE =
             "Arawn.GameCreator2.Networking.Melee.NetworkMeleeController, Arawn.GameCreator2.Networking.Melee";
+        private const string NETWORK_FREE_FLOW_COMBAT_ADAPTER_TYPE =
+            "Arawn.GameCreator2.Networking.Melee.NetworkFreeFlowCombatAdapter, " +
+            "Arawn.GameCreator2.Networking.Melee";
+        private const string FREE_FLOW_NETWORK_INTEGRATION_TYPE =
+            "Arawn.FreeFlowCombat.FreeFlowNetworkIntegration, Assembly-CSharp";
         private const string PURRNET_MELEE_BRIDGE_TYPE =
             "Arawn.GameCreator2.Networking.Melee.Transport.PurrNet.PurrNetMeleeTransportBridge, Arawn.GameCreator2.Networking.Melee.Transport.PurrNet";
         private const string NETWORK_STATS_MANAGER_TYPE =
@@ -197,6 +202,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
         private bool m_RegisterInstalledDemoAssets = true;
         private bool m_CreateMeleeStatsDamageBridge = true;
         private bool m_CreateShooterStatsDamageBridge = true;
+        private bool m_EnableFreeFlowCombat;
 
         private bool m_CreatePlayerSpawner = true;
         private GameObject m_PlayerPrefab;
@@ -206,6 +212,11 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
         private NetworkVariableProfile m_PlayerVariableProfile;
         private bool m_PlayerUsesNetworkInstructionClips;
         private readonly List<AnimationClip> m_PlayerPreRegisteredAnimationClips = new();
+        private GameObject m_NpcPrefab;
+        private bool m_ConfigureNpcPrefab;
+        private readonly List<string> m_NpcAuthorityRootPaths = new();
+        private bool m_CreateBotSlots;
+        private int m_BotSlotCount = 3;
         private NetworkPrefabs m_NetworkPrefabs;
         private bool m_CreateNetworkPrefabsAsset = true;
         private bool m_CreateCharacterSelectionUI = false;
@@ -432,6 +443,24 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
             if (m_ModuleMelee)
             {
                 DrawMeleePatchRequirement();
+            }
+            bool freeFlowAvailable = IsFreeFlowCombatAvailable();
+            using (new EditorGUI.DisabledScope(!m_ModuleMelee || !freeFlowAvailable))
+            {
+                m_EnableFreeFlowCombat = EditorGUILayout.ToggleLeft(
+                    new GUIContent(
+                        "Server-authoritative Free Flow Combat",
+                        "Adds the transport-neutral Free Flow adapter to prepared player and NPC " +
+                        "prefabs. It remains opt-in so ordinary Melee prefabs are unchanged."),
+                    m_EnableFreeFlowCombat);
+            }
+            if (!m_ModuleMelee) m_EnableFreeFlowCombat = false;
+            if (m_ModuleMelee && !freeFlowAvailable)
+            {
+                EditorGUILayout.HelpBox(
+                    "Install and compile Arawn FreeFlowCombat to enable its authoritative " +
+                    "network adapter.",
+                    MessageType.None);
             }
             m_ModuleShooter = EditorGUILayout.ToggleLeft(
                 new GUIContent("Shooter", "Adds NetworkShooterManager and PurrNet Shooter Bridge. Enable for aiming, weapon state, shots, reloads, bullet VFX, and impact events."),
@@ -1825,6 +1854,64 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
                 "For example, selecting Stats + Melee adds NetworkStatsController and NetworkMeleeController. NetworkVariableController is added only when 'Player uses local GC2 Variables' is enabled. " +
                 "Prepared spawned player prefabs are authored with Character.IsPlayer off; NetworkCharacter enables it only for the local owner at runtime.",
                 MessageType.Info);
+
+            EditorGUILayout.Space(10);
+            EditorGUILayout.LabelField("Server-Owned NPCs and Bot Slots", EditorStyles.boldLabel);
+            m_NpcPrefab = (GameObject)EditorGUILayout.ObjectField(
+                new GUIContent(
+                    "NPC / Bot Prefab",
+                    "A root GC2 Character prefab spawned without PurrNet ownership and simulated only by the host or dedicated server."),
+                m_NpcPrefab,
+                typeof(GameObject),
+                false);
+            using (new EditorGUI.DisabledScope(m_NpcPrefab == null))
+            {
+                m_ConfigureNpcPrefab = EditorGUILayout.ToggleLeft(
+                    "Prepare as an explicit server-owned NPC",
+                    m_ConfigureNpcPrefab);
+                using (new EditorGUI.DisabledScope(!m_ConfigureNpcPrefab))
+                {
+                    EditorGUILayout.LabelField(
+                        "NPC Movement Backend",
+                        "Built-in Server NavMesh (PurrDiction is owner-predicted)");
+                    DrawNpcAuthorityRootPaths();
+                }
+                m_CreateBotSlots = EditorGUILayout.ToggleLeft(
+                    "Create bot-backed player slots",
+                    m_CreateBotSlots);
+                using (new EditorGUI.DisabledScope(!m_CreateBotSlots))
+                {
+                    m_BotSlotCount = EditorGUILayout.IntSlider(
+                        "Bot Slot Count",
+                        Mathf.Clamp(m_BotSlotCount, 1, 16),
+                        1,
+                        16);
+                }
+            }
+            EditorGUILayout.HelpBox(
+                "Prepared NPCs stay IsPlayer=false on every peer, have no PurrNet owner, run " +
+                "their selected GC2 AI roots only on the server, and cannot use PurrDiction. " +
+                "Joining humans reserve slots atomically and inherit only the bot transform.",
+                MessageType.Info);
+        }
+
+        private void DrawNpcAuthorityRootPaths()
+        {
+            EditorGUILayout.LabelField("Authority-Only AI Trigger Roots", EditorStyles.miniBoldLabel);
+            for (int i = 0; i < m_NpcAuthorityRootPaths.Count; i++)
+            {
+                EditorGUILayout.BeginHorizontal();
+                m_NpcAuthorityRootPaths[i] = EditorGUILayout.TextField(
+                    $"AI Root {i + 1}",
+                    m_NpcAuthorityRootPaths[i]);
+                if (GUILayout.Button("Remove", GUILayout.Width(78f)))
+                {
+                    m_NpcAuthorityRootPaths.RemoveAt(i--);
+                }
+                EditorGUILayout.EndHorizontal();
+            }
+            if (GUILayout.Button("Add AI Root Path", GUILayout.Width(150f)))
+                m_NpcAuthorityRootPaths.Add(string.Empty);
         }
 
         private void DrawCharacterSelectionPrefabsSection()
@@ -2089,6 +2176,9 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
                 DrawInventoryRequirements();
             }
             EditorGUILayout.LabelField($"Melee: {YesNo(m_ModuleMelee)}");
+            EditorGUILayout.LabelField(
+                $"Server-authoritative Free Flow Combat: " +
+                $"{YesNo(m_ModuleMelee && m_EnableFreeFlowCombat)}");
             if (m_ModuleMelee)
             {
                 DrawMeleePatchRequirement();
@@ -2119,6 +2209,9 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
             EditorGUILayout.LabelField($"Player spawner: {YesNo(m_CreatePlayerSpawner)}");
             EditorGUILayout.LabelField($"Player prefab: {(m_PlayerPrefab != null ? m_PlayerPrefab.name : "None")}");
             EditorGUILayout.LabelField($"Prepare player prefab: {YesNo(m_PlayerPrefab != null && m_ConfigurePlayerPrefab)}");
+            EditorGUILayout.LabelField($"Server-owned NPC prefab: {(m_NpcPrefab != null ? m_NpcPrefab.name : "None")}");
+            EditorGUILayout.LabelField($"Prepare NPC prefab: {YesNo(m_NpcPrefab != null && m_ConfigureNpcPrefab)}");
+            EditorGUILayout.LabelField($"Bot-backed slots: {(m_CreateBotSlots ? m_BotSlotCount.ToString() : "No")}");
             DrawLegacyCoreControllerWarning();
             EditorGUILayout.LabelField($"Network-ready Character units: {YesNo(m_PlayerPrefab != null && m_ConfigurePlayerPrefab && m_ConfigurePlayerPrefabKernel)}");
             EditorGUILayout.LabelField($"Prediction backend: {m_PredictionBackend}");
@@ -2156,11 +2249,67 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
             EditorGUILayout.LabelField($"Project template: {m_ProjectTemplate}");
 
             DrawCurrentSceneConfigurationWarnings();
+            DrawNpcReviewValidation();
 
             EditorGUILayout.Space(8);
             EditorGUILayout.HelpBox(
                 "This page is only a review. Use Back or the step tabs above to change anything before applying the setup.",
                 MessageType.Info);
+        }
+
+        private void DrawNpcReviewValidation()
+        {
+            if (!m_ConfigureNpcPrefab && !m_CreateBotSlots) return;
+            HasNpcPreflightErrors(out List<string> errors, out List<string> warnings);
+            for (int i = 0; i < errors.Count; i++)
+                EditorGUILayout.HelpBox(errors[i], MessageType.Error);
+            for (int i = 0; i < warnings.Count; i++)
+                EditorGUILayout.HelpBox(warnings[i], MessageType.Warning);
+        }
+
+        private bool HasNpcPreflightErrors(
+            out List<string> errors,
+            out List<string> warnings)
+        {
+            errors = new List<string>();
+            warnings = new List<string>();
+            if (!m_ConfigureNpcPrefab && !m_CreateBotSlots) return false;
+            if (m_NpcPrefab == null)
+            {
+                errors.Add("Assign an NPC prefab before preparing NPCs or creating bot slots.");
+                return true;
+            }
+
+            string path = AssetDatabase.GetAssetPath(m_NpcPrefab);
+            if (string.IsNullOrEmpty(path) ||
+                !path.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase))
+                errors.Add("The NPC / Bot Prefab must be a prefab asset from the Project window.");
+
+            if (m_ConfigureNpcPrefab)
+            {
+                if (NetworkNpcSetupEditorUtility.HasGc2Triggers(m_NpcPrefab) &&
+                    m_NpcAuthorityRootPaths.Count == 0)
+                    errors.Add("Select at least one explicit authority-only AI root for this prefab's GC2 Triggers.");
+                for (int i = 0; i < m_NpcAuthorityRootPaths.Count; i++)
+                {
+                    string rootPath = m_NpcAuthorityRootPaths[i]?.Trim();
+                    if (string.IsNullOrEmpty(rootPath) || m_NpcPrefab.transform.Find(rootPath) == null)
+                        errors.Add($"NPC authority root path '{m_NpcAuthorityRootPaths[i]}' does not exist in the prefab.");
+                }
+            }
+            else
+            {
+                NetworkNpcSetupEditorUtility.ValidateServerNpc(
+                    m_NpcPrefab,
+                    typeof(NetworkIdentity),
+                    m_NpcAuthorityRootPaths,
+                    errors,
+                    warnings);
+            }
+
+            if (m_CreateBotSlots && !m_CreatePlayerSpawner)
+                errors.Add("Bot-backed slots require the PurrNet player spawner.");
+            return errors.Count > 0;
         }
 
         private void DrawLegacyCoreControllerWarning()
@@ -2406,7 +2555,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
                 else if (identity != null)
                 {
                     var key = new NetworkActionEndpointKey(
-                        unchecked((uint)identity.GetInstanceID()), endpoint.EndpointHash);
+                        unchecked((uint)identity.GetLegacyInstanceId()), endpoint.EndpointHash);
                     if (endpointKeys.TryGetValue(key, out NetworkActionEndpoint existing) &&
                         existing != endpoint)
                     {
@@ -2625,8 +2774,21 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
         {
             try
             {
+                if (HasFreeFlowPreflightError(out string freeFlowError))
+                {
+                    Debug.LogError($"[PurrNetSceneSetupWizard] {freeFlowError}");
+                    EditorUtility.DisplayDialog("PurrNet Scene Setup", freeFlowError, "OK");
+                    return false;
+                }
                 if (!ValidatePredictionBackendSelection())
                 {
+                    return false;
+                }
+                if (HasNpcPreflightErrors(out List<string> npcErrors, out _))
+                {
+                    string message = string.Join("\n", npcErrors);
+                    Debug.LogError($"[PurrNetSceneSetupWizard] {message}");
+                    EditorUtility.DisplayDialog("PurrNet Scene Setup", message, "OK");
                     return false;
                 }
 
@@ -2730,6 +2892,11 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
                 {
                     Debug.Log(playerPrefabReport);
                 }
+                if (m_ConfigureNpcPrefab)
+                {
+                    string npcReport = EnsureNpcPrefabSetup();
+                    if (!string.IsNullOrEmpty(npcReport)) Debug.Log(npcReport);
+                }
 
                 NetworkManager manager = FindOrCreateNetworkManager(root);
 
@@ -2781,9 +2948,14 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
                     characterSelection = EnsureCharacterSelectionUI(root, manager);
                 }
 
+                PurrNetDemoPlayerSpawner playerSpawner = null;
                 if (m_CreatePlayerSpawner)
                 {
-                    EnsurePlayerSpawner(root, characterSelection);
+                    playerSpawner = EnsurePlayerSpawner(root, characterSelection);
+                }
+                if (m_CreateBotSlots)
+                {
+                    EnsureBotSlots(root, manager, playerSpawner);
                 }
 
                 if (m_CreateDemoCanvasUI)
@@ -2804,6 +2976,20 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
                 if (m_CreateChatUI)
                 {
                     EnsureChatUI(root, manager);
+                }
+
+                if (m_ConfigureNpcPrefab || m_CreateBotSlots)
+                {
+                    var postErrors = new List<string>();
+                    var postWarnings = new List<string>();
+                    NetworkNpcSetupEditorUtility.ValidateServerNpc(
+                        m_NpcPrefab,
+                        typeof(NetworkIdentity),
+                        m_NpcAuthorityRootPaths,
+                        postErrors,
+                        postWarnings);
+                    if (postErrors.Count > 0)
+                        throw new InvalidOperationException(string.Join("\n", postErrors));
                 }
 
                 Undo.CollapseUndoOperations(group);
@@ -3157,7 +3343,9 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
             EditorUtility.SetDirty(bridge);
         }
 
-        private void EnsurePlayerSpawner(GameObject root, PurrNetDemoCharacterSelection characterSelection)
+        private PurrNetDemoPlayerSpawner EnsurePlayerSpawner(
+            GameObject root,
+            PurrNetDemoCharacterSelection characterSelection)
         {
             var spawner = FindOrCreateComponent<PurrNetDemoPlayerSpawner>("PurrNet Player Spawner", root);
             List<GameObject> playerPrefabs = GetSelectablePlayerPrefabs();
@@ -3196,6 +3384,71 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
 
             so.ApplyModifiedPropertiesWithoutUndo();
             EditorUtility.SetDirty(spawner);
+            return spawner;
+        }
+
+        private void EnsureBotSlots(
+            GameObject root,
+            NetworkManager manager,
+            PurrNetDemoPlayerSpawner playerSpawner)
+        {
+            if (m_NpcPrefab == null || playerSpawner == null)
+                throw new InvalidOperationException(
+                    "PurrNet bot slots require both an NPC prefab and the PurrNet player spawner.");
+
+            PurrNetBotSlotCoordinator coordinator =
+                FindOrCreateComponent<PurrNetBotSlotCoordinator>("PurrNet Bot Slots", root);
+            Transform anchorRoot = coordinator.transform.Find("Slot Anchors");
+            if (anchorRoot == null)
+                anchorRoot = CreateChild("Slot Anchors", coordinator.gameObject).transform;
+
+            int count = Mathf.Clamp(m_BotSlotCount, 1, 16);
+            var anchors = new List<Transform>(count);
+            for (int i = 0; i < count; i++)
+            {
+                string name = $"Combatant Slot {i + 1}";
+                Transform anchor = anchorRoot.Find(name);
+                if (anchor == null) anchor = CreateChild(name, anchorRoot.gameObject).transform;
+                float angle = (Mathf.PI * 2f * i) / count;
+                anchor.localPosition = new Vector3(Mathf.Cos(angle), 0f, Mathf.Sin(angle)) * 4f;
+                anchor.localRotation = Quaternion.LookRotation(-anchor.localPosition.normalized, Vector3.up);
+                anchors.Add(anchor);
+            }
+
+            var coordinatorObject = new SerializedObject(coordinator);
+            AssignObjectReference(coordinatorObject, "m_NetworkManager", manager);
+            SetBool(coordinatorObject, "m_FillVacantSlotsWithBots", true);
+            ConfigureBotSlotDefinitions(
+                coordinatorObject,
+                anchors,
+                m_NpcPrefab,
+                "purrnet-combatant-slot");
+            coordinatorObject.ApplyModifiedPropertiesWithoutUndo();
+            EditorUtility.SetDirty(coordinator);
+
+            var spawnerObject = new SerializedObject(playerSpawner);
+            AssignObjectReference(spawnerObject, "m_BotSlotCoordinator", coordinator);
+            spawnerObject.ApplyModifiedPropertiesWithoutUndo();
+            EditorUtility.SetDirty(playerSpawner);
+        }
+
+        private static void ConfigureBotSlotDefinitions(
+            SerializedObject coordinator,
+            IReadOnlyList<Transform> anchors,
+            GameObject botPrefab,
+            string idPrefix)
+        {
+            SerializedProperty slots = coordinator.FindProperty("m_Slots");
+            if (slots == null || !slots.isArray)
+                throw new InvalidOperationException("Network bot slot definitions are unavailable.");
+            slots.arraySize = anchors.Count;
+            for (int i = 0; i < anchors.Count; i++)
+            {
+                SerializedProperty slot = slots.GetArrayElementAtIndex(i);
+                slot.FindPropertyRelative("m_StableSlotId").stringValue = $"{idPrefix}-{i + 1}";
+                slot.FindPropertyRelative("m_Anchor").objectReferenceValue = anchors[i];
+                slot.FindPropertyRelative("m_BotPrefab").objectReferenceValue = botPrefab;
+            }
         }
 
         private string EnsurePlayerPrefabSetup()
@@ -3213,6 +3466,79 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
             }
 
             return reports.Count > 0 ? string.Join("\n", reports) : null;
+        }
+
+        private string EnsureNpcPrefabSetup()
+        {
+            if (m_NpcPrefab == null) return null;
+            string prefabPath = AssetDatabase.GetAssetPath(m_NpcPrefab);
+            if (string.IsNullOrEmpty(prefabPath) ||
+                !prefabPath.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(
+                    "Assign a prefab asset before preparing a PurrNet server-owned NPC.");
+            }
+
+            GameObject prefabRoot = PrefabUtility.LoadPrefabContents(prefabPath);
+            var changes = new List<string>();
+            var errors = new List<string>();
+            try
+            {
+                if (EnsurePrefabComponent<NetworkIdentity>(prefabRoot, out _))
+                    changes.Add("NetworkIdentity");
+                if (EnsurePrefabComponent<PurrNetNetworkCharacterAuto>(prefabRoot, out _))
+                    changes.Add("PurrNetNetworkCharacterAuto");
+
+                RemovePrefabComponentByType(
+                    prefabRoot,
+                    PURRDICTION_CHARACTER_CONTROLLER_TYPE,
+                    "PurrDictionNetworkCharacterController",
+                    changes);
+                RemovePrefabComponentByType(
+                    prefabRoot,
+                    PURRDICTION_NAVMESH_CONTROLLER_TYPE,
+                    "PurrDictionNetworkNavmeshController",
+                    changes);
+
+                var requiredControllers = new List<Type>();
+                AddAvailableType(requiredControllers, m_ModuleStats, NETWORK_STATS_CONTROLLER_TYPE);
+                AddAvailableType(requiredControllers, m_ModuleShooter, NETWORK_SHOOTER_CONTROLLER_TYPE);
+                AddAvailableType(requiredControllers, m_ModuleMelee, NETWORK_MELEE_CONTROLLER_TYPE);
+                AddAvailableType(
+                    requiredControllers,
+                    m_ModuleMelee && m_EnableFreeFlowCombat,
+                    NETWORK_FREE_FLOW_COMBAT_ADAPTER_TYPE);
+                NetworkNpcSetupEditorUtility.ConfigureServerNpc(
+                    prefabRoot,
+                    NetworkPredictionBackend.BuiltIn,
+                    m_NpcAuthorityRootPaths,
+                    requiredControllers,
+                    changes,
+                    errors);
+                if (errors.Count > 0)
+                    throw new InvalidOperationException(string.Join("\n", errors));
+
+                PrefabUtility.SaveAsPrefabAsset(prefabRoot, prefabPath);
+                AssetDatabase.ImportAsset(prefabPath);
+            }
+            finally
+            {
+                PrefabUtility.UnloadPrefabContents(prefabRoot);
+            }
+
+            return changes.Count == 0
+                ? $"[PurrNetSceneSetupWizard] NPC prefab '{prefabPath}' already has the selected setup."
+                : $"[PurrNetSceneSetupWizard] Prepared NPC prefab '{prefabPath}': {string.Join(", ", changes)}.";
+        }
+
+        private static void AddAvailableType(
+            ICollection<Type> destination,
+            bool enabled,
+            string assemblyQualifiedType)
+        {
+            if (!enabled) return;
+            Type type = Type.GetType(assemblyQualifiedType);
+            if (type != null) destination.Add(type);
         }
 
         private string EnsurePlayerPrefabSetup(GameObject playerPrefab)
@@ -3325,6 +3651,14 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
             {
                 EnsurePrefabComponentByType(prefabRoot, NETWORK_MELEE_CONTROLLER_TYPE, "NetworkMeleeController", changes);
             }
+            if (m_ModuleMelee && m_EnableFreeFlowCombat)
+            {
+                EnsurePrefabComponentByType(
+                    prefabRoot,
+                    NETWORK_FREE_FLOW_COMBAT_ADAPTER_TYPE,
+                    "NetworkFreeFlowCombatAdapter",
+                    changes);
+            }
 
             if (m_ModuleShooter)
             {
@@ -3405,6 +3739,10 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
 
             var so = new SerializedObject(networkCharacter);
             bool changed = false;
+            changed |= SetEnumIndexIfPresent(
+                so,
+                "m_ActorType",
+                (int)NetworkCharacterActorType.PlayerOwned);
             changed |= SetEnumIndexIfPresent(so, "m_NPCMode", (int)NetworkCharacter.NPCSyncMode.ServerAuthoritative);
             changed |= SetBoolIfPresent(so, "m_UseNetworkMotion", true);
             changed |= SetBoolIfPresent(so, "m_UseAnimationSync", true);
@@ -4442,6 +4780,8 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
         private NetworkPrefabs ResolveOrCreateNetworkPrefabs(NetworkManager manager)
         {
             List<GameObject> spawnablePrefabs = GetSpawnablePlayerPrefabs();
+            if (m_NpcPrefab != null && (m_ConfigureNpcPrefab || m_CreateBotSlots))
+                AddUniquePrefab(spawnablePrefabs, m_NpcPrefab);
             NetworkPrefabs prefabs = m_NetworkPrefabs;
             if (prefabs == null && manager != null)
             {
@@ -4483,7 +4823,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
             string assetPath = AssetDatabase.GetAssetPath(prefab);
             if (string.IsNullOrEmpty(assetPath))
             {
-                Debug.LogWarning("[PurrNetSceneSetupWizard] Player Prefab is not a project asset; it was not added to NetworkPrefabs.");
+                Debug.LogWarning("[PurrNetSceneSetupWizard] Spawnable prefab is not a project asset; it was not added to NetworkPrefabs.");
                 return;
             }
 
@@ -4618,7 +4958,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
         private static T FindSceneComponent<T>() where T : Component
         {
 #if UNITY_2023_1_OR_NEWER
-            var components = UnityEngine.Object.FindObjectsByType<T>(FindObjectsInactive.Include, FindObjectsSortMode.None);
+            var components = UnityObjectSearch.FindAll<T>(FindObjectsInactive.Include);
 #else
             var components = UnityEngine.Object.FindObjectsOfType<T>(true);
 #endif
@@ -4628,9 +4968,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
         private static T[] FindSceneComponents<T>() where T : Component
         {
 #if UNITY_2023_1_OR_NEWER
-            T[] components = UnityEngine.Object.FindObjectsByType<T>(
-                FindObjectsInactive.Include,
-                FindObjectsSortMode.None);
+            T[] components = UnityObjectSearch.FindAll<T>(FindObjectsInactive.Include);
 #else
             T[] components = UnityEngine.Object.FindObjectsOfType<T>(true);
 #endif
@@ -4654,7 +4992,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
             if (type == null) return null;
 
 #if UNITY_2023_1_OR_NEWER
-            var objects = UnityEngine.Object.FindObjectsByType(type, FindObjectsInactive.Include, FindObjectsSortMode.None);
+            var objects = UnityObjectSearch.FindAll(type, FindObjectsInactive.Include);
 #else
             var objects = UnityEngine.Object.FindObjectsOfType(type, true);
 #endif
@@ -5124,6 +5462,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
             m_ModuleDialogue = enabled;
             m_ModuleTraversal = enabled;
             m_ModuleAbilities = enabled;
+            if (!enabled) m_EnableFreeFlowCombat = false;
         }
 
         private void ApplyProjectTemplate(ProjectTemplate template)
@@ -5320,6 +5659,38 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
             if (m_ModuleTraversal) modules.Add("Traversal");
             if (m_ModuleAbilities) modules.Add("Abilities");
             return modules.Count == 0 ? string.Empty : prefix + string.Join(", ", modules);
+        }
+
+        private bool HasFreeFlowPreflightError(out string message)
+        {
+            if (!m_EnableFreeFlowCombat)
+            {
+                message = null;
+                return false;
+            }
+
+            if (!m_ModuleMelee)
+            {
+                message = "Server-authoritative Free Flow Combat requires the Melee module.";
+                return true;
+            }
+
+            if (!IsFreeFlowCombatAvailable())
+            {
+                message =
+                    "Server-authoritative Free Flow Combat was selected, but its runtime " +
+                    "integration or Networking Layer adapter is unavailable.";
+                return true;
+            }
+
+            message = null;
+            return false;
+        }
+
+        private static bool IsFreeFlowCombatAvailable()
+        {
+            return Type.GetType(NETWORK_FREE_FLOW_COMBAT_ADAPTER_TYPE) != null &&
+                   Type.GetType(FREE_FLOW_NETWORK_INTEGRATION_TYPE) != null;
         }
     }
 }

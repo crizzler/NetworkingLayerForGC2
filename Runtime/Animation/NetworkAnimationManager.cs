@@ -143,9 +143,8 @@ namespace Arawn.GameCreator2.Networking
 
         public void RefreshControllerRegistry()
         {
-            var controllers = FindObjectsByType<UnitAnimimNetworkController>(
-                FindObjectsInactive.Exclude,
-                FindObjectsSortMode.None);
+            var controllers = UnityObjectSearch.FindAll<UnitAnimimNetworkController>(
+                FindObjectsInactive.Exclude);
 
             for (int i = 0; i < controllers.Length; i++)
             {

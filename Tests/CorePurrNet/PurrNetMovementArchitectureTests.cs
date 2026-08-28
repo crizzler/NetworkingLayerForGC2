@@ -3,10 +3,12 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
 using Arawn.GameCreator2.Networking.Transport.PurrNet;
+using Arawn.GameCreator2.Networking.TestUtilities;
 using GameCreator.Runtime.Characters;
 using NUnit.Framework;
 using PurrNet.Packing;
 using UnityEngine;
+using UnityEngine.TestTools;
 
 namespace Arawn.GameCreator2.Networking.CorePurrNet.Tests
 {
@@ -25,9 +27,18 @@ namespace Arawn.GameCreator2.Networking.CorePurrNet.Tests
         [TearDown]
         public void TearDown()
         {
-            for (int i = m_Cleanup.Count - 1; i >= 0; i--)
+            bool previousIgnore = LogAssert.ignoreFailingMessages;
+            LogAssert.ignoreFailingMessages = true;
+            try
             {
-                if (m_Cleanup[i] != null) UnityEngine.Object.DestroyImmediate(m_Cleanup[i]);
+                for (int i = m_Cleanup.Count - 1; i >= 0; i--)
+                {
+                    if (m_Cleanup[i] != null) UnityEngine.Object.DestroyImmediate(m_Cleanup[i]);
+                }
+            }
+            finally
+            {
+                LogAssert.ignoreFailingMessages = previousIgnore;
             }
 
             m_Cleanup.Clear();
@@ -76,6 +87,67 @@ namespace Arawn.GameCreator2.Networking.CorePurrNet.Tests
             Assert.That(
                 Quaternion.Angle(character.transform.rotation, authoritativeRotation),
                 Is.LessThan(0.001f));
+        }
+
+        [Test]
+        [Category("GC2Networking.FreeFlow")]
+        public void VisualPresentation_PooledDeactivationDefersHierarchyMutation()
+        {
+            Character character = CreateCharacter(
+                "Pooled Visual Presentation",
+                out Transform mannequin);
+            object presentation = CreatePresentation(character, "PurrNetPool");
+            Assert.That(Invoke<bool>(presentation, "TryEnsure", true), Is.True);
+            Transform wrapper = mannequin.parent;
+            Assert.That(wrapper.name, Is.EqualTo("__NetworkCharacterPresentation"));
+
+            Type type = typeof(UnitDriverNetworkRemote).Assembly.GetType(PresentationTypeName);
+            Assert.That(type, Is.Not.Null, $"Missing {PresentationTypeName}");
+            MethodInfo decision = type.GetMethod(
+                "ShouldDeferHierarchyRestore",
+                BindingFlags.Static | BindingFlags.NonPublic);
+            Assert.That(decision, Is.Not.Null);
+
+            bool Decide(
+                bool characterEnabled,
+                bool characterActive,
+                bool presentationActive)
+            {
+                return (bool)decision.Invoke(
+                    null,
+                    new object[]
+                    {
+                        characterEnabled,
+                        characterActive,
+                        presentationActive
+                    });
+            }
+
+            Assert.That(Decide(false, false, false), Is.True);
+            Assert.That(Decide(true, false, false), Is.True);
+            Assert.That(Decide(true, true, false), Is.True);
+            Assert.That(Decide(true, true, true), Is.False);
+
+            character.gameObject.SetActive(false);
+            Invoke(presentation, "Dispose");
+            Assert.That(
+                mannequin.parent,
+                Is.SameAs(wrapper),
+                "Deferred cleanup must not destroy the Mannequin with its wrapper.");
+
+            Type queueType = typeof(UnitDriverNetworkRemote).Assembly.GetType(
+                "Arawn.GameCreator2.Networking." +
+                "NetworkCharacterVisualPresentationRestoreQueue");
+            Assert.That(queueType, Is.Not.Null);
+            MethodInfo drain = queueType.GetMethod(
+                "Drain",
+                BindingFlags.Static | BindingFlags.NonPublic);
+            Assert.That(drain, Is.Not.Null);
+            drain.Invoke(null, null);
+
+            Assert.That(mannequin, Is.Not.Null);
+            Assert.That(mannequin.parent, Is.SameAs(character.transform));
+            Assert.That(character.transform.Find("__NetworkCharacterPresentation"), Is.Null);
         }
 
         [Test]
@@ -175,10 +247,10 @@ namespace Arawn.GameCreator2.Networking.CorePurrNet.Tests
         public void RemoteSnapshots_RejectNonMonotonicPacketsAndRoleResetInvalidatesLatePackets()
         {
             Character character = CreateCharacter("Remote Snapshot Watermark", out Transform mannequin);
-            NetworkCharacter networkCharacter = character.gameObject.AddComponent<NetworkCharacter>();
+            NetworkCharacter networkCharacter = EditModeLifecycle.AddComponent<NetworkCharacter>(character.gameObject);
             DisableOptionalNetworkSystems(networkCharacter);
             networkCharacter.SetManualNetworkId(701);
-            networkCharacter.InitializeNetworkRole(isServer: false, isOwner: false);
+            EditModeLifecycle.InitializeNetworkRole(networkCharacter, isServer: false, isOwner: false);
 
             Assert.That(networkCharacter.CurrentRole, Is.EqualTo(NetworkCharacter.NetworkRole.RemoteClient));
             UnitDriverNetworkRemote driver = networkCharacter.RemoteDriver;
@@ -282,7 +354,7 @@ namespace Arawn.GameCreator2.Networking.CorePurrNet.Tests
             foreach (TUnitDriver driver in drivers)
             {
                 GameObject characterObject = Track(new GameObject($"AddScale {driver.GetType().Name}"));
-                Character character = characterObject.AddComponent<Character>();
+                Character character = EditModeLifecycle.AddComponent<Character>(characterObject);
                 driver.OnStartup(character);
 
                 try
@@ -368,10 +440,10 @@ namespace Arawn.GameCreator2.Networking.CorePurrNet.Tests
         public void RemoteSnapshots_AdvanceWhileDeadWithoutWritingTheRagdollRoot()
         {
             Character character = CreateCharacter("Remote Ragdoll Root", out _);
-            NetworkCharacter networkCharacter = character.gameObject.AddComponent<NetworkCharacter>();
+            NetworkCharacter networkCharacter = EditModeLifecycle.AddComponent<NetworkCharacter>(character.gameObject);
             DisableOptionalNetworkSystems(networkCharacter);
             networkCharacter.SetManualNetworkId(702);
-            networkCharacter.InitializeNetworkRole(isServer: false, isOwner: false);
+            EditModeLifecycle.InitializeNetworkRole(networkCharacter, isServer: false, isOwner: false);
 
             UnitDriverNetworkRemote driver = networkCharacter.RemoteDriver;
             NetworkPositionState beforeDeath = NetworkPositionState.Create(
@@ -401,8 +473,12 @@ namespace Arawn.GameCreator2.Networking.CorePurrNet.Tests
                 "Network state must not compete with the ragdoll/death root writer");
             Assert.That(
                 GetPrivateField<IList>(driver, "m_SnapshotBuffer").Count,
-                Is.EqualTo(2),
-                "The newest authority state should still be retained for recovery");
+                Is.EqualTo(1),
+                "A teleport-sized authority update should compact stale interpolation history");
+            Assert.That(
+                GetPrivateField<bool>(driver, "m_HasLatestAuthoritativeSnapshot"),
+                Is.True,
+                "The compacted buffer must still retain the newest authority state for recovery");
 
             character.IsDead = false;
             driver.OnUpdate();
@@ -580,10 +656,19 @@ namespace Arawn.GameCreator2.Networking.CorePurrNet.Tests
         public void RemoteServerReplica_LocalPlayerUnitCannotConsumeRemoteSequenceNumbers()
         {
             Character character = CreateCharacter("Remote Server Input Namespace", out _);
-            NetworkCharacter networkCharacter = character.gameObject.AddComponent<NetworkCharacter>();
+            NetworkCharacter networkCharacter = EditModeLifecycle.AddComponent<NetworkCharacter>(character.gameObject);
             DisableOptionalNetworkSystems(networkCharacter);
+            SetPrivateField(
+                networkCharacter,
+                "m_ActorType",
+                NetworkCharacterActorType.PlayerOwned);
             networkCharacter.SetManualNetworkId(703);
-            networkCharacter.InitializeNetworkRole(isServer: true, isOwner: false, isHost: true);
+            EditModeLifecycle.InitializeNetworkRole(
+                networkCharacter,
+                isServer: true,
+                isOwner: false,
+                isHost: true,
+                hasAuthenticatedPlayerOwner: true);
 
             UnitDriverNetworkServer driver = networkCharacter.ServerDriver;
             Assert.That(driver, Is.Not.Null);
@@ -622,10 +707,10 @@ namespace Arawn.GameCreator2.Networking.CorePurrNet.Tests
         public void StrictHostOwner_CanStillGenerateValidatedLocalServerInput()
         {
             Character character = CreateCharacter("Strict Host Local Input", out _);
-            NetworkCharacter networkCharacter = character.gameObject.AddComponent<NetworkCharacter>();
+            NetworkCharacter networkCharacter = EditModeLifecycle.AddComponent<NetworkCharacter>(character.gameObject);
             DisableOptionalNetworkSystems(networkCharacter);
             networkCharacter.SetManualNetworkId(704);
-            networkCharacter.InitializeNetworkRole(isServer: true, isOwner: true, isHost: true);
+            EditModeLifecycle.InitializeNetworkRole(networkCharacter, isServer: true, isOwner: true, isHost: true);
 
             Assert.That(networkCharacter.CurrentRole, Is.EqualTo(NetworkCharacter.NetworkRole.Server));
             UnitDriverNetworkServer driver = networkCharacter.ServerDriver;
@@ -691,10 +776,10 @@ namespace Arawn.GameCreator2.Networking.CorePurrNet.Tests
         public void HostInputPacket_UsesTimeWeightedDirectionAcrossRenderFrames()
         {
             Character character = CreateCharacter("Weighted Host Input", out _);
-            NetworkCharacter networkCharacter = character.gameObject.AddComponent<NetworkCharacter>();
+            NetworkCharacter networkCharacter = EditModeLifecycle.AddComponent<NetworkCharacter>(character.gameObject);
             DisableOptionalNetworkSystems(networkCharacter);
             networkCharacter.SetManualNetworkId(706);
-            networkCharacter.InitializeNetworkRole(isServer: true, isOwner: true, isHost: true);
+            EditModeLifecycle.InitializeNetworkRole(networkCharacter, isServer: true, isOwner: true, isHost: true);
 
             UnitDriverNetworkServer driver = networkCharacter.ServerDriver;
             Invoke(driver, "QueueLocalDirectionalInput", Vector2.right, null, false, 0.016f);
@@ -792,10 +877,19 @@ namespace Arawn.GameCreator2.Networking.CorePurrNet.Tests
         public void ServerRole_ReusingSameDriverReactivatesRemoteInputGate()
         {
             Character character = CreateCharacter("Server Driver Reactivation", out _);
-            NetworkCharacter networkCharacter = character.gameObject.AddComponent<NetworkCharacter>();
+            NetworkCharacter networkCharacter = EditModeLifecycle.AddComponent<NetworkCharacter>(character.gameObject);
             DisableOptionalNetworkSystems(networkCharacter);
+            SetPrivateField(
+                networkCharacter,
+                "m_ActorType",
+                NetworkCharacterActorType.PlayerOwned);
             networkCharacter.SetManualNetworkId(705);
-            networkCharacter.InitializeNetworkRole(isServer: true, isOwner: false, isHost: true);
+            EditModeLifecycle.InitializeNetworkRole(
+                networkCharacter,
+                isServer: true,
+                isOwner: false,
+                isHost: true,
+                hasAuthenticatedPlayerOwner: true);
 
             UnitDriverNetworkServer originalDriver = networkCharacter.ServerDriver;
             networkCharacter.ResetNetworkRole();
@@ -805,7 +899,12 @@ namespace Arawn.GameCreator2.Networking.CorePurrNet.Tests
             originalDriver.QueueInput(NetworkInputState.Create(Vector2.right, 0, 0.05f));
             Assert.That(queue.Count, Is.Zero, "Late packets must remain rejected after cleanup");
 
-            networkCharacter.InitializeNetworkRole(isServer: true, isOwner: false, isHost: true);
+            EditModeLifecycle.InitializeNetworkRole(
+                networkCharacter,
+                isServer: true,
+                isOwner: false,
+                isHost: true,
+                hasAuthenticatedPlayerOwner: true);
 
             Assert.That(networkCharacter.ServerDriver, Is.SameAs(originalDriver));
             Assert.That(networkCharacter.ActiveDriver, Is.SameAs(originalDriver));
@@ -824,7 +923,7 @@ namespace Arawn.GameCreator2.Networking.CorePurrNet.Tests
         private Character CreateCharacter(string name, out Transform mannequin)
         {
             GameObject characterObject = Track(new GameObject(name));
-            Character character = characterObject.AddComponent<Character>();
+            Character character = EditModeLifecycle.AddComponent<Character>(characterObject);
             GameObject mannequinObject = new GameObject("Mannequin");
             mannequinObject.transform.SetParent(characterObject.transform, false);
             mannequinObject.AddComponent<MeshRenderer>();

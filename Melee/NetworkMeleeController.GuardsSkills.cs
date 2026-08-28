@@ -465,9 +465,30 @@ namespace Arawn.GameCreator2.Networking.Melee
                 }
             }
 
+            if (!NetworkFreeFlowCombatAdapter.ValidateSkillRequest(
+                    this,
+                    weapon,
+                    skill,
+                    request,
+                    out string actionContextDetails))
+            {
+                return RejectSkillRequest(
+                    request,
+                    SkillRejectionReason.InvalidActionContext,
+                    actionContextDetails);
+            }
+
+            bool requestsFreeFlowCounter =
+                (request.ActionFlags & NetworkMeleeSkillActionFlags.FreeFlowCounter) != 0;
+            bool interruptRemoteOwnerAfterCounterCommit = false;
+
             // The owner's combo state can advance before the server presentation replica leaves
             // its prior Strike frame. Accept only a structurally valid continuation of the most
             // recent server-approved combo operation; unrelated requests remain blocked by Busy.
+            // A connected owner may, however, force-cancel its local Melee phase to answer an
+            // authority-published Free Flow counter window while the server presentation replica
+            // is still playing the prior Skill. Defer that one Busy decision until the exact
+            // counter revision is committed below; a flag by itself never grants the bypass.
             if (m_Character.Busy.IsBusy)
             {
                 MeleePhase phase = m_MeleeStance?.CurrentPhase ?? MeleePhase.None;
@@ -480,15 +501,26 @@ namespace Arawn.GameCreator2.Networking.Melee
                     weapon,
                     skill,
                     Time.time);
+                bool isRemoteOwnerCounterCandidate =
+                    !m_IsLocalClient &&
+                    requestsFreeFlowCounter &&
+                    m_NetworkCharacter != null &&
+                    m_NetworkCharacter.IsPlayerOwnedActor &&
+                    m_NetworkCharacter.HasAuthenticatedPlayerOwner;
 
                 if (!isHostOwnerReplay &&
                     !isApprovedComboContinuation &&
                     phase != MeleePhase.None)
                 {
-                    return RejectSkillRequest(
-                        request,
-                        SkillRejectionReason.CharacterBusy,
-                        $"character busy phase={phase} lastSkill={m_LastAttackState.SkillHash}");
+                    if (!isRemoteOwnerCounterCandidate)
+                    {
+                        return RejectSkillRequest(
+                            request,
+                            SkillRejectionReason.CharacterBusy,
+                            $"character busy phase={phase} lastSkill={m_LastAttackState.SkillHash}");
+                    }
+
+                    interruptRemoteOwnerAfterCounterCommit = true;
                 }
             }
 
@@ -522,6 +554,31 @@ namespace Arawn.GameCreator2.Networking.Melee
                     SkillRejectionReason.OnCooldown,
                     $"skill request rate limited dt={now - m_LastValidatedSkillRequestTime:F3}");
             }
+            if (!NetworkFreeFlowCombatAdapter.CommitSkillRequest(
+                    this,
+                    request,
+                    out string commitDetails))
+            {
+                return RejectSkillRequest(
+                    request,
+                    SkillRejectionReason.InvalidActionContext,
+                    commitDetails);
+            }
+
+            if (interruptRemoteOwnerAfterCounterCommit &&
+                m_MeleeStance != null &&
+                m_MeleeStance.CurrentPhase != MeleePhase.None)
+            {
+                // Commit above atomically consumed the exact NPC window assigned to this owner.
+                // Mirror the owner's authored ForceCancel before replacing the presentation
+                // replica's prior Skill, so no stale Strike can survive into the counter lease.
+                LogMeleeSync(
+                    $"force-cancelling busy server replica for committed Free Flow counter " +
+                    $"req={request.RequestId} corr={request.CorrelationId} " +
+                    $"priorPhase={m_MeleeStance.CurrentPhase}");
+                m_MeleeStance.ForceCancel();
+            }
+
             m_LastValidatedSkillRequestTime = now;
 
             LogMeleeSync(

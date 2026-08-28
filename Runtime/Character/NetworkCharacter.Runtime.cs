@@ -87,7 +87,17 @@ namespace Arawn.GameCreator2.Networking
                 return;
             }
 
-            m_Character.IsPlayer = isPlayer;
+            if (HasExplicitActorType)
+            {
+                EnforceActorPlayerFlag();
+                Debug.LogWarning(
+                    $"[NetworkCharacter] Ignored IsPlayer={isPlayer} for explicitly classified " +
+                    $"actor '{name}'. Network authority is controlled by Actor Type.",
+                    this);
+                return;
+            }
+
+            SetCharacterPlayerFlag(isPlayer);
             m_LastIsPlayer = isPlayer;
             OnNetworkPlayerChanged?.Invoke(isPlayer);
         }
@@ -173,6 +183,8 @@ namespace Arawn.GameCreator2.Networking
         {
             if (!m_IsInitialized) return;
 
+            EnforceActorPlayerFlag();
+
             float deltaTime = m_Character != null ? m_Character.Time.DeltaTime : Time.deltaTime;
             if (m_RegisteredBridge == null && NetworkTransportBridge.HasActive)
             {
@@ -194,6 +206,46 @@ namespace Arawn.GameCreator2.Networking
 
             ApplyCurrentRelevanceTier();
             DetectStateChanges();
+        }
+
+        private void LateUpdate()
+        {
+            if (!m_IsInitialized || !m_RuntimeIsServer) return;
+            if (!IsServerAuthoritativeNPC || !m_UsingAuthoredNpcDriver) return;
+            if (m_ActivePredictionBackend != null) return;
+
+            float now = Time.time;
+            float elapsed = Mathf.Max(0.0001f, now - m_LastNpcSampleTime);
+            Vector3 position = transform.position;
+            Vector3 velocity = (position - m_LastNpcSamplePosition) / elapsed;
+            IUnitDriver driver = m_Character?.Driver;
+
+            NetworkPositionState state = NetworkPositionState.Create(
+                position,
+                transform.eulerAngles.y,
+                velocity.y,
+                ++m_NpcStateSequence,
+                driver?.IsGrounded ?? false,
+                m_Character?.Motion?.IsJumping ?? false,
+                velocity);
+
+            OnServerStateProduced(state);
+            m_LastNpcSamplePosition = position;
+            m_LastNpcSampleTime = now;
+        }
+
+        private void EnforceActorPlayerFlag()
+        {
+            if (!HasExplicitActorType || m_Character == null) return;
+
+            bool expected = m_ActorType == NetworkCharacterActorType.PlayerOwned &&
+                m_RuntimeHasAuthenticatedPlayerOwner &&
+                m_RuntimeIsOwner;
+
+            if (m_Character.IsPlayer != expected)
+            {
+                SetCharacterPlayerFlag(expected);
+            }
         }
 
         private void DetectStateChanges()
@@ -231,6 +283,8 @@ namespace Arawn.GameCreator2.Networking
 
         private void Cleanup()
         {
+            bool hadAssignedRole = m_IsInitialized || m_CurrentRole != NetworkRole.None;
+            RestoreServerOptimizations();
             if (m_LagCompensation != null)
             {
                 m_LagCompensation.Configure(NetworkId, false);
@@ -272,11 +326,21 @@ namespace Arawn.GameCreator2.Networking
             m_RuntimeIsServer = false;
             m_RuntimeIsOwner = false;
             m_RuntimeIsHost = false;
+            m_RuntimeHasAuthenticatedPlayerOwner = false;
+            m_UsingAuthoredNpcDriver = false;
+            m_NpcStateSequence = 0;
+            m_LastNpcSamplePosition = transform.position;
+            m_LastNpcSampleTime = Time.time;
             m_ServerSimulationAccumulator = 0f;
             m_LastStateBroadcastTime = -100f;
             m_NextRelevanceUpdateTime = 0f;
             m_CurrentRelevanceTier = NetworkRelevanceTier.Near;
             m_LastStateBroadcastPerClient.Clear();
+
+            if (hadAssignedRole)
+            {
+                OnRoleReset?.Invoke();
+            }
         }
 
         public void ResetNetworkRole()
@@ -305,10 +369,14 @@ namespace Arawn.GameCreator2.Networking
             }
 
             // GC2's IsPlayer gates local input, so remote replicas must never inherit it.
-            bool isLocalPlayer = m_CurrentRole != NetworkRole.RemoteClient && state.isPlayer;
+            bool isLocalPlayer = HasExplicitActorType
+                ? m_ActorType == NetworkCharacterActorType.PlayerOwned &&
+                  m_RuntimeHasAuthenticatedPlayerOwner &&
+                  m_RuntimeIsOwner
+                : m_CurrentRole != NetworkRole.RemoteClient && state.isPlayer;
             if (m_Character.IsPlayer != isLocalPlayer)
             {
-                m_Character.IsPlayer = isLocalPlayer;
+                SetCharacterPlayerFlag(isLocalPlayer);
             }
         }
 
@@ -320,7 +388,11 @@ namespace Arawn.GameCreator2.Networking
             return new NetworkCharacterState
             {
                 isDead = m_Character.IsDead,
-                isPlayer = m_Character.IsPlayer
+                isPlayer = HasExplicitActorType
+                    ? m_ActorType == NetworkCharacterActorType.PlayerOwned &&
+                      m_RuntimeHasAuthenticatedPlayerOwner &&
+                      m_RuntimeIsOwner
+                    : m_Character.IsPlayer
             };
         }
 

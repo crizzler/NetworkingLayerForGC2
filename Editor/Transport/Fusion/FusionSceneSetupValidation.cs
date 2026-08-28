@@ -1601,7 +1601,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                 else if (identity != null)
                 {
                     var key = new NetworkActionEndpointKey(
-                        unchecked((uint)identity.GetInstanceID()), endpoint.EndpointHash);
+                        unchecked((uint)identity.GetLegacyInstanceId()), endpoint.EndpointHash);
                     if (endpointKeys.TryGetValue(key, out NetworkActionEndpoint existing) &&
                         existing != endpoint)
                     {
@@ -1876,10 +1876,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
             if (type == null || !typeof(Component).IsAssignableFrom(type)) return;
 
 #if UNITY_2023_1_OR_NEWER
-            UnityEngine.Object[] objects = UnityEngine.Object.FindObjectsByType(
-                type,
-                FindObjectsInactive.Include,
-                FindObjectsSortMode.None);
+            UnityEngine.Object[] objects = UnityObjectSearch.FindAll(type, FindObjectsInactive.Include);
 #else
             UnityEngine.Object[] objects = UnityEngine.Object.FindObjectsOfType(type, true);
 #endif
@@ -1915,9 +1912,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
         internal static T[] FindSceneComponents<T>() where T : Component
         {
 #if UNITY_2023_1_OR_NEWER
-            T[] components = UnityEngine.Object.FindObjectsByType<T>(
-                FindObjectsInactive.Include,
-                FindObjectsSortMode.None);
+            T[] components = UnityObjectSearch.FindAll<T>(FindObjectsInactive.Include);
 #else
             T[] components = UnityEngine.Object.FindObjectsOfType<T>(true);
 #endif
@@ -1938,10 +1933,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                 return Array.Empty<Component>();
 
 #if UNITY_2023_1_OR_NEWER
-            UnityEngine.Object[] objects = UnityEngine.Object.FindObjectsByType(
-                type,
-                FindObjectsInactive.Include,
-                FindObjectsSortMode.None);
+            UnityEngine.Object[] objects = UnityObjectSearch.FindAll(type, FindObjectsInactive.Include);
 #else
             UnityEngine.Object[] objects = UnityEngine.Object.FindObjectsOfType(type, true);
 #endif

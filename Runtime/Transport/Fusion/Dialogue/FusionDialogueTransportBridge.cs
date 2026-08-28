@@ -119,7 +119,7 @@ namespace Arawn.GameCreator2.Networking.Dialogue.Transport.Fusion
         {
             FusionTransportBridge candidate = m_TransportBridge;
             if (candidate == null) candidate = NetworkTransportBridge.Active as FusionTransportBridge;
-            if (candidate == null) candidate = FindFirstObjectByType<FusionTransportBridge>();
+            if (candidate == null) candidate = UnityObjectSearch.FindAny<FusionTransportBridge>();
 
             if (!force && candidate == m_BoundBridge) return;
             if (candidate == m_BoundBridge) return;
@@ -245,9 +245,7 @@ namespace Arawn.GameCreator2.Networking.Dialogue.Transport.Fusion
             PruneControllerRegistry(manager);
             if (!m_AutoRegisterSceneControllers && !force) return;
 
-            NetworkDialogueController[] controllers = FindObjectsByType<NetworkDialogueController>(
-                FindObjectsInactive.Exclude,
-                FindObjectsSortMode.None);
+            NetworkDialogueController[] controllers = UnityObjectSearch.FindAll<NetworkDialogueController>(FindObjectsInactive.Exclude);
             for (int i = 0; i < controllers.Length; i++) RegisterController(manager, controllers[i]);
         }
 
@@ -429,7 +427,7 @@ namespace Arawn.GameCreator2.Networking.Dialogue.Transport.Fusion
         {
             return NetworkDialogueManager.Instance != null
                 ? NetworkDialogueManager.Instance
-                : FindFirstObjectByType<NetworkDialogueManager>();
+                : UnityObjectSearch.FindAny<NetworkDialogueManager>();
         }
     }
 }

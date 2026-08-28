@@ -283,8 +283,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
             uint clientId = PlayerIdToClientId(player);
             if (!NetworkTransportBridge.IsValidClientId(clientId)) return;
 
-            NetworkCharacter[] characters = FindObjectsByType<NetworkCharacter>(
-                FindObjectsInactive.Exclude, FindObjectsSortMode.None);
+            NetworkCharacter[] characters = UnityObjectSearch.FindAll<NetworkCharacter>(FindObjectsInactive.Exclude);
             var sent = new HashSet<uint>();
             for (int i = 0; i < characters.Length; i++)
             {
@@ -426,7 +425,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
         {
             return NetworkCoreManager.Instance != null
                 ? NetworkCoreManager.Instance
-                : FindFirstObjectByType<NetworkCoreManager>();
+                : UnityObjectSearch.FindAny<NetworkCoreManager>();
         }
 
         private static uint PlayerIdToClientId(PlayerID player)

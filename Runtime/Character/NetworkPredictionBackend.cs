@@ -92,11 +92,24 @@ namespace Arawn.GameCreator2.Networking
     }
 
     /// <summary>
+    /// Exposes the narrowly scoped application context for a remote owner's pose after a
+    /// transport has authenticated the sender. This is not an authority grant: the ordinary
+    /// server motion window, gameplay validation, finite-value checks, and reconciliation
+    /// envelope remain mandatory in the enclosing apply path. Implementations must assert the
+    /// value only while consuming that verified sample and clear it in a <c>finally</c> block.
+    /// </summary>
+    public interface INetworkAuthenticatedRemoteOwnerPoseContext
+    {
+        bool IsApplyingAuthenticatedRemoteOwnerPose { get; }
+    }
+
+    /// <summary>
     /// Transport-neutral coordination hooks for temporarily owner-authored root motion.
-    /// Traversal uses these hooks to keep its relative pose aligned with the collision-constrained
-    /// root accepted by an authoritative movement backend. Keeping the hook outside a concrete
-    /// driver lets the built-in, PurrDiction-native, and Fusion-native backends enforce the
-    /// same invariants.
+    /// Traversal uses these hooks to keep its relative pose aligned with the root accepted by an
+    /// authoritative movement backend. Ordinary locomotion remains collision-constrained, while
+    /// an explicitly authorized interactive traversal can retain GC2's authored absolute-root
+    /// semantics. Keeping the hook outside a concrete driver lets the built-in,
+    /// PurrDiction-native, and Fusion-native backends enforce the same invariants.
     /// </summary>
     public static class NetworkOwnerMotionAuthorityHooks
     {

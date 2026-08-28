@@ -617,7 +617,7 @@ namespace Arawn.GameCreator2.Networking
                     $"sequence={command.sequenceNumber} type={command.commandType} consumed={consumed} " +
                     $"velocity={NetworkTraversalClimbDiagnostics.Vector(command.GetVelocity())}",
                     this.Character,
-                    $"traversal-direction-echo:{this.Character.GetInstanceID()}");
+                    $"traversal-direction-echo:{this.Character.GetLegacyInstanceId()}");
             }
 
             return consumed;
@@ -705,8 +705,6 @@ namespace Arawn.GameCreator2.Networking
 
             if (m_IsServer)
             {
-                ushort sequence = NextCommandSequence(false);
-
                 // Server applies directly
                 StopNavigationRoutine();
                 base.MoveToDirection(velocity, space, priority);
@@ -716,6 +714,27 @@ namespace Arawn.GameCreator2.Networking
                         traversalWorldVelocity,
                         true);
                 }
+
+                // A Host-owned MotionInteractive invokes this once per render frame. Keep
+                // applying that local direction every frame, but coalesce its semantic wire
+                // command exactly like a connected owner. Without this gate the Host queues
+                // ~60 ReliableOrdered broadcasts per second while connected owners normally
+                // publish at <=20 Hz with a 0.12-second heartbeat. That asymmetric traffic can
+                // starve Fusion pose snapshots and repeatedly restart remote traversal blends.
+                if (!ShouldSendMoveDirectionCommand(velocity, space, priority))
+                {
+                    LogTraversalMoveDirection(
+                        "server-throttled",
+                        velocity,
+                        traversalWorldVelocity,
+                        space,
+                        priority,
+                        0,
+                        false);
+                    return;
+                }
+
+                ushort sequence = NextCommandSequence(false);
 
                 // Broadcast to clients
                 var command = NetworkMotionCommand.CreateMoveToDirection(
@@ -796,10 +815,8 @@ namespace Arawn.GameCreator2.Networking
                 return;
             }
 
-            ushort sequence = NextCommandSequence(false);
             StopNavigationRoutine();
             base.StopToDirection(priority);
-            MarkMoveDirectionCommandSent(Vector3.zero, Space.World, priority, Time.unscaledTime);
             if (IsTraversalMoveDirectionPriority(priority))
             {
                 if (CanPublishLocalTraversalPresentationDirection())
@@ -807,15 +824,34 @@ namespace Arawn.GameCreator2.Networking
                     SetTraversalPresentationDirection(Vector3.zero);
                 }
                 SetDriverExternalMoveDirection(Vector3.zero, false);
+            }
+
+            // GC2 systems may hold a movement lock by invoking StopToDirection once per
+            // rendered frame. Preserve that local stop on every call, but publish only the
+            // first stop or a changed priority/context. Otherwise a legitimate 60 FPS lock
+            // floods the reliable motion channel and exhausts the shared Core rate limit.
+            if (!ShouldSendMoveDirectionCommand(Vector3.zero, Space.World, priority))
+            {
                 LogTraversalMoveDirection(
-                    m_IsServer ? "server-stop" : "client-stop",
+                    m_IsServer ? "server-stop-throttled" : "client-stop-throttled",
                     Vector3.zero,
                     Vector3.zero,
                     Space.World,
                     priority,
-                    sequence,
-                    true);
+                    0,
+                    false);
+                return;
             }
+
+            ushort sequence = NextCommandSequence(false);
+            LogTraversalMoveDirection(
+                m_IsServer ? "server-stop" : "client-stop",
+                Vector3.zero,
+                Vector3.zero,
+                Space.World,
+                priority,
+                sequence,
+                true);
 
             var command = NetworkMotionCommand.CreateStopDirection(priority, sequence);
             if (m_IsServer)
@@ -1353,7 +1389,19 @@ namespace Arawn.GameCreator2.Networking
 
         private bool ShouldSendMoveDirectionCommand(Vector3 velocity, Space space, int priority)
         {
-            float now = Time.unscaledTime;
+            return ShouldSendMoveDirectionCommandAtTime(
+                velocity,
+                space,
+                priority,
+                Time.unscaledTime);
+        }
+
+        private bool ShouldSendMoveDirectionCommandAtTime(
+            Vector3 velocity,
+            Space space,
+            int priority,
+            float now)
+        {
             const float minimumInterval = MOVE_DIRECTION_MINIMUM_SEND_INTERVAL;
             const float heartbeatInterval = MOVE_DIRECTION_HEARTBEAT_INTERVAL;
             const float changeThreshold = MOVE_DIRECTION_CHANGE_THRESHOLD;
@@ -1773,7 +1821,7 @@ namespace Arawn.GameCreator2.Networking
                 $"{space}:{AxisSign(worldVelocity.x)},{AxisSign(worldVelocity.y)},{AxisSign(worldVelocity.z)}:" +
                 $"{updateKinematics}";
             bool changed = NetworkTraversalClimbDiagnostics.HasChanged(
-                $"traversal-direction:{this.Character.GetInstanceID()}",
+                $"traversal-direction:{this.Character.GetLegacyInstanceId()}",
                 signature);
 
             NetworkTraversalClimbDiagnostics.Log(
@@ -1787,7 +1835,7 @@ namespace Arawn.GameCreator2.Networking
                 $"driverLocal={NetworkTraversalClimbDiagnostics.Vector(driverLocal)} " +
                 $"updateKinematics={updateKinematics}",
                 this.Character,
-                changed ? null : $"traversal-direction:{this.Character.GetInstanceID()}");
+                changed ? null : $"traversal-direction:{this.Character.GetLegacyInstanceId()}");
         }
 
         private static int AxisSign(float value)
@@ -2218,7 +2266,7 @@ namespace Arawn.GameCreator2.Networking
                 $"authored={NetworkTraversalClimbDiagnostics.Vector(authoredVelocity)} " +
                 $"world={NetworkTraversalClimbDiagnostics.Vector(worldVelocity)}",
                 this.Character,
-                $"passive-server-traversal-direction:{this.Character.GetInstanceID()}:{operation}");
+                $"passive-server-traversal-direction:{this.Character.GetLegacyInstanceId()}:{operation}");
         }
 
         private void ApplyDashLocally(NetworkMotionCommand command)

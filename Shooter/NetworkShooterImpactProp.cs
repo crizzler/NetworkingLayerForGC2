@@ -280,9 +280,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
         {
             if (TryGet(networkId, out prop)) return true;
 
-            NetworkShooterImpactProp[] props = FindObjectsByType<NetworkShooterImpactProp>(
-                FindObjectsInactive.Exclude,
-                FindObjectsSortMode.None);
+            NetworkShooterImpactProp[] props = UnityObjectSearch.FindAll<NetworkShooterImpactProp>(FindObjectsInactive.Exclude);
 
             for (int i = 0; i < props.Length; i++)
             {

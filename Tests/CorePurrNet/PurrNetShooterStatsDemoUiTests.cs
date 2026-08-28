@@ -23,6 +23,9 @@ namespace Arawn.GameCreator2.Networking.CorePurrNet.Tests
         private const string InstallRoot =
             "Assets/Plugins/GameCreator/Installs/" +
             "GC2NetworkingLayerPurrNetTransport.ShooterExamples@1.0.2";
+        private const string PackageInstallRoot =
+            "Assets/Plugins/GameCreator/Installs/" +
+            "GC2NetworkingLayerPurrNetTransport.ShooterExamples@1.1.0";
 
         private const string ScenePath = InstallRoot +
             "/Requires Shooter Demos - PurrNetShooterStatsDemo.unity";
@@ -473,48 +476,107 @@ namespace Arawn.GameCreator2.Networking.CorePurrNet.Tests
         }
 
         [Test]
-        public void ShooterStatsDemo_UnityPackageContainsExactVersion102Payload()
+        public void ShooterStatsDemo_UnityPackageContainsExactVersion110Payload()
         {
             string descriptor = ReadAsset(InstallerDescriptorPath).Replace("\r\n", "\n");
             StringAssert.IsMatch(
-                @"(?m)^    m_Version:\n      major: 1\n      minor: 0\n      patch: 2$",
+                @"(?m)^    m_Version:\n      major: 1\n      minor: 1\n      patch: 0$",
                 descriptor,
-                "Existing 1.0.1 installs need version 1.0.2 so Game Creator offers the " +
-                "collider-free impact fix.");
+                "The enemy-shooter demo is a feature release and must install as 1.1.0.");
 
             string packageFile = ProjectPath(PackagePath);
             Assert.That(File.Exists(packageFile), Is.True,
                 "The PurrNet Shooter demo Game Creator package is missing.");
 
             string[] pathnames = ReadUnityPackagePathnames(packageFile);
+            string packageProfiles = PackageInstallRoot + "/Profiles";
+            string packageRegistry = packageProfiles +
+                "/PurrNetDemoNetworkPrefabs 37.asset";
+            string packageVariables = packageProfiles +
+                "/PurrNetDemoNetworkVariableProfile 21.asset";
+            string packageSceneVariables = packageProfiles +
+                "/PurrNetDemoSceneNetworkVariableProfile 20.asset";
+            string packagePlayer = PackageInstallRoot +
+                "/PurrNetDemoPlayer-ShooterAndStats.prefab";
+            string packageScene = PackageInstallRoot +
+                "/Requires Shooter Demos - PurrNetShooterStatsDemo.unity";
+            string packageMonitor = PackageInstallRoot +
+                "/PurrNetShooterStatsDemoMonitor.cs";
+            string packageWeapons = PackageInstallRoot + "/Weapons";
+            string packageWeapon = packageWeapons + "/PurrNetDemo_AK_Weapon.asset";
+            string enemyPrefab = PackageInstallRoot +
+                "/PurrNetDemoEnemy-ShooterAndStats.prefab";
+            string enemyFolder = PackageInstallRoot +
+                "/Requires Shooter Demos - PurrNetEnemyShooterDemo";
+            string enemyScene = PackageInstallRoot +
+                "/Requires Shooter Demos - PurrNetEnemyShooterDemo.unity";
+            string navMesh = enemyFolder + "/NavMesh-EnemyDemo.asset";
             CollectionAssert.AreEquivalent(
                 new[]
                 {
-                    InstallRoot,
-                    ProfilesPath,
-                    NetworkPrefabsPath,
-                    VariableProfilePath,
-                    SceneVariableProfilePath,
-                    PlayerPrefabPath,
-                    ScenePath,
-                    MonitorPath,
-                    WeaponFolderPath,
-                    CustomWeaponPath
+                    PackageInstallRoot,
+                    packageProfiles,
+                    packageRegistry,
+                    packageVariables,
+                    packageSceneVariables,
+                    packagePlayer,
+                    packageScene,
+                    packageMonitor,
+                    packageWeapons,
+                    packageWeapon,
+                    enemyPrefab,
+                    enemyFolder,
+                    enemyScene,
+                    navMesh
                 },
                 pathnames,
-                "The package must contain the exact ten-entry install payload, including the " +
-                "custom weapon and replicated-health monitor, with no stale assets.");
-            Assert.That(pathnames.Length, Is.EqualTo(10));
+                "The package must contain the existing PvP fixture plus the registered enemy " +
+                "prefab, enemy scene, and persisted NavMesh, with no stale assets.");
+            Assert.That(pathnames.Length, Is.EqualTo(14));
 
             Dictionary<string, byte[]> packagedAssets =
                 ReadUnityPackageAssetPayloads(packageFile);
-            AssertPackageAssetMatchesCurrentSource(packagedAssets, NetworkPrefabsPath);
-            AssertPackageAssetMatchesCurrentSource(packagedAssets, VariableProfilePath);
-            AssertPackageAssetMatchesCurrentSource(packagedAssets, SceneVariableProfilePath);
-            AssertPackageAssetMatchesCurrentSource(packagedAssets, PlayerPrefabPath);
-            AssertPackageAssetMatchesCurrentSource(packagedAssets, ScenePath);
-            AssertPackageAssetMatchesCurrentSource(packagedAssets, MonitorPath);
-            AssertPackageAssetMatchesCurrentSource(packagedAssets, CustomWeaponPath);
+            AssertPackageAssetMatchesCurrentSource(
+                packagedAssets, packageVariables, VariableProfilePath);
+            AssertPackageAssetMatchesCurrentSource(
+                packagedAssets, packageSceneVariables, SceneVariableProfilePath);
+            AssertPackageAssetMatchesCurrentSource(packagedAssets, packagePlayer, PlayerPrefabPath);
+            AssertPackageAssetMatchesCurrentSource(packagedAssets, packageScene, ScenePath);
+            AssertPackageAssetMatchesCurrentSource(packagedAssets, packageMonitor, MonitorPath);
+            AssertPackageAssetMatchesCurrentSource(packagedAssets, packageWeapon, CustomWeaponPath);
+
+            string registryYaml = Encoding.UTF8.GetString(packagedAssets[packageRegistry]);
+            Assert.That(CountOccurrences(registryYaml, "    prefab:"), Is.EqualTo(2),
+                "PurrNet must register both the human and server-owned enemy prefabs.");
+
+            string enemyPrefabYaml = Encoding.UTF8.GetString(packagedAssets[enemyPrefab]);
+            StringAssert.Contains("m_ActorType: 2", enemyPrefabYaml);
+            StringAssert.Contains("m_NPCMode: 0", enemyPrefabYaml);
+            StringAssert.Contains("Authority Only AI", enemyPrefabYaml);
+            StringAssert.Contains("Trigger_Start", enemyPrefabYaml);
+            StringAssert.Contains("Trigger_AI", enemyPrefabYaml);
+            StringAssert.Contains("NetworkCharacterAuthorityGate", enemyPrefabYaml);
+            StringAssert.Contains("NetworkNpcTargetSelector", enemyPrefabYaml);
+            StringAssert.Contains("GetGameObjectCharacterTarget", enemyPrefabYaml);
+            StringAssert.IsMatch(
+                @"(?s)m_Name: Authority Only AI.*?m_IsActive: 1",
+                enemyPrefabYaml,
+                "The AI root must be authored enabled so the authority gate can restore it.");
+            Assert.That(
+                CountOccurrences(enemyPrefabYaml, "GetGameObjectPlayer"),
+                Is.EqualTo(CountOccurrences(
+                    Encoding.UTF8.GetString(packagedAssets[packagePlayer]),
+                    "GetGameObjectPlayer")),
+                "Cloned authority AI must add no ShortcutPlayer getters; inherited player " +
+                "controller defaults may remain dormant while Character.IsPlayer is false.");
+            StringAssert.DoesNotContain("28cd7c621507645ab8d9eda7f9b350da", enemyPrefabYaml,
+                "The copied GC2 AI must use the demo-owned deterministic weapon.");
+
+            string enemySceneYaml = Encoding.UTF8.GetString(packagedAssets[enemyScene]);
+            Assert.That(CountOccurrences(enemySceneYaml, "purrnet-enemy-slot-"), Is.EqualTo(3));
+            Assert.That(CountOccurrences(enemySceneYaml, "m_BotPrefab:"), Is.EqualTo(3));
+            StringAssert.Contains("PurrNetBotSlotCoordinator", enemySceneYaml);
+            Assert.That(packagedAssets[navMesh].Length, Is.GreaterThan(0));
         }
 
         [Test]
@@ -562,6 +624,28 @@ namespace Arawn.GameCreator2.Networking.CorePurrNet.Tests
                     "SetString(so, \"m_FallbackHealthAttributeId\", \"hp\")"),
                 Is.EqualTo(2),
                 "Both bridge types need an explicit lowercase HP fallback ID.");
+        }
+
+        [Test]
+        public void Runtime_BotSlotsRecoverLateSubscriptionsAndRequestDurableSnapshots()
+        {
+            string coordinator = ReadAsset(
+                "Assets/Arawn/NetworkingLayerForGC2/Runtime/Transport/PurrNet/" +
+                "PurrNetBotSlotCoordinator.cs");
+            string spawner = ReadAsset(
+                "Assets/Arawn/NetworkingLayerForGC2/Runtime/Transport/PurrNet/" +
+                "PurrNetDemoPlayerSpawner.cs");
+
+            StringAssert.Contains("PurrNetBotSlotSnapshotRequestPacket", coordinator);
+            StringAssert.Contains("EnsureRunningSubscriptions(manager);", coordinator);
+            StringAssert.Contains("manager.SendToServer(", coordinator);
+            StringAssert.Contains("HandleSnapshotRequestServer", coordinator);
+            StringAssert.Contains(
+                "if (manager != null && manager.isServer && !m_SubscribedServer)",
+                spawner,
+                "Dedicated-server scene components must recover when PurrNet's start callback " +
+                "precedes their subscription.");
+            StringAssert.Contains("TrySubscribeServer(manager);", spawner);
         }
 
         private static Rect CalculatePanelRect(
@@ -898,23 +982,25 @@ namespace Arawn.GameCreator2.Networking.CorePurrNet.Tests
 
         private static void AssertPackageAssetMatchesCurrentSource(
             IReadOnlyDictionary<string, byte[]> packagedAssets,
-            string assetPath)
+            string packagedAssetPath,
+            string sourceAssetPath)
         {
             Assert.That(
-                packagedAssets.TryGetValue(assetPath, out byte[] packaged),
+                packagedAssets.TryGetValue(packagedAssetPath, out byte[] packaged),
                 Is.True,
-                $"The Unity package has no asset payload for '{assetPath}'.");
+                $"The Unity package has no asset payload for '{packagedAssetPath}'.");
 
-            byte[] current = File.ReadAllBytes(ProjectPath(assetPath));
+            byte[] current = File.ReadAllBytes(ProjectPath(sourceAssetPath));
             Assert.That(
                 packaged.Length,
                 Is.EqualTo(current.Length),
-                $"The packaged '{assetPath}' is stale (byte length differs from its source).");
+                $"The packaged '{packagedAssetPath}' is stale (byte length differs from " +
+                $"'{sourceAssetPath}').");
             Assert.That(
                 packaged.SequenceEqual(current),
                 Is.True,
-                $"The packaged '{assetPath}' is stale (bytes differ from source). " +
-                "Rebuild Package.unitypackage with the Game Creator InstallManager.");
+                $"The packaged '{packagedAssetPath}' is stale (bytes differ from " +
+                $"'{sourceAssetPath}'). Rebuild Package.unitypackage.");
         }
 
         private static int ReadFully(

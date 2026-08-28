@@ -101,7 +101,7 @@ namespace Arawn.GameCreator2.Networking.Shooter.Transport.PurrNet
             {
                 if (m_CoreBridge != null) return m_CoreBridge;
                 m_CoreBridge = NetworkTransportBridge.Active as PurrNetTransportBridge;
-                if (m_CoreBridge == null) m_CoreBridge = FindFirstObjectByType<PurrNetTransportBridge>();
+                if (m_CoreBridge == null) m_CoreBridge = UnityObjectSearch.FindAny<PurrNetTransportBridge>();
                 return m_CoreBridge;
             }
         }
@@ -382,9 +382,7 @@ namespace Arawn.GameCreator2.Networking.Shooter.Transport.PurrNet
                     m_Channel);
             }
 
-            NetworkShooterImpactProp[] props = FindObjectsByType<NetworkShooterImpactProp>(
-                FindObjectsInactive.Exclude,
-                FindObjectsSortMode.None);
+            NetworkShooterImpactProp[] props = UnityObjectSearch.FindAll<NetworkShooterImpactProp>(FindObjectsInactive.Exclude);
             for (int i = 0; i < props.Length; i++)
             {
                 NetworkShooterImpactProp prop = props[i];
@@ -642,9 +640,7 @@ namespace Arawn.GameCreator2.Networking.Shooter.Transport.PurrNet
 
             if (!m_AutoRegisterSceneControllers && !force) return;
 
-            var controllers = FindObjectsByType<NetworkShooterController>(
-                FindObjectsInactive.Exclude,
-                FindObjectsSortMode.None);
+            var controllers = UnityObjectSearch.FindAll<NetworkShooterController>(FindObjectsInactive.Exclude);
 
             for (int i = 0; i < controllers.Length; i++)
             {
@@ -1895,7 +1891,7 @@ namespace Arawn.GameCreator2.Networking.Shooter.Transport.PurrNet
         {
             return NetworkShooterManager.Instance != null
                 ? NetworkShooterManager.Instance
-                : FindFirstObjectByType<NetworkShooterManager>();
+                : UnityObjectSearch.FindAny<NetworkShooterManager>();
         }
 
         private static T GetArrayValue<T>(T[] values, int index) where T : UnityEngine.Object

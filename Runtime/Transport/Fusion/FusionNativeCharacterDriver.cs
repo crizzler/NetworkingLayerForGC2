@@ -23,6 +23,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         INetworkDirectionalInputSink,
         INetworkOwnerMotionAuthority,
         INetworkServerOwnerMotionAuthority,
+        INetworkAuthenticatedRemoteOwnerPoseContext,
         INetworkExternalMoveDirectionSink,
         INetworkNavMeshCommandSink
     {
@@ -75,6 +76,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         [NonSerialized] private float m_MaxSpeedMultiplier = 1.2f;
         [NonSerialized] private float m_MaxOwnerPoseDistance = 3f;
         [NonSerialized] private FusionNativeNetworkCharacterMotor m_Motor;
+        [NonSerialized] private bool m_IsApplyingAuthenticatedRemoteOwnerPose;
 
         [NonSerialized] private int m_LastGroundedTick = int.MinValue;
         [NonSerialized] private int m_LastAcceptedOwnerPoseTick = int.MinValue;
@@ -139,10 +141,17 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         internal int ServerOwnerMotionUntilTick => m_ServerMotionAuthorizationCount > 0
             ? m_ServerMotionAuthorizations[m_ServerMotionAuthorizationCount - 1].UntilTick
             : int.MinValue;
+        public bool IsApplyingAuthenticatedRemoteOwnerPose =>
+            m_IsApplyingAuthenticatedRemoteOwnerPose;
 
         internal void AttachMotor(FusionNativeNetworkCharacterMotor motor)
         {
             m_Motor = motor;
+        }
+
+        internal void SetAuthenticatedRemoteOwnerPoseApplication(bool active)
+        {
+            m_IsApplyingAuthenticatedRemoteOwnerPose = active;
         }
 
         /// <summary>
@@ -174,6 +183,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                 0,
                 m_ServerMotionAuthorizations.Length);
             m_ServerMotionAuthorizationCount = 0;
+            m_IsApplyingAuthenticatedRemoteOwnerPose = false;
             bool groundedNow = Character != null && m_Controller != null && IsGrounded;
             m_LastGroundedTick = groundedNow ? CurrentTick : int.MinValue;
             m_LastAcceptedOwnerPoseTick = int.MinValue;
@@ -215,6 +225,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             m_WarpRejectionWarningIssued = false;
             m_OwnerMotionUntilTick = int.MinValue;
             m_ServerMotionAuthorizationCount = 0;
+            m_IsApplyingAuthenticatedRemoteOwnerPose = false;
             m_LastGroundedTick = int.MinValue;
             m_LastAcceptedOwnerPoseTick = int.MinValue;
 
@@ -231,6 +242,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             m_Controller = null;
             m_FloorNormal = null;
             m_NavigationPath = null;
+            m_IsApplyingAuthenticatedRemoteOwnerPose = false;
             ClearExplicitPresentationVelocity();
             ClearNavigationIntent(NavigationMode.Inactive);
             base.OnDispose(character);
@@ -1062,7 +1074,25 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             Vector3 before = Transform.position;
             Vector3 requestedDelta = target - before;
             CollisionFlags collisionFlags = CollisionFlags.None;
-            if (m_Controller != null && m_Controller.enabled &&
+            bool useAuthorizedAbsoluteRootWrite =
+                NetworkOwnerMotionAuthorityHooks.TryGetExternalRootWriteAllowance(
+                    Character,
+                    target,
+                    out _);
+            if (useAuthorizedAbsoluteRootWrite)
+            {
+                // GC2 interactive Traversal authors an absolute root pose. The local GC2
+                // driver has already applied that semantic pose without a controller sweep;
+                // sweeping the authenticated copy again can stop State Authority on another
+                // network player's CharacterController while the owner continues to the ledge
+                // boundary. Observers then receive the blocked pose and select Move instead of
+                // Edge. The transport-neutral gameplay hook is installed only for the active,
+                // validated traversal operation, after the server motion window, rejection and
+                // distance checks above. Match the built-in server driver's absolute path so
+                // Fusion state and the owner's authored traversal cannot diverge.
+                SetRootPosition(target);
+            }
+            else if (m_Controller != null && m_Controller.enabled &&
                 m_Controller.gameObject.activeInHierarchy)
             {
                 Physics.SyncTransforms();

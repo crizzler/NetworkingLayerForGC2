@@ -1307,7 +1307,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
             {
                 if (propInstance != null)
                 {
-                    m_Character.Props.RemovePrefab(modelPrefab, propInstance.GetInstanceID());
+                    m_Character.Props.RemovePrefabInstance(modelPrefab, propInstance);
                 }
 
                 m_Character.Props.RemovePrefab(modelPrefab);

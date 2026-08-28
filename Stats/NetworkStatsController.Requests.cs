@@ -23,6 +23,7 @@ namespace Arawn.GameCreator2.Networking.Stats
             StatModificationSource source = StatModificationSource.Direct,
             int sourceHash = 0)
         {
+            if (RejectCosmeticNpcRequest(nameof(RequestStatModify))) return;
             if (m_IsRemoteClient)
             {
                 Debug.LogWarning("[NetworkStatsController] Cannot modify stats on remote client");
@@ -95,6 +96,7 @@ namespace Arawn.GameCreator2.Networking.Stats
             StatModificationSource source = StatModificationSource.Direct,
             int sourceHash = 0)
         {
+            if (RejectCosmeticNpcRequest(nameof(RequestAttributeModify))) return;
             if (m_IsRemoteClient)
             {
                 Debug.LogWarning("[NetworkStatsController] Cannot modify attributes on remote client");
@@ -166,6 +168,7 @@ namespace Arawn.GameCreator2.Networking.Stats
             StatModificationSource source = StatModificationSource.Direct,
             int sourceHash = 0)
         {
+            if (RejectCosmeticNpcRequest(nameof(RequestStatusEffectAction))) return;
             if (m_IsRemoteClient)
             {
                 Debug.LogWarning("[NetworkStatsController] Cannot modify status effects on remote client");
@@ -216,6 +219,7 @@ namespace Arawn.GameCreator2.Networking.Stats
             StatModificationSource source = StatModificationSource.Direct,
             int sourceHash = 0)
         {
+            if (RejectCosmeticNpcRequest(nameof(RequestStatModifierAdd))) return;
             if (m_IsRemoteClient)
             {
                 Debug.LogWarning("[NetworkStatsController] Cannot add modifiers on remote client");
@@ -267,6 +271,7 @@ namespace Arawn.GameCreator2.Networking.Stats
             StatModificationSource source = StatModificationSource.Direct,
             int sourceHash = 0)
         {
+            if (RejectCosmeticNpcRequest(nameof(RequestStatModifierRemove))) return;
             if (m_IsRemoteClient)
             {
                 Debug.LogWarning("[NetworkStatsController] Cannot remove modifiers on remote client");
@@ -315,6 +320,7 @@ namespace Arawn.GameCreator2.Networking.Stats
             StatModificationSource source = StatModificationSource.Direct,
             int sourceHash = 0)
         {
+            if (RejectCosmeticNpcRequest(nameof(RequestStatModifiersClear))) return;
             if (m_IsRemoteClient)
             {
                 Debug.LogWarning("[NetworkStatsController] Cannot clear modifiers on remote client");
@@ -364,6 +370,7 @@ namespace Arawn.GameCreator2.Networking.Stats
             StatModificationSource source = StatModificationSource.Direct,
             int sourceHash = 0)
         {
+            if (RejectCosmeticNpcRequest(nameof(RequestClearStatusEffectsByType))) return;
             if (m_IsRemoteClient)
             {
                 Debug.LogWarning("[NetworkStatsController] Cannot clear status effects on remote client");

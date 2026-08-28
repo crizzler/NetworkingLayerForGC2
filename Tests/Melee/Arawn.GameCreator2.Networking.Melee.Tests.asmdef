@@ -3,6 +3,7 @@
     "rootNamespace": "Arawn.GameCreator2.Networking.Melee.Tests",
     "references": [
         "Arawn.GameCreator2.Networking",
+        "Arawn.GameCreator2.Networking.TestUtilities",
         "Arawn.GameCreator2.Networking.Melee",
         "Arawn.GameCreator2.Networking.Melee.Transport.PurrNet",
         "PurrNet.Runtime",

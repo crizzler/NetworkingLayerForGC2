@@ -203,15 +203,11 @@ namespace Arawn.GameCreator2.Networking.CorePurrNet.Tests
         public void Properties_WithNoContext_ReturnSafeFallbacks()
         {
             Assert.That(
-                UnityEngine.Object.FindObjectsByType<PurrNetNetworkManager>(
-                    FindObjectsInactive.Include,
-                    FindObjectsSortMode.None),
+                UnityObjectSearch.FindAll<PurrNetNetworkManager>(FindObjectsInactive.Include),
                 Is.Empty,
                 "This fallback test requires no scene PurrNet NetworkManager.");
             Assert.That(
-                UnityEngine.Object.FindObjectsByType<PurrNetSteamLobbyNetwork>(
-                    FindObjectsInactive.Include,
-                    FindObjectsSortMode.None),
+                UnityObjectSearch.FindAll<PurrNetSteamLobbyNetwork>(FindObjectsInactive.Include),
                 Is.Empty,
                 "This fallback test requires no scene Steam lobby coordinator.");
 

@@ -23,13 +23,19 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         [Min(0.1f)]
         [SerializeField] private float m_ValidationInterval = 1f;
 
+        private const float AUTHORITY_MIGRATION_GRACE_SECONDS = 2f;
+        private const float AUTHORITY_MIGRATION_VALIDATION_INTERVAL = 0.05f;
+
         private readonly Dictionary<NetworkId, FusionNetworkIdentity> m_Admitted =
             new Dictionary<NetworkId, FusionNetworkIdentity>();
         private readonly HashSet<int> m_PendingSpawnInstanceIds = new HashSet<int>();
+        private readonly HashSet<NetworkId> m_PendingAuthorityMigrationIds =
+            new HashSet<NetworkId>();
         private readonly List<NetworkId> m_StaleIds = new List<NetworkId>();
 
         private NetworkRunner m_BoundRunner;
         private float m_NextValidationAt;
+        private float m_AuthorityMigrationDeadline;
         private bool m_RebuildingAuthority;
 
         public int AdmittedCount => m_Admitted.Count;
@@ -65,7 +71,12 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                 return;
             }
 
-            m_NextValidationAt = Time.unscaledTime + Mathf.Max(0.1f, m_ValidationInterval);
+            float interval = m_PendingAuthorityMigrationIds.Count > 0
+                ? Mathf.Min(
+                    Mathf.Max(0.1f, m_ValidationInterval),
+                    AUTHORITY_MIGRATION_VALIDATION_INTERVAL)
+                : Mathf.Max(0.1f, m_ValidationInterval);
+            m_NextValidationAt = Time.unscaledTime + interval;
             ValidateAllIdentities();
         }
 
@@ -163,7 +174,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                 inputAuthority,
                 (spawnRunner, networkObject) =>
                 {
-                    m_PendingSpawnInstanceIds.Add(networkObject.GetInstanceID());
+                    m_PendingSpawnInstanceIds.Add(networkObject.GetLegacyInstanceId());
                     FusionNetworkIdentity identity =
                         networkObject.GetComponent<FusionNetworkIdentity>();
                     if (identity != null)
@@ -179,7 +190,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
 
             if (spawned == null) return null;
 
-            m_PendingSpawnInstanceIds.Remove(spawned.GetInstanceID());
+            m_PendingSpawnInstanceIds.Remove(spawned.GetLegacyInstanceId());
             FusionNetworkIdentity spawnedIdentity =
                 spawned.GetComponent<FusionNetworkIdentity>();
             if (spawnedIdentity == null || !Admit(spawnedIdentity))
@@ -209,6 +220,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
 
             NetworkId id = identity.NetworkObject.Id;
             m_Admitted[id] = identity;
+            m_PendingAuthorityMigrationIds.Remove(id);
             identity.SetTransportAdmission(true);
             return true;
         }
@@ -224,6 +236,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             }
 
             m_Admitted.Remove(networkId);
+            m_PendingAuthorityMigrationIds.Remove(networkId);
             if (identity == null || identity.NetworkObject == null)
             {
                 return true;
@@ -246,7 +259,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             }
 
             NetworkObject networkObject = identity.NetworkObject;
-            bool pending = m_PendingSpawnInstanceIds.Contains(networkObject.GetInstanceID());
+            bool pending = m_PendingSpawnInstanceIds.Contains(networkObject.GetLegacyInstanceId());
             bool sceneObject = networkObject.NetworkTypeId.IsSceneObject;
             if (m_TransportBridge.IsServer &&
                 (pending || sceneObject) &&
@@ -268,12 +281,22 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                 return;
             }
 
+            if (ShouldQuarantineDuringAuthorityMigration(identity))
+            {
+                identity.SetTransportAdmission(false);
+                return;
+            }
+
             Reject(identity, "object was not spawned by the logical authority");
         }
 
         internal void ObserveDespawned(FusionNetworkIdentity identity, NetworkId previousId)
         {
-            if (previousId.IsValid) m_Admitted.Remove(previousId);
+            if (previousId.IsValid)
+            {
+                m_Admitted.Remove(previousId);
+                m_PendingAuthorityMigrationIds.Remove(previousId);
+            }
             identity?.SetTransportAdmission(false);
         }
 
@@ -322,6 +345,8 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             m_BoundRunner = null;
             m_Admitted.Clear();
             m_PendingSpawnInstanceIds.Clear();
+            m_PendingAuthorityMigrationIds.Clear();
+            m_AuthorityMigrationDeadline = 0f;
         }
 
         private void OnAuthorityChanged(bool isAuthority, uint epoch)
@@ -331,6 +356,29 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
 
         private void RebuildAfterAuthorityChange()
         {
+            bool sharedMigration = m_BoundRunner != null &&
+                                   m_BoundRunner.IsRunning &&
+                                   m_BoundRunner.GameMode == GameMode.Shared;
+            if (sharedMigration)
+            {
+                foreach (NetworkId id in m_Admitted.Keys)
+                {
+                    if (id.IsValid) m_PendingAuthorityMigrationIds.Add(id);
+                }
+
+                if (m_PendingAuthorityMigrationIds.Count > 0)
+                {
+                    m_AuthorityMigrationDeadline =
+                        Time.unscaledTime + AUTHORITY_MIGRATION_GRACE_SECONDS;
+                    m_NextValidationAt = Time.unscaledTime;
+                }
+            }
+            else
+            {
+                m_PendingAuthorityMigrationIds.Clear();
+                m_AuthorityMigrationDeadline = 0f;
+            }
+
             foreach (FusionNetworkIdentity identity in m_Admitted.Values)
             {
                 identity?.SetTransportAdmission(false);
@@ -351,6 +399,13 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         {
             if (m_BoundRunner == null || !m_BoundRunner.IsRunning) return;
 
+            if (m_PendingAuthorityMigrationIds.Count > 0 &&
+                Time.unscaledTime > m_AuthorityMigrationDeadline)
+            {
+                m_PendingAuthorityMigrationIds.Clear();
+                m_AuthorityMigrationDeadline = 0f;
+            }
+
             m_StaleIds.Clear();
             foreach (var pair in m_Admitted)
             {
@@ -366,9 +421,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                 m_Admitted.Remove(m_StaleIds[i]);
             }
 
-            FusionNetworkIdentity[] identities = FindObjectsByType<FusionNetworkIdentity>(
-                FindObjectsInactive.Include,
-                FindObjectsSortMode.None);
+            FusionNetworkIdentity[] identities = UnityObjectSearch.FindAll<FusionNetworkIdentity>(FindObjectsInactive.Include);
             for (int i = 0; i < identities.Length; i++)
             {
                 FusionNetworkIdentity identity = identities[i];
@@ -378,7 +431,9 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                     continue;
                 }
 
-                bool previouslyAdmitted = IsAdmitted(identity);
+                NetworkId networkId = identity.NetworkObject.Id;
+                bool previouslyAdmitted = IsAdmitted(identity) ||
+                                            m_PendingAuthorityMigrationIds.Contains(networkId);
                 bool sceneObject = identity.NetworkObject.NetworkTypeId.IsSceneObject;
                 if (m_TransportBridge.IsServer &&
                     sceneObject &&
@@ -398,11 +453,37 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                 {
                     Admit(identity);
                 }
+                else if (ShouldQuarantineDuringAuthorityMigration(identity))
+                {
+                    // Fusion can notify the new Shared master before StateAuthority has
+                    // converged on its MasterClientObjects. Keep the trusted replicated
+                    // admission marker, but fail closed locally until the transfer arrives.
+                    identity.SetTransportAdmission(false);
+                }
                 else
                 {
                     Reject(identity, "Shared State Authority is not assigned to the Master Client");
                 }
             }
+        }
+
+        private bool ShouldQuarantineDuringAuthorityMigration(
+            FusionNetworkIdentity identity)
+        {
+            if (identity == null || identity.NetworkObject == null ||
+                !identity.NetworkObject.IsValid ||
+                !identity.NetworkObject.Id.IsValid ||
+                m_BoundRunner == null ||
+                m_BoundRunner.GameMode != GameMode.Shared ||
+                Time.unscaledTime > m_AuthorityMigrationDeadline ||
+                !m_PendingAuthorityMigrationIds.Contains(identity.NetworkObject.Id) ||
+                !identity.HasAuthorityAdmission ||
+                !HasSafeAuthorityFlags(identity.NetworkObject))
+            {
+                return false;
+            }
+
+            return true;
         }
 
         private bool IsMasterAuthoritative(NetworkObject networkObject)
@@ -448,6 +529,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             if (networkObject != null && networkObject.Id.IsValid)
             {
                 m_Admitted.Remove(networkObject.Id);
+                m_PendingAuthorityMigrationIds.Remove(networkObject.Id);
             }
             identity.SetTransportAdmission(false);
 

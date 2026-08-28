@@ -66,7 +66,7 @@ namespace Arawn.GameCreator2.Networking.Inventory.Transport.PurrNet
             {
                 if (m_CoreBridge != null) return m_CoreBridge;
                 m_CoreBridge = NetworkTransportBridge.Active as PurrNetTransportBridge;
-                if (m_CoreBridge == null) m_CoreBridge = FindFirstObjectByType<PurrNetTransportBridge>();
+                if (m_CoreBridge == null) m_CoreBridge = UnityObjectSearch.FindAny<PurrNetTransportBridge>();
                 return m_CoreBridge;
             }
         }
@@ -519,9 +519,7 @@ namespace Arawn.GameCreator2.Networking.Inventory.Transport.PurrNet
             RefreshRuntimePickupRegistry(manager);
             if (!m_AutoRegisterSceneControllers && !force) return;
 
-            NetworkInventoryController[] controllers = FindObjectsByType<NetworkInventoryController>(
-                FindObjectsInactive.Exclude,
-                FindObjectsSortMode.None);
+            NetworkInventoryController[] controllers = UnityObjectSearch.FindAll<NetworkInventoryController>(FindObjectsInactive.Exclude);
 
             for (int i = 0; i < controllers.Length; i++)
             {
@@ -530,9 +528,7 @@ namespace Arawn.GameCreator2.Networking.Inventory.Transport.PurrNet
 
             if (!m_AutoAddControllersToBags) return;
 
-            Bag[] bags = FindObjectsByType<Bag>(
-                FindObjectsInactive.Exclude,
-                FindObjectsSortMode.None);
+            Bag[] bags = UnityObjectSearch.FindAll<Bag>(FindObjectsInactive.Exclude);
 
             for (int i = 0; i < bags.Length; i++)
             {
@@ -662,9 +658,7 @@ namespace Arawn.GameCreator2.Networking.Inventory.Transport.PurrNet
             m_DuplicateRuntimePickupIds.Clear();
 
             PurrNetInventoryRuntimePickupIdentityAdapter[] adapters =
-                FindObjectsByType<PurrNetInventoryRuntimePickupIdentityAdapter>(
-                    FindObjectsInactive.Exclude,
-                    FindObjectsSortMode.None);
+                UnityObjectSearch.FindAll<PurrNetInventoryRuntimePickupIdentityAdapter>(FindObjectsInactive.Exclude);
 
             for (int i = 0; i < adapters.Length; i++)
             {
@@ -678,7 +672,7 @@ namespace Arawn.GameCreator2.Networking.Inventory.Transport.PurrNet
                 if (source == null || !ReferenceEquals(source.RuntimeIdentity, adapter))
                 {
                     WarnInvariantOnce(
-                        $"runtime-pickup-source:{adapter.GetInstanceID()}",
+                        $"runtime-pickup-source:{adapter.GetLegacyInstanceId()}",
                         $"Runtime pickup '{adapter.name}' is not paired with a same-object " +
                         "NetworkInventoryPickupSource whose Runtime Identity references the adapter.");
                     continue;
@@ -1586,7 +1580,7 @@ namespace Arawn.GameCreator2.Networking.Inventory.Transport.PurrNet
         {
             return NetworkInventoryManager.Instance != null
                 ? NetworkInventoryManager.Instance
-                : FindFirstObjectByType<NetworkInventoryManager>();
+                : UnityObjectSearch.FindAny<NetworkInventoryManager>();
         }
 
         private static void LogPickupDebug(string message)

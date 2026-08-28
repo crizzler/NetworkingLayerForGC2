@@ -60,7 +60,7 @@ namespace Arawn.GameCreator2.Networking.Stats.Shooter
         {
             NetworkShooterManager manager = NetworkShooterManager.Instance != null
                 ? NetworkShooterManager.Instance
-                : FindFirstObjectByType<NetworkShooterManager>();
+                : UnityObjectSearch.FindAny<NetworkShooterManager>();
 
             if (manager == null) return;
             if (manager.TryApplyDamageFunc != null &&

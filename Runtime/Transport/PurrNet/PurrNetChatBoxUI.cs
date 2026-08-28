@@ -883,7 +883,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
         private void LogDebug(string message)
         {
             if (!m_DebugLog) return;
-            Debug.Log($"[PurrNetChatBoxUI:{name}:{GetInstanceID()}] {message}", this);
+            Debug.Log($"[PurrNetChatBoxUI:{name}:{this.GetLegacyInstanceId()}] {message}", this);
         }
 
         private static string DescribeManager(NetworkManager manager)
@@ -1255,7 +1255,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
         private static void EnsureEventSystem()
         {
 #if UNITY_2023_1_OR_NEWER
-            EventSystem existing = UnityEngine.Object.FindFirstObjectByType<EventSystem>();
+            EventSystem existing = UnityObjectSearch.FindAny<EventSystem>();
 #else
             EventSystem existing = UnityEngine.Object.FindObjectOfType<EventSystem>();
 #endif

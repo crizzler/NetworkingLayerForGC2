@@ -10,7 +10,7 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
     public class MeleePatcher : GC2PatcherBase
     {
         public override string ModuleName => "Melee";
-        public override string PatchVersion => "3.5.0-melee";
+        public override string PatchVersion => "3.7.0-melee";
         public override string DisplayName => "Melee (Game Creator 2)";
 
         public override string PatchDescription =>
@@ -40,7 +40,10 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
         {
             return new[]
             {
-                VersionRequirement("Plugins/GameCreator/Packages/Melee/Editor/Version.txt", "2.2.*")
+                VersionRequirement(
+                    "Plugins/GameCreator/Packages/Melee/Editor/Version.txt",
+                    "2.2.*",
+                    "2.3.*")
             };
         }
 
@@ -606,33 +609,96 @@ namespace GameCreator.Runtime.Melee
                 return false;
             }
 
-            string originalCanHit = @"                if (!this.ComboSkill.CanHit(hitArgs))
-                {
-                    this.m_HitsBuffer.Add(hit.GameObject.GetInstanceID());
-                    continue;
-                }";
-
-            string patchedCanHit = originalCanHit + @"
-
-                // [GC2_NETWORK_PATCH] Route the complete strike before triggers, shields,
-                // Skill.OnHit instructions, damage, poise, or target reactions can run.
-                if (NetworkStrikeValidator != null &&
-                    !NetworkStrikeValidator.Invoke(this.Attacks.MeleeStance, hit, this.ComboSkill))
-                {
-                    this.m_HitsBuffer.Add(hit.GameObject.GetInstanceID());
-                    continue;
-                }
-                // [GC2_NETWORK_PATCH_END]";
-
-            if (!TryReplaceWithFlexibleWhitespace(ref content, originalCanHit, patchedCanHit))
+            if (!TryInsertPostCanHitStrikeValidator(ref content, out string strikeFailure))
             {
                 Debug.LogError(
-                    "[GC2 Networking] Could not find the post-CanHit strike block in AttackSkill.cs.");
+                    $"[GC2 Networking] Could not patch the post-CanHit strike block in " +
+                    $"AttackSkill.cs: {strikeFailure}");
                 return false;
             }
 
             WriteFile(relativePath, content);
             Debug.Log($"[GC2 Networking] Patched {relativePath}");
+            return true;
+        }
+
+        /// <summary>
+        /// Inserts the authority validator after GC2's semantic CanHit rejection block while
+        /// preserving the exact object-identity expression used by the installed Melee source.
+        /// Melee 2.3.15 exists with both legacy int and native EntityId hit-buffer shapes.
+        /// </summary>
+        protected static bool TryInsertPostCanHitStrikeValidator(
+            ref string content,
+            out string failureReason)
+        {
+            const string invocationToken = "NetworkStrikeValidator.Invoke";
+            if (content.Contains(invocationToken, System.StringComparison.Ordinal))
+            {
+                failureReason = null;
+                return true;
+            }
+
+            if (!TryFindMethodBodySpan(
+                    content,
+                    "OnUpdatePhaseStrike",
+                    out SourceBlockSpan methodSpan))
+            {
+                failureReason = "Could not find method body for 'OnUpdatePhaseStrike'.";
+                return false;
+            }
+
+            const string canHitRejectionPattern =
+                @"(?m)^(?<indent>[ \t]*)if\s*\(\s*!\s*this\.ComboSkill\.CanHit" +
+                @"\s*\(\s*hitArgs\s*\)\s*\)\s*\{\s*" +
+                @"this\.m_HitsBuffer\.Add\s*\(\s*" +
+                @"(?<identity>hit\.GameObject\.(?:GetInstanceID|GetEntityId)\s*\(\s*\)" +
+                @"(?:\s*\.\s*GetHashCode\s*\(\s*\))?)\s*\)\s*;\s*" +
+                @"continue\s*;\s*\}";
+
+            string methodBody = content.Substring(methodSpan.BodyStart, methodSpan.BodyLength);
+            MatchCollection matches;
+
+            try
+            {
+                matches = Regex.Matches(
+                    methodBody,
+                    canHitRejectionPattern,
+                    RegexOptions.CultureInvariant | RegexOptions.Multiline,
+                    System.TimeSpan.FromMilliseconds(250));
+            }
+            catch (RegexMatchTimeoutException)
+            {
+                failureReason = "Timed out while locating the CanHit rejection block.";
+                return false;
+            }
+
+            if (matches.Count != 1)
+            {
+                failureReason = matches.Count == 0
+                    ? "Could not find one supported CanHit rejection block."
+                    : $"Found {matches.Count} CanHit rejection blocks; refusing an ambiguous patch.";
+                return false;
+            }
+
+            Match match = matches[0];
+            string indent = match.Groups["indent"].Value;
+            string identityExpression = match.Groups["identity"].Value;
+
+            string insertion =
+                "\n\n" +
+                $"{indent}// [GC2_NETWORK_PATCH] Route the complete strike before triggers, shields,\n" +
+                $"{indent}// Skill.OnHit instructions, damage, poise, or target reactions can run.\n" +
+                $"{indent}if (NetworkStrikeValidator != null &&\n" +
+                $"{indent}    !NetworkStrikeValidator.Invoke(this.Attacks.MeleeStance, hit, this.ComboSkill))\n" +
+                $"{indent}{{\n" +
+                $"{indent}    this.m_HitsBuffer.Add({identityExpression});\n" +
+                $"{indent}    continue;\n" +
+                $"{indent}}}\n" +
+                $"{indent}// [GC2_NETWORK_PATCH_END]";
+
+            int insertionIndex = methodSpan.BodyStart + match.Index + match.Length;
+            content = content.Insert(insertionIndex, insertion);
+            failureReason = null;
             return true;
         }
 

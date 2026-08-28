@@ -28,9 +28,6 @@ namespace Arawn.GameCreator2.Networking.Inventory.Tests
         private const string InventoryManagerPath =
             "Arawn/NetworkingLayerForGC2/Inventory/NetworkInventoryManager.cs";
 
-        private const string RegressionMenuPath =
-            "Arawn/NetworkingLayerForGC2/Editor/Inventory/InventoryAuthorityRegressionDemoSceneMenu.cs";
-
         private const string RegressionHarnessPath =
             "Arawn/NetworkingLayerForGC2/Inventory/NetworkInventoryAuthorityRegressionHarness.cs";
 
@@ -106,8 +103,8 @@ namespace Arawn.GameCreator2.Networking.Inventory.Tests
             Assert.That(TBagContent.NetworkPatchCapabilities, Is.EqualTo(expected));
 
             var patcher = new InventoryPatcherProxy();
-            Assert.That(patcher.PatchVersion, Is.EqualTo("3.0.0-inventory"));
-            Assert.That(patcher.Marker, Is.EqualTo("// [GC2_NETWORK_PATCH_Inventory_v3_0_0_inventory]"));
+            Assert.That(patcher.PatchVersion, Is.EqualTo("3.1.0-inventory"));
+            Assert.That(patcher.Marker, Is.EqualTo("// [GC2_NETWORK_PATCH_Inventory_v3_1_0_inventory]"));
         }
 
         [Test]
@@ -357,14 +354,10 @@ namespace Arawn.GameCreator2.Networking.Inventory.Tests
         }
 
         [Test]
-        public void RegressionSceneGenerator_ExercisesPatchedInstructionAndStockPickupConversion()
+        public void RegressionHarness_ExercisesPatchedInstructionAndStockPickupConversion()
         {
-            string menu = ReadAssetSource(RegressionMenuPath);
             string harness = ReadAssetSource(RegressionHarnessPath);
 
-            StringAssert.Contains("InstructionInventoryAddItem", menu);
-            StringAssert.Contains("ConvertStockScenePickups(false)", menu);
-            StringAssert.Contains("EnsureGeneratedSceneInBuildSettings", menu);
             StringAssert.Contains("m_ValidatedAddTrigger.Execute", harness);
             StringAssert.Contains("m_StaticPickupTrigger.Execute", harness);
             StringAssert.Contains("NetworkInventoryRegressionContinuationInstruction", harness);
@@ -373,10 +366,6 @@ namespace Arawn.GameCreator2.Networking.Inventory.Tests
             StringAssert.Contains("FullSnapshotApplyCount", harness);
             StringAssert.Contains("GetItemInstance", ReadAssetSource(
                 "Arawn/NetworkingLayerForGC2/Editor/InventorySceneSetupTools.cs"));
-            StringAssert.Contains(
-                "updated.Add(new EditorBuildSettingsScene(GeneratedScenePath, true))",
-                menu,
-                "The generated diagnostic must be build index zero for one-click standalone tests.");
             StringAssert.DoesNotContain("Input.GetKeyDown", harness,
                 "The regression panel must work when the project uses the new Input System only.");
         }

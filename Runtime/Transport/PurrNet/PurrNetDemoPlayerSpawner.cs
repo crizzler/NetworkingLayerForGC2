@@ -21,13 +21,24 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
         [SerializeField, Min(0f)] private float m_SelectionWaitTimeout = 5f;
         [SerializeField] private bool m_IgnoreNetworkRules = false;
         [SerializeField] private List<Transform> m_SpawnPoints = new();
+        [Tooltip("Optional reusable bot-slot coordinator. Humans replace bots and overflow players use the normal spawn points.")]
+        [SerializeField] private PurrNetBotSlotCoordinator m_BotSlotCoordinator;
 
         private NetworkManager m_Manager;
         private ScenePlayersModule m_ScenePlayers;
         private Coroutine m_HostSpawnRoutine;
         private readonly HashSet<PlayerID> m_PendingSelectionSpawns = new();
+        private readonly Dictionary<PlayerID, GameObject> m_SpawnedPlayers = new();
         private int m_CurrentSpawnPoint;
         private bool m_SubscribedServer;
+
+        private void Awake()
+        {
+            if (m_BotSlotCoordinator == null)
+            {
+                m_BotSlotCoordinator = GetComponentInParent<PurrNetBotSlotCoordinator>();
+            }
+        }
 
         private void OnEnable()
         {
@@ -41,6 +52,20 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
             ScheduleHostSpawnCheck();
         }
 
+        private void Update()
+        {
+            TryHookNetworkManager();
+            NetworkManager manager = m_Manager != null ? m_Manager : NetworkManager.main;
+            if (manager != null && manager.isServer && !m_SubscribedServer)
+            {
+                // PurrNet versions differ in whether onNetworkStarted is observed by scene
+                // components that hooked the manager while it was offline. Reconcile from the
+                // live server flag so dedicated servers subscribe to ScenePlayers as reliably as
+                // hosts do through HostSpawnRoutine.
+                TrySubscribeServer(manager);
+            }
+        }
+
         private void OnDisable()
         {
             StopHostSpawnCheck();
@@ -50,6 +75,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
             if (m_Manager == null) return;
             m_Manager.onNetworkStarted -= OnNetworkStarted;
             m_Manager.onNetworkShutdown -= OnNetworkShutdown;
+            m_Manager.onPlayerLeft -= OnPlayerLeft;
             m_Manager = null;
         }
 
@@ -62,12 +88,14 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
             {
                 m_Manager.onNetworkStarted -= OnNetworkStarted;
                 m_Manager.onNetworkShutdown -= OnNetworkShutdown;
+                m_Manager.onPlayerLeft -= OnPlayerLeft;
                 UnsubscribeServer();
             }
 
             m_Manager = manager;
             m_Manager.onNetworkStarted += OnNetworkStarted;
             m_Manager.onNetworkShutdown += OnNetworkShutdown;
+            m_Manager.onPlayerLeft += OnPlayerLeft;
 
             if (m_Manager.isServer)
             {
@@ -92,6 +120,37 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
         {
             StopHostSpawnCheck();
             UnsubscribeServer();
+            if (!manager.isServer && !manager.isClient) m_SpawnedPlayers.Clear();
+        }
+
+        private void OnPlayerLeft(PlayerID player, bool asServer)
+        {
+            if (!asServer) return;
+
+            uint clientId = PlayerIdToClientId(player);
+            NetworkBotSlotState slotState = default;
+            bool hadBotSlot = m_BotSlotCoordinator != null &&
+                m_BotSlotCoordinator.TryGetHumanSlot(
+                    clientId,
+                    out slotState);
+
+            m_SpawnedPlayers.TryGetValue(player, out GameObject actor);
+            m_SpawnedPlayers.Remove(player);
+            Vector3 position = actor != null ? actor.transform.position : slotState.Position;
+            Quaternion rotation = actor != null ? actor.transform.rotation : slotState.Rotation;
+
+            if (actor != null)
+            {
+                UnityProxy.Destroy(actor);
+            }
+
+            if (hadBotSlot)
+            {
+                m_BotSlotCoordinator.ReplaceDisconnectedHumanWithBot(
+                    clientId,
+                    position,
+                    rotation);
+            }
         }
 
         private bool TrySubscribeServer(NetworkManager manager)
@@ -201,14 +260,40 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
             string reason)
         {
             if (manager == null || !manager.isServer || playerPrefab == null) return;
+            if (m_SpawnedPlayers.TryGetValue(player, out GameObject existing) && existing != null)
+            {
+                return;
+            }
             if (!m_IgnoreNetworkRules && PlayerAlreadyHasNetworkCharacter(manager, player, scene)) return;
 
-            Transform point = NextSpawnPoint();
-            Vector3 position = point != null ? point.position : playerPrefab.transform.position;
-            Quaternion rotation = point != null ? point.rotation : playerPrefab.transform.rotation;
+            uint clientId = PlayerIdToClientId(player);
+            NetworkBotSlotReservation botReservation = default;
+            bool hasBotReservation = m_BotSlotCoordinator != null &&
+                m_BotSlotCoordinator.TryReserveSlotForHuman(clientId, out botReservation);
+
+            Vector3 position;
+            Quaternion rotation;
+            if (hasBotReservation)
+            {
+                position = botReservation.Position;
+                rotation = botReservation.Rotation;
+            }
+            else
+            {
+                Transform point = NextSpawnPoint();
+                position = point != null ? point.position : playerPrefab.transform.position;
+                rotation = point != null ? point.rotation : playerPrefab.transform.rotation;
+            }
 
             GameObject instance = UnityProxy.Instantiate(playerPrefab, position, rotation, gameObject.scene);
-            if (instance == null) return;
+            if (instance == null)
+            {
+                if (hasBotReservation)
+                {
+                    m_BotSlotCoordinator.RollbackHumanReservation(botReservation);
+                }
+                return;
+            }
 
             if (instance.TryGetComponent(out PurrNetNetworkCharacterAuto autoInit))
             {
@@ -222,8 +307,23 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
             else
             {
                 Debug.LogError($"[PurrNetDemoPlayerSpawner] Spawned prefab '{instance.name}' has no NetworkIdentity.", instance);
+                UnityProxy.Destroy(instance);
+                if (hasBotReservation)
+                {
+                    m_BotSlotCoordinator.RollbackHumanReservation(botReservation);
+                }
                 return;
             }
+
+            if (hasBotReservation &&
+                !m_BotSlotCoordinator.CommitHumanReservation(botReservation, instance))
+            {
+                UnityProxy.Destroy(instance);
+                m_BotSlotCoordinator.RollbackHumanReservation(botReservation);
+                return;
+            }
+
+            m_SpawnedPlayers[player] = instance;
 
         }
 
@@ -336,6 +436,14 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
             }
 
             return false;
+        }
+
+        private static uint PlayerIdToClientId(PlayerID player)
+        {
+            ulong raw = player.id;
+            return raw <= uint.MaxValue
+                ? (uint)raw
+                : NetworkTransportBridge.InvalidClientId;
         }
     }
 }

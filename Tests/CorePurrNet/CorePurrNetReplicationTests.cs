@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Reflection;
 using Arawn.GameCreator2.Networking.Transport.PurrNet;
+using Arawn.GameCreator2.Networking.TestUtilities;
 using GameCreator.Runtime.Characters;
 using NUnit.Framework;
 using PurrNet.Packing;
@@ -687,7 +688,7 @@ namespace Arawn.GameCreator2.Networking.CorePurrNet.Tests
         public void BasePurrNetBridge_AutoEnsuresReliableOrderedCoreBridge()
         {
             GameObject bridgeObject = Track(new GameObject("PurrNet Bridge Test"));
-            bridgeObject.AddComponent<PurrNetTransportBridge>();
+            EditModeLifecycle.AddComponent<PurrNetTransportBridge>(bridgeObject);
 
             PurrNetCoreTransportBridge coreBridge =
                 bridgeObject.GetComponent<PurrNetCoreTransportBridge>();

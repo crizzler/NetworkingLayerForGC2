@@ -57,7 +57,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         {
             if (m_SessionBootstrap == null)
             {
-                m_SessionBootstrap = FindFirstObjectByType<FusionSessionBootstrap>();
+                m_SessionBootstrap = UnityObjectSearch.FindAny<FusionSessionBootstrap>();
             }
             m_RuntimeSessionName =
                 m_SessionBootstrap != null

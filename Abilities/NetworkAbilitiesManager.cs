@@ -751,7 +751,7 @@ namespace Arawn.GameCreator2.Networking
         public static void PatchAbility(Ability ability)
         {
             if (ability == null) return;
-            if (!s_PatchedAbilities.Add(ability.GetInstanceID())) return;
+            if (!s_PatchedAbilities.Add(ability.GetLegacyInstanceId())) return;
 
             IEnumerable<AbilityEffect> effects = ability.Effects;
 

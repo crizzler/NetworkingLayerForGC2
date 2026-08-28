@@ -4,11 +4,13 @@ using System.Collections.Generic;
 using System.Reflection;
 using Arawn.GameCreator2.Networking.Security;
 using Arawn.GameCreator2.Networking.Shooter.Transport.PurrNet;
+using Arawn.GameCreator2.Networking.TestUtilities;
 using GameCreator.Runtime.Characters;
 using GameCreator.Runtime.Shooter;
 using NUnit.Framework;
 using PurrNet.Packing;
 using UnityEngine;
+using UnityEngine.TestTools;
 
 namespace Arawn.GameCreator2.Networking.Shooter.Tests
 {
@@ -66,22 +68,29 @@ namespace Arawn.GameCreator2.Networking.Shooter.Tests
         [TearDown]
         public void TearDown()
         {
-            Transform[] transforms = UnityEngine.Object.FindObjectsByType<Transform>(
-                FindObjectsInactive.Include,
-                FindObjectsSortMode.None);
-            for (int i = 0; i < transforms.Length; i++)
+            bool previousIgnore = LogAssert.ignoreFailingMessages;
+            LogAssert.ignoreFailingMessages = true;
+            try
             {
-                if (transforms[i] != null &&
-                    (transforms[i].name == "Network Shooter Impact" ||
-                     transforms[i].name == "Network Shooter Tracer"))
+                Transform[] transforms = UnityObjectSearch.FindAll<Transform>(FindObjectsInactive.Include);
+                for (int i = 0; i < transforms.Length; i++)
                 {
-                    UnityEngine.Object.DestroyImmediate(transforms[i].gameObject);
+                    if (transforms[i] != null &&
+                        (transforms[i].name == "Network Shooter Impact" ||
+                         transforms[i].name == "Network Shooter Tracer"))
+                    {
+                        UnityEngine.Object.DestroyImmediate(transforms[i].gameObject);
+                    }
+                }
+
+                for (int i = m_Cleanup.Count - 1; i >= 0; i--)
+                {
+                    if (m_Cleanup[i] != null) UnityEngine.Object.DestroyImmediate(m_Cleanup[i]);
                 }
             }
-
-            for (int i = m_Cleanup.Count - 1; i >= 0; i--)
+            finally
             {
-                if (m_Cleanup[i] != null) UnityEngine.Object.DestroyImmediate(m_Cleanup[i]);
+                LogAssert.ignoreFailingMessages = previousIgnore;
             }
 
             m_Cleanup.Clear();
@@ -502,10 +511,10 @@ namespace Arawn.GameCreator2.Networking.Shooter.Tests
             NetworkShooterManager manager = CreateManager(false, true);
 
             GameObject shooterObject = Track(new GameObject("Shooter Confirmed Local Shot"));
-            shooterObject.AddComponent<Character>();
-            NetworkCharacter character = shooterObject.AddComponent<NetworkCharacter>();
+            EditModeLifecycle.AddComponent<Character>(shooterObject);
+            NetworkCharacter character = EditModeLifecycle.AddComponent<NetworkCharacter>(shooterObject);
             character.SetManualNetworkId(47);
-            NetworkShooterController controller = shooterObject.AddComponent<NetworkShooterController>();
+            NetworkShooterController controller = EditModeLifecycle.AddComponent<NetworkShooterController>(shooterObject);
             SetPrivateField(controller, "m_LogDiagnostics", false);
             controller.Initialize(false, true);
             controller.UseGeneratedFallbackPresentation = true;
@@ -529,10 +538,10 @@ namespace Arawn.GameCreator2.Networking.Shooter.Tests
             NetworkShooterManager manager = CreateManager(false, true);
 
             GameObject shooterObject = Track(new GameObject("Shooter Optimistic Attacker"));
-            shooterObject.AddComponent<Character>();
-            NetworkCharacter shooterCharacter = shooterObject.AddComponent<NetworkCharacter>();
+            EditModeLifecycle.AddComponent<Character>(shooterObject);
+            NetworkCharacter shooterCharacter = EditModeLifecycle.AddComponent<NetworkCharacter>(shooterObject);
             shooterCharacter.SetManualNetworkId(51);
-            NetworkShooterController shooter = shooterObject.AddComponent<NetworkShooterController>();
+            NetworkShooterController shooter = EditModeLifecycle.AddComponent<NetworkShooterController>(shooterObject);
             SetPrivateField(shooter, "m_LogDiagnostics", false);
             shooter.Initialize(false, true);
             shooter.OptimisticHitEffects = true;
@@ -578,10 +587,10 @@ namespace Arawn.GameCreator2.Networking.Shooter.Tests
             NetworkShooterManager manager = CreateManager(false, true);
 
             GameObject shooterObject = Track(new GameObject("Shooter Optimistic Physics Attacker"));
-            shooterObject.AddComponent<Character>();
-            NetworkCharacter shooterCharacter = shooterObject.AddComponent<NetworkCharacter>();
+            EditModeLifecycle.AddComponent<Character>(shooterObject);
+            NetworkCharacter shooterCharacter = EditModeLifecycle.AddComponent<NetworkCharacter>(shooterObject);
             shooterCharacter.SetManualNetworkId(52);
-            NetworkShooterController shooter = shooterObject.AddComponent<NetworkShooterController>();
+            NetworkShooterController shooter = EditModeLifecycle.AddComponent<NetworkShooterController>(shooterObject);
             SetPrivateField(shooter, "m_LogDiagnostics", false);
             shooter.Initialize(false, true);
             shooter.OptimisticHitEffects = true;
@@ -670,7 +679,7 @@ namespace Arawn.GameCreator2.Networking.Shooter.Tests
 
             GameObject characterTarget = Track(new GameObject("Shooter Character Physics Target"));
             characterTarget.transform.position = Vector3.left * 4f;
-            characterTarget.AddComponent<Character>();
+            EditModeLifecycle.AddComponent<Character>(characterTarget);
             characterTarget.AddComponent<BoxCollider>();
             Rigidbody characterBody = characterTarget.AddComponent<Rigidbody>();
             characterBody.useGravity = false;
@@ -719,15 +728,15 @@ namespace Arawn.GameCreator2.Networking.Shooter.Tests
             NetworkShooterManager manager = CreateManager(true, true);
 
             GameObject shooterObject = Track(new GameObject("Shooter Native Physics Host"));
-            Character character = shooterObject.AddComponent<Character>();
-            NetworkCharacter networkCharacter = shooterObject.AddComponent<NetworkCharacter>();
+            Character character = EditModeLifecycle.AddComponent<Character>(shooterObject);
+            NetworkCharacter networkCharacter = EditModeLifecycle.AddComponent<NetworkCharacter>(shooterObject);
             networkCharacter.SetManualNetworkId(53);
             SetNetworkCharacterRuntimeRole(
                 networkCharacter,
                 isServer: true,
                 isOwner: true,
                 isHost: true);
-            NetworkShooterController shooter = shooterObject.AddComponent<NetworkShooterController>();
+            NetworkShooterController shooter = EditModeLifecycle.AddComponent<NetworkShooterController>(shooterObject);
             SetPrivateField(shooter, "m_LogDiagnostics", false);
             shooter.Initialize(true, true);
             manager.RegisterController(53, shooter);
@@ -840,10 +849,10 @@ namespace Arawn.GameCreator2.Networking.Shooter.Tests
         public void ClientHitWithoutRequestRoute_FailsClosedAndDoesNotLeakPendingState()
         {
             GameObject shooterObject = Track(new GameObject("Shooter Missing Route Attacker"));
-            shooterObject.AddComponent<Character>();
-            NetworkCharacter shooterCharacter = shooterObject.AddComponent<NetworkCharacter>();
+            EditModeLifecycle.AddComponent<Character>(shooterObject);
+            NetworkCharacter shooterCharacter = EditModeLifecycle.AddComponent<NetworkCharacter>(shooterObject);
             shooterCharacter.SetManualNetworkId(57);
-            NetworkShooterController shooter = shooterObject.AddComponent<NetworkShooterController>();
+            NetworkShooterController shooter = EditModeLifecycle.AddComponent<NetworkShooterController>(shooterObject);
             SetPrivateField(shooter, "m_LogDiagnostics", false);
             shooter.Initialize(false, true);
 
@@ -870,10 +879,11 @@ namespace Arawn.GameCreator2.Networking.Shooter.Tests
             NetworkShooterManager manager = CreateManager(true, false);
 
             GameObject shooterObject = Track(new GameObject("Shooter Server Attacker"));
-            shooterObject.AddComponent<Character>();
-            NetworkCharacter shooterCharacter = shooterObject.AddComponent<NetworkCharacter>();
+            EditModeLifecycle.AddComponent<Character>(shooterObject);
+            NetworkCharacter shooterCharacter = EditModeLifecycle.AddComponent<NetworkCharacter>(shooterObject);
             shooterCharacter.SetManualNetworkId(61);
-            NetworkShooterController shooter = shooterObject.AddComponent<NetworkShooterController>();
+            SetServerAuthoritativeNpcRuntimeRole(shooterCharacter);
+            NetworkShooterController shooter = EditModeLifecycle.AddComponent<NetworkShooterController>(shooterObject);
             SetPrivateField(shooter, "m_LogDiagnostics", false);
             shooter.Initialize(true, false);
             manager.RegisterController(61, shooter);
@@ -934,10 +944,11 @@ namespace Arawn.GameCreator2.Networking.Shooter.Tests
             NetworkShooterManager manager = CreateManager(true, false);
 
             GameObject shooterObject = Track(new GameObject("Shooter Patched Server Attacker"));
-            shooterObject.AddComponent<Character>();
-            NetworkCharacter shooterCharacter = shooterObject.AddComponent<NetworkCharacter>();
+            EditModeLifecycle.AddComponent<Character>(shooterObject);
+            NetworkCharacter shooterCharacter = EditModeLifecycle.AddComponent<NetworkCharacter>(shooterObject);
             shooterCharacter.SetManualNetworkId(63);
-            NetworkShooterController shooter = shooterObject.AddComponent<NetworkShooterController>();
+            SetServerAuthoritativeNpcRuntimeRole(shooterCharacter);
+            NetworkShooterController shooter = EditModeLifecycle.AddComponent<NetworkShooterController>(shooterObject);
             SetPrivateField(shooter, "m_LogDiagnostics", false);
             shooter.Initialize(true, false);
             manager.RegisterController(63, shooter);
@@ -1091,19 +1102,26 @@ namespace Arawn.GameCreator2.Networking.Shooter.Tests
         [Test]
         public void TrustedNativeHit_UsesPreHitValidationAfterLethalTargetRemoval()
         {
+            ShooterTestTransportBridge bridge = Track(
+                    new GameObject("Shooter NPC Prevalidation Transport"))
+                .AddComponent<ShooterTestTransportBridge>();
             NetworkShooterManager manager = CreateManager(true, false);
 
-            GameObject shooterObject = Track(new GameObject("Shooter Prevalidation Attacker"));
-            shooterObject.AddComponent<Character>();
-            NetworkCharacter shooterCharacter = shooterObject.AddComponent<NetworkCharacter>();
+            GameObject shooterObject = Track(new GameObject("Server-Owned NPC Attacker"));
+            Character shooterGc2Character =
+                EditModeLifecycle.AddComponent<Character>(shooterObject);
+            NetworkCharacter shooterCharacter = EditModeLifecycle.AddComponent<NetworkCharacter>(shooterObject);
+            SetPrivateField(shooterCharacter, "m_ActorType", NetworkCharacterActorType.NPC);
             shooterCharacter.SetManualNetworkId(68);
-            NetworkShooterController shooter = shooterObject.AddComponent<NetworkShooterController>();
+            shooterCharacter.InitializeNetworkRole(true, false, true, false);
+            bridge.ResolvedCharacter = shooterGc2Character;
+            NetworkShooterController shooter = EditModeLifecycle.AddComponent<NetworkShooterController>(shooterObject);
             shooter.Initialize(true, false);
             manager.RegisterController(68, shooter);
 
             GameObject targetObject = Track(new GameObject("Shooter Prevalidation Target"));
-            targetObject.AddComponent<Character>();
-            NetworkCharacter targetCharacter = targetObject.AddComponent<NetworkCharacter>();
+            EditModeLifecycle.AddComponent<Character>(targetObject);
+            NetworkCharacter targetCharacter = EditModeLifecycle.AddComponent<NetworkCharacter>(targetObject);
             targetCharacter.SetManualNetworkId(69);
             manager.GetCharacterByNetworkIdFunc = id => id == 69 ? targetCharacter : null;
             manager.ComputeDamageFunc = _ => 73f;
@@ -1167,6 +1185,87 @@ namespace Arawn.GameCreator2.Networking.Shooter.Tests
         }
 
         [Test]
+        public void TrustedServerOrigin_AcceptsOnlyServerAuthoritativeNpc_AndRejectsClientSpoof()
+        {
+            ShooterTestTransportBridge bridge = Track(
+                    new GameObject("Shooter NPC Trust Transport"))
+                .AddComponent<ShooterTestTransportBridge>();
+            NetworkShooterManager manager = CreateManager(true, false);
+
+            GameObject npcObject = Track(new GameObject("Trusted Server NPC"));
+            Character npcCharacter = EditModeLifecycle.AddComponent<Character>(npcObject);
+            NetworkCharacter networkNpc = EditModeLifecycle.AddComponent<NetworkCharacter>(npcObject);
+            SetPrivateField(networkNpc, "m_ActorType", NetworkCharacterActorType.NPC);
+            SetPrivateField(
+                networkNpc,
+                "m_NPCMode",
+                NetworkCharacter.NPCSyncMode.ServerAuthoritative);
+            networkNpc.SetManualNetworkId(201);
+            networkNpc.InitializeNetworkRole(true, false, true, false);
+            bridge.ResolvedCharacter = npcCharacter;
+
+            var hit = new NetworkShooterHitRequest
+            {
+                RequestId = 1,
+                ActorNetworkId = 201,
+                ShooterNetworkId = 201,
+                CorrelationId = 0x201001,
+                HitPoint = Vector3.forward,
+                HitNormal = Vector3.back,
+                IsCharacterHit = false
+            };
+
+            Assert.That(manager.TryServerQueueTrustedHit(hit), Is.True);
+            Assert.That(
+                CountEnumerable(GetPrivateField<IEnumerable>(manager, "m_ServerHitQueue")),
+                Is.EqualTo(1));
+
+            int rejectedResponses = 0;
+            manager.SendHitResponseToClient += (_, response) =>
+            {
+                if (!response.Validated) rejectedResponses++;
+            };
+            LogAssert.Expect(
+                LogType.Error,
+                "[SecurityIntegration] Rejecting Shooter/NetworkShooterHitRequest: " +
+                "NetworkSecurityManager is missing while running in server context.");
+            manager.ReceiveHitRequest(77, new NetworkShooterHitRequest
+            {
+                RequestId = 2,
+                ActorNetworkId = 201,
+                ShooterNetworkId = 201,
+                CorrelationId = 0x201002,
+                IsCharacterHit = false
+            });
+
+            Assert.That(rejectedResponses, Is.EqualTo(1));
+            Assert.That(
+                CountEnumerable(GetPrivateField<IEnumerable>(manager, "m_ServerHitQueue")),
+                Is.EqualTo(1),
+                "An unauthenticated client cannot append an NPC-origin request.");
+
+            networkNpc.ResetNetworkRole();
+            SetPrivateField(
+                networkNpc,
+                "m_NPCMode",
+                NetworkCharacter.NPCSyncMode.ClientSideDeterministic);
+            networkNpc.InitializeNetworkRole(true, false, true, false);
+            npcCharacter.IsPlayer = true;
+            EditModeLifecycle.Invoke(networkNpc, "Update");
+
+            Assert.That(npcCharacter.IsPlayer, Is.False);
+            Assert.That(manager.TryServerQueueTrustedHit(new NetworkShooterHitRequest
+            {
+                RequestId = 3,
+                ActorNetworkId = 201,
+                ShooterNetworkId = 201,
+                CorrelationId = 0x201003,
+                IsCharacterHit = false
+            }), Is.False,
+                "A cosmetic NPC cannot become trusted by flipping Character.IsPlayer.");
+        }
+
+        [Test]
         public void PatchedServerHit_WhenTrustedQueueIsFull_SuppressesNativeGameplay()
         {
             ShooterTestTransportBridge bridge = Track(
@@ -1176,10 +1275,11 @@ namespace Arawn.GameCreator2.Networking.Shooter.Tests
             SetPrivateField(manager, "m_MaxHitQueueLength", 1);
 
             GameObject shooterObject = Track(new GameObject("Shooter Full Queue Server Attacker"));
-            shooterObject.AddComponent<Character>();
-            NetworkCharacter shooterCharacter = shooterObject.AddComponent<NetworkCharacter>();
+            EditModeLifecycle.AddComponent<Character>(shooterObject);
+            NetworkCharacter shooterCharacter = EditModeLifecycle.AddComponent<NetworkCharacter>(shooterObject);
             shooterCharacter.SetManualNetworkId(72);
-            NetworkShooterController shooter = shooterObject.AddComponent<NetworkShooterController>();
+            SetServerAuthoritativeNpcRuntimeRole(shooterCharacter);
+            NetworkShooterController shooter = EditModeLifecycle.AddComponent<NetworkShooterController>(shooterObject);
             SetPrivateField(shooter, "m_LogDiagnostics", false);
             shooter.Initialize(true, false);
             manager.RegisterController(72, shooter);
@@ -1237,12 +1337,19 @@ namespace Arawn.GameCreator2.Networking.Shooter.Tests
             NetworkShooterManager manager = CreateManager(true, false);
 
             GameObject shooterObject = Track(new GameObject("Shooter Client-Owned Server Replica"));
-            shooterObject.AddComponent<Character>();
-            NetworkCharacter shooterCharacter = shooterObject.AddComponent<NetworkCharacter>();
+            EditModeLifecycle.AddComponent<Character>(shooterObject);
+            NetworkCharacter shooterCharacter = EditModeLifecycle.AddComponent<NetworkCharacter>(shooterObject);
             shooterCharacter.SetManualNetworkId(65);
+            SetPrivateField(shooterCharacter, "m_ActorType", NetworkCharacterActorType.PlayerOwned);
+            SetNetworkCharacterRuntimeRole(
+                shooterCharacter,
+                isServer: true,
+                isOwner: false,
+                isHost: false);
+            bridge.RegisterCharacter(shooterCharacter);
             bridge.SetCharacterOwner(65, 900);
 
-            NetworkShooterController shooter = shooterObject.AddComponent<NetworkShooterController>();
+            NetworkShooterController shooter = EditModeLifecycle.AddComponent<NetworkShooterController>(shooterObject);
             SetPrivateField(shooter, "m_LogDiagnostics", false);
             shooter.Initialize(true, false);
             manager.RegisterController(65, shooter);
@@ -1282,8 +1389,8 @@ namespace Arawn.GameCreator2.Networking.Shooter.Tests
             NetworkShooterManager manager = CreateManager(true, true);
 
             GameObject shooterObject = Track(new GameObject("Shooter Shared Authority Attacker"));
-            Character character = shooterObject.AddComponent<Character>();
-            NetworkCharacter networkCharacter = shooterObject.AddComponent<NetworkCharacter>();
+            Character character = EditModeLifecycle.AddComponent<Character>(shooterObject);
+            NetworkCharacter networkCharacter = EditModeLifecycle.AddComponent<NetworkCharacter>(shooterObject);
             networkCharacter.SetManualNetworkId(actorNetworkId);
             SetNetworkCharacterRuntimeRole(
                 networkCharacter,
@@ -1291,9 +1398,10 @@ namespace Arawn.GameCreator2.Networking.Shooter.Tests
                 isOwner: true,
                 isHost: true);
             bridge.ResolvedCharacter = character;
+            bridge.RegisterCharacter(networkCharacter);
             bridge.SetCharacterOwner(actorNetworkId, localClientId);
 
-            NetworkShooterController shooter = shooterObject.AddComponent<NetworkShooterController>();
+            NetworkShooterController shooter = EditModeLifecycle.AddComponent<NetworkShooterController>(shooterObject);
             SetPrivateField(shooter, "m_LogDiagnostics", false);
             shooter.Initialize(true, true);
             manager.RegisterController(actorNetworkId, shooter);
@@ -1336,8 +1444,8 @@ namespace Arawn.GameCreator2.Networking.Shooter.Tests
             NetworkShooterManager manager = CreateManager(true, true);
 
             GameObject shooterObject = Track(new GameObject("Shooter Shared Owner Mismatch Attacker"));
-            Character character = shooterObject.AddComponent<Character>();
-            NetworkCharacter networkCharacter = shooterObject.AddComponent<NetworkCharacter>();
+            Character character = EditModeLifecycle.AddComponent<Character>(shooterObject);
+            NetworkCharacter networkCharacter = EditModeLifecycle.AddComponent<NetworkCharacter>(shooterObject);
             networkCharacter.SetManualNetworkId(actorNetworkId);
             SetNetworkCharacterRuntimeRole(
                 networkCharacter,
@@ -1345,9 +1453,10 @@ namespace Arawn.GameCreator2.Networking.Shooter.Tests
                 isOwner: true,
                 isHost: true);
             bridge.ResolvedCharacter = character;
+            bridge.RegisterCharacter(networkCharacter);
             bridge.SetCharacterOwner(actorNetworkId, localClientId + 1);
 
-            NetworkShooterController shooter = shooterObject.AddComponent<NetworkShooterController>();
+            NetworkShooterController shooter = EditModeLifecycle.AddComponent<NetworkShooterController>(shooterObject);
             SetPrivateField(shooter, "m_LogDiagnostics", false);
             shooter.Initialize(true, true);
             manager.RegisterController(actorNetworkId, shooter);
@@ -1376,8 +1485,8 @@ namespace Arawn.GameCreator2.Networking.Shooter.Tests
         {
             NetworkShooterManager manager = CreateManager(true, false);
             GameObject targetObject = Track(new GameObject("Shooter Reaction Target"));
-            targetObject.AddComponent<Character>();
-            NetworkCharacter target = targetObject.AddComponent<NetworkCharacter>();
+            EditModeLifecycle.AddComponent<Character>(targetObject);
+            NetworkCharacter target = EditModeLifecycle.AddComponent<NetworkCharacter>(targetObject);
             target.SetManualNetworkId(64);
             manager.GetCharacterByNetworkIdFunc = id => id == 64 ? target : null;
 
@@ -1446,8 +1555,8 @@ namespace Arawn.GameCreator2.Networking.Shooter.Tests
         {
             NetworkShooterManager manager = CreateManager(true, false);
             GameObject targetObject = Track(new GameObject("Shooter Defended Reaction Target"));
-            targetObject.AddComponent<Character>();
-            NetworkCharacter target = targetObject.AddComponent<NetworkCharacter>();
+            EditModeLifecycle.AddComponent<Character>(targetObject);
+            NetworkCharacter target = EditModeLifecycle.AddComponent<NetworkCharacter>(targetObject);
             target.SetManualNetworkId(68);
             manager.GetCharacterByNetworkIdFunc = id => id == 68 ? target : null;
 
@@ -1485,8 +1594,8 @@ namespace Arawn.GameCreator2.Networking.Shooter.Tests
         {
             NetworkShooterManager manager = CreateManager(true, false);
             GameObject targetObject = Track(new GameObject("Shooter Reacting Target"));
-            targetObject.AddComponent<Character>();
-            NetworkCharacter target = targetObject.AddComponent<NetworkCharacter>();
+            EditModeLifecycle.AddComponent<Character>(targetObject);
+            NetworkCharacter target = EditModeLifecycle.AddComponent<NetworkCharacter>(targetObject);
             target.SetManualNetworkId(70);
             manager.GetCharacterByNetworkIdFunc = id => id == 70 ? target : null;
 
@@ -1525,13 +1634,18 @@ namespace Arawn.GameCreator2.Networking.Shooter.Tests
         [Test]
         public void DedicatedServerShot_QueuesOnceAndNativeNotificationReusesPendingRequest()
         {
+            ShooterTestTransportBridge bridge = Track(
+                    new GameObject("Shooter Server Shot Transport"))
+                .AddComponent<ShooterTestTransportBridge>();
             NetworkShooterManager manager = CreateManager(true, false);
 
             GameObject shooterObject = Track(new GameObject("Shooter Server Shot Actor"));
-            shooterObject.AddComponent<Character>();
-            NetworkCharacter shooterCharacter = shooterObject.AddComponent<NetworkCharacter>();
+            Character character = EditModeLifecycle.AddComponent<Character>(shooterObject);
+            NetworkCharacter shooterCharacter = EditModeLifecycle.AddComponent<NetworkCharacter>(shooterObject);
             shooterCharacter.SetManualNetworkId(66);
-            NetworkShooterController shooter = shooterObject.AddComponent<NetworkShooterController>();
+            SetServerAuthoritativeNpcRuntimeRole(shooterCharacter);
+            bridge.ResolvedCharacter = character;
+            NetworkShooterController shooter = EditModeLifecycle.AddComponent<NetworkShooterController>(shooterObject);
             SetPrivateField(shooter, "m_LogDiagnostics", false);
             shooter.Initialize(true, false);
             manager.RegisterController(66, shooter);
@@ -1577,15 +1691,15 @@ namespace Arawn.GameCreator2.Networking.Shooter.Tests
             NetworkShooterManager manager = CreateManager(true, true);
 
             GameObject shooterObject = Track(new GameObject("Shooter Host Attacker"));
-            shooterObject.AddComponent<Character>();
-            NetworkCharacter shooterCharacter = shooterObject.AddComponent<NetworkCharacter>();
+            EditModeLifecycle.AddComponent<Character>(shooterObject);
+            NetworkCharacter shooterCharacter = EditModeLifecycle.AddComponent<NetworkCharacter>(shooterObject);
             shooterCharacter.SetManualNetworkId(71);
             SetNetworkCharacterRuntimeRole(
                 shooterCharacter,
                 isServer: true,
                 isOwner: true,
                 isHost: true);
-            NetworkShooterController shooter = shooterObject.AddComponent<NetworkShooterController>();
+            NetworkShooterController shooter = EditModeLifecycle.AddComponent<NetworkShooterController>(shooterObject);
             SetPrivateField(shooter, "m_LogDiagnostics", false);
             shooter.Initialize(true, true);
             shooter.OptimisticHitEffects = true;
@@ -1642,15 +1756,15 @@ namespace Arawn.GameCreator2.Networking.Shooter.Tests
         public void RemoteWeaponApplyVersion_AdvancesForEachNewState()
         {
             GameObject controllerObject = Track(new GameObject("Shooter Version Test"));
-            controllerObject.AddComponent<Character>();
+            EditModeLifecycle.AddComponent<Character>(controllerObject);
             NetworkShooterController controller =
-                controllerObject.AddComponent<NetworkShooterController>();
+                EditModeLifecycle.AddComponent<NetworkShooterController>(controllerObject);
             SetPrivateField(controller, "m_LogDiagnostics", false);
             controller.Initialize(false, false);
 
             controller.ApplyRemoteWeaponState(NetworkWeaponState.None, null, null, null);
             var second = NetworkWeaponState.None;
-            second.LeanAmount = 9f;
+            second.AmmoInMagazine = 9;
             controller.ApplyRemoteWeaponState(second, null, null, null);
 
             int version = GetPrivateField<int>(controller, "m_RemoteWeaponApplyVersion");
@@ -1658,13 +1772,13 @@ namespace Arawn.GameCreator2.Networking.Shooter.Tests
                 controller,
                 "m_LastWeaponState");
             Assert.That(version, Is.EqualTo(2));
-            Assert.That(applied.LeanAmount, Is.EqualTo(9f));
+            Assert.That(applied.AmmoInMagazine, Is.EqualTo(9));
         }
 
         private NetworkShooterManager CreateManager(bool isServer, bool isClient)
         {
             GameObject managerObject = Track(new GameObject("Shooter Manager Test"));
-            NetworkShooterManager manager = managerObject.AddComponent<NetworkShooterManager>();
+            NetworkShooterManager manager = EditModeLifecycle.AddComponent<NetworkShooterManager>(managerObject);
             SetPrivateField(manager, "m_LogDiagnostics", false);
             manager.Initialize(isServer, isClient);
             return manager;
@@ -1676,8 +1790,9 @@ namespace Arawn.GameCreator2.Networking.Shooter.Tests
             bool isLocalClient)
         {
             GameObject controllerObject = Track(new GameObject(name));
+            EditModeLifecycle.AddComponent<Character>(controllerObject);
             NetworkShooterController controller =
-                controllerObject.AddComponent<NetworkShooterController>();
+                EditModeLifecycle.AddComponent<NetworkShooterController>(controllerObject);
             SetPrivateField(controller, "m_LogDiagnostics", false);
             controller.UseGeneratedFallbackPresentation = true;
             controller.Initialize(isServer, isLocalClient);
@@ -1714,9 +1829,7 @@ namespace Arawn.GameCreator2.Networking.Shooter.Tests
         private static int CountImpactObjects()
         {
             int count = 0;
-            Transform[] transforms = UnityEngine.Object.FindObjectsByType<Transform>(
-                FindObjectsInactive.Include,
-                FindObjectsSortMode.None);
+            Transform[] transforms = UnityObjectSearch.FindAll<Transform>(FindObjectsInactive.Include);
             for (int i = 0; i < transforms.Length; i++)
             {
                 if (transforms[i] != null && transforms[i].name == "Network Shooter Impact") count++;
@@ -1727,9 +1840,7 @@ namespace Arawn.GameCreator2.Networking.Shooter.Tests
         private static int CountTracerObjects()
         {
             int count = 0;
-            Transform[] transforms = UnityEngine.Object.FindObjectsByType<Transform>(
-                FindObjectsInactive.Include,
-                FindObjectsSortMode.None);
+            Transform[] transforms = UnityObjectSearch.FindAll<Transform>(FindObjectsInactive.Include);
             for (int i = 0; i < transforms.Length; i++)
             {
                 if (transforms[i] != null && transforms[i].name == "Network Shooter Tracer") count++;
@@ -1822,6 +1933,20 @@ namespace Arawn.GameCreator2.Networking.Shooter.Tests
             SetPrivateField(character, "m_RuntimeIsServer", isServer);
             SetPrivateField(character, "m_RuntimeIsOwner", isOwner);
             SetPrivateField(character, "m_RuntimeIsHost", isHost);
+            SetPrivateField(character, "m_RuntimeHasAuthenticatedPlayerOwner", true);
+        }
+
+        private static void SetServerAuthoritativeNpcRuntimeRole(NetworkCharacter character)
+        {
+            SetPrivateField(character, "m_ActorType", NetworkCharacterActorType.NPC);
+            SetPrivateField(
+                character,
+                "m_NPCMode",
+                NetworkCharacter.NPCSyncMode.ServerAuthoritative);
+            SetPrivateField(character, "m_RuntimeIsServer", true);
+            SetPrivateField(character, "m_RuntimeIsOwner", false);
+            SetPrivateField(character, "m_RuntimeIsHost", false);
+            SetPrivateField(character, "m_RuntimeHasAuthenticatedPlayerOwner", false);
         }
 
         private static void InvokePrivate(object target, string name, params object[] arguments)

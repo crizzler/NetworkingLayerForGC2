@@ -60,7 +60,7 @@ namespace Arawn.GameCreator2.Networking.Stats.Melee
         {
             var manager = NetworkMeleeManager.Instance != null
                 ? NetworkMeleeManager.Instance
-                : FindFirstObjectByType<NetworkMeleeManager>();
+                : UnityObjectSearch.FindAny<NetworkMeleeManager>();
 
             if (manager == null) return;
             if (manager.TryApplyDamageFunc != null && !ReferenceEquals(manager.TryApplyDamageFunc.Target, this))

@@ -62,6 +62,27 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
         /// </summary>
         public NetworkManager ActiveNetworkManager => ActiveManager;
 
+        /// <summary>
+        /// Pins this bridge to the manager that owns the current session. This is useful for
+        /// command-line bootstraps and additive session scenes where NetworkManager.main can be
+        /// published after the bridge's OnEnable callback.
+        /// </summary>
+        public void ConfigureNetworkManager(NetworkManager manager)
+        {
+            if (manager == null) return;
+
+            if (!ReferenceEquals(m_NetworkManager, manager))
+            {
+                UnhookNetworkManager();
+                m_NetworkManager = manager;
+            }
+
+            TryHookNetworkManager();
+            EnsureRunningSubscriptions(manager);
+            EnsureCoreTransportBridge();
+            EnsureAnimationMotionBridge();
+        }
+
         public override bool IsServer => ActiveManager != null && ActiveManager.isServer;
         public override bool IsClient => ActiveManager != null && ActiveManager.isClient;
         public override bool IsHost => ActiveManager != null && ActiveManager.isHost;
@@ -130,6 +151,11 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
             {
                 TryHookNetworkManager();
             }
+
+            // PurrNet versions differ in exactly when the client half raises
+            // onNetworkStarted. Converge from the authoritative manager flags as well so a
+            // bridge enabled before StartClient cannot remain permanently unsubscribed.
+            EnsureRunningSubscriptions(ActiveManager);
 
             RebuildConnectedClients();
         }
@@ -202,6 +228,15 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
             EnsureAnimationMotionBridge();
         }
 
+        private void EnsureRunningSubscriptions(NetworkManager manager)
+        {
+            if (manager == null) return;
+            if (manager.isServer && !m_SubscribedServer)
+                HandleNetworkStarted(manager, true);
+            if (manager.isClient && !m_SubscribedClient)
+                HandleNetworkStarted(manager, false);
+        }
+
         private void EnsureCoreTransportBridge()
         {
             if (m_CoreTransportBridge != null)
@@ -211,7 +246,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
             }
 
 #if UNITY_2023_1_OR_NEWER
-            m_CoreTransportBridge = FindFirstObjectByType<PurrNetCoreTransportBridge>();
+            m_CoreTransportBridge = UnityObjectSearch.FindAny<PurrNetCoreTransportBridge>();
 #else
             m_CoreTransportBridge = FindObjectOfType<PurrNetCoreTransportBridge>();
 #endif
@@ -233,7 +268,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
             }
 
 #if UNITY_2023_1_OR_NEWER
-            m_AnimationMotionBridge = FindFirstObjectByType<PurrNetAnimationMotionTransportBridge>();
+            m_AnimationMotionBridge = UnityObjectSearch.FindAny<PurrNetAnimationMotionTransportBridge>();
 #else
             m_AnimationMotionBridge = FindObjectOfType<PurrNetAnimationMotionTransportBridge>();
 #endif
@@ -251,7 +286,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
             if (m_LagCompensationBootstrap == null)
             {
 #if UNITY_2023_1_OR_NEWER
-                m_LagCompensationBootstrap = FindFirstObjectByType<LagCompensationBootstrap>(
+                m_LagCompensationBootstrap = UnityObjectSearch.FindAny<LagCompensationBootstrap>(
                     FindObjectsInactive.Include);
 #else
                 m_LagCompensationBootstrap = FindObjectOfType<LagCompensationBootstrap>(true);
@@ -280,9 +315,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
             // Characters can have initialized before a restarted network session replaced the
             // manager. Configure/Register is idempotent and rebinds those existing adapters.
 #if UNITY_2023_1_OR_NEWER
-            CharacterLagCompensation[] adapters = FindObjectsByType<CharacterLagCompensation>(
-                FindObjectsInactive.Exclude,
-                FindObjectsSortMode.None);
+            CharacterLagCompensation[] adapters = UnityObjectSearch.FindAll<CharacterLagCompensation>(FindObjectsInactive.Exclude);
 #else
             CharacterLagCompensation[] adapters = FindObjectsOfType<CharacterLagCompensation>();
 #endif
@@ -560,7 +593,10 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
             if (networkCharacter == null) return false;
 
             var identity = networkCharacter.GetComponentInParent<NetworkIdentity>();
-            if (identity == null || !identity.isSpawned || identity.objectId >= uint.MaxValue)
+            if (identity == null ||
+                !identity.isSpawned ||
+                !identity.id.HasValue ||
+                identity.objectId >= uint.MaxValue)
             {
                 return false;
             }

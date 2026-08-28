@@ -27,6 +27,8 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         [SerializeField] private float m_SelectionWaitTimeout = 8f;
         [SerializeField] private Transform[] m_SpawnPoints = Array.Empty<Transform>();
         [SerializeField] private bool m_DespawnPlayerOnLeave = true;
+        [Tooltip("Optional reusable bot-slot coordinator. Humans replace bots atomically and use ordinary spawn points after all slots are occupied.")]
+        [SerializeField] private FusionBotSlotCoordinator m_BotSlotCoordinator;
 
         private readonly Dictionary<PlayerRef, NetworkObject> m_SpawnedPlayers =
             new Dictionary<PlayerRef, NetworkObject>();
@@ -56,6 +58,10 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             }
             EnsureSpawnRegistry();
             AttachConfiguredCharacterSelection();
+            if (m_BotSlotCoordinator == null)
+            {
+                m_BotSlotCoordinator = GetComponentInParent<FusionBotSlotCoordinator>();
+            }
         }
 
         private void OnEnable()
@@ -228,7 +234,27 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
 
             if (TryGetSpawnedPlayer(player, out NetworkObject existing)) return existing;
 
-            ResolveSpawnTransform(player, out Vector3 position, out Quaternion rotation);
+            bool hasClientId = FusionTransportBridge.TryPlayerToClientId(player, out uint clientId);
+            NetworkBotSlotReservation botReservation = default;
+            bool hasBotReservation = hasClientId &&
+                m_BotSlotCoordinator != null &&
+                m_BotSlotCoordinator.TryReserveSlotForHuman(
+                    clientId,
+                    out botReservation);
+
+            Vector3 position;
+            Quaternion rotation;
+
+            if (hasBotReservation)
+            {
+                position = botReservation.Position;
+                rotation = botReservation.Rotation;
+            }
+            else
+            {
+                ResolveSpawnTransform(player, out position, out rotation);
+            }
+
             PlayerRef? inputAuthority =
                 runner.GameMode == GameMode.Shared ? (PlayerRef?)null : player;
             NetworkObject spawned = m_SpawnRegistry.Spawn(
@@ -238,7 +264,14 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                 player,
                 inputAuthority);
 
-            if (spawned == null) return null;
+            if (spawned == null)
+            {
+                if (hasBotReservation)
+                {
+                    m_BotSlotCoordinator.RollbackHumanReservation(botReservation);
+                }
+                return null;
+            }
 
             FusionNetworkIdentity spawnedIdentity = spawned.GetComponent<FusionNetworkIdentity>();
             if (spawnedIdentity == null)
@@ -247,6 +280,20 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                     $"[FusionTransport] Spawned player '{spawned.name}' has no FusionNetworkIdentity.",
                     spawned);
                 m_SpawnRegistry.Despawn(spawned.Id);
+                if (hasBotReservation)
+                {
+                    m_BotSlotCoordinator.RollbackHumanReservation(botReservation);
+                }
+                return null;
+            }
+
+            if (hasBotReservation &&
+                !m_BotSlotCoordinator.CommitHumanReservation(
+                    botReservation,
+                    spawned.gameObject))
+            {
+                m_SpawnRegistry.Despawn(spawned.Id);
+                m_BotSlotCoordinator.RollbackHumanReservation(botReservation);
                 return null;
             }
 
@@ -503,9 +550,19 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                 playerObject != null && playerObject.Id.IsValid
                     ? playerObject.Id.Raw
                     : 0;
+            Vector3 lastPosition = playerObject != null
+                ? playerObject.transform.position
+                : transform.position;
+            Quaternion lastRotation = playerObject != null
+                ? playerObject.transform.rotation
+                : transform.rotation;
 
             m_SpawnedPlayers.Remove(player);
-            if (FusionTransportBridge.TryPlayerToClientId(player, out uint clientId))
+            bool hasClientId = FusionTransportBridge.TryPlayerToClientId(player, out uint clientId);
+            bool hadBotSlot = hasClientId &&
+                m_BotSlotCoordinator != null &&
+                m_BotSlotCoordinator.TryGetHumanSlot(clientId, out _);
+            if (hasClientId)
             {
                 m_PendingSelectionSpawns.Remove(clientId);
                 m_CharacterSelection?.ForgetAuthoritySelection(clientId);
@@ -515,7 +572,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                 m_AuthorityIssuedObjects.Remove(playerObject.Id);
             }
 
-            if (m_DespawnPlayerOnLeave &&
+            if ((m_DespawnPlayerOnLeave || hadBotSlot) &&
                 m_TransportBridge != null &&
                 m_TransportBridge.IsServer &&
                 playerObject != null &&
@@ -528,6 +585,14 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                         player,
                         playerObject,
                         previousNetworkId);
+
+                    if (hadBotSlot)
+                    {
+                        m_BotSlotCoordinator.ReplaceDisconnectedHumanWithBot(
+                            clientId,
+                            lastPosition,
+                            lastRotation);
+                    }
                 }
             }
         }

@@ -19,13 +19,13 @@ namespace Arawn.GameCreator2.Networking.Inventory
         // SINGLETON (lazy-find override)
         // ════════════════════════════════════════════════════════════════════════════════════════
 
-        /// <summary>Singleton instance. Falls back to FindFirstObjectByType if not yet assigned.</summary>
+        /// <summary>Singleton instance. Falls back to UnityObjectSearch.FindAny if not yet assigned.</summary>
         public new static NetworkInventoryManager Instance
         {
             get
             {
                 if (s_Instance == null)
-                    s_Instance = FindFirstObjectByType<NetworkInventoryManager>();
+                    s_Instance = UnityObjectSearch.FindAny<NetworkInventoryManager>();
                 return s_Instance;
             }
         }

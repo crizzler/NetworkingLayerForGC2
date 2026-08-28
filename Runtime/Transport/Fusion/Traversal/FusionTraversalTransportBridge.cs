@@ -119,7 +119,7 @@ namespace Arawn.GameCreator2.Networking.Traversal.Transport.Fusion
         {
             FusionTransportBridge candidate = m_TransportBridge;
             if (candidate == null) candidate = NetworkTransportBridge.Active as FusionTransportBridge;
-            if (candidate == null) candidate = FindFirstObjectByType<FusionTransportBridge>();
+            if (candidate == null) candidate = UnityObjectSearch.FindAny<FusionTransportBridge>();
 
             if (!force && candidate == m_BoundBridge) return;
             if (candidate == m_BoundBridge) return;
@@ -247,9 +247,7 @@ namespace Arawn.GameCreator2.Networking.Traversal.Transport.Fusion
             PruneControllerRegistry(manager);
             if (!m_AutoRegisterSceneControllers && !force) return;
 
-            NetworkTraversalController[] controllers = FindObjectsByType<NetworkTraversalController>(
-                FindObjectsInactive.Exclude,
-                FindObjectsSortMode.None);
+            NetworkTraversalController[] controllers = UnityObjectSearch.FindAll<NetworkTraversalController>(FindObjectsInactive.Exclude);
             for (int i = 0; i < controllers.Length; i++) RegisterController(manager, controllers[i]);
         }
 
@@ -298,6 +296,13 @@ namespace Arawn.GameCreator2.Networking.Traversal.Transport.Fusion
         private void SendRequestToAuthority(NetworkTraversalRequest request)
         {
             if (m_BoundBridge == null || !m_BoundBridge.IsClient) return;
+            NetworkCiTrace.Log(
+                "fusion-traversal-route",
+                "request-send-to-authority",
+                request.ActorNetworkId,
+                request.CorrelationId,
+                $"request={request.RequestId} action={request.Action} epoch={m_BoundBridge.AuthorityEpoch}",
+                this);
             byte[] payload = FusionValueCodec.Encode(request, (writer, value) => writer.Write(value));
             m_BoundBridge.SendModuleToAuthority(ModuleId, (ushort)MessageType.Request, payload);
         }
@@ -305,6 +310,14 @@ namespace Arawn.GameCreator2.Networking.Traversal.Transport.Fusion
         private void SendResponseToClient(uint clientId, NetworkTraversalResponse response)
         {
             if (m_BoundBridge == null || !m_BoundBridge.IsServer) return;
+            NetworkCiTrace.Log(
+                "fusion-traversal-route",
+                "response-send-to-owner",
+                response.ActorNetworkId,
+                response.CorrelationId,
+                $"client={clientId} request={response.RequestId} authorized={response.Authorized} " +
+                $"applied={response.Applied} version={response.StateVersion}",
+                this);
             byte[] payload = FusionValueCodec.Encode(response, (writer, value) => writer.Write(value));
             m_BoundBridge.SendModuleToClient(clientId, ModuleId, (ushort)MessageType.Response, payload);
         }
@@ -346,6 +359,14 @@ namespace Arawn.GameCreator2.Networking.Traversal.Transport.Fusion
                         Log("dropped malformed request");
                         return;
                     }
+                    NetworkCiTrace.Log(
+                        "fusion-traversal-route",
+                        "request-received-by-authority",
+                        request.ActorNetworkId,
+                        request.CorrelationId,
+                        $"sender={message.SenderClientId} request={request.RequestId} action={request.Action} " +
+                        $"epoch={message.AuthorityEpoch}",
+                        this);
                     RefreshControllerRegistry(force: true);
                     _ = GetManager()?.ReceiveTraversalRequest(request, message.SenderClientId);
                     break;
@@ -360,6 +381,14 @@ namespace Arawn.GameCreator2.Networking.Traversal.Transport.Fusion
                         Log("dropped malformed response");
                         return;
                     }
+                    NetworkCiTrace.Log(
+                        "fusion-traversal-route",
+                        "response-received-by-owner",
+                        response.ActorNetworkId,
+                        response.CorrelationId,
+                        $"request={response.RequestId} authorized={response.Authorized} " +
+                        $"applied={response.Applied} version={response.StateVersion} epoch={message.AuthorityEpoch}",
+                        this);
                     GetManager()?.ReceiveTraversalResponse(response, response.ActorNetworkId);
                     break;
 
@@ -373,6 +402,14 @@ namespace Arawn.GameCreator2.Networking.Traversal.Transport.Fusion
                         Log("dropped malformed broadcast");
                         return;
                     }
+                    NetworkCiTrace.Log(
+                        "fusion-traversal-route",
+                        "broadcast-received",
+                        broadcast.NetworkId,
+                        broadcast.CorrelationId,
+                        $"action={broadcast.Action} version={broadcast.StateVersion} " +
+                        $"traversing={broadcast.IsTraversing} epoch={message.AuthorityEpoch}",
+                        this);
                     LogFocusedClimbRoute("receive-broadcast", broadcast, message);
                     RefreshControllerRegistry(force: true);
                     GetManager()?.ReceiveTraversalChangeBroadcast(broadcast);
@@ -431,7 +468,7 @@ namespace Arawn.GameCreator2.Networking.Traversal.Transport.Fusion
         {
             return NetworkTraversalManager.Instance != null
                 ? NetworkTraversalManager.Instance
-                : FindFirstObjectByType<NetworkTraversalManager>();
+                : UnityObjectSearch.FindAny<NetworkTraversalManager>();
         }
     }
 }

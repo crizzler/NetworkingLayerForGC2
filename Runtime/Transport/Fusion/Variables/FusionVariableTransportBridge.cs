@@ -224,8 +224,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             if (!m_AutoRegisterSceneControllers && !force) return;
 
             NetworkVariableController[] controllers =
-                FindObjectsByType<NetworkVariableController>(
-                    FindObjectsInactive.Exclude, FindObjectsSortMode.None);
+                UnityObjectSearch.FindAll<NetworkVariableController>(FindObjectsInactive.Exclude);
             for (int i = 0; i < controllers.Length; i++)
                 RegisterController(manager, controllers[i]);
         }
@@ -474,7 +473,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         {
             return NetworkVariableManager.Instance != null
                 ? NetworkVariableManager.Instance
-                : FindFirstObjectByType<NetworkVariableManager>(FindObjectsInactive.Include);
+                : UnityObjectSearch.FindAny<NetworkVariableManager>(FindObjectsInactive.Include);
         }
     }
 }

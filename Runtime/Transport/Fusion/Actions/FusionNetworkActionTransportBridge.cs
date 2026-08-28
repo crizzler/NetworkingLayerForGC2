@@ -250,8 +250,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             PruneEndpointRegistry(manager);
             if (!m_AutoRegisterSceneEndpoints && !force) return;
 
-            NetworkActionEndpoint[] endpoints = FindObjectsByType<NetworkActionEndpoint>(
-                FindObjectsInactive.Exclude, FindObjectsSortMode.None);
+            NetworkActionEndpoint[] endpoints = UnityObjectSearch.FindAll<NetworkActionEndpoint>(FindObjectsInactive.Exclude);
             for (int i = 0; i < endpoints.Length; i++) RegisterEndpoint(manager, endpoints[i]);
         }
 
@@ -668,6 +667,6 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         private static NetworkActionManager GetManager() =>
             NetworkActionManager.Instance != null
                 ? NetworkActionManager.Instance
-                : FindFirstObjectByType<NetworkActionManager>(FindObjectsInactive.Include);
+                : UnityObjectSearch.FindAny<NetworkActionManager>(FindObjectsInactive.Include);
     }
 }

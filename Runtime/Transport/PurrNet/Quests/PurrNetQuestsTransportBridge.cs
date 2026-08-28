@@ -225,9 +225,7 @@ namespace Arawn.GameCreator2.Networking.Quests.Transport.PurrNet
 
             if (!m_AutoRegisterSceneControllers && !force) return;
 
-            NetworkQuestsController[] controllers = FindObjectsByType<NetworkQuestsController>(
-                FindObjectsInactive.Exclude,
-                FindObjectsSortMode.None);
+            NetworkQuestsController[] controllers = UnityObjectSearch.FindAll<NetworkQuestsController>(FindObjectsInactive.Exclude);
 
             for (int i = 0; i < controllers.Length; i++)
             {
@@ -391,7 +389,7 @@ namespace Arawn.GameCreator2.Networking.Quests.Transport.PurrNet
         {
             return NetworkQuestsManager.Instance != null
                 ? NetworkQuestsManager.Instance
-                : FindFirstObjectByType<NetworkQuestsManager>();
+                : UnityObjectSearch.FindAny<NetworkQuestsManager>();
         }
 
         private static uint PlayerIdToClientId(PlayerID playerId)

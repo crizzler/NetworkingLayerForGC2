@@ -292,7 +292,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
             // This bridge runs before ordinary scene objects. Discover the serialized manager
             // even when its Awake has not claimed the singleton slot yet.
 #if UNITY_2023_1_OR_NEWER
-            manager = FindFirstObjectByType<NetworkAnimationManager>(FindObjectsInactive.Include);
+            manager = UnityObjectSearch.FindAny<NetworkAnimationManager>(FindObjectsInactive.Include);
 #else
             manager = FindObjectOfType<NetworkAnimationManager>(true);
 #endif
@@ -309,7 +309,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
             if (manager != null) return manager;
 
 #if UNITY_2023_1_OR_NEWER
-            manager = FindFirstObjectByType<NetworkMotionManager>(FindObjectsInactive.Include);
+            manager = UnityObjectSearch.FindAny<NetworkMotionManager>(FindObjectsInactive.Include);
 #else
             manager = FindObjectOfType<NetworkMotionManager>(true);
 #endif

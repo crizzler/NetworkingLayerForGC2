@@ -164,7 +164,7 @@ namespace Arawn.GameCreator2.Networking
 
         public string GetProfileId()
         {
-            return !string.IsNullOrWhiteSpace(name) ? name : GetInstanceID().ToString();
+            return !string.IsNullOrWhiteSpace(name) ? name : this.GetLegacyInstanceId().ToString();
         }
 
         public string GetLocalListBindingId()

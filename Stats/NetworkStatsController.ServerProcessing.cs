@@ -18,7 +18,7 @@ namespace Arawn.GameCreator2.Networking.Stats
         /// </summary>
         public NetworkStatModifyResponse ProcessStatModifyRequest(NetworkStatModifyRequest request, uint clientNetworkId)
         {
-            if (!m_IsServer)
+            if (!m_IsServer || !CanUseDurableGameplayState)
             {
                 return new NetworkStatModifyResponse
                 {
@@ -85,7 +85,7 @@ namespace Arawn.GameCreator2.Networking.Stats
         /// </summary>
         public NetworkAttributeModifyResponse ProcessAttributeModifyRequest(NetworkAttributeModifyRequest request, uint clientNetworkId)
         {
-            if (!m_IsServer)
+            if (!m_IsServer || !CanUseDurableGameplayState)
             {
                 return new NetworkAttributeModifyResponse
                 {
@@ -155,7 +155,7 @@ namespace Arawn.GameCreator2.Networking.Stats
         /// </summary>
         public NetworkStatusEffectResponse ProcessStatusEffectRequest(NetworkStatusEffectRequest request, uint clientNetworkId)
         {
-            if (!m_IsServer)
+            if (!m_IsServer || !CanUseDurableGameplayState)
             {
                 return new NetworkStatusEffectResponse
                 {
@@ -225,7 +225,7 @@ namespace Arawn.GameCreator2.Networking.Stats
         /// </summary>
         public NetworkStatModifierResponse ProcessStatModifierRequest(NetworkStatModifierRequest request, uint clientNetworkId)
         {
-            if (!m_IsServer)
+            if (!m_IsServer || !CanUseDurableGameplayState)
             {
                 return new NetworkStatModifierResponse
                 {
@@ -328,7 +328,7 @@ namespace Arawn.GameCreator2.Networking.Stats
         /// </summary>
         public NetworkClearStatusEffectsResponse ProcessClearStatusEffectsRequest(NetworkClearStatusEffectsRequest request, uint clientNetworkId)
         {
-            if (!m_IsServer)
+            if (!m_IsServer || !CanUseDurableGameplayState)
             {
                 return new NetworkClearStatusEffectsResponse
                 {

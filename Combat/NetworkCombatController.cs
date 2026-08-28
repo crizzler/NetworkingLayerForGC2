@@ -447,9 +447,8 @@ namespace Arawn.GameCreator2.Networking
             uint actorNetworkId = GetLocalPlayerNetworkId?.Invoke() ?? 0;
             if (actorNetworkId != 0) return actorNetworkId;
 
-            NetworkCharacter[] networkCharacters = FindObjectsByType<NetworkCharacter>(
-                FindObjectsInactive.Exclude,
-                FindObjectsSortMode.None);
+            NetworkCharacter[] networkCharacters = UnityObjectSearch.FindAll<NetworkCharacter>(
+                FindObjectsInactive.Exclude);
 
             for (int i = 0; i < networkCharacters.Length; i++)
             {

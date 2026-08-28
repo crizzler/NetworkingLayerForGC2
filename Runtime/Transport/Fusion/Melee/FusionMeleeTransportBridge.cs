@@ -32,7 +32,8 @@ namespace Arawn.GameCreator2.Networking.Melee.Transport.Fusion
             ChargeBroadcast = 12,
             ReactionBroadcast = 13,
             WeaponState = 14,
-            CharacterSnapshot = 15
+            CharacterSnapshot = 15,
+            FreeFlowState = 16
         }
 
         [Header("Fusion")]
@@ -137,7 +138,7 @@ namespace Arawn.GameCreator2.Networking.Melee.Transport.Fusion
         {
             FusionTransportBridge candidate = m_TransportBridge;
             if (candidate == null) candidate = NetworkTransportBridge.Active as FusionTransportBridge;
-            if (candidate == null) candidate = FindFirstObjectByType<FusionTransportBridge>();
+            if (candidate == null) candidate = UnityObjectSearch.FindAny<FusionTransportBridge>();
             if (!force && candidate == m_BoundBridge) return;
             if (candidate == m_BoundBridge) return;
 
@@ -235,6 +236,8 @@ namespace Arawn.GameCreator2.Networking.Melee.Transport.Fusion
             manager.SendSkillResponseToClient += SendSkillResponse;
             manager.BroadcastSkillToAllClients -= BroadcastSkill;
             manager.BroadcastSkillToAllClients += BroadcastSkill;
+            manager.BroadcastFreeFlowStateToAllClients -= BroadcastFreeFlowState;
+            manager.BroadcastFreeFlowStateToAllClients += BroadcastFreeFlowState;
 
             manager.SendChargeRequestToServer -= SendChargeRequest;
             manager.SendChargeRequestToServer += SendChargeRequest;
@@ -274,6 +277,7 @@ namespace Arawn.GameCreator2.Networking.Melee.Transport.Fusion
                 manager.SendSkillRequestToServer -= SendSkillRequest;
                 manager.SendSkillResponseToClient -= SendSkillResponse;
                 manager.BroadcastSkillToAllClients -= BroadcastSkill;
+                manager.BroadcastFreeFlowStateToAllClients -= BroadcastFreeFlowState;
                 manager.SendChargeRequestToServer -= SendChargeRequest;
                 manager.SendChargeResponseToClient -= SendChargeResponse;
                 manager.BroadcastChargeToAllClients -= BroadcastCharge;
@@ -333,8 +337,7 @@ namespace Arawn.GameCreator2.Networking.Melee.Transport.Fusion
             PruneControllerRegistry(manager);
             if (!m_AutoRegisterSceneControllers && !force) return;
 
-            NetworkMeleeController[] controllers = FindObjectsByType<NetworkMeleeController>(
-                FindObjectsInactive.Exclude, FindObjectsSortMode.None);
+            NetworkMeleeController[] controllers = UnityObjectSearch.FindAll<NetworkMeleeController>(FindObjectsInactive.Exclude);
             for (int i = 0; i < controllers.Length; i++) RegisterController(manager, controllers[i]);
         }
 
@@ -424,9 +427,27 @@ namespace Arawn.GameCreator2.Networking.Melee.Transport.Fusion
             NetworkMeleeController controller,
             NetworkMeleeWeaponState state)
         {
-            if (controller == null || !controller.IsLocalClient) return;
-            uint networkId = controller.GetComponent<NetworkCharacter>()?.NetworkId ?? 0;
-            if (networkId != 0) SendWeaponState(networkId, state);
+            if (controller == null) return;
+            NetworkCharacter character = controller.GetComponent<NetworkCharacter>();
+            uint networkId = character != null ? character.NetworkId : 0;
+            if (networkId == 0) return;
+
+            if (controller.IsLocalClient)
+            {
+                SendWeaponState(networkId, state);
+                return;
+            }
+
+            bool trustedServerNpc = m_BoundBridge != null && m_BoundBridge.IsServer &&
+                                    character.IsServerAuthoritativeNPC &&
+                                    character.IsServerInstance &&
+                                    character.HasSimulationAuthority &&
+                                    !m_BoundBridge.TryGetCharacterOwner(networkId, out _);
+            if (!trustedServerNpc) return;
+
+            NetworkMeleeManager manager = GetManager();
+            manager?.RecordAuthoritativeWeaponState(networkId, state);
+            BroadcastWeaponState(networkId, state, reliable: true);
         }
 
         private void SendHitRequest(NetworkMeleeHitRequest value) =>
@@ -453,6 +474,8 @@ namespace Arawn.GameCreator2.Networking.Melee.Transport.Fusion
             Broadcast(MessageType.BlockBroadcast, value, (writer, item) => writer.Write(item));
         private void BroadcastSkill(NetworkSkillBroadcast value) =>
             Broadcast(MessageType.SkillBroadcast, value, (writer, item) => writer.Write(item));
+        private void BroadcastFreeFlowState(NetworkFreeFlowCombatState value) =>
+            Broadcast(MessageType.FreeFlowState, value, (writer, item) => writer.Write(item));
         private void BroadcastCharge(NetworkChargeBroadcast value) =>
             Broadcast(MessageType.ChargeBroadcast, value, (writer, item) => writer.Write(item));
         private void BroadcastReaction(NetworkReactionBroadcast value) =>
@@ -502,7 +525,10 @@ namespace Arawn.GameCreator2.Networking.Melee.Transport.Fusion
                 reliable: false);
         }
 
-        private void BroadcastWeaponState(uint characterNetworkId, NetworkMeleeWeaponState state)
+        private void BroadcastWeaponState(
+            uint characterNetworkId,
+            NetworkMeleeWeaponState state,
+            bool reliable = false)
         {
             if (m_BoundBridge == null || !m_BoundBridge.IsServer || characterNetworkId == 0) return;
             var writer = new FusionValueWriter();
@@ -512,7 +538,7 @@ namespace Arawn.GameCreator2.Networking.Melee.Transport.Fusion
                 ModuleId,
                 (ushort)MessageType.WeaponState,
                 writer.ToArray(),
-                reliable: false);
+                reliable: reliable);
         }
 
         private bool SendCharacterSnapshot(uint clientId, NetworkMeleeCharacterSnapshot snapshot)
@@ -588,6 +614,13 @@ namespace Arawn.GameCreator2.Networking.Melee.Transport.Fusion
                     {
                         RefreshControllerRegistry(force: true);
                         manager.ReceiveCharacterSnapshot(value);
+                    });
+                    break;
+                case MessageType.FreeFlowState:
+                    ReceiveAuthority(message, (NetworkMeleeManager manager, NetworkFreeFlowCombatState value) =>
+                    {
+                        RefreshControllerRegistry(force: true);
+                        manager.ReceiveFreeFlowState(value);
                     });
                     break;
                 default:
@@ -703,7 +736,7 @@ namespace Arawn.GameCreator2.Networking.Melee.Transport.Fusion
         {
             return NetworkMeleeManager.Instance != null
                 ? NetworkMeleeManager.Instance
-                : FindFirstObjectByType<NetworkMeleeManager>();
+                : UnityObjectSearch.FindAny<NetworkMeleeManager>();
         }
     }
 
@@ -767,6 +800,10 @@ namespace Arawn.GameCreator2.Networking.Melee.Transport.Fusion
             else if (typeof(T) == typeof(NetworkMeleeCharacterSnapshot))
             {
                 NetworkMeleeCharacterSnapshot typed = default; reader.Read(ref typed); boxed = typed;
+            }
+            else if (typeof(T) == typeof(NetworkFreeFlowCombatState))
+            {
+                NetworkFreeFlowCombatState typed = default; reader.Read(ref typed); boxed = typed;
             }
             else
             {

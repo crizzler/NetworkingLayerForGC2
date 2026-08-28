@@ -647,7 +647,7 @@ namespace Arawn.GameCreator2.Networking
                 "OwnerWindow",
                 $"side=server operation=open id={m_ServerOwnerMotionOperationId} " +
                 $"duration={durationSeconds:F3} until={m_ServerOwnerMotionWindowUntilRealtime:F3}",
-                $"server-window-open:{this.Character?.GetInstanceID() ?? 0}");
+                $"server-window-open:{this.Character?.GetLegacyInstanceId() ?? 0}");
             LogTraversalPose(
                 $"server-owner-motion-window-open operation={m_ServerOwnerMotionOperationId} " +
                 $"duration={durationSeconds:F3} until={m_ServerOwnerMotionWindowUntilRealtime:F3}");
@@ -1067,7 +1067,7 @@ namespace Arawn.GameCreator2.Networking
                 $"lastProcessed={state.lastProcessedInput} pos={NetworkTraversalClimbDiagnostics.Vector(state.GetPosition())} " +
                 $"grounded={IsGrounded} queuedBefore={queuedAtStart} rootMotion={this.Character?.RootMotionPosition ?? 0f:F3} " +
                 $"{FormatBusyState()}",
-                $"server-state:{this.Character?.GetInstanceID() ?? 0}");
+                $"server-state:{this.Character?.GetLegacyInstanceId() ?? 0}");
             OnStateProduced?.Invoke(state);
             return state;
         }
@@ -1149,7 +1149,7 @@ namespace Arawn.GameCreator2.Networking
                     $"windowRemaining={Mathf.Max(0f, m_ServerOwnerMotionWindowUntilRealtime - Time.realtimeSinceStartup):F3} " +
                     $"operation={m_ServerOwnerMotionOperationId} grounded={IsGrounded} " +
                     $"rootMotion={this.Character?.RootMotionPosition ?? 0f:F3} {FormatBusyState()}",
-                    $"server-owner-receive:{this.Character?.GetInstanceID() ?? 0}");
+                    $"server-owner-receive:{this.Character?.GetLegacyInstanceId() ?? 0}");
                 LogTraversalPose(
                     $"process-owner-authority-input-begin seq={input.sequenceNumber} dt={deltaTime:F3} " +
                     $"rawInput={FormatVector2(rawInput)} inputRotY={inputRotationY:F2} " +
@@ -1277,7 +1277,7 @@ namespace Arawn.GameCreator2.Networking
                     $"nativeApplied={NetworkTraversalClimbDiagnostics.Vector(m_LastOwnerAuthorityAppliedDelta)} " +
                     $"nativeFrame={m_LastOwnerAuthorityNativeMoveFrame} grounded={IsGrounded} " +
                     $"rootMotion={this.Character?.RootMotionPosition ?? 0f:F3} {FormatBusyState()}",
-                    $"server-owner-result:{this.Character?.GetInstanceID() ?? 0}");
+                    $"server-owner-result:{this.Character?.GetLegacyInstanceId() ?? 0}");
                 LogTraversalPose(
                     $"process-owner-authority-input-end seq={input.sequenceNumber} appliedOwnerPose={ownerAuthorityApplied} " +
                     $"after={FormatVector(this.Transform.position)} afterY={this.Transform.position.y:F3} " +
@@ -1467,7 +1467,7 @@ namespace Arawn.GameCreator2.Networking
                 $"grounded={IsGrounded} rootMotion={this.Character?.RootMotionPosition ?? 0f:F3} " +
                 $"{FormatBusyState()}",
                 result.StartsWith("accepted", StringComparison.Ordinal)
-                    ? $"server-owner-validation:{this.Character?.GetInstanceID() ?? 0}"
+                    ? $"server-owner-validation:{this.Character?.GetLegacyInstanceId() ?? 0}"
                     : null);
         }
 
@@ -1515,7 +1515,7 @@ namespace Arawn.GameCreator2.Networking
                     $"requested={NetworkTraversalClimbDiagnostics.Vector(rootPosition)} " +
                     $"applied={NetworkTraversalClimbDiagnostics.Vector(this.Transform.position)} " +
                     $"delta={NetworkTraversalClimbDiagnostics.Vector(m_LastOwnerAuthorityAppliedDelta)}",
-                    $"server-owner-absolute:{this.Character?.GetInstanceID() ?? 0}");
+                    $"server-owner-absolute:{this.Character?.GetLegacyInstanceId() ?? 0}");
                 return this.Transform.position;
             }
 
@@ -1529,12 +1529,22 @@ namespace Arawn.GameCreator2.Networking
                 m_LastOwnerAuthorityNativeMoveFrame = Time.frameCount;
                 m_LastOwnerAuthorityAppliedDelta = this.Transform.position - before;
 
-                // A real non-zero native Move supersedes an older pending Transform/shape
-                // refresh. A later shape mutation or explicit window close can schedule a new
-                // verified repair independently.
-                m_ControllerPhysicsRefreshPending = false;
-                m_ControllerPhysicsRefreshNotBeforeFrame = -1;
-                m_ControllerPhysicsRefreshRetryCount = 0;
+                // Unity 6000.5 can leave an enabled controller absent from overlap queries even
+                // after a genuine non-zero Move. Verify the native proxy before clearing an
+                // older repair request so a same-tick authoritative combat query sees the new
+                // pose. The recovery path runs only when the inexpensive self-query fails.
+                Physics.SyncTransforms();
+                if (IsControllerQueryableInOwnPhysicsScene())
+                {
+                    m_ControllerPhysicsRefreshPending = false;
+                    m_ControllerPhysicsRefreshNotBeforeFrame = -1;
+                    m_ControllerPhysicsRefreshRetryCount = 0;
+                }
+                else
+                {
+                    RefreshControllerPhysicsProxy(out bool queryable);
+                    if (!queryable) ScheduleDeferredControllerPhysicsRefresh();
+                }
                 return this.Transform.position;
             }
 
@@ -2023,7 +2033,7 @@ namespace Arawn.GameCreator2.Networking
                         $"rootYaw={this.Transform.eulerAngles.y:F2} presentationYaw={presentationRotation.eulerAngles.y:F2} " +
                         $"ownerPoseAge={(m_LastOwnerAuthorityPoseRealtime > -50f ? Time.realtimeSinceStartup - m_LastOwnerAuthorityPoseRealtime : -1f):F3} " +
                         $"ownerWindowRemaining={Mathf.Max(0f, m_ServerOwnerMotionWindowUntilRealtime - Time.realtimeSinceStartup):F3}",
-                        $"host-presentation-pose:{this.Character.GetInstanceID()}");
+                        $"host-presentation-pose:{this.Character.GetLegacyInstanceId()}");
                 }
             }
 
@@ -2459,7 +2469,7 @@ namespace Arawn.GameCreator2.Networking
                 $"operation={m_ServerOwnerMotionOperationId} updateKinematics={this.UpdateKinematics} " +
                 $"grounded={IsGrounded} rootMotion={this.Character?.RootMotionPosition ?? 0f:F3} " +
                 $"{FormatBusyState()}",
-                $"server-root-write:{this.Character.GetInstanceID()}:{writer}:{result}");
+                $"server-root-write:{this.Character.GetLegacyInstanceId()}:{writer}:{result}");
         }
 
         private bool TryGetExternalRootPositionWriteAllowance(Vector3 position, out string reason)

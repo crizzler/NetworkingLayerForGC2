@@ -10,7 +10,7 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
     public class QuestsPatcher : GC2PatcherBase
     {
         public override string ModuleName => "Quests";
-        public override string PatchVersion => "2.1.0-quests";
+        public override string PatchVersion => "2.2.0-quests";
         public override string DisplayName => "Quests (Game Creator 2)";
 
         public override string PatchDescription =>
@@ -28,7 +28,10 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
         {
             return new[]
             {
-                VersionRequirement("Plugins/GameCreator/Packages/Quests/Editor/Version.txt", "2.3.*")
+                VersionRequirement(
+                    "Plugins/GameCreator/Packages/Quests/Editor/Version.txt",
+                    "2.3.*",
+                    "2.4.*")
             };
         }
 

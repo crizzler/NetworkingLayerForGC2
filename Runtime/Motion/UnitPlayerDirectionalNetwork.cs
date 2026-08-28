@@ -112,18 +112,31 @@ namespace Arawn.GameCreator2.Networking
             this.m_InputJump.OnUpdate();
 
             if (this.Character == null) return;
-            if (!this.Character.IsPlayer && !TryRestoreLocalNetworkPlayerFlag())
+            if (!this.Character.IsPlayer)
             {
-                m_CurrentInput = Vector2.zero;
-                m_JumpPressed = false;
-                this.InputDirection = Vector3.zero;
-                ClearMotionDirection();
-                ClearNetworkInputSink();
-                return;
+                if (!TryRestoreLocalNetworkPlayerFlag())
+                {
+                    TraceCiInputHealth("blocked", "character-is-player-false");
+                    m_CurrentInput = Vector2.zero;
+                    m_JumpPressed = false;
+                    this.InputDirection = Vector3.zero;
+
+                    // A network player unit can remain authored on an explicit NPC prefab while
+                    // NetworkCharacter swaps only its Driver for the current authority role. GC2
+                    // runs Player before Motion and Driver, so clearing Motion.MoveDirection here
+                    // erased an AI MoveToDirection request before the authoritative NavMesh driver
+                    // could consume it. Match GC2's built-in directional unit: a non-player owns no
+                    // input and therefore must leave the shared Motion command untouched.
+                    ClearNetworkInputSink();
+                    return;
+                }
+
+                TraceCiInputHealth("player-flag-restored", "authenticated-local-owner");
             }
 
             if (!m_IsInputEnabled)
             {
+                TraceCiInputHealth("blocked", "unit-input-disabled");
                 m_CurrentInput = Vector2.zero;
                 m_JumpPressed = false;
                 this.InputDirection = Vector3.zero;
@@ -134,6 +147,7 @@ namespace Arawn.GameCreator2.Networking
 
             if (NetworkGameplayInputBlocker.IsTextInputFocused())
             {
+                TraceCiInputHealth("blocked", "text-input-focused");
                 m_CurrentInput = Vector2.zero;
                 m_JumpPressed = false;
                 m_JumpConsumed = false;
@@ -152,6 +166,7 @@ namespace Arawn.GameCreator2.Networking
 
             if (!this.m_IsControllable)
             {
+                TraceCiInputHealth("blocked", "character-not-controllable");
                 m_CurrentInput = Vector2.zero;
                 m_JumpPressed = false;
                 m_JumpConsumed = false;
@@ -197,6 +212,10 @@ namespace Arawn.GameCreator2.Networking
                     m_JumpPressed = false;
                 }
             }
+
+            TraceCiInputHealth(
+                "sample",
+                m_InputSink != null ? "input-forwarded" : "network-input-sink-missing");
         }
 
         private void LogFocusedTraversalInput()
@@ -222,7 +241,7 @@ namespace Arawn.GameCreator2.Networking
                 $"{AxisSign(playerLocal.x)},{AxisSign(playerLocal.y)},{AxisSign(playerLocal.z)}:" +
                 $"{m_JumpPressed}:{m_IsInputEnabled}:{this.m_IsControllable}";
             bool changed = NetworkTraversalClimbDiagnostics.HasChanged(
-                $"player-input:{this.Character.GetInstanceID()}",
+                $"player-input:{this.Character.GetLegacyInstanceId()}",
                 signature);
 
             NetworkTraversalClimbDiagnostics.Log(
@@ -236,12 +255,72 @@ namespace Arawn.GameCreator2.Networking
                 $"driverLocal={NetworkTraversalClimbDiagnostics.Vector(driverLocal)} " +
                 $"jump={m_JumpPressed} enabled={m_IsInputEnabled} controllable={this.m_IsControllable}",
                 this.Character,
-                changed ? null : $"player-input:{this.Character.GetInstanceID()}");
+                changed ? null : $"player-input:{this.Character.GetLegacyInstanceId()}");
         }
 
         private static int AxisSign(float value)
         {
             return value > 0.05f ? 1 : value < -0.05f ? -1 : 0;
+        }
+
+        [System.Diagnostics.Conditional("UNITY_EDITOR")]
+        [System.Diagnostics.Conditional("DEVELOPMENT_BUILD")]
+        private void TraceCiInputHealth(string stage, string reason)
+        {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            if (!NetworkCiTrace.TraversalTraceWindowActive || this.Character == null)
+            {
+                return;
+            }
+
+            RefreshNetworkCharacter();
+            if (m_NetworkCharacter == null || !m_NetworkCharacter.IsOwnerInstance ||
+                !m_NetworkCharacter.HasAuthenticatedPlayerOwner)
+            {
+                return;
+            }
+
+            uint actorId = m_NetworkCharacter.NetworkId;
+            bool shortcutMatches = ShortcutPlayer.Instance == this.Character.gameObject;
+            string signature =
+                $"{stage}:{reason}:{this.Character.IsPlayer}:{m_IsInputEnabled}:" +
+                $"{this.m_IsControllable}:{shortcutMatches}:" +
+                $"{this.Character.Driver?.GetType().Name ?? "<none>"}:" +
+                $"{m_InputSink?.GetType().Name ?? "<none>"}";
+            string stateKey = $"gc2-local-input-state:{actorId}";
+            string sampleKey = $"gc2-local-input-sample:{actorId}";
+            if (!NetworkCiTrace.HasChanged(stateKey, signature) &&
+                !NetworkCiTrace.ShouldSample(sampleKey, 0.5f))
+            {
+                return;
+            }
+
+            Vector3 playerWorld = this.Character.Player?.InputDirection ?? Vector3.zero;
+            Vector3 playerLocal = this.Character.Player?.LocalInputDirection ?? Vector3.zero;
+            Vector3 motionMove = this.Character.Motion?.MoveDirection ?? Vector3.zero;
+            string shortcut = ShortcutPlayer.Instance != null
+                ? ShortcutPlayer.Instance.name
+                : "<none>";
+            NetworkCiTrace.Log(
+                "gc2-player-input",
+                stage,
+                actorId,
+                0,
+                $"reason={reason} role={m_NetworkCharacter.CurrentRole} " +
+                $"isPlayer={this.Character.IsPlayer} controllable={this.m_IsControllable} " +
+                $"unitEnabled={m_IsInputEnabled} objectActive={this.Character.gameObject.activeInHierarchy} " +
+                $"shortcut='{shortcut}' shortcutMatches={shortcutMatches} " +
+                $"raw={NetworkTraversalClimbDiagnostics.Vector(m_CurrentInput)} " +
+                $"unitInput={NetworkTraversalClimbDiagnostics.Vector(this.InputDirection)} " +
+                $"playerWorld={NetworkTraversalClimbDiagnostics.Vector(playerWorld)} " +
+                $"playerLocal={NetworkTraversalClimbDiagnostics.Vector(playerLocal)} " +
+                $"motionMove={NetworkTraversalClimbDiagnostics.Vector(motionMove)} " +
+                $"driver={this.Character.Driver?.GetType().Name ?? "<none>"} " +
+                $"sink={m_InputSink?.GetType().Name ?? "<none>"} " +
+                $"updateKinematics={this.Character.Driver?.UpdateKinematics ?? false} " +
+                $"position={this.Character.transform.position:F3}",
+                this.Character);
+#endif
         }
 
         private void OnJumpPerformed()

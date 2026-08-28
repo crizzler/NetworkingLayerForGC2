@@ -1,4 +1,5 @@
 #if UNITY_EDITOR
+using System;
 using System.IO;
 using NUnit.Framework;
 using Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches;
@@ -122,6 +123,13 @@ public const int NetworkPatchRevision = 300;";
             {
                 return VerifyPatchedFile(relativePath, content, out reason);
             }
+
+            public bool InsertPostCanHitStrikeValidator(
+                ref string content,
+                out string reason)
+            {
+                return TryInsertPostCanHitStrikeValidator(ref content, out reason);
+            }
         }
 
         private sealed class CorePatcherProxy : CorePatcher
@@ -244,29 +252,201 @@ public const int NetworkPatchRevision = 300;";
             }
         }
 
+        private sealed class PatchStatePatcherProxy : GC2PatcherBase
+        {
+            private readonly string m_ModuleName;
+            private readonly string[] m_Files;
+
+            public PatchStatePatcherProxy(string moduleName, params string[] files)
+            {
+                m_ModuleName = moduleName;
+                m_Files = files;
+            }
+
+            public override string ModuleName => m_ModuleName;
+            public override string PatchVersion => "2.0.0-test";
+            public override string DisplayName => "Patch State Test";
+            public override string PatchDescription => "Test-only patch state fixture.";
+            protected override string[] FilesToPatch => m_Files;
+
+            public string Marker => PatchMarker;
+
+            protected override string[] GetRequiredPatchTokens(string relativePath)
+            {
+                return new[] { Path.GetFileNameWithoutExtension(relativePath) + "_HOOK" };
+            }
+
+            protected override bool PatchFile(string relativePath)
+            {
+                return false;
+            }
+        }
+
+        [Test]
+        public void PatchState_FullyVerifiedOlderMarkers_PromoteWithoutPristineBackups()
+        {
+            string fixtureRoot = CreatePatchStateFixtureRoot(out string relativeRoot);
+            try
+            {
+                string firstRelative = relativeRoot + "/First.fixture";
+                string secondRelative = relativeRoot + "/Second.fixture";
+                var patcher = new PatchStatePatcherProxy(
+                    "PatchState" + Guid.NewGuid().ToString("N"),
+                    firstRelative,
+                    secondRelative);
+                string oldMarker = $"// [GC2_NETWORK_PATCH_{patcher.ModuleName}_v1]";
+
+                string firstBefore = BuildPatchStateFixture(oldMarker, "First_HOOK", "\r\n");
+                string secondBefore = BuildPatchStateFixture(oldMarker, "Second_HOOK", "\n");
+                File.WriteAllText(Path.Combine(Application.dataPath, firstRelative), firstBefore);
+                File.WriteAllText(Path.Combine(Application.dataPath, secondRelative), secondBefore);
+
+                Assert.IsTrue(
+                    patcher.TryVerifyInstalledPatch(
+                        out bool requiresPromotion,
+                        out string verifyFailure),
+                    verifyFailure);
+                Assert.IsTrue(requiresPromotion);
+                Assert.IsFalse(patcher.HasBackups());
+
+                Assert.IsTrue(patcher.TryPromoteVerifiedPatchMarkers());
+                Assert.IsTrue(patcher.IsPatched());
+
+                string firstAfter = File.ReadAllText(Path.Combine(Application.dataPath, firstRelative));
+                string secondAfter = File.ReadAllText(Path.Combine(Application.dataPath, secondRelative));
+                Assert.AreEqual(firstBefore, firstAfter.Replace(patcher.Marker, oldMarker));
+                Assert.AreEqual(secondBefore, secondAfter.Replace(patcher.Marker, oldMarker));
+            }
+            finally
+            {
+                if (Directory.Exists(fixtureRoot)) Directory.Delete(fixtureRoot, true);
+            }
+        }
+
+        [Test]
+        public void PatchState_MixedPatchedAndUnpatchedTargets_RefusePromotionWithoutMutation()
+        {
+            string fixtureRoot = CreatePatchStateFixtureRoot(out string relativeRoot);
+            try
+            {
+                string firstRelative = relativeRoot + "/First.fixture";
+                string secondRelative = relativeRoot + "/Second.fixture";
+                var patcher = new PatchStatePatcherProxy(
+                    "PatchState" + Guid.NewGuid().ToString("N"),
+                    firstRelative,
+                    secondRelative);
+                string oldMarker = $"// [GC2_NETWORK_PATCH_{patcher.ModuleName}_v1]";
+                string firstBefore = BuildPatchStateFixture(oldMarker, "First_HOOK", "\n");
+                const string secondBefore = "namespace Pristine { class Second { } }\n";
+                string firstPath = Path.Combine(Application.dataPath, firstRelative);
+                string secondPath = Path.Combine(Application.dataPath, secondRelative);
+                File.WriteAllText(firstPath, firstBefore);
+                File.WriteAllText(secondPath, secondBefore);
+
+                Assert.IsFalse(
+                    patcher.TryVerifyInstalledPatch(
+                        out bool requiresPromotion,
+                        out string verifyFailure));
+                Assert.IsTrue(requiresPromotion);
+                StringAssert.Contains("1 of 2 required files", verifyFailure);
+                StringAssert.Contains("Second.fixture: patch marker is missing", verifyFailure);
+                Assert.IsFalse(patcher.CanSafelyPatchExistingSources(out string safetyFailure));
+                StringAssert.Contains("First.fixture", safetyFailure);
+
+                Assert.IsFalse(patcher.TryPromoteVerifiedPatchMarkers());
+                Assert.AreEqual(firstBefore, File.ReadAllText(firstPath));
+                Assert.AreEqual(secondBefore, File.ReadAllText(secondPath));
+            }
+            finally
+            {
+                if (Directory.Exists(fixtureRoot)) Directory.Delete(fixtureRoot, true);
+            }
+        }
+
+        private static string CreatePatchStateFixtureRoot(out string relativeRoot)
+        {
+            relativeRoot =
+                "Arawn/NetworkingLayerForGC2/Tests/TempPatchState~/" +
+                Guid.NewGuid().ToString("N");
+            string fixtureRoot = Path.Combine(Application.dataPath, relativeRoot);
+            Directory.CreateDirectory(fixtureRoot);
+            return fixtureRoot;
+        }
+
+        private static string BuildPatchStateFixture(
+            string marker,
+            string requiredHook,
+            string newline)
+        {
+            return string.Join(
+                newline,
+                marker,
+                "// [GC2_NETWORK_PATCH]",
+                requiredHook,
+                "// [GC2_NETWORK_PATCH_END]",
+                string.Empty);
+        }
+
         private delegate bool VerifyDelegate(string relativePath, string content, out string reason);
+
+        [TestCase(false, false, null)]
+        [TestCase(true, false, "currently compiling")]
+        [TestCase(false, true, "compilation has failed")]
+        [TestCase(true, true, "currently compiling")]
+        public void PatchManager_CompilationGate_BlocksUnsafePatchOperations(
+            bool isCompiling,
+            bool scriptCompilationFailed,
+            string expectedReason)
+        {
+            string reason = GC2PatchManager.GetPatchOperationBlockReason(
+                isCompiling,
+                scriptCompilationFailed);
+
+            if (expectedReason == null)
+            {
+                Assert.IsNull(reason);
+                return;
+            }
+
+            StringAssert.Contains(expectedReason, reason);
+            StringAssert.Contains("reload", reason);
+        }
 
         private static int VerifyPatchedProjectFiles(
             string marker,
             string[] relativePaths,
             VerifyDelegate verify)
         {
-            int validatedCount = 0;
-
+            bool anyModuleMarker = false;
             foreach (string relativePath in relativePaths)
             {
                 string fullPath = Path.Combine(Application.dataPath, relativePath);
                 if (!File.Exists(fullPath)) continue;
 
                 string content = File.ReadAllText(fullPath);
-                if (!content.Contains(marker) && !content.Contains("// [GC2_NETWORK_PATCH_")) continue;
-
-                bool valid = verify(relativePath, content, out string reason);
-                Assert.IsTrue(valid, $"{relativePath}: {reason}");
-                validatedCount++;
+                if (content.Contains(marker) || content.Contains("// [GC2_NETWORK_PATCH_"))
+                {
+                    anyModuleMarker = true;
+                    break;
+                }
             }
 
-            return validatedCount;
+            if (!anyModuleMarker) return 0;
+
+            foreach (string relativePath in relativePaths)
+            {
+                string fullPath = Path.Combine(Application.dataPath, relativePath);
+                Assert.That(
+                    File.Exists(fullPath),
+                    Is.True,
+                    $"A partially installed patch is missing target file {relativePath}.");
+
+                string content = File.ReadAllText(fullPath);
+                bool valid = verify(relativePath, content, out string reason);
+                Assert.IsTrue(valid, $"{relativePath}: {reason}");
+            }
+
+            return relativePaths.Length;
         }
 
         [Test]
@@ -808,6 +988,96 @@ public const int NetworkPatchRevision = 300;";
                 out string reason);
 
             Assert.IsTrue(valid, reason);
+        }
+
+        [TestCase("GetInstanceID()")]
+        [TestCase("GetEntityId()")]
+        [TestCase("GetEntityId().GetHashCode()")]
+        public void MeleePatcher_InsertStrikeValidator_PreservesInstalledIdentityShape(
+            string identityExpression)
+        {
+            var patcher = new MeleePatcherProxy();
+            string content =
+                "public class AttackSkill\n" +
+                "{\n" +
+                "    private void OnUpdatePhaseStrike()\n" +
+                "    {\n" +
+                "        foreach (StrikeOutput hit in hits)\n" +
+                "        {\n" +
+                "            if (!this.ComboSkill.CanHit(hitArgs))\n" +
+                "            {\n" +
+                $"                this.m_HitsBuffer.Add(hit.GameObject.{identityExpression});\n" +
+                "                continue;\n" +
+                "            }\n" +
+                "\n" +
+                "            Trigger[] triggers = hit.GameObject.GetComponents<Trigger>();\n" +
+                "        }\n" +
+                "    }\n" +
+                "}\n";
+
+            bool patched = patcher.InsertPostCanHitStrikeValidator(
+                ref content,
+                out string reason);
+
+            Assert.IsTrue(patched, reason);
+            Assert.AreEqual(
+                1,
+                content.Split(
+                    new[] { "NetworkStrikeValidator.Invoke" },
+                    StringSplitOptions.None).Length - 1);
+            Assert.AreEqual(
+                2,
+                content.Split(
+                    new[] { $"hit.GameObject.{identityExpression}" },
+                    StringSplitOptions.None).Length - 1,
+                "The rejection path must reuse the source's exact hit-buffer identity type.");
+
+            int canHitIndex = content.IndexOf("ComboSkill.CanHit", StringComparison.Ordinal);
+            int validatorIndex = content.IndexOf(
+                "NetworkStrikeValidator.Invoke",
+                StringComparison.Ordinal);
+            int triggerIndex = content.IndexOf("Trigger[] triggers", StringComparison.Ordinal);
+            Assert.That(validatorIndex, Is.GreaterThan(canHitIndex));
+            Assert.That(validatorIndex, Is.LessThan(triggerIndex));
+
+            if (identityExpression == "GetEntityId()")
+            {
+                StringAssert.DoesNotContain("GetHashCode", content);
+                StringAssert.DoesNotContain("GetInstanceID", content);
+            }
+
+            string oncePatched = content;
+            Assert.IsTrue(patcher.InsertPostCanHitStrikeValidator(ref content, out reason), reason);
+            Assert.AreEqual(oncePatched, content, "A second transform must be byte-identical.");
+        }
+
+        [Test]
+        public void MeleePatcher_InsertStrikeValidator_RejectsAmbiguousCanHitBlocks()
+        {
+            var patcher = new MeleePatcherProxy();
+            const string rejection =
+                "        if (!this.ComboSkill.CanHit(hitArgs))\n" +
+                "        {\n" +
+                "            this.m_HitsBuffer.Add(hit.GameObject.GetEntityId());\n" +
+                "            continue;\n" +
+                "        }\n";
+            string content =
+                "public class AttackSkill\n" +
+                "{\n" +
+                "    private void OnUpdatePhaseStrike()\n" +
+                "    {\n" +
+                rejection +
+                rejection +
+                "    }\n" +
+                "}\n";
+
+            bool patched = patcher.InsertPostCanHitStrikeValidator(
+                ref content,
+                out string reason);
+
+            Assert.IsFalse(patched);
+            StringAssert.Contains("ambiguous", reason);
+            StringAssert.DoesNotContain("NetworkStrikeValidator.Invoke", content);
         }
 
         [Test]
@@ -1453,7 +1723,10 @@ public const int NetworkPatchRevision = 300;";
                 "Traverse networkConnection = NetworkEdgeConnectionResolver.Invoke(this, traverseInteractive, character, currentLocalPosition, swizzleLocalInput, false);\n" +
                 "if (networkConnection != null) { return networkConnection; }\n}\n" +
                 "else if (traverseInteractive.ContinueA != null) return traverseInteractive.ContinueA;\n" +
-                "}\n" + edgeB + "}\n}\n" +
+                "}\n" + edgeB +
+                "if (cancel.IsCancelled) { return null; }\n" +
+                "nextLocalPosition = traverseInteractive.ClampInBounds(nextLocalPosition);\n" +
+                "}\n}\n" +
                 "// [GC2_NETWORK_PATCH_END]\n";
 
             bool valid = patcher.Verify(
@@ -1469,7 +1742,10 @@ public const int NetworkPatchRevision = 300;";
                 "if (NetworkEdgeConnectionResolver != null) {\n" +
                 "Traverse networkConnection = NetworkEdgeConnectionResolver.Invoke(this, traverseInteractive, character, currentLocalPosition, swizzleLocalInput, false);\n" +
                 "if (networkConnection != null) { return networkConnection; }\n}\n" +
-                "}\n" + edgeB + "}\n}\n" +
+                "}\n" + edgeB +
+                "if (cancel.IsCancelled) { return null; }\n" +
+                "nextLocalPosition = traverseInteractive.ClampInBounds(nextLocalPosition);\n" +
+                "}\n}\n" +
                 "// [GC2_NETWORK_PATCH_END]\n";
 
             valid = patcher.Verify(
@@ -1516,6 +1792,37 @@ public const int NetworkPatchRevision = 300;";
         public void TraversalPatcher_VerifyTraverseRuntime_PassesWithRequiredStructure()
         {
             var patcher = new TraversalPatcherProxy();
+
+            Assert.That(
+                patcher.Files,
+                Does.Contain("Plugins/GameCreator/Packages/Traversal/Runtime/Components/Traverse.cs"),
+                "Traversal patch transactions must own the collider-safety target");
+
+            string traverseContent =
+                $"{patcher.Marker}\n" +
+                "// [GC2_NETWORK_PATCH]\n" +
+                "public class Traverse {\n" +
+                "void RefreshCollisions() { foreach (Collider ignoreCollider in this.m_IgnoreColliders) { " +
+                "if (ignoreCollider == null) continue; Physics.IgnoreCollision(a, ignoreCollider, true); } }\n" +
+                "}\n" +
+                "// [GC2_NETWORK_PATCH_END]\n";
+
+            bool traverseValid = patcher.Verify(
+                "Plugins/GameCreator/Packages/Traversal/Runtime/Components/Traverse.cs",
+                traverseContent,
+                out string traverseReason);
+
+            Assert.IsTrue(traverseValid, traverseReason);
+
+            string unsafeTraverseContent = traverseContent.Replace(
+                "if (ignoreCollider == null) continue; ",
+                string.Empty);
+            traverseValid = patcher.Verify(
+                "Plugins/GameCreator/Packages/Traversal/Runtime/Components/Traverse.cs",
+                unsafeTraverseContent,
+                out traverseReason);
+            Assert.IsFalse(traverseValid);
+            StringAssert.Contains("ignoreCollider == null", traverseReason);
 
             string linkContent =
                 $"{patcher.Marker}\n" +

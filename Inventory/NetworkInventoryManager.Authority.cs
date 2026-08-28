@@ -1020,8 +1020,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
 
         private Merchant FindMerchant(uint merchantBagId)
         {
-            Merchant[] merchants = FindObjectsByType<Merchant>(
-                FindObjectsInactive.Include, FindObjectsSortMode.None);
+            Merchant[] merchants = UnityObjectSearch.FindAll<Merchant>(FindObjectsInactive.Include);
             for (int i = 0; i < merchants.Length; i++)
             {
                 Merchant merchant = merchants[i];

@@ -68,6 +68,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
         private PlayerID? m_SpawnedOwnerHint;
         private bool m_MissingManagerWarningLogged;
         private bool m_OwnerFallbackWarningLogged;
+        private bool m_MissingNpcIdentityWarningLogged;
 
         private NetworkManager ActiveManager
         {
@@ -158,6 +159,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
             if (m_Initialized) ResetInitializedRole();
             m_SpawnedOwnerHint = null;
             m_OwnerFallbackWarningLogged = false;
+            m_MissingNpcIdentityWarningLogged = false;
         }
 
         private void TryHook()
@@ -281,7 +283,38 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
             }
 
             bool allowOwnerModeFallback = false;
-            if (m_UseNetworkIdentityOwner && HasNetworkIdentity())
+            if (m_Character.ActorType == NetworkCharacterActorType.NPC &&
+                m_Character.NPCMode == NetworkCharacter.NPCSyncMode.ServerAuthoritative &&
+                HasNetworkIdentity())
+            {
+                float warningDeadline =
+                    Time.unscaledTime + Mathf.Max(0.5f, m_StartupWaitTimeout);
+                while (ShouldDeferExplicitNpcUntilIdentityReady())
+                {
+                    // A PurrNet scene NPC initially has only its authored GC2 hash. The
+                    // server-assigned NetworkIdentity id arrives during scene-object spawn.
+                    // Initializing before that point permanently registers a different target
+                    // id on observers, so durable combat/action requests must fail closed and
+                    // wait rather than falling back to the local hash.
+                    if (!m_MissingNpcIdentityWarningLogged &&
+                        Time.unscaledTime >= warningDeadline)
+                    {
+                        m_MissingNpcIdentityWarningLogged = true;
+                        Debug.LogError(
+                            "[PurrNetNetworkCharacterAuto] Explicit server-authoritative NPC " +
+                            "did not receive a usable spawned NetworkIdentity before the startup " +
+                            "timeout. Network role initialization will keep waiting so this peer " +
+                            "cannot register a divergent GC2 NetworkId. Check PurrNet scene-object admission, " +
+                            "skipSceneAutoSpawning, and prefab registration.",
+                            this);
+                    }
+
+                    yield return null;
+                }
+            }
+
+            if (m_Character.ActorType != NetworkCharacterActorType.NPC &&
+                m_UseNetworkIdentityOwner && HasNetworkIdentity())
             {
                 float deadline = Time.unscaledTime + Mathf.Max(0.5f, m_StartupWaitTimeout);
                 while (Time.unscaledTime < deadline && ShouldWaitForNetworkIdentityOwner())
@@ -331,6 +364,24 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
             bool isServer = serverActive;
             bool isHost = nm.isHost;
 
+            if (m_Character.ActorType == NetworkCharacterActorType.NPC)
+            {
+                if (ShouldDeferExplicitNpcUntilIdentityReady())
+                {
+                    return false;
+                }
+
+                m_Character.InitializeNetworkRole(
+                    isServer,
+                    isOwner: false,
+                    isHost: isHost,
+                    hasAuthenticatedPlayerOwner: false);
+                m_Initialized = true;
+                m_InitializedManager = nm;
+                m_InitializedUsingOwnerModeFallback = false;
+                return true;
+            }
+
             bool identityApplicable =
                 TryResolveNetworkIdentityOwner(nm, out bool identityOwner, out bool identityReady);
             if (!TryResolveInitializationOwner(
@@ -348,11 +399,65 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
                 return false;
             }
 
-            m_Character.InitializeNetworkRole(isServer, isOwner, isHost);
+            bool hasAuthenticatedPlayerOwner = identityApplicable && identityReady;
+            if (ShouldUseLegacyCompatibilityInitialization(
+                    m_Character.ActorType,
+                    identityApplicable,
+                    identityReady))
+            {
+                m_Character.InitializeNetworkRole(isServer, isOwner, isHost);
+            }
+            else
+            {
+                m_Character.InitializeNetworkRole(
+                    isServer,
+                    isOwner,
+                    isHost,
+                    hasAuthenticatedPlayerOwner);
+            }
             m_Initialized = true;
             m_InitializedManager = nm;
             m_InitializedUsingOwnerModeFallback = identityApplicable && !identityReady;
             return true;
+        }
+
+        private bool ShouldDeferExplicitNpcUntilIdentityReady()
+        {
+            bool hasIdentity = HasNetworkIdentity();
+            NetworkIdentity identity = hasIdentity ? m_Identity : null;
+            bool identitySpawned = identity != null && identity.isSpawned;
+            bool identityIdUsable = identitySpawned &&
+                                    identity.id.HasValue &&
+                                    identity.objectId < uint.MaxValue;
+
+            return ShouldDeferExplicitNpcUntilIdentityReady(
+                m_Character.ActorType,
+                m_Character.NPCMode,
+                hasIdentity,
+                identitySpawned,
+                identityIdUsable);
+        }
+
+        private static bool ShouldDeferExplicitNpcUntilIdentityReady(
+            NetworkCharacterActorType actorType,
+            NetworkCharacter.NPCSyncMode npcSyncMode,
+            bool hasNetworkIdentity,
+            bool identitySpawned,
+            bool identityIdUsable)
+        {
+            return actorType == NetworkCharacterActorType.NPC &&
+                   npcSyncMode == NetworkCharacter.NPCSyncMode.ServerAuthoritative &&
+                   hasNetworkIdentity &&
+                   (!identitySpawned || !identityIdUsable);
+        }
+
+        private static bool ShouldUseLegacyCompatibilityInitialization(
+            NetworkCharacterActorType actorType,
+            bool identityApplicable,
+            bool identityReady)
+        {
+            return actorType == NetworkCharacterActorType.LegacyAutomatic &&
+                   (!identityApplicable || !identityReady);
         }
 
         private void RefreshResolvedIdentityOwner()

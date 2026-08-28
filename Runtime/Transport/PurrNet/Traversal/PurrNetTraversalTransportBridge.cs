@@ -353,9 +353,7 @@ namespace Arawn.GameCreator2.Networking.Traversal.Transport.PurrNet
 
             if (!m_AutoRegisterSceneControllers && !force) return;
 
-            NetworkTraversalController[] controllers = FindObjectsByType<NetworkTraversalController>(
-                FindObjectsInactive.Exclude,
-                FindObjectsSortMode.None);
+            NetworkTraversalController[] controllers = UnityObjectSearch.FindAll<NetworkTraversalController>(FindObjectsInactive.Exclude);
 
             for (int i = 0; i < controllers.Length; i++)
             {
@@ -798,7 +796,7 @@ namespace Arawn.GameCreator2.Networking.Traversal.Transport.PurrNet
         {
             return NetworkTraversalManager.Instance != null
                 ? NetworkTraversalManager.Instance
-                : FindFirstObjectByType<NetworkTraversalManager>();
+                : UnityObjectSearch.FindAny<NetworkTraversalManager>();
         }
 
         private static uint PlayerIdToClientId(PlayerID playerId)

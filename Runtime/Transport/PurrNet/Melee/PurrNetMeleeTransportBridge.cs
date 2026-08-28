@@ -86,7 +86,7 @@ namespace Arawn.GameCreator2.Networking.Melee.Transport.PurrNet
             {
                 if (m_CoreBridge != null) return m_CoreBridge;
                 m_CoreBridge = NetworkTransportBridge.Active as PurrNetTransportBridge;
-                if (m_CoreBridge == null) m_CoreBridge = FindFirstObjectByType<PurrNetTransportBridge>();
+                if (m_CoreBridge == null) m_CoreBridge = UnityObjectSearch.FindAny<PurrNetTransportBridge>();
                 return m_CoreBridge;
             }
         }
@@ -193,6 +193,7 @@ namespace Arawn.GameCreator2.Networking.Melee.Transport.PurrNet
                 nm.Unsubscribe<GC2MeleeChargeBroadcastPacket>(HandleChargeBroadcastClient, false);
                 nm.Unsubscribe<GC2MeleeReactionBroadcastPacket>(HandleReactionBroadcastClient, false);
                 nm.Unsubscribe<GC2MeleeWeaponStatePacket>(HandleWeaponStateClient, false);
+                nm.Unsubscribe<GC2MeleeFreeFlowStatePacket>(HandleFreeFlowStateClient, false);
                 nm.Unsubscribe<GC2MeleeCharacterSnapshotPacket>(HandleCharacterSnapshotClient, false);
                 m_SubscribedClient = false;
             }
@@ -223,6 +224,7 @@ namespace Arawn.GameCreator2.Networking.Melee.Transport.PurrNet
                 manager.Subscribe<GC2MeleeChargeBroadcastPacket>(HandleChargeBroadcastClient, false);
                 manager.Subscribe<GC2MeleeReactionBroadcastPacket>(HandleReactionBroadcastClient, false);
                 manager.Subscribe<GC2MeleeWeaponStatePacket>(HandleWeaponStateClient, false);
+                manager.Subscribe<GC2MeleeFreeFlowStatePacket>(HandleFreeFlowStateClient, false);
                 manager.Subscribe<GC2MeleeCharacterSnapshotPacket>(HandleCharacterSnapshotClient, false);
                 m_SubscribedClient = true;
             }
@@ -254,6 +256,7 @@ namespace Arawn.GameCreator2.Networking.Melee.Transport.PurrNet
                 manager.Unsubscribe<GC2MeleeChargeBroadcastPacket>(HandleChargeBroadcastClient, false);
                 manager.Unsubscribe<GC2MeleeReactionBroadcastPacket>(HandleReactionBroadcastClient, false);
                 manager.Unsubscribe<GC2MeleeWeaponStatePacket>(HandleWeaponStateClient, false);
+                manager.Unsubscribe<GC2MeleeFreeFlowStatePacket>(HandleFreeFlowStateClient, false);
                 manager.Unsubscribe<GC2MeleeCharacterSnapshotPacket>(HandleCharacterSnapshotClient, false);
                 m_SubscribedClient = false;
             }
@@ -305,6 +308,8 @@ namespace Arawn.GameCreator2.Networking.Melee.Transport.PurrNet
             manager.SendSkillResponseToClient += SendSkillResponseToClient;
             manager.BroadcastSkillToAllClients -= BroadcastSkillToAllClients;
             manager.BroadcastSkillToAllClients += BroadcastSkillToAllClients;
+            manager.BroadcastFreeFlowStateToAllClients -= BroadcastFreeFlowStateToAllClients;
+            manager.BroadcastFreeFlowStateToAllClients += BroadcastFreeFlowStateToAllClients;
 
             manager.SendChargeRequestToServer -= SendChargeRequestToServer;
             manager.SendChargeRequestToServer += SendChargeRequestToServer;
@@ -355,6 +360,7 @@ namespace Arawn.GameCreator2.Networking.Melee.Transport.PurrNet
             manager.SendSkillRequestToServer -= SendSkillRequestToServer;
             manager.SendSkillResponseToClient -= SendSkillResponseToClient;
             manager.BroadcastSkillToAllClients -= BroadcastSkillToAllClients;
+            manager.BroadcastFreeFlowStateToAllClients -= BroadcastFreeFlowStateToAllClients;
             manager.SendChargeRequestToServer -= SendChargeRequestToServer;
             manager.SendChargeResponseToClient -= SendChargeResponseToClient;
             manager.BroadcastChargeToAllClients -= BroadcastChargeToAllClients;
@@ -433,9 +439,7 @@ namespace Arawn.GameCreator2.Networking.Melee.Transport.PurrNet
 
             if (!m_AutoRegisterSceneControllers && !force) return;
 
-            var controllers = FindObjectsByType<NetworkMeleeController>(
-                FindObjectsInactive.Exclude,
-                FindObjectsSortMode.None);
+            var controllers = UnityObjectSearch.FindAll<NetworkMeleeController>(FindObjectsInactive.Exclude);
 
             for (int i = 0; i < controllers.Length; i++)
             {
@@ -553,12 +557,35 @@ namespace Arawn.GameCreator2.Networking.Melee.Transport.PurrNet
             NetworkMeleeController controller,
             NetworkMeleeWeaponState state)
         {
-            if (controller == null || !controller.IsLocalClient) return;
+            if (controller == null) return;
 
-            uint networkId = controller.GetComponent<NetworkCharacter>()?.NetworkId ?? 0;
+            NetworkCharacter character = controller.GetComponent<NetworkCharacter>();
+            uint networkId = character != null ? character.NetworkId : 0;
             if (networkId == 0) return;
 
-            SendWeaponStateToServer(networkId, state);
+            if (controller.IsLocalClient)
+            {
+                SendWeaponStateToServer(networkId, state);
+                return;
+            }
+
+            NetworkManager networkManager = ActiveManager;
+            PurrNetTransportBridge core = CoreBridge;
+            bool trustedServerNpc = networkManager != null && networkManager.isServer &&
+                                    character.IsServerAuthoritativeNPC &&
+                                    character.IsServerInstance &&
+                                    character.HasSimulationAuthority &&
+                                    core != null &&
+                                    !core.TryGetCharacterOwner(networkId, out _);
+            if (!trustedServerNpc) return;
+
+            NetworkMeleeManager manager = GetMeleeManager();
+            manager?.RecordAuthoritativeWeaponState(networkId, state);
+            BroadcastWeaponStateToAllClients(new GC2MeleeWeaponStatePacket
+            {
+                characterNetworkId = networkId,
+                state = state
+            });
         }
 
         private void SendHitRequestToServer(NetworkMeleeHitRequest request)
@@ -838,6 +865,13 @@ namespace Arawn.GameCreator2.Networking.Melee.Transport.PurrNet
             nm.SendToAll(new GC2MeleeSkillBroadcastPacket { broadcast = broadcast }, m_Channel);
         }
 
+        private void BroadcastFreeFlowStateToAllClients(NetworkFreeFlowCombatState state)
+        {
+            NetworkManager nm = ActiveManager;
+            if (nm == null || !nm.isServer || state.CharacterNetworkId == 0) return;
+            nm.SendToAll(new GC2MeleeFreeFlowStatePacket { state = state }, m_Channel);
+        }
+
         private void BroadcastChargeToAllClients(NetworkChargeBroadcast broadcast)
         {
             var nm = ActiveManager;
@@ -1071,6 +1105,16 @@ namespace Arawn.GameCreator2.Networking.Melee.Transport.PurrNet
             ApplyWeaponState(data);
         }
 
+        private void HandleFreeFlowStateClient(
+            PlayerID senderPlayer,
+            GC2MeleeFreeFlowStatePacket data,
+            bool asServer)
+        {
+            if (asServer) return;
+            RefreshControllerRegistry(force: true);
+            GetMeleeManager()?.ReceiveFreeFlowState(data.state);
+        }
+
         private void HandleCharacterSnapshotClient(
             PlayerID senderPlayer,
             GC2MeleeCharacterSnapshotPacket data,
@@ -1143,7 +1187,7 @@ namespace Arawn.GameCreator2.Networking.Melee.Transport.PurrNet
         {
             return NetworkMeleeManager.Instance != null
                 ? NetworkMeleeManager.Instance
-                : FindFirstObjectByType<NetworkMeleeManager>();
+                : UnityObjectSearch.FindAny<NetworkMeleeManager>();
         }
 
         private static bool TryConvertPlayerId(PlayerID playerId, out uint clientId)

@@ -90,9 +90,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
 
         private NetworkCharacter FindNearestTarget()
         {
-            NetworkCharacter[] candidates = FindObjectsByType<NetworkCharacter>(
-                FindObjectsInactive.Exclude,
-                FindObjectsSortMode.None);
+            NetworkCharacter[] candidates = UnityObjectSearch.FindAll<NetworkCharacter>(FindObjectsInactive.Exclude);
 
             NetworkCharacter nearest = null;
             float nearestSqrDistance = float.PositiveInfinity;

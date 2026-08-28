@@ -15,13 +15,13 @@ MonoBehaviour:
   m_Install:
     m_Name: Shooter Examples
     m_Module: GC2 Networking Layer PurrNet Transport
-    m_Description: PurrNet server-authoritative Shooter and Stats synchronization
-      example.
+    m_Description: PurrNet Shooter and Stats examples with PvP and server-owned enemy
+      scenes, bot-backed player slots, authoritative damage, and late-join state.
     m_Author: Arawn
     m_Version:
       major: 1
-      minor: 0
-      patch: 2
+      minor: 1
+      patch: 0
     m_Complexity: 0
     m_Dependencies:
     - m_ID: GC2NetworkingLayerPurrNetTransport.Assets

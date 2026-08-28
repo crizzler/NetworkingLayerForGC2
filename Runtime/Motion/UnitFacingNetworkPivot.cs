@@ -185,13 +185,14 @@ namespace Arawn.GameCreator2.Networking
 
         private void UpdateAsServer()
         {
-            // Server calculates authoritative facing direction
-            Vector3 direction = GetLocalDirection();
-            float targetYaw = Mathf.Atan2(direction.x, direction.z) * Mathf.Rad2Deg;
+            // Let GC2 resolve its authored Facing layers before publishing authority yaw. Free
+            // Flow, Traversal, Dash, and ordinary visual-scripting Instructions all use
+            // SetLayerDirection/SetLayerTarget; deriving yaw only from Motion.MoveDirection
+            // silently discarded those requests on server-owned characters.
+            base.OnUpdate();
 
-            // Smooth server-side rotation
-            m_ServerYaw = Mathf.LerpAngle(m_ServerYaw, targetYaw,
-                Character.Motion.AngularSpeed * Character.Time.DeltaTime / 360f);
+            Quaternion resolvedRotation = Transform.rotation;
+            m_ServerYaw = resolvedRotation.eulerAngles.y;
             m_ClientYaw = m_ServerYaw;
 
             // Check if we need to broadcast update
@@ -202,15 +203,23 @@ namespace Arawn.GameCreator2.Networking
                 // NetworkCharacter transport integration handles the broadcast path.
             }
 
-            // Apply rotation
-            ApplyRotation(m_ServerYaw);
+            // TUnitFacing writes the Transform directly. Route the same resolved rotation through
+            // the active driver as well so its physics representation is synchronized before
+            // server-side combat overlap tests execute.
+            Character.Driver.SetRotation(resolvedRotation);
         }
 
         private void UpdateAsLocalClient()
         {
-            // Local client: calculate desired direction and send to server
-            Vector3 direction = GetLocalDirection();
-            float desiredYaw = Mathf.Atan2(direction.x, direction.z) * Mathf.Rad2Deg;
+            // Resolve the same GC2 Facing layer queue as the ordinary Pivot unit. Free Flow,
+            // Traversal, and visual-scripting actions use SetLayerDirection/SetLayerTarget; using
+            // only Motion.MoveDirection here discarded those authored requests on connected
+            // owners. Restore the source rotation before applying the validated network yaw so
+            // base.OnUpdate is used as a resolver rather than an unvalidated transform write.
+            Quaternion sourceRotation = Transform.rotation;
+            base.OnUpdate();
+            float desiredYaw = GetResolvedTargetYaw(sourceRotation.eulerAngles.y);
+            Transform.rotation = sourceRotation;
 
             // Send a new target when input changes, then keep requesting while the
             // validated server yaw is still catching up to that target.
@@ -263,6 +272,15 @@ namespace Arawn.GameCreator2.Networking
             // Server can validate/modify the requested yaw here
             // For example: clamp rotation speed, check for cheating, etc.
 
+            // GC2 uses a negative angular speed to mean immediate rotation. Passing that value
+            // into Mathf.Clamp reverses its min/max bounds and can rotate connected owners in the
+            // wrong direction instead of honoring an authored facing layer.
+            if (Character.Motion.AngularSpeed < 0f)
+            {
+                m_ServerYaw = requestedYaw;
+                return m_ServerYaw;
+            }
+
             // Calculate max rotation delta based on angular speed
             float maxDelta = Character.Motion.AngularSpeed * Character.Time.DeltaTime;
             float currentYaw = m_ServerYaw;
@@ -285,6 +303,7 @@ namespace Arawn.GameCreator2.Networking
             m_ServerYaw = yaw;
             m_ClientYaw = yaw;
             m_LastSentYaw = yaw;
+            ApplyRotation(yaw);
         }
 
         // ════════════════════════════════════════════════════════════════════════════════════════
@@ -293,8 +312,9 @@ namespace Arawn.GameCreator2.Networking
 
         protected override Vector3 GetDefaultDirection()
         {
-            // Return direction based on current client yaw
-            return Quaternion.Euler(0f, m_ClientYaw, 0f) * Vector3.forward;
+            // TUnitFacing calls this only when no authored facing layer is active. Preserve the
+            // ordinary Pivot behavior in that case and let a queued layer override it.
+            return GetLocalDirection();
         }
 
         // ════════════════════════════════════════════════════════════════════════════════════════
@@ -317,9 +337,29 @@ namespace Arawn.GameCreator2.Networking
             return m_Axonometry?.ProcessRotation(this, direction) ?? direction;
         }
 
+        private float GetResolvedTargetYaw(float fallbackYaw)
+        {
+            // TUnitFacing stores the unsmoothed, layer-resolved direction in m_FaceDirection.
+            // Reading Transform.eulerAngles after base.OnUpdate instead would read GC2's already
+            // smoothed intermediate yaw, which then gets clamped by authority and interpolated a
+            // second time on the owner. That made finite-speed Free Flow facing visibly sluggish.
+            Vector3 direction = Vector3.Scale(m_FaceDirection, Vector3Plane.NormalUp);
+            if (direction.sqrMagnitude <= float.Epsilon) return fallbackYaw;
+
+            return Mathf.Atan2(direction.x, direction.z) * Mathf.Rad2Deg;
+        }
+
         private void ApplyRotation(float yaw)
         {
             Quaternion targetRotation = Quaternion.Euler(0f, yaw, 0f);
+            Quaternion sourceRotation = Transform.rotation;
+
+            m_FaceDirection = targetRotation * Vector3.forward;
+            m_PivotSpeed = Vector3.SignedAngle(
+                sourceRotation * Vector3.forward,
+                m_FaceDirection,
+                Vector3.up
+            );
 
             // Route root rotation through the active driver. Network CharacterControllers can
             // be left dirty in PhysX when auto-sync transforms is disabled and Facing writes the
@@ -327,7 +367,7 @@ namespace Arawn.GameCreator2.Networking
             // before GC2 performs its LateUpdate melee overlap queries.
             Quaternion rotation = Quaternion.Lerp(
                 targetRotation,
-                Transform.rotation * Character.Animim.RootMotionDeltaRotation,
+                sourceRotation * Character.Animim.RootMotionDeltaRotation,
                 Character.RootMotionRotation
             );
 
@@ -346,6 +386,8 @@ namespace Arawn.GameCreator2.Networking
             m_ServerYaw = currentYaw;
             m_ClientYaw = currentYaw;
             m_LastSentYaw = currentYaw;
+            m_FaceDirection = Quaternion.Euler(0f, currentYaw, 0f) * Vector3.forward;
+            m_PivotSpeed = 0f;
         }
 
         // ════════════════════════════════════════════════════════════════════════════════════════

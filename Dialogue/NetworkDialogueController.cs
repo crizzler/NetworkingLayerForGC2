@@ -649,7 +649,7 @@ namespace Arawn.GameCreator2.Networking.Dialogue
             Character character = ResolveCharacter(networkId);
             if (character != null) return character.gameObject;
 
-            NetworkDialogueController[] controllers = FindObjectsByType<NetworkDialogueController>(FindObjectsSortMode.None);
+            NetworkDialogueController[] controllers = UnityObjectSearch.FindAll<NetworkDialogueController>(FindObjectsInactive.Exclude);
             for (int i = 0; i < controllers.Length; i++)
             {
                 NetworkDialogueController controller = controllers[i];
@@ -950,7 +950,7 @@ namespace Arawn.GameCreator2.Networking.Dialogue
             string key = $"{scenePath}|{hierarchyPath}|Dialogue|{m_NetworkIdSalt}";
             uint stableHash = unchecked((uint)StableHashUtility.GetStableHash(key));
 
-            return stableHash == 0 ? (uint)(Mathf.Abs(transform.GetInstanceID()) + 1) : stableHash;
+            return stableHash == 0 ? (uint)(Mathf.Abs(transform.GetLegacyInstanceId()) + 1) : stableHash;
         }
 
         private static string BuildHierarchyPath(Transform current)
@@ -1081,7 +1081,7 @@ namespace Arawn.GameCreator2.Networking.Dialogue
                 return direct;
             }
 
-            NetworkDialogueController[] controllers = FindObjectsByType<NetworkDialogueController>(FindObjectsSortMode.None);
+            NetworkDialogueController[] controllers = UnityObjectSearch.FindAll<NetworkDialogueController>(FindObjectsInactive.Exclude);
             for (int i = 0; i < controllers.Length; i++)
             {
                 NetworkDialogueController controller = controllers[i];

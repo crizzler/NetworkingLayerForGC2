@@ -40,9 +40,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             Type journalType = Type.GetType(JournalType);
             if (journalType == null) return false;
 
-            Character[] characters = FindObjectsByType<Character>(
-                FindObjectsInactive.Exclude,
-                FindObjectsSortMode.None);
+            Character[] characters = UnityObjectSearch.FindAll<Character>(FindObjectsInactive.Exclude);
             for (int i = 0; i < characters.Length; i++)
             {
                 Character character = characters[i];

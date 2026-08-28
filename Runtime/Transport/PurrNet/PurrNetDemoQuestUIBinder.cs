@@ -34,9 +34,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
             Type journalType = Type.GetType(JOURNAL_TYPE);
             if (journalType == null) return false;
 
-            Character[] characters = FindObjectsByType<Character>(
-                FindObjectsInactive.Exclude,
-                FindObjectsSortMode.None);
+            Character[] characters = UnityObjectSearch.FindAll<Character>(FindObjectsInactive.Exclude);
 
             for (int i = 0; i < characters.Length; i++)
             {

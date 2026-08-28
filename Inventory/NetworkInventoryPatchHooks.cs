@@ -91,7 +91,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
             if (!IsInventoryPatched())
             {
                 Debug.LogWarning(
-                    "[NetworkInventoryPatchHooks] Inventory patch 3.0.0-inventory is required. " +
+                    "[NetworkInventoryPatchHooks] Inventory patch 3.1.0-inventory is required. " +
                     "Network-managed bags fail closed until the patch is applied.");
                 return;
             }

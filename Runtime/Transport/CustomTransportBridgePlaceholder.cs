@@ -29,7 +29,7 @@ namespace Arawn.GameCreator2.Networking
         {
             if (m_AssignedBridge == null)
             {
-                m_AssignedBridge = FindFirstObjectByType<NetworkTransportBridge>();
+                m_AssignedBridge = UnityObjectSearch.FindAny<NetworkTransportBridge>();
             }
         }
     }

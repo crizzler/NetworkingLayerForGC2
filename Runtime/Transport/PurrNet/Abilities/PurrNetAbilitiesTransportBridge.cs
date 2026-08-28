@@ -66,7 +66,7 @@ namespace Arawn.GameCreator2.Networking.Abilities.Transport.PurrNet
             {
                 if (m_CoreBridge != null) return m_CoreBridge;
                 m_CoreBridge = NetworkTransportBridge.Active as PurrNetTransportBridge;
-                if (m_CoreBridge == null) m_CoreBridge = FindFirstObjectByType<PurrNetTransportBridge>();
+                if (m_CoreBridge == null) m_CoreBridge = UnityObjectSearch.FindAny<PurrNetTransportBridge>();
                 return m_CoreBridge;
             }
         }
@@ -384,9 +384,7 @@ namespace Arawn.GameCreator2.Networking.Abilities.Transport.PurrNet
 
             if (!m_AutoRegisterScenePawns && !force) return;
 
-            Pawn[] pawns = FindObjectsByType<Pawn>(
-                FindObjectsInactive.Exclude,
-                FindObjectsSortMode.None);
+            Pawn[] pawns = UnityObjectSearch.FindAll<Pawn>(FindObjectsInactive.Exclude);
 
             for (int i = 0; i < pawns.Length; i++)
             {
@@ -758,9 +756,7 @@ namespace Arawn.GameCreator2.Networking.Abilities.Transport.PurrNet
                 }
             }
 
-            NetworkCharacter[] characters = FindObjectsByType<NetworkCharacter>(
-                FindObjectsInactive.Exclude,
-                FindObjectsSortMode.None);
+            NetworkCharacter[] characters = UnityObjectSearch.FindAll<NetworkCharacter>(FindObjectsInactive.Exclude);
             for (int i = 0; i < characters.Length; i++)
             {
                 NetworkCharacter character = characters[i];
@@ -805,7 +801,7 @@ namespace Arawn.GameCreator2.Networking.Abilities.Transport.PurrNet
         {
             return NetworkAbilitiesController.HasInstance
                 ? NetworkAbilitiesController.Instance
-                : FindFirstObjectByType<NetworkAbilitiesController>();
+                : UnityObjectSearch.FindAny<NetworkAbilitiesController>();
         }
 
         private static NetworkCharacter ResolveNetworkCharacter(Pawn pawn)

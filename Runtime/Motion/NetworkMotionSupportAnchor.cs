@@ -130,7 +130,7 @@ namespace Arawn.GameCreator2.Networking
             uint hash = unchecked((uint)StableHashUtility.GetStableHash(key));
             if (hash != 0) return hash;
 
-            int instanceId = transform.GetInstanceID();
+            int instanceId = transform.GetLegacyInstanceId();
             return (uint)(Mathf.Abs(instanceId) + 1);
         }
 

@@ -34,6 +34,9 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
         /// <summary>Relative path from Assets folder to the main file to patch.</summary>
         protected abstract string[] FilesToPatch { get; }
 
+        /// <summary>Read-only target list used by deterministic patch validation tooling.</summary>
+        public IReadOnlyList<string> TargetFiles => FilesToPatch;
+
         /// <summary>Display name for menu and dialogs.</summary>
         public abstract string DisplayName { get; }
 
@@ -50,6 +53,13 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
         protected string BackupFolder => Path.Combine(BACKUP_BASE_FOLDER, ModuleName);
         protected string LegacyBackupFolder => Path.Combine(LEGACY_BACKUP_BASE_FOLDER, ModuleName);
         protected virtual bool AllowLegacyBackupRestore => true;
+
+        /// <summary>
+        /// Describes what the most recent <see cref="ApplyPatch"/> call actually did. Callers
+        /// can use this to avoid claiming that files were patched or backups were created when
+        /// the installed hooks were already current.
+        /// </summary>
+        public PatchApplyOutcome LastApplyOutcome { get; private set; }
 
         protected enum ExistingPatchState
         {
@@ -171,6 +181,12 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
             return content.Contains(moduleMarkerPrefix, StringComparison.Ordinal);
         }
 
+        protected bool ContainsCurrentPatchMarker(string content)
+        {
+            return !string.IsNullOrEmpty(content) &&
+                   content.Contains(PatchMarker, StringComparison.Ordinal);
+        }
+
         protected bool TryReplaceRequired(
             ref string content,
             string originalSnippet,
@@ -193,7 +209,8 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                 return ExistingPatchState.Continue;
             }
 
-            if (VerifyPatchedFile(relativePath, content, out _))
+            if (ContainsCurrentPatchMarker(content) &&
+                VerifyPatchedFile(relativePath, content, out _))
             {
                 Debug.LogWarning($"[GC2 Networking] {relativePath} is already patched and valid.");
                 return ExistingPatchState.SkipAlreadyPatched;
@@ -213,7 +230,7 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                 return ExistingPatchState.Failed;
             }
 
-            content = pristineContent;
+            content = NormalizeUnityObjectIdentityCallsForPatchMatching(pristineContent);
             Debug.Log(
                 $"[GC2 Networking] Migrating {relativePath} from pristine backup '{backupPath}'.");
 
@@ -290,31 +307,245 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
         /// </summary>
         public bool IsPatched()
         {
-            if (FilesToPatch.Length == 0) return false;
+            return TryVerifyInstalledPatch(
+                requireCurrentMarkers: true,
+                out _,
+                out _);
+        }
 
-            bool hasRequiredPatchedFile = false;
+        /// <summary>
+        /// Verifies the complete module patch as one unit. Older module markers are accepted only
+        /// when every target still satisfies the current patcher's structural contract. This must
+        /// remain package-wide: verifying marked files individually would misclassify a mixed
+        /// patched/unpatched module as usable.
+        /// </summary>
+        public bool TryVerifyInstalledPatch(
+            out bool requiresMarkerPromotion,
+            out string failureReason)
+        {
+            return TryVerifyInstalledPatch(
+                requireCurrentMarkers: false,
+                out requiresMarkerPromotion,
+                out failureReason);
+        }
 
-            foreach (var relativePath in FilesToPatch)
+        /// <summary>
+        /// Returns true when any target contains a version marker belonging to this module.
+        /// </summary>
+        public bool HasInstalledPatchMarkers()
+        {
+            foreach (string relativePath in FilesToPatch)
             {
-                if (!ShouldRequirePatchMarker(relativePath)) continue;
-
                 string fullPath = Path.Combine(Application.dataPath, relativePath);
-                if (!File.Exists(fullPath)) return false;
+                if (!File.Exists(fullPath)) continue;
 
                 string content = NormalizeLineEndings(File.ReadAllText(fullPath));
-                if (!ContainsPatchMarker(content))
+                if (ContainsPatchMarker(content)) return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Performs the non-mutating safety half of backup creation. A marked target may only be
+        /// rewritten when a genuinely pristine pre-patch backup exists.
+        /// </summary>
+        public bool CanSafelyPatchExistingSources(out string failureReason)
+        {
+            foreach (string relativePath in FilesToPatch)
+            {
+                string fullPath = Path.Combine(Application.dataPath, relativePath);
+                if (!File.Exists(fullPath)) continue;
+
+                string source = NormalizeLineEndings(File.ReadAllText(fullPath));
+                if (!ContainsAnyPatchMarker(source)) continue;
+                if (TryReadPristineBackup(relativePath, out _, out _)) continue;
+
+                failureReason =
+                    $"{relativePath} contains patched source, but no pristine pre-patch backup exists.";
+                return false;
+            }
+
+            failureReason = null;
+            return true;
+        }
+
+        private bool TryVerifyInstalledPatch(
+            bool requireCurrentMarkers,
+            out bool requiresMarkerPromotion,
+            out string failureReason)
+        {
+            requiresMarkerPromotion = false;
+            if (FilesToPatch.Length == 0)
+            {
+                failureReason = "The patcher does not declare any target files.";
+                return false;
+            }
+
+            int requiredFileCount = 0;
+            int markedFileCount = 0;
+            var failures = new List<string>();
+
+            foreach (string relativePath in FilesToPatch)
+            {
+                string fullPath = Path.Combine(Application.dataPath, relativePath);
+                if (!File.Exists(fullPath))
                 {
-                    return false;
+                    failures.Add($"{relativePath}: source file is missing.");
+                    continue;
                 }
 
-                hasRequiredPatchedFile = true;
-                if (!VerifyPatchedFile(relativePath, content, out _))
+                string content = NormalizeLineEndings(File.ReadAllText(fullPath));
+                bool requiresMarker = ShouldRequirePatchMarker(relativePath);
+                bool hasModuleMarker = ContainsPatchMarker(content);
+
+                if (requiresMarker)
                 {
-                    return false;
+                    requiredFileCount++;
+                    if (!hasModuleMarker)
+                    {
+                        failures.Add($"{relativePath}: patch marker is missing.");
+                        continue;
+                    }
+
+                    markedFileCount++;
+                    if (!ContainsCurrentPatchMarker(content))
+                    {
+                        requiresMarkerPromotion = true;
+                        if (requireCurrentMarkers)
+                        {
+                            failures.Add(
+                                $"{relativePath}: patch marker is older than {PatchVersion}.");
+                            continue;
+                        }
+                    }
+                }
+
+                if (!VerifyPatchedFile(relativePath, content, out string verifyFailure))
+                {
+                    failures.Add($"{relativePath}: {verifyFailure}");
                 }
             }
 
-            return hasRequiredPatchedFile;
+            if (requiredFileCount == 0)
+            {
+                failureReason = "The patcher has no marker-required target files.";
+                return false;
+            }
+
+            if (failures.Count == 0 && markedFileCount == requiredFileCount)
+            {
+                failureReason = null;
+                return true;
+            }
+
+            string countSummary =
+                $"Verified module markers were found in {markedFileCount} of " +
+                $"{requiredFileCount} required files.";
+            int detailCount = Mathf.Min(3, failures.Count);
+            var details = new List<string>(detailCount);
+            for (int i = 0; i < detailCount; i++) details.Add(failures[i]);
+
+            failureReason = detailCount > 0
+                ? countSummary + " " + string.Join(" ", details)
+                : countSummary;
+            return false;
+        }
+
+        private static void RestoreMarkerPromotionInputs(
+            Dictionary<string, string> originalFiles)
+        {
+            foreach (KeyValuePair<string, string> pair in originalFiles)
+            {
+                try
+                {
+                    File.WriteAllText(pair.Key, pair.Value);
+                }
+                catch (Exception restoreException)
+                {
+                    Debug.LogError(
+                        $"[GC2 Networking] Could not restore '{pair.Key}' after marker " +
+                        $"promotion failed: {restoreException.Message}");
+                }
+            }
+        }
+
+        /// <summary>
+        /// Promotes stale version markers when every installed hook still satisfies the current
+        /// patcher's structural verification contract. This is intentionally limited to marker
+        /// replacement: it never attempts to reconstruct or rewrite hook bodies without a
+        /// pristine backup. This supports both editor idempotence and isolated CI preparation
+        /// after a patch-version metadata bump whose existing hooks remain current.
+        /// </summary>
+        public bool TryPromoteVerifiedPatchMarkers()
+        {
+            if (FilesToPatch.Length == 0) return false;
+
+            if (!TryVerifyInstalledPatch(
+                    requireCurrentMarkers: false,
+                    out bool requiresMarkerPromotion,
+                    out _))
+            {
+                return false;
+            }
+
+            if (!requiresMarkerPromotion) return IsPatched();
+
+            var promotedFiles = new Dictionary<string, string>(StringComparer.Ordinal);
+            var originalFiles = new Dictionary<string, string>(StringComparer.Ordinal);
+            string markerPattern =
+                Regex.Escape($"{PATCH_MARKER_PREFIX}{ModuleName}_") + @"[^\]\r\n]+\]";
+
+            foreach (string relativePath in FilesToPatch)
+            {
+                string fullPath = Path.Combine(Application.dataPath, relativePath);
+                string originalContent = File.ReadAllText(fullPath);
+                string content = NormalizeLineEndings(originalContent);
+
+                if (!ShouldRequirePatchMarker(relativePath) ||
+                    ContainsCurrentPatchMarker(content))
+                {
+                    continue;
+                }
+
+                if (!ContainsPatchMarker(content)) return false;
+
+                string promoted = Regex.Replace(originalContent, markerPattern, PatchMarker);
+                if (string.Equals(promoted, originalContent, StringComparison.Ordinal)) return false;
+
+                originalFiles[fullPath] = originalContent;
+                promotedFiles[fullPath] = promoted;
+            }
+
+            try
+            {
+                foreach (KeyValuePair<string, string> pair in promotedFiles)
+                {
+                    File.WriteAllText(pair.Key, pair.Value);
+                }
+
+                if (!IsPatched())
+                {
+                    RestoreMarkerPromotionInputs(originalFiles);
+                    Debug.LogError(
+                        $"[GC2 Networking] Refused to promote {ModuleName} patch markers because " +
+                        "post-promotion verification failed. Original files were restored.");
+                    return false;
+                }
+
+                Debug.Log(
+                    $"[GC2 Networking] Promoted verified {ModuleName} patch markers to " +
+                    $"{PatchVersion}; hook bodies were unchanged.");
+                return true;
+            }
+            catch (Exception exception)
+            {
+                RestoreMarkerPromotionInputs(originalFiles);
+                Debug.LogError(
+                    $"[GC2 Networking] Failed to promote verified {ModuleName} patch markers: " +
+                    $"{exception.Message}. Original files were restored.");
+                return false;
+            }
         }
 
         /// <summary>
@@ -338,6 +569,7 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
         /// </summary>
         public bool ApplyPatch()
         {
+            LastApplyOutcome = PatchApplyOutcome.Failed;
             bool assetEditingStarted = false;
             bool reloadAssembliesLocked = false;
             try
@@ -347,6 +579,32 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
 
                 AssetDatabase.StartAssetEditing();
                 assetEditingStarted = true;
+
+                if (TryVerifyInstalledPatch(
+                        out bool requiresMarkerPromotion,
+                        out _))
+                {
+                    if (!requiresMarkerPromotion)
+                    {
+                        LastApplyOutcome = PatchApplyOutcome.AlreadyApplied;
+                        Debug.Log(
+                            $"[GC2 Networking] {DisplayName} patch {PatchVersion} is already " +
+                            "applied and verified. No files were modified.");
+                        return true;
+                    }
+
+                    if (!TryPromoteVerifiedPatchMarkers())
+                    {
+                        return false;
+                    }
+
+                    LastApplyOutcome = PatchApplyOutcome.VerifiedMarkersPromoted;
+                    Debug.Log(
+                        $"[GC2 Networking] {DisplayName} was already structurally patched. " +
+                        $"Only its verified version markers were updated to {PatchVersion}; " +
+                        "hook bodies were not rewritten.");
+                    return true;
+                }
 
                 EditorUtility.DisplayProgressBar(
                     "GC2 Networking Patch",
@@ -393,6 +651,7 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                 // Save patch info
                 SavePatchInfo();
 
+                LastApplyOutcome = PatchApplyOutcome.Applied;
                 Debug.Log($"[GC2 Networking] {ModuleName} patch applied successfully.");
                 return true;
             }
@@ -479,14 +738,21 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
         /// </summary>
         public PatchStatus GetStatus()
         {
+            bool structurallyVerified = TryVerifyInstalledPatch(
+                out bool requiresMarkerPromotion,
+                out string verificationFailure);
             return new PatchStatus
             {
                 ModuleName = ModuleName,
                 DisplayName = DisplayName,
                 IsInstalled = ValidateFilesExist(),
-                IsPatched = IsPatched(),
+                IsPatched = structurallyVerified && !requiresMarkerPromotion,
+                IsStructurallyVerified = structurallyVerified,
+                RequiresMarkerPromotion = structurallyVerified && requiresMarkerPromotion,
+                HasInstalledMarkers = HasInstalledPatchMarkers(),
                 HasBackups = HasBackups(),
-                PatchVersion = PatchVersion
+                PatchVersion = PatchVersion,
+                VerificationFailure = verificationFailure
             };
         }
 
@@ -1356,10 +1622,21 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                 if (!ContainsAnyPatchMarker(source)) continue;
                 if (TryReadPristineBackup(relativePath, out _, out _)) continue;
 
+                TryVerifyInstalledPatch(
+                    requireCurrentMarkers: false,
+                    out _,
+                    out string verificationFailure);
+                string verificationText = string.IsNullOrWhiteSpace(verificationFailure)
+                    ? "The complete current patch could not be verified."
+                    : $"Current module verification: {verificationFailure}";
+
                 Debug.LogError(
-                    $"[GC2 Networking] Cannot safely patch {relativePath}: it already contains a " +
-                    "Networking Layer patch, but no pristine backup exists. Restore or reinstall the " +
-                    "original GC2 source first. Existing source and backups were not modified.");
+                    $"[GC2 Networking] Cannot safely update {DisplayName} to patch {PatchVersion}. " +
+                    $"The installed module is partial, stale, or structurally incompatible. " +
+                    $"{verificationText} In addition, {relativePath} contains Networking Layer " +
+                    "patch content but has no pristine pre-patch backup. Restore or reinstall the " +
+                    "original GC2 package source, then apply the patch again. Existing source and " +
+                    "backups were not modified.");
                 return false;
             }
 
@@ -1996,7 +2273,8 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
         {
             string fullPath = Path.Combine(Application.dataPath, relativePath);
             string content = File.ReadAllText(fullPath);
-            return NormalizeLineEndings(content);
+            content = NormalizeLineEndings(content);
+            return NormalizeUnityObjectIdentityCallsForPatchMatching(content);
         }
 
         private bool VerifyPatchedOutput(string relativePath, out string failureReason)
@@ -2021,7 +2299,32 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
         protected void WriteFile(string relativePath, string content)
         {
             string fullPath = Path.Combine(Application.dataPath, relativePath);
+            content = ApplyUnityObjectIdentityCompatibility(content);
             File.WriteAllText(fullPath, content);
+        }
+
+        private static string NormalizeUnityObjectIdentityCallsForPatchMatching(string content)
+        {
+            #if UNITY_6000_5_OR_NEWER
+            return content.Replace(
+                ".GetEntityId().GetHashCode()",
+                ".GetInstanceID()",
+                StringComparison.Ordinal);
+            #else
+            return content;
+            #endif
+        }
+
+        private static string ApplyUnityObjectIdentityCompatibility(string content)
+        {
+            #if UNITY_6000_5_OR_NEWER
+            return content.Replace(
+                ".GetInstanceID()",
+                ".GetEntityId().GetHashCode()",
+                StringComparison.Ordinal);
+            #else
+            return content;
+            #endif
         }
 
         /// <summary>
@@ -2093,6 +2396,17 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
     }
 
     /// <summary>
+    /// Result of the most recent patch application request.
+    /// </summary>
+    public enum PatchApplyOutcome
+    {
+        Failed,
+        Applied,
+        AlreadyApplied,
+        VerifiedMarkersPromoted
+    }
+
+    /// <summary>
     /// Patch status information.
     /// </summary>
     public struct PatchStatus
@@ -2101,7 +2415,11 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
         public string DisplayName;
         public bool IsInstalled;
         public bool IsPatched;
+        public bool IsStructurallyVerified;
+        public bool RequiresMarkerPromotion;
+        public bool HasInstalledMarkers;
         public bool HasBackups;
         public string PatchVersion;
+        public string VerificationFailure;
     }
 }

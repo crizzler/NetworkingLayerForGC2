@@ -297,7 +297,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         {
             NetworkAnimationManager manager = NetworkAnimationManager.Instance;
             if (manager == null)
-                manager = FindFirstObjectByType<NetworkAnimationManager>(FindObjectsInactive.Include);
+                manager = UnityObjectSearch.FindAny<NetworkAnimationManager>(FindObjectsInactive.Include);
             if (manager != null || !m_CreateManagersIfMissing) return manager;
             return new GameObject("Network Animation Manager")
                 .AddComponent<NetworkAnimationManager>();
@@ -307,7 +307,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         {
             NetworkMotionManager manager = NetworkMotionManager.Instance;
             if (manager == null)
-                manager = FindFirstObjectByType<NetworkMotionManager>(FindObjectsInactive.Include);
+                manager = UnityObjectSearch.FindAny<NetworkMotionManager>(FindObjectsInactive.Include);
             if (manager != null || !m_CreateManagersIfMissing) return manager;
             return new GameObject("Network Motion Manager").AddComponent<NetworkMotionManager>();
         }

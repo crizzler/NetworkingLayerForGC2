@@ -25,7 +25,7 @@ namespace Arawn.GameCreator2.Networking.Dialogue
             {
                 if (s_Instance == null)
                 {
-                    s_Instance = FindFirstObjectByType<NetworkDialogueManager>();
+                    s_Instance = UnityObjectSearch.FindAny<NetworkDialogueManager>();
                 }
 
                 return s_Instance;

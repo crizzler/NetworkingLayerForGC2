@@ -9,6 +9,42 @@ namespace Arawn.GameCreator2.Networking
 {
     public partial class NetworkCharacter
     {
+        private readonly struct ServerRendererState
+        {
+            public readonly Renderer Component;
+            public readonly bool Enabled;
+
+            public ServerRendererState(Renderer component)
+            {
+                Component = component;
+                Enabled = component != null && component.enabled;
+            }
+        }
+
+        private readonly struct ServerAudioState
+        {
+            public readonly AudioSource Component;
+            public readonly bool Enabled;
+
+            public ServerAudioState(AudioSource component)
+            {
+                Component = component;
+                Enabled = component != null && component.enabled;
+            }
+        }
+
+        private readonly struct ServerParticleState
+        {
+            public readonly ParticleSystem Component;
+            public readonly bool EmissionEnabled;
+
+            public ServerParticleState(ParticleSystem component)
+            {
+                Component = component;
+                EmissionEnabled = component != null && component.emission.enabled;
+            }
+        }
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // INITIALIZATION
         // ════════════════════════════════════════════════════════════════════════════════════════
@@ -26,9 +62,12 @@ namespace Arawn.GameCreator2.Networking
             m_RuntimeIsServer = false;
             m_RuntimeIsOwner = false;
             m_RuntimeIsHost = false;
+            m_RuntimeHasAuthenticatedPlayerOwner = false;
             m_RuntimeNetworkId = ResolveNetworkId();
 
             // Cache initial state
+            m_AuthoredIsPlayer = m_Character.IsPlayer;
+            m_AuthoredDriver = m_Character.Driver as TUnitDriver;
             m_LastIsDead = m_Character.IsDead;
             m_LastIsPlayer = m_Character.IsPlayer;
         }
@@ -42,13 +81,42 @@ namespace Arawn.GameCreator2.Networking
         /// <param name="isHost">True if this is a host (server + client).</param>
         public void InitializeNetworkRole(bool isServer, bool isOwner, bool isHost = false)
         {
+            // Compatibility overload for custom transports that have not yet supplied logical
+            // ownership separately. An authored legacy player remains classified as a player,
+            // but only isOwner grants local input on this peer.
+            bool hasAuthenticatedPlayerOwner = isOwner ||
+                (m_ActorType == NetworkCharacterActorType.LegacyAutomatic && m_AuthoredIsPlayer);
+
+            InitializeNetworkRole(isServer, isOwner, isHost, hasAuthenticatedPlayerOwner);
+        }
+
+        /// <summary>
+        /// Initializes this character with transport-authenticated logical ownership.
+        /// </summary>
+        /// <param name="hasAuthenticatedPlayerOwner">
+        /// True when the transport has resolved a real player as the object's logical owner,
+        /// including on observers. This is actor identity information, not local authority.
+        /// </param>
+        public void InitializeNetworkRole(
+            bool isServer,
+            bool isOwner,
+            bool isHost,
+            bool hasAuthenticatedPlayerOwner)
+        {
             if (m_IsInitialized) return;
 
+            if (m_ActorType == NetworkCharacterActorType.NPC)
+            {
+                isOwner = false;
+                hasAuthenticatedPlayerOwner = false;
+            }
+
             m_RuntimeIsServer = isServer;
-            m_RuntimeIsOwner = isOwner;
+            m_RuntimeHasAuthenticatedPlayerOwner = hasAuthenticatedPlayerOwner;
+            m_RuntimeIsOwner = isOwner && IsPlayerOwnedActor;
             m_RuntimeIsHost = isHost;
 
-            m_CurrentRole = ResolveRole(isServer, isOwner, isHost);
+            m_CurrentRole = ResolveRole(isServer, m_RuntimeIsOwner, isHost);
             RefreshNetworkId();
 
             InitializeForRole();
@@ -85,7 +153,8 @@ namespace Arawn.GameCreator2.Networking
 
             // Register local player with GC2's ShortcutPlayer system
             // so "Get Player" property getters work across the framework
-            if (m_RuntimeIsOwner || m_CurrentRole == NetworkRole.LocalClient)
+            if (IsPlayerOwnedActor &&
+                (m_RuntimeIsOwner || m_CurrentRole == NetworkRole.LocalClient))
             {
                 GameCreator.Runtime.Common.ShortcutPlayer.Change(gameObject);
             }
@@ -97,17 +166,48 @@ namespace Arawn.GameCreator2.Networking
 
         private void AssignDriverForRole()
         {
-            // Create the appropriate driver at runtime based on role
-            IUnitDriver driver = TryCreateExternalPredictionDriver();
-            if (driver == null)
+            m_UsingAuthoredNpcDriver = false;
+
+            IUnitDriver driver;
+            if (EffectiveActorType == NetworkCharacterActorType.NPC)
             {
-                driver = m_CurrentRole switch
+                // Fusion Native owns NPC tick state and interpolation. Built-in NPC movement
+                // instead keeps the authored GC2/NavMesh driver only on simulation authority.
+                driver = m_PredictionBackend == NetworkPredictionBackend.FusionNative
+                    ? TryCreateExternalPredictionDriver()
+                    : null;
+
+                if (driver == null)
                 {
-                    NetworkRole.Server => CreateServerDriver(),
-                    NetworkRole.LocalClient => CreateClientDriver(),
-                    NetworkRole.RemoteClient => CreateRemoteDriver(),
-                    _ => null
-                };
+                    if (IsClientSideNPC || HasSimulationAuthority)
+                    {
+                        driver = CreateNpcAuthorityDriver();
+                        // Authored authority drivers and a fail-safe runtime NavMesh server
+                        // replacement both need the transport-neutral LateUpdate pose sampler.
+                        // UnitDriverNetworkServer publishes its own position state instead.
+                        m_UsingAuthoredNpcDriver =
+                            ReferenceEquals(driver, m_AuthoredDriver) ||
+                            driver is UnitDriverNavmeshNetworkServer;
+                    }
+                    else
+                    {
+                        driver = CreateRemoteDriver();
+                    }
+                }
+            }
+            else
+            {
+                driver = TryCreateExternalPredictionDriver();
+                if (driver == null)
+                {
+                    driver = m_CurrentRole switch
+                    {
+                        NetworkRole.Server => CreateServerDriver(),
+                        NetworkRole.LocalClient => CreateClientDriver(),
+                        NetworkRole.RemoteClient => CreateRemoteDriver(),
+                        _ => null
+                    };
+                }
             }
 
             if (driver != null)
@@ -122,6 +222,9 @@ namespace Arawn.GameCreator2.Networking
 
                 OnDriverAssigned?.Invoke(driver);
             }
+
+            m_LastNpcSamplePosition = transform.position;
+            m_LastNpcSampleTime = Time.time;
 
             m_ActivePredictionBackend?.Initialize(
                 this,
@@ -192,6 +295,29 @@ namespace Arawn.GameCreator2.Networking
             return m_ServerDriver;
         }
 
+        private IUnitDriver CreateNpcAuthorityDriver()
+        {
+            // Never preserve a driver that this component created for an earlier network role.
+            // The authored reference captured in Awake survives authority migration.
+            // A manually authored NavMesh Network Client driver is likewise never an NPC
+            // authority driver: it consumes replicated path state and would leave the real
+            // server/Shared-master AI motion without an authoritative NavMesh writer.
+            if (m_AuthoredDriver is UnitDriverNavmeshNetworkClient)
+            {
+                return new UnitDriverNavmeshNetworkServer();
+            }
+
+            if (m_AuthoredDriver != null &&
+                m_AuthoredDriver is not UnitDriverNetworkClient &&
+                m_AuthoredDriver is not UnitDriverNetworkRemote &&
+                m_AuthoredDriver is not UnitDriverNetworkServer)
+            {
+                return m_AuthoredDriver;
+            }
+
+            return CreateServerDriver();
+        }
+
         private UnitDriverNetworkClient CreateClientDriver()
         {
             if (m_Character?.Driver is UnitDriverNetworkClient currentDriver)
@@ -237,11 +363,14 @@ namespace Arawn.GameCreator2.Networking
         {
             if (m_Character?.Kernel == null) return;
 
-            bool isLocalOwner = m_RuntimeIsOwner || m_CurrentRole == NetworkRole.LocalClient;
+            bool isLocalOwner = IsPlayerOwnedActor &&
+                (m_RuntimeIsOwner || m_CurrentRole == NetworkRole.LocalClient);
             SetCharacterPlayerFlag(isLocalOwner);
 
             // Remote and dedicated server instances should not process local player input.
-            if (m_CurrentRole == NetworkRole.RemoteClient || (m_CurrentRole == NetworkRole.Server && !m_RuntimeIsOwner))
+            if (!IsPlayerOwnedActor ||
+                m_CurrentRole == NetworkRole.RemoteClient ||
+                (m_CurrentRole == NetworkRole.Server && !m_RuntimeIsOwner))
             {
                 m_Character.Kernel.ChangePlayer(m_Character, null);
                 return;
@@ -284,10 +413,72 @@ namespace Arawn.GameCreator2.Networking
             GameObject previousShortcut = ShortcutPlayer.Instance;
             m_Character.IsPlayer = isPlayer;
 
-            if (!isPlayer && previousShortcut != null && previousShortcut != gameObject)
+            if (!isPlayer)
             {
-                ShortcutPlayer.Change(previousShortcut);
+                // GC2's Character.IsPlayer setter always calls ShortcutPlayer.Change(null)
+                // when any character becomes an NPC. In a multiplayer process that remote
+                // replica must not clear (or keep stealing) the authenticated local player's
+                // process-global shortcut. Prefer the prior unrelated shortcut, then recover
+                // the explicit local owner if this replica had already replaced it.
+                GameObject localShortcut = ResolveLocalShortcutAfterPlayerFlagClear(
+                    previousShortcut);
+                ShortcutPlayer.Change(localShortcut);
             }
+
+            if (NetworkCiTrace.TraversalTraceWindowActive)
+            {
+                NetworkCiTrace.Log(
+                    "network-character-role",
+                    "player-flag-corrected",
+                    NetworkId,
+                    0,
+                    $"character='{name}' role={m_CurrentRole} requested={isPlayer} " +
+                    $"runtimeOwner={m_RuntimeIsOwner} " +
+                    $"authenticatedOwner={m_RuntimeHasAuthenticatedPlayerOwner} " +
+                    $"previousShortcut='{previousShortcut?.name ?? "<none>"}' " +
+                    $"currentShortcut='{ShortcutPlayer.Instance?.name ?? "<none>"}' " +
+                    $"shortcutMatches={ShortcutPlayer.Instance == gameObject}",
+                    this);
+            }
+        }
+
+        private GameObject ResolveLocalShortcutAfterPlayerFlagClear(
+            GameObject previousShortcut)
+        {
+            if (previousShortcut != null && previousShortcut != gameObject)
+            {
+                NetworkCharacter previousNetworkCharacter =
+                    previousShortcut.GetComponent<NetworkCharacter>() ??
+                    previousShortcut.GetComponentInParent<NetworkCharacter>();
+                if (previousNetworkCharacter == null ||
+                    (previousNetworkCharacter.IsOwnerInstance &&
+                     previousNetworkCharacter.IsPlayerOwnedActor &&
+                     previousNetworkCharacter.HasAuthenticatedPlayerOwner))
+                {
+                    return previousShortcut;
+                }
+            }
+
+            NetworkCharacter[] candidates =
+                UnityObjectSearch.FindAll<NetworkCharacter>(FindObjectsInactive.Exclude);
+            for (int i = 0; i < candidates.Length; i++)
+            {
+                NetworkCharacter candidate = candidates[i];
+                if (candidate == null || candidate == this ||
+                    !candidate.isActiveAndEnabled ||
+                    !candidate.IsOwnerInstance ||
+                    !candidate.IsPlayerOwnedActor ||
+                    !candidate.HasAuthenticatedPlayerOwner ||
+                    candidate.Character == null ||
+                    !candidate.Character.IsPlayer)
+                {
+                    continue;
+                }
+
+                return candidate.gameObject;
+            }
+
+            return null;
         }
 
         private void ConfigureSystemsForRole()
@@ -567,17 +758,27 @@ namespace Arawn.GameCreator2.Networking
 
         private void ApplyServerOptimizations()
         {
+            if (m_ServerPresentationOptimized) return;
+            m_ServerPresentationOptimized = true;
+
+            m_ServerRendererStates.Clear();
+            m_ServerAudioStates.Clear();
+            m_ServerParticleStates.Clear();
+
             if (m_DisableVisualsOnServer)
             {
-                // Disable renderers
-                foreach (var renderer in GetComponentsInChildren<Renderer>())
+                // Capture the exact authored state before disabling presentation. A transport
+                // can briefly initialize as server-only while StartHost is still bringing up
+                // its local client half, and later role migration must be able to undo this.
+                foreach (Renderer renderer in GetComponentsInChildren<Renderer>(true))
                 {
+                    m_ServerRendererStates.Add(new ServerRendererState(renderer));
                     renderer.enabled = false;
                 }
 
-                // Disable particle systems
-                foreach (var particles in GetComponentsInChildren<ParticleSystem>())
+                foreach (ParticleSystem particles in GetComponentsInChildren<ParticleSystem>(true))
                 {
+                    m_ServerParticleStates.Add(new ServerParticleState(particles));
                     particles.Stop();
                     var emission = particles.emission;
                     emission.enabled = false;
@@ -586,12 +787,42 @@ namespace Arawn.GameCreator2.Networking
 
             if (m_DisableAudioOnServer)
             {
-                // Disable audio sources
-                foreach (var audio in GetComponentsInChildren<AudioSource>())
+                foreach (AudioSource audio in GetComponentsInChildren<AudioSource>(true))
                 {
+                    m_ServerAudioStates.Add(new ServerAudioState(audio));
                     audio.enabled = false;
                 }
             }
+        }
+
+        private void RestoreServerOptimizations()
+        {
+            if (!m_ServerPresentationOptimized) return;
+
+            for (int i = 0; i < m_ServerRendererStates.Count; i++)
+            {
+                ServerRendererState state = m_ServerRendererStates[i];
+                if (state.Component != null) state.Component.enabled = state.Enabled;
+            }
+
+            for (int i = 0; i < m_ServerAudioStates.Count; i++)
+            {
+                ServerAudioState state = m_ServerAudioStates[i];
+                if (state.Component != null) state.Component.enabled = state.Enabled;
+            }
+
+            for (int i = 0; i < m_ServerParticleStates.Count; i++)
+            {
+                ServerParticleState state = m_ServerParticleStates[i];
+                if (state.Component == null) continue;
+                ParticleSystem.EmissionModule emission = state.Component.emission;
+                emission.enabled = state.EmissionEnabled;
+            }
+
+            m_ServerRendererStates.Clear();
+            m_ServerAudioStates.Clear();
+            m_ServerParticleStates.Clear();
+            m_ServerPresentationOptimized = false;
         }
 
         private NetworkRole ResolveRole(bool isServer, bool isOwner, bool isHost)
@@ -623,7 +854,7 @@ namespace Arawn.GameCreator2.Networking
             string key = $"{scenePath}|{hierarchyPath}|{m_NetworkIdSalt}";
             uint stableHash = unchecked((uint)StableHashUtility.GetStableHash(key));
 
-            return stableHash == 0 ? (uint)(Mathf.Abs(transform.GetInstanceID()) + 1) : stableHash;
+            return stableHash == 0 ? (uint)(Mathf.Abs(transform.GetLegacyInstanceId()) + 1) : stableHash;
         }
 
         private static string BuildHierarchyPath(Transform current)
@@ -802,6 +1033,7 @@ namespace Arawn.GameCreator2.Networking
 
         private void OnClientInputReady(NetworkInputState[] inputs)
         {
+            if (!IsPlayerOwnedActor || !m_RuntimeIsOwner) return;
             if (inputs == null || inputs.Length == 0) return;
 
             OnInputPayloadReady?.Invoke(NetworkId, inputs);
@@ -861,6 +1093,10 @@ namespace Arawn.GameCreator2.Networking
             if (!m_RuntimeIsServer) return;
             if (characterNetworkId != NetworkId) return;
             if (inputs == null || inputs.Length == 0) return;
+
+            // NPCs never consume client-authored movement, even if a client mutates GC2's
+            // Character.IsPlayer flag or spoofs this network id.
+            if (!IsPlayerOwnedActor) return;
 
             if (m_RegisteredBridge != null &&
                 m_RegisteredBridge.TryGetCharacterOwner(characterNetworkId, out uint ownerClientId) &&

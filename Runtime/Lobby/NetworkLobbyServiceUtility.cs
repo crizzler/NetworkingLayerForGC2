@@ -39,9 +39,8 @@ namespace Arawn.GameCreator2.Networking.Lobby
             if (!searchScene) return null;
 
 #if UNITY_2023_1_OR_NEWER || UNITY_6000_0_OR_NEWER || UNITY_6000
-            MonoBehaviour[] behaviours = Object.FindObjectsByType<MonoBehaviour>(
-                FindObjectsInactive.Exclude,
-                FindObjectsSortMode.None);
+            MonoBehaviour[] behaviours = UnityObjectSearch.FindAll<MonoBehaviour>(
+                FindObjectsInactive.Exclude);
 #else
             MonoBehaviour[] behaviours = Object.FindObjectsOfType<MonoBehaviour>();
 #endif

@@ -75,7 +75,11 @@ namespace Arawn.GameCreator2.Networking.Melee
                 comboNodeId);
             if (attackCorrelationId == 0 && m_IsServer && !m_IsLocalClient)
             {
-                attackCorrelationId = GetOrCreateTrustedAttackCorrelationId();
+                // Only OnPatchedAttackSkillStarted may mint a trusted server operation. A
+                // native hit following a rejected/missing Skill must remain correlation-less
+                // and fail closed instead of inventing even an inert authorization token.
+                attackCorrelationId = m_CurrentTrustedAttackCorrelationId;
+                m_TrustedAttackEnteredStrike = attackCorrelationId != 0;
             }
 
             PrepareProcessedHitOperation(
@@ -91,8 +95,8 @@ namespace Arawn.GameCreator2.Networking.Melee
             // branch once.
             Character hitCharacter = candidateCharacter;
             int targetId = hitCharacter != null
-                ? hitCharacter.gameObject.GetInstanceID()
-                : target.GetInstanceID();
+                ? hitCharacter.gameObject.GetLegacyInstanceId()
+                : target.GetLegacyInstanceId();
             if (!m_ProcessedHits.Add(targetId))
             {
                 return false;
@@ -166,6 +170,16 @@ namespace Arawn.GameCreator2.Networking.Melee
             // path. Host-owned actors continue through the ordinary loopback request below.
             if (m_IsServer && !m_IsLocalClient)
             {
+                if (m_NetworkCharacter == null ||
+                    !m_NetworkCharacter.IsServerAuthoritativeNPC ||
+                    !m_NetworkCharacter.HasSimulationAuthority)
+                {
+                    WarnHitRoutingInvariant(
+                        $"Suppressed server-observed melee hit {request.RequestId} because " +
+                        "the actor is not an explicitly trusted server-authoritative NPC.");
+                    return false;
+                }
+
                 NetworkTransportBridge transport = NetworkTransportBridge.Active;
                 if (transport == null)
                 {
@@ -197,8 +211,6 @@ namespace Arawn.GameCreator2.Networking.Melee
                         $"ownerClient={ownerClientId}; waiting for owner request");
                     return false;
                 }
-
-                RecordTrustedAttackLease(request, Time.time);
 
                 if (manager.TryServerQueueTrustedHit(request))
                 {
@@ -467,9 +479,9 @@ namespace Arawn.GameCreator2.Networking.Melee
         }
 
         /// <summary>
-        /// Server validation entry point that distinguishes client-authorized attacks from
-        /// trusted server/AI observations. Client hits use an accepted attack lease; trusted
-        /// server hits retain the strict live GC2 phase check.
+        /// Server validation entry point for client and trusted server/AI observations. Every
+        /// gameplay-bearing hit must consume an accepted attack lease; a native server callback
+        /// cannot synthesize authority after its Skill operation was rejected.
         /// </summary>
         internal NetworkMeleeHitResponse ProcessHitRequest(
             NetworkMeleeHitRequest request,
@@ -706,69 +718,18 @@ namespace Arawn.GameCreator2.Networking.Melee
                 return MeleeHitRejectionReason.WeaponMismatch;
             }
 
-            if (!trustedServerOrigin || request.AttackCorrelationId != 0)
-            {
-                AttackAuthorizationStatus authorizationStatus = EvaluateAuthoritativeAttackAuthorization(
-                    request,
-                    Time.time,
-                    false,
-                    out MeleeHitRejectionReason authorizationRejection);
-                return authorizationStatus == AttackAuthorizationStatus.Authorized
-                    ? MeleeHitRejectionReason.None
-                    : authorizationRejection;
-            }
-
-            if (m_MeleeStance == null)
-            {
-                TryGetMeleeStance();
-            }
-
-            if (m_MeleeStance == null || m_MeleeStance.CurrentPhase != MeleePhase.Strike)
-            {
-                return MeleeHitRejectionReason.InvalidPhase;
-            }
-
-            NetworkAttackState authoritativeState = m_LastAttackState;
-            authoritativeState.Phase = (byte)m_MeleeStance.CurrentPhase;
-            TryGetCurrentSkillInfo(ref authoritativeState);
-
-            if (authoritativeState.SkillHash == 0 ||
-                authoritativeState.SkillHash != request.SkillHash)
-            {
-                return MeleeHitRejectionReason.SkillMismatch;
-            }
-
-            if (authoritativeState.WeaponHash == 0 ||
-                authoritativeState.WeaponHash != request.WeaponHash)
-            {
-                return MeleeHitRejectionReason.WeaponMismatch;
-            }
-
-            // Hashes route packets, while object identity protects against a local duplicate-hash
-            // registry entry replacing the asset that is actually executing in GC2.
-            if (s_AttacksField == null) return MeleeHitRejectionReason.InvalidPhase;
-            try
-            {
-                var attacks = s_AttacksField.GetValue(m_MeleeStance) as Attacks;
-                if (attacks?.ComboSkill == null || !ReferenceEquals(attacks.ComboSkill, skill))
-                {
-                    return MeleeHitRejectionReason.SkillMismatch;
-                }
-
-                if (attacks.Weapon == null || !ReferenceEquals(attacks.Weapon, weapon))
-                {
-                    return MeleeHitRejectionReason.WeaponMismatch;
-                }
-            }
-            catch (Exception exception)
-            {
-                LogMeleeSyncWarning(
-                    $"could not inspect the live authoritative attack for hit {request.RequestId}: " +
-                    exception.GetBaseException().Message);
-                return MeleeHitRejectionReason.InvalidPhase;
-            }
-
-            return MeleeHitRejectionReason.None;
+            // A trusted server observation is not itself authority to create an attack. Both
+            // client-owned and server-owned actors must present the correlation of a Skill
+            // operation that already passed the authoritative Skill validator. In particular,
+            // a rejected NPC Skill must not be resurrected by its later native strike callback.
+            AttackAuthorizationStatus authorizationStatus = EvaluateAuthoritativeAttackAuthorization(
+                request,
+                Time.time,
+                false,
+                out MeleeHitRejectionReason authorizationRejection);
+            return authorizationStatus == AttackAuthorizationStatus.Authorized
+                ? MeleeHitRejectionReason.None
+                : authorizationRejection;
         }
 
         internal enum AttackAuthorizationStatus : byte
@@ -822,27 +783,6 @@ namespace Arawn.GameCreator2.Networking.Melee
             m_ProcessedHits.Clear();
         }
 
-        private void RecordTrustedAttackLease(NetworkMeleeHitRequest request, float acceptedAt)
-        {
-            if (!m_IsServer || request.AttackCorrelationId == 0) return;
-            if (m_ServerAttackLeases.ContainsKey(request.AttackCorrelationId)) return;
-
-            RecordAuthoritativeAttackLease(
-                new NetworkSkillRequest
-                {
-                    ActorNetworkId = request.ActorNetworkId,
-                    CorrelationId = request.AttackCorrelationId,
-                    ClientTimestamp = NetworkMeleeManager.Instance?.GetNetworkTimeFunc?.Invoke()
-                                      ?? acceptedAt,
-                    TargetNetworkId = request.TargetNetworkId,
-                    SkillHash = request.SkillHash,
-                    WeaponHash = request.WeaponHash,
-                    ComboNodeId = request.ComboNodeId,
-                    PreviousComboNodeId = ComboTree.NODE_INVALID
-                },
-                acceptedAt);
-        }
-
         /// <summary>
         /// Records the exact operation the server accepted. The lease lasts through the
         /// authored attack plus transport/rewind grace, so validation is independent of the
@@ -866,6 +806,7 @@ namespace Arawn.GameCreator2.Networking.Melee
                 request.TargetNetworkId,
                 out float comboActiveLifetime);
             float comboTimelineStart = ResolveSkillTimelineTime(request, acceptedAt);
+            ServerAttackTargetPolicy targetPolicy = ResolveServerAttackTargetPolicy(request);
 
             PruneAuthoritativeAttackLeases(acceptedAt);
             if (m_ServerAttackLeases.Count >= MaxServerAttackLeases)
@@ -899,6 +840,8 @@ namespace Arawn.GameCreator2.Networking.Melee
                 AcceptVersion = m_NextServerAttackAcceptVersion,
                 ComboActiveUntil = comboTimelineStart + comboActiveLifetime,
                 ExpiresAt = acceptedAt + lifetime,
+                RequestedTargetNetworkId = request.TargetNetworkId,
+                TargetPolicy = targetPolicy,
                 ConsumedTargetIds = new HashSet<uint>()
             };
 
@@ -907,7 +850,46 @@ namespace Arawn.GameCreator2.Networking.Melee
                 $"acceptVersion={m_NextServerAttackAcceptVersion} " +
                 $"skillHash={request.SkillHash} weaponHash={request.WeaponHash} " +
                 $"combo={request.ComboNodeId} previousCombo={request.PreviousComboNodeId} " +
+                $"target={request.TargetNetworkId} targetPolicy={targetPolicy} " +
                 $"comboLifetime={comboActiveLifetime:F3}s hitLifetime={lifetime:F3}s");
+        }
+
+        private ServerAttackTargetPolicy ResolveServerAttackTargetPolicy(
+            NetworkSkillRequest request)
+        {
+            // Prefer the exact equipped asset already validated for this actor. The global
+            // registry is only a readiness fallback and must not let a hash-colliding asset
+            // weaken a Free Flow lease into the ordinary unrestricted policy.
+            MeleeWeapon weapon = GetCurrentMeleeWeapon(request.WeaponHash) ??
+                                  NetworkMeleeManager.GetMeleeWeaponByHash(request.WeaponHash);
+            if (!NetworkFreeFlowCombatAdapter.UsesFreeFlowWeapon(this, weapon))
+            {
+                return ServerAttackTargetPolicy.Unrestricted;
+            }
+
+            NetworkCharacter actor = m_NetworkCharacter != null
+                ? m_NetworkCharacter
+                : GetComponent<NetworkCharacter>();
+            if (actor == null) return ServerAttackTargetPolicy.RejectAll;
+            if (actor.IsPlayerOwnedActor)
+            {
+                // Free Flow's supported player path is PvE. Keep the category, rather than one
+                // target ID, so an authored sweep can still hit several server-owned NPCs.
+                return ServerAttackTargetPolicy.FreeFlowServerNpcOnly;
+            }
+
+            if (actor.IsServerAuthoritativeNPC)
+            {
+                return ServerAttackTargetPolicy.FreeFlowAuthenticatedPlayerOnly;
+            }
+
+            // Client-deterministic or unresolved Free Flow actors cannot author durable hits.
+            return ServerAttackTargetPolicy.RejectAll;
+        }
+
+        internal void RecordTrustedServerSkillLease(NetworkSkillRequest request, float acceptedAt)
+        {
+            RecordAuthoritativeAttackLease(request, acceptedAt);
         }
 
         private bool IsAuthorizedServerComboContinuation(
@@ -1041,6 +1023,12 @@ namespace Arawn.GameCreator2.Networking.Melee
                 return AttackAuthorizationStatus.Rejected;
             }
 
+            if (!IsServerAttackLeaseTargetAllowed(lease, request.TargetNetworkId))
+            {
+                rejectionReason = MeleeHitRejectionReason.CheatSuspected;
+                return AttackAuthorizationStatus.Rejected;
+            }
+
             if (lease.ConsumedTargetIds.Contains(request.TargetNetworkId))
             {
                 rejectionReason = MeleeHitRejectionReason.AlreadyHit;
@@ -1054,6 +1042,33 @@ namespace Arawn.GameCreator2.Networking.Melee
 
             rejectionReason = MeleeHitRejectionReason.None;
             return AttackAuthorizationStatus.Authorized;
+        }
+
+        private static bool IsServerAttackLeaseTargetAllowed(
+            ServerAttackLease lease,
+            uint targetNetworkId)
+        {
+            if (lease == null) return false;
+            if (lease.TargetPolicy == ServerAttackTargetPolicy.Unrestricted) return true;
+            if (lease.TargetPolicy == ServerAttackTargetPolicy.RejectAll || targetNetworkId == 0)
+            {
+                return false;
+            }
+
+            NetworkCharacter target = NetworkMeleeManager.Instance
+                ?.GetCharacterByNetworkId(targetNetworkId);
+            if (target == null) return false;
+
+            return lease.TargetPolicy switch
+            {
+                ServerAttackTargetPolicy.FreeFlowServerNpcOnly =>
+                    target.IsServerAuthoritativeNPC &&
+                    !target.HasAuthenticatedPlayerOwner,
+                ServerAttackTargetPolicy.FreeFlowAuthenticatedPlayerOnly =>
+                    target.IsPlayerOwnedActor &&
+                    target.HasAuthenticatedPlayerOwner,
+                _ => false
+            };
         }
 
         private float CalculateAttackAuthorizationLifetime(

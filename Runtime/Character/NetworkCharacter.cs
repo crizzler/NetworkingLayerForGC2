@@ -87,6 +87,11 @@ namespace Arawn.GameCreator2.Networking
         // INSPECTOR - NPC Mode
         // ════════════════════════════════════════════════════════════════════════════════════════
 
+        [Header("Actor Authority")]
+        [Tooltip("Explicit network actor classification. Legacy Automatic preserves existing assets by using the authenticated transport owner, never Character.IsPlayer, as the authority source.")]
+        [SerializeField] private NetworkCharacterActorType m_ActorType =
+            NetworkCharacterActorType.LegacyAutomatic;
+
         [Header("NPC Synchronization")]
         [Tooltip("How this NPC's AI and movement is synchronized.\n\n" +
                  "Server Authoritative: Server runs AI, broadcasts to clients. Use for important NPCs.\n" +
@@ -208,6 +213,7 @@ namespace Arawn.GameCreator2.Networking
         private bool m_RuntimeIsServer;
         private bool m_RuntimeIsOwner;
         private bool m_RuntimeIsHost;
+        private bool m_RuntimeHasAuthenticatedPlayerOwner;
         private uint m_RuntimeNetworkId;
         private bool m_TransportCallbacksWired;
         private float m_ServerSimulationAccumulator;
@@ -217,7 +223,20 @@ namespace Arawn.GameCreator2.Networking
         private NetworkSessionProfile m_ResolvedSessionProfile;
         private NetworkTransportBridge m_RegisteredBridge;
         private INetworkCharacterPredictionBackend m_ActivePredictionBackend;
+        private readonly List<ServerRendererState> m_ServerRendererStates = new();
+        private readonly List<ServerAudioState> m_ServerAudioStates = new();
+        private readonly List<ServerParticleState> m_ServerParticleStates = new();
+        private bool m_ServerPresentationOptimized;
         private readonly Dictionary<uint, float> m_LastStateBroadcastPerClient = new Dictionary<uint, float>(32);
+
+        // Authored character state is retained across authority changes. Server-owned NPCs keep
+        // their normal GC2 driver (including UnitDriverNavmesh) while observers interpolate.
+        private bool m_AuthoredIsPlayer;
+        private TUnitDriver m_AuthoredDriver;
+        private bool m_UsingAuthoredNpcDriver;
+        private Vector3 m_LastNpcSamplePosition;
+        private float m_LastNpcSampleTime;
+        private ushort m_NpcStateSequence;
 
         // Network state (manual sync if not using transport)
         private bool m_LastIsDead;
@@ -263,6 +282,9 @@ namespace Arawn.GameCreator2.Networking
         /// Fired when the network role is assigned.
         /// </summary>
         public event Action<NetworkRole> OnRoleAssigned;
+
+        /// <summary>Fired when a previously assigned role is torn down or migrated.</summary>
+        public event Action OnRoleReset;
 
         /// <summary>
         /// Fired when a driver is assigned.
@@ -336,14 +358,57 @@ namespace Arawn.GameCreator2.Networking
         public UnitDriverNetworkRemote RemoteDriver => m_RemoteDriver;
 
         // NPC Mode
+        /// <summary>The authored actor classification.</summary>
+        public NetworkCharacterActorType ActorType => m_ActorType;
+
+        /// <summary>
+        /// Effective actor classification. Legacy assets are players only when the transport has
+        /// supplied an authenticated logical player owner (or before initialization, when an
+        /// authored local-player flag must be preserved for offline compatibility).
+        /// </summary>
+        public NetworkCharacterActorType EffectiveActorType
+        {
+            get
+            {
+                if (m_ActorType != NetworkCharacterActorType.LegacyAutomatic) return m_ActorType;
+                if (m_RuntimeHasAuthenticatedPlayerOwner) return NetworkCharacterActorType.PlayerOwned;
+                if (!m_IsInitialized && (m_Character != null ? m_Character.IsPlayer : m_AuthoredIsPlayer))
+                {
+                    return NetworkCharacterActorType.PlayerOwned;
+                }
+
+                return NetworkCharacterActorType.NPC;
+            }
+        }
+
+        /// <summary>Whether the asset has been migrated away from legacy inference.</summary>
+        public bool HasExplicitActorType => m_ActorType != NetworkCharacterActorType.LegacyAutomatic;
+
+        /// <summary>Whether the transport supplied a real logical player owner.</summary>
+        public bool HasAuthenticatedPlayerOwner => m_RuntimeHasAuthenticatedPlayerOwner;
+
+        /// <summary>Whether this actor is allowed to have an authenticated client owner.</summary>
+        public bool IsPlayerOwnedActor => EffectiveActorType == NetworkCharacterActorType.PlayerOwned;
+
+        /// <summary>Whether this peer is allowed to run durable gameplay simulation for the actor.</summary>
+        public bool HasSimulationAuthority => IsPlayerOwnedActor
+            ? m_RuntimeIsOwner || m_RuntimeIsServer
+            : IsServerAuthoritativeNPC
+                ? m_RuntimeIsServer
+                : true;
+
         /// <summary>The NPC synchronization mode (server-authoritative or client-side deterministic).</summary>
         public NPCSyncMode NPCMode => m_NPCMode;
 
         /// <summary>Whether this NPC uses server-authoritative synchronization.</summary>
-        public bool IsServerAuthoritativeNPC => m_NPCMode == NPCSyncMode.ServerAuthoritative;
+        public bool IsServerAuthoritativeNPC =>
+            EffectiveActorType == NetworkCharacterActorType.NPC &&
+            m_NPCMode == NPCSyncMode.ServerAuthoritative;
 
         /// <summary>Whether this NPC uses client-side deterministic behavior.</summary>
-        public bool IsClientSideNPC => m_NPCMode == NPCSyncMode.ClientSideDeterministic;
+        public bool IsClientSideNPC =>
+            EffectiveActorType == NetworkCharacterActorType.NPC &&
+            m_NPCMode == NPCSyncMode.ClientSideDeterministic;
 
         /// <summary>The deterministic seed for client-side NPCs.</summary>
         public int DeterministicSeed => m_DeterministicSeed;

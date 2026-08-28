@@ -189,6 +189,14 @@ namespace Arawn.GameCreator2.Networking.Stats
             set => m_OptimisticUpdates = value;
         }
 
+        /// <summary>
+        /// Whether this actor may author or receive replicated durable Stats state.
+        /// Client-deterministic NPCs are presentation-only and must never become an
+        /// authority path merely because their GC2 logic is running on a peer.
+        /// </summary>
+        public bool CanUseDurableGameplayState =>
+            m_NetworkCharacter == null || !m_NetworkCharacter.IsClientSideNPC;
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // UNITY LIFECYCLE
         // ════════════════════════════════════════════════════════════════════════════════════════
@@ -235,6 +243,7 @@ namespace Arawn.GameCreator2.Networking.Stats
 
         private void Update()
         {
+            if (!CanUseDurableGameplayState) return;
             if (!m_IsServer && !m_IsLocalClient) return;
 
             float currentTime = Time.time;
@@ -400,6 +409,21 @@ namespace Arawn.GameCreator2.Networking.Stats
             accumulator[hash] = accumulated;
 
             return accumulated <= m_MaxChangePerSecond;
+        }
+
+        private bool RejectCosmeticNpcRequest(string operation)
+        {
+            if (CanUseDurableGameplayState) return false;
+
+            const string details =
+                "Client-deterministic NPCs are cosmetic and cannot author durable Stats state.";
+            if (m_LogRejections)
+            {
+                Debug.LogWarning($"[NetworkStatsController] Rejected {operation}: {details}", this);
+            }
+
+            OnModificationRejected?.Invoke(StatRejectionReason.NotAuthorized, details);
+            return true;
         }
 
         private ushort GetNextRequestId()

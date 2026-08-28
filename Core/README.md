@@ -4,6 +4,9 @@ Server-authoritative networking for Game Creator 2 Core character features.
 
 For the local UI, cosmetic effect, attached prop, and network-object decision
 guide, see the [online documentation](../Documentation/Online%20Documentation.md).
+For explicit player/NPC authority, authority-gated GC2 AI, target selection,
+movement backends, and bot-backed player handoff, see
+[Server-Authoritative NPCs and Bot Slots](../Documentation/Server%20Authoritative%20NPCs%20and%20Bot%20Slots.md).
 
 ## Features Covered
 
@@ -24,6 +27,11 @@ For PurrNet projects, open `Game Creator > Networking Layer > PurrNet Scene Setu
 Core, Variables, Animation, and Motion are always included. The wizard creates/reuses `NetworkSecurityManager`, `NetworkCoreManager`, `NetworkAnimationManager`, `NetworkMotionManager`, `NetworkVariableManager`, `PurrNetTransportBridge`, `PurrNetCoreTransportBridge`, `PurrNetVariableTransportBridge`, and `PurrNetAnimationMotionTransportBridge`.
 
 If a Player Prefab is assigned on the Scene page and prefab preparation is enabled, the wizard adds `NetworkIdentity`, `NetworkCharacter`, `PurrNetNetworkCharacterAuto`, network-ready GC2 character units, optional local-variable sync, and optional pre-registered Network Dash/Gesture clips.
+
+The Fusion and PurrNet wizards can also prepare explicit server-owned NPC
+prefabs and optional bot-backed slots. Network authority comes from
+`NetworkCharacter.ActorType` and transport-authenticated ownership, never from
+changing GC2's local `Character.IsPlayer` flag.
 
 ## Architecture
 

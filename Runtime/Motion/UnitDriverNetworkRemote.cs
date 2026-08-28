@@ -163,6 +163,11 @@ namespace Arawn.GameCreator2.Networking
                 this.m_Controller.skinWidth = this.m_SkinWidth;
                 this.m_Controller.minMoveDistance = 0f;
             }
+
+            // A server-authoritative NavMesh role makes the CharacterController inert while its
+            // NavMeshAgent/Capsule own collision. Shared-master migration can then reuse this
+            // remote driver, so explicitly reactivate the existing controller.
+            if (!this.m_Controller.enabled) this.m_Controller.enabled = true;
         }
 
         public override void OnDispose(Character character)
@@ -1113,7 +1118,7 @@ namespace Arawn.GameCreator2.Networking
                 this.Character,
                 backwardsCorrection || stoppedAtEndpoint
                     ? null
-                    : $"remote-snapshot:{this.Character.GetInstanceID()}");
+                    : $"remote-snapshot:{this.Character.GetLegacyInstanceId()}");
         }
 
         private void LogFocusedTraversalRender(string stage, string extra, bool sample = false)
@@ -1138,7 +1143,7 @@ namespace Arawn.GameCreator2.Networking
                 $"serverTime={m_ServerTime:F3} renderTime={m_RenderTime:F3} " +
                 $"extrapolating={m_IsExtrapolating} buffer={m_SnapshotBuffer?.Count ?? 0}{suffix}",
                 this.Character,
-                sample ? $"remote-render:{this.Character.GetInstanceID()}" : null,
+                sample ? $"remote-render:{this.Character.GetLegacyInstanceId()}" : null,
                 sample ? 0.05f : NetworkTraversalClimbDiagnostics.SampleInterval);
         }
 
@@ -1549,23 +1554,61 @@ namespace Arawn.GameCreator2.Networking
             m_PresentationRoot.localPosition = Vector3.zero;
             m_PresentationRoot.localRotation = Quaternion.identity;
             m_PresentationRoot.localScale = Vector3.one;
-            if (m_VisualRoot != null && m_CharacterRoot != null)
-            {
-                m_VisualRoot.SetParent(m_CharacterRoot, false);
-                if (m_OriginalSiblingIndex >= 0 && m_CharacterRoot.childCount > 0)
-                {
-                    m_VisualRoot.SetSiblingIndex(Mathf.Min(
-                        m_OriginalSiblingIndex,
-                        m_CharacterRoot.childCount - 1));
-                }
-            }
 
             GameObject presentationObject = m_PresentationRoot.gameObject;
+            bool deferRestore = ShouldDeferHierarchyRestore(
+                m_Character != null && m_Character.isActiveAndEnabled,
+                m_CharacterRoot != null && m_CharacterRoot.gameObject.activeInHierarchy,
+                presentationObject.activeInHierarchy);
+            if (deferRestore)
+            {
+                NetworkCharacterVisualPresentationRestoreQueue.Enqueue(
+                    presentationObject,
+                    m_CharacterRoot,
+                    m_VisualRoot,
+                    m_OriginalSiblingIndex);
+            }
+            else
+            {
+                RestoreVisualRoot(
+                    m_CharacterRoot,
+                    m_VisualRoot,
+                    m_OriginalSiblingIndex);
+            }
+
             m_PresentationRoot = null;
             m_VisualRoot = null;
             m_OriginalSiblingIndex = -1;
+            if (deferRestore) return;
+
             if (Application.isPlaying) UnityEngine.Object.Destroy(presentationObject);
             else UnityEngine.Object.DestroyImmediate(presentationObject);
+        }
+
+        private static bool ShouldDeferHierarchyRestore(
+            bool characterEnabled,
+            bool characterActiveInHierarchy,
+            bool presentationActiveInHierarchy)
+        {
+            return !characterEnabled ||
+                   !characterActiveInHierarchy ||
+                   !presentationActiveInHierarchy;
+        }
+
+        internal static void RestoreVisualRoot(
+            Transform characterRoot,
+            Transform visualRoot,
+            int originalSiblingIndex)
+        {
+            if (visualRoot == null || characterRoot == null) return;
+
+            visualRoot.SetParent(characterRoot, false);
+            if (originalSiblingIndex >= 0 && characterRoot.childCount > 0)
+            {
+                visualRoot.SetSiblingIndex(Mathf.Min(
+                    originalSiblingIndex,
+                    characterRoot.childCount - 1));
+            }
         }
 
         private bool IsSafeVisualRoot(Transform characterRoot, Transform candidate)
@@ -1671,6 +1714,144 @@ namespace Arawn.GameCreator2.Networking
         {
             return IsFinite(value.x) && IsFinite(value.y) &&
                    IsFinite(value.z) && IsFinite(value.w);
+        }
+    }
+
+    /// <summary>
+    /// Owns presentation wrappers that could not be restored synchronously during a pooled
+    /// Character's activation transition. A persistent active runner retries after PurrNet's
+    /// SetActive/parenting stack has returned, even while the pooled Character remains inactive.
+    /// </summary>
+    internal static class NetworkCharacterVisualPresentationRestoreQueue
+    {
+        private sealed class PendingRestore
+        {
+            public GameObject Wrapper;
+            public Transform CharacterRoot;
+            public Transform VisualRoot;
+            public int OriginalSiblingIndex;
+        }
+
+        private static readonly List<PendingRestore> Pending = new List<PendingRestore>(8);
+        private static NetworkCharacterVisualPresentationRestoreRunner s_Runner;
+
+        internal static int PendingCount => Pending.Count;
+
+        [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
+        private static void ResetStatics()
+        {
+            Pending.Clear();
+            if (s_Runner != null)
+            {
+                GameObject owner = s_Runner.gameObject;
+                if (Application.isPlaying) UnityEngine.Object.Destroy(owner);
+                else UnityEngine.Object.DestroyImmediate(owner);
+            }
+
+            s_Runner = null;
+        }
+
+        internal static void Enqueue(
+            GameObject wrapper,
+            Transform characterRoot,
+            Transform visualRoot,
+            int originalSiblingIndex)
+        {
+            if (wrapper == null) return;
+
+            for (int i = 0; i < Pending.Count; i++)
+            {
+                if (Pending[i].Wrapper != wrapper) continue;
+                Pending[i].CharacterRoot = characterRoot;
+                Pending[i].VisualRoot = visualRoot;
+                Pending[i].OriginalSiblingIndex = originalSiblingIndex;
+                EnsureRunner();
+                return;
+            }
+
+            Pending.Add(new PendingRestore
+            {
+                Wrapper = wrapper,
+                CharacterRoot = characterRoot,
+                VisualRoot = visualRoot,
+                OriginalSiblingIndex = originalSiblingIndex
+            });
+            EnsureRunner();
+        }
+
+        internal static void Drain()
+        {
+            for (int i = Pending.Count - 1; i >= 0; i--)
+            {
+                PendingRestore item = Pending[i];
+                if (item.Wrapper == null)
+                {
+                    Pending.RemoveAt(i);
+                    continue;
+                }
+
+                Transform wrapperTransform = item.Wrapper.transform;
+                if (item.VisualRoot == null || item.CharacterRoot == null)
+                {
+                    // If another lifecycle already emptied the wrapper it is safe to retire.
+                    // Otherwise leave its remaining subtree owned by the object being destroyed.
+                    if (wrapperTransform.childCount == 0) DestroyWrapper(item.Wrapper);
+                    Pending.RemoveAt(i);
+                    continue;
+                }
+
+                if (item.VisualRoot.parent != wrapperTransform)
+                {
+                    // Another system deliberately took ownership. Never commandeer that new
+                    // hierarchy; only remove the now-empty temporary frame.
+                    if (wrapperTransform.childCount == 0) DestroyWrapper(item.Wrapper);
+                    Pending.RemoveAt(i);
+                    continue;
+                }
+
+                NetworkCharacterVisualPresentation.RestoreVisualRoot(
+                    item.CharacterRoot,
+                    item.VisualRoot,
+                    item.OriginalSiblingIndex);
+                if (item.VisualRoot == null || item.VisualRoot.parent != item.CharacterRoot)
+                {
+                    // Unity can still reject a hierarchy write if another activation callback
+                    // began this frame. Keep the wrapper and retry without risking the Mannequin.
+                    continue;
+                }
+
+                DestroyWrapper(item.Wrapper);
+                Pending.RemoveAt(i);
+            }
+        }
+
+        private static void EnsureRunner()
+        {
+            if (s_Runner != null) return;
+
+            var owner = new GameObject("__NetworkCharacterPresentationRestoreQueue")
+            {
+                hideFlags = HideFlags.HideAndDontSave
+            };
+            if (Application.isPlaying) UnityEngine.Object.DontDestroyOnLoad(owner);
+            s_Runner = owner.AddComponent<NetworkCharacterVisualPresentationRestoreRunner>();
+        }
+
+        private static void DestroyWrapper(GameObject wrapper)
+        {
+            if (wrapper == null) return;
+            if (Application.isPlaying) UnityEngine.Object.Destroy(wrapper);
+            else UnityEngine.Object.DestroyImmediate(wrapper);
+        }
+    }
+
+    [ExecuteAlways]
+    [DisallowMultipleComponent]
+    internal sealed class NetworkCharacterVisualPresentationRestoreRunner : MonoBehaviour
+    {
+        private void LateUpdate()
+        {
+            NetworkCharacterVisualPresentationRestoreQueue.Drain();
         }
     }
 }

@@ -274,7 +274,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Lobby
             if (m_Controller == null)
             {
 #if UNITY_2023_1_OR_NEWER || UNITY_6000_0_OR_NEWER || UNITY_6000
-                m_Controller = FindFirstObjectByType<PurrNetStagingRoomController>();
+                m_Controller = UnityObjectSearch.FindAny<PurrNetStagingRoomController>();
 #else
                 m_Controller = FindObjectOfType<PurrNetStagingRoomController>();
 #endif
@@ -284,7 +284,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Lobby
             if (m_LobbyService == null && m_Controller != null)
             {
 #if UNITY_2023_1_OR_NEWER || UNITY_6000_0_OR_NEWER || UNITY_6000
-                m_LobbyService = FindFirstObjectByType<PurrNetLobbyService>();
+                m_LobbyService = UnityObjectSearch.FindAny<PurrNetLobbyService>();
 #else
                 m_LobbyService = FindObjectOfType<PurrNetLobbyService>();
 #endif
@@ -1059,7 +1059,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Lobby
         private static void EnsureEventSystem()
         {
 #if UNITY_2023_1_OR_NEWER || UNITY_6000_0_OR_NEWER || UNITY_6000
-            EventSystem eventSystem = FindFirstObjectByType<EventSystem>();
+            EventSystem eventSystem = UnityObjectSearch.FindAny<EventSystem>();
 #else
             EventSystem eventSystem = FindObjectOfType<EventSystem>();
 #endif

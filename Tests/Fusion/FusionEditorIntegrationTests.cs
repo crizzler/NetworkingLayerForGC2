@@ -6,6 +6,7 @@ using System.Linq;
 using System.Reflection;
 using System.Text.RegularExpressions;
 using Arawn.GameCreator2.Networking.Editor;
+using Arawn.GameCreator2.Networking.TestUtilities;
 using Arawn.GameCreator2.Networking.Transport.Fusion.Editor;
 using Fusion;
 using GameCreator.Runtime.Characters;
@@ -14,6 +15,7 @@ using Assert = NUnit.Framework.Assert;
 using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
+using UnityEngine.TestTools;
 using UnityEngine.SceneManagement;
 using NetworkRole = Arawn.GameCreator2.Networking.NetworkCharacter.NetworkRole;
 
@@ -499,6 +501,8 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
                 "source != m_Identity.LogicalOwner",
                 acceptInput,
                 "Shared input must be authenticated against the replicated logical owner.");
+            StringAssert.Contains("!m_Identity.TransportAdmitted", acceptInput);
+            StringAssert.Contains("!m_Identity.HasAuthorityAdmission", acceptInput);
             StringAssert.Contains(
                 "sourceTick <= m_LastSharedPayloadTick",
                 acceptInput,
@@ -542,12 +546,33 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
                 acceptTransient);
             StringAssert.Contains("m_SharedTransientQueue.Enqueue", acceptTransient);
             StringAssert.Contains("TrustedTick = trustedSourceTick", acceptTransient);
+            StringAssert.Contains("Source = source", acceptTransient);
+            StringAssert.Contains("source != m_Identity.LogicalOwner", acceptTransient);
+            AssertAppearsBefore(
+                acceptTransient,
+                "source != m_Identity.LogicalOwner",
+                "m_SharedTransientQueue.Enqueue");
+            StringAssert.Contains("!m_Identity.TransportAdmitted", acceptTransient);
+            StringAssert.Contains("!m_Identity.HasAuthorityAdmission", acceptTransient);
 
             string fixedShared = ExtractDeclaredMethodBody(motor, "FixedUpdateShared");
             StringAssert.Contains("sharedPayloadTick = input.SourceTick", fixedShared);
             StringAssert.Contains("input.SourceTick = m_LatestSharedTrustedTick", fixedShared);
             StringAssert.Contains("m_SharedTransientQueue.Dequeue()", fixedShared);
             StringAssert.Contains("input.SourceTick = transient.TrustedTick", fixedShared);
+            StringAssert.Contains("sharedInputSource = transient.Source", fixedShared);
+            StringAssert.Contains(
+                "CanApplyAuthenticatedSharedRemoteOwnerPose",
+                fixedShared);
+            AssertAppearsBefore(
+                fixedShared,
+                "m_Driver.SetAuthenticatedRemoteOwnerPoseApplication(",
+                "m_Driver.Simulate");
+            AssertAppearsBefore(
+                fixedShared,
+                "m_Driver.Simulate",
+                "SetAuthenticatedRemoteOwnerPoseApplication(false)");
+            StringAssert.Contains("finally", fixedShared);
             StringAssert.Contains("if (appliedSharedTransient)", fixedShared);
             AssertAppearsBefore(
                 fixedShared,
@@ -560,6 +585,29 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
             StringAssert.Contains("LastProcessedInputTick", advanceSharedTick);
             StringAssert.Contains("latestPayloadTick", advanceSharedTick);
             StringAssert.Contains("representedTick + 1L", advanceSharedTick);
+
+            string resetShared = ExtractDeclaredMethodBody(
+                motor,
+                "ResetSharedRuntimeState");
+            StringAssert.Contains(
+                "m_LatestSharedInputSource = PlayerRef.Invalid",
+                resetShared);
+            StringAssert.Contains("m_SharedTransientQueue.Clear()", resetShared);
+
+            string authenticatedSharedPose = ExtractDeclaredMethodBody(
+                motor,
+                "CanApplyAuthenticatedSharedRemoteOwnerPose");
+            StringAssert.Contains("input.HasOwnerPose", authenticatedSharedPose);
+            StringAssert.Contains("Runner.GameMode == GameMode.Shared", authenticatedSharedPose);
+            StringAssert.Contains("HasStateAuthority", authenticatedSharedPose);
+            StringAssert.Contains("!IsLocalLogicalOwner", authenticatedSharedPose);
+            StringAssert.Contains("source == m_Identity.LogicalOwner", authenticatedSharedPose);
+            StringAssert.Contains("m_Identity.TransportAdmitted", authenticatedSharedPose);
+            StringAssert.Contains("m_Identity.HasAuthorityAdmission", authenticatedSharedPose);
+            StringAssert.Contains(
+                "m_NetworkCharacter.HasAuthenticatedPlayerOwner",
+                authenticatedSharedPose);
+            StringAssert.Contains("m_NetworkCharacter.IsPlayerOwnedActor", authenticatedSharedPose);
 
             string sharedOwnerPump = ExtractDeclaredMethodBody(
                 motor,
@@ -602,10 +650,11 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
             StringAssert.Contains("Runner.GameMode == GameMode.Shared", refreshRole);
             StringAssert.Contains("Runner.IsSharedModeMasterClient", refreshRole);
             StringAssert.Contains(
-                "m_Character.InitializeNetworkRole(isServer, isOwner, isHost)",
+                "m_Character.InitializeNetworkRole(",
                 refreshRole,
                 "A graphical Shared master must not apply dedicated-server renderer " +
                 "optimizations to remote players.");
+            StringAssert.Contains("hasAuthenticatedPlayerOwner);", refreshRole);
         }
 
         [Test]
@@ -741,7 +790,11 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
                     prefab != null
                         ? prefab.GetComponentInChildren<NetworkCharacter>(true)
                         : null;
-                if (character == null) continue;
+                if (character == null ||
+                    character.ActorType == NetworkCharacterActorType.NPC)
+                {
+                    continue;
+                }
 
                 networkCharacterPrefabCount++;
                 var serialized = new SerializedObject(character);
@@ -960,7 +1013,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
             StringAssert.Contains("input = m_Driver.CaptureInput(tick)", motor);
             StringAssert.Contains("IsSafePresentationVisualRoot", motor);
             StringAssert.Contains("m_PresentationRootWarningIssued", motor);
-            StringAssert.Contains("HasStateAuthority && !IsLocalLogicalOwner", motor);
+            StringAssert.Contains("!IsLocalLogicalOwner ||", motor);
             StringAssert.Contains("LastAppliedSharedSourceTick", motor);
             StringAssert.Contains("appliedSharedTransient", motor);
             StringAssert.Contains("LastContinuousMove", motor);
@@ -1087,13 +1140,37 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
             StringAssert.Contains("m_Driver.RequiresSimulationRootPresentation", render);
             StringAssert.Contains("useLiveOwnerPresentation", render);
             StringAssert.Contains("ApplyLiveExternalRootPresentationPose()", render);
+            StringAssert.Contains("RestoreRemoteProxySimulationRootForPresentation()", render);
             StringAssert.Contains("m_PresentationRoot", render);
+            StringAssert.Contains("!IsLocalLogicalOwner ||", render);
             StringAssert.Contains("NetworkTRSP.Render(", render);
             StringAssert.Contains("transform,", render);
+            StringAssert.Contains(
+                "transform,\n                        false,\n                        false,\n                        false,",
+                render,
+                "The Character root uses world space. Fusion's third NetworkTRSP.Render " +
+                "boolean must remain false for both owners and remote proxies.");
+            StringAssert.DoesNotContain(
+                "locallySimulatedOwner ? false : true",
+                render,
+                "The local flag must not be inverted for remote proxies.");
             StringAssert.DoesNotContain(
                 "else if (!locallySimulatedOwner)",
                 render,
                 "Ordinary local owners must not be excluded from Fusion root rendering.");
+            StringAssert.Contains(
+                "if (!HasStateAuthority && !locallySimulatedOwner)",
+                render,
+                "A proxy without a safe visual root must retain the legacy root-render fallback.");
+
+            string restoreRemoteRoot = ExtractDeclaredMethodBody(
+                motor,
+                "RestoreRemoteProxySimulationRootForPresentation");
+            StringAssert.Contains("IsLocalLogicalOwner || HasStateAuthority", restoreRemoteRoot);
+            StringAssert.Contains("NativeState.TRSPData", restoreRemoteRoot);
+            StringAssert.Contains("transform.SetPositionAndRotation", restoreRemoteRoot);
+            StringAssert.Contains("Physics.SyncTransforms()", restoreRemoteRoot);
+            StringAssert.DoesNotContain("NetworkTRSP.Render", restoreRemoteRoot);
 
             StringAssert.Contains("RequiresSimulationRootPresentation", driver);
             StringAssert.Contains("IsOwnerMotionActive(CurrentTick)", driver);
@@ -1397,11 +1474,118 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
             AssertAppearsBefore(
                 applyOwnerPose,
                 "if (distance > maxAuthorityDistance)",
+                "TryGetExternalRootWriteAllowance");
+            StringAssert.Contains(
+                "NetworkOwnerMotionAuthorityHooks.TryGetExternalRootWriteAllowance",
+                applyOwnerPose,
+                "Validated GC2 Traversal poses must use the same absolute root semantics in " +
+                "Fusion state that the owner already used locally.");
+            StringAssert.Contains("if (useAuthorizedAbsoluteRootWrite)", applyOwnerPose);
+            StringAssert.Contains("SetRootPosition(target)", applyOwnerPose);
+            AssertAppearsBefore(
+                applyOwnerPose,
+                "TryGetExternalRootWriteAllowance",
                 "m_Controller.Move(requestedDelta)");
             StringAssert.Contains("CollisionFlags collisionFlags", applyOwnerPose);
             StringAssert.Contains("residualDistance > applicationTolerance", applyOwnerPose);
             StringAssert.Contains("m_LastAcceptedOwnerPoseTick = int.MinValue", applyOwnerPose);
             StringAssert.Contains("LogOwnerPoseCollisionBlocked", applyOwnerPose);
+        }
+
+        [Test]
+        public void FusionNativeOwnerPose_AuthorizedTraversalCrossesAnotherCharacterController()
+        {
+            var characterObject = new GameObject("Fusion Traversal Owner");
+            var blockerObject = new GameObject("Connected Player Controller");
+            FusionNativeCharacterDriver driver = null;
+            Func<Character, Vector3, string> allowAbsolute = null;
+
+            try
+            {
+                Vector3 start = new Vector3(0f, 100f, 0f);
+                Vector3 target = new Vector3(2f, 100f, 0f);
+                characterObject.transform.position = start;
+                Character character = EditModeLifecycle.AddComponent<Character>(characterObject);
+
+                driver = new FusionNativeCharacterDriver();
+                driver.OnStartup(character);
+                driver.OpenServerOwnerMotionWindow(1f, 73u);
+
+                CharacterController blocker = blockerObject.AddComponent<CharacterController>();
+                blocker.height = 2f;
+                blocker.radius = 0.35f;
+                blocker.center = Vector3.up;
+                blockerObject.transform.position = new Vector3(1f, 100f, 0f);
+                Physics.SyncTransforms();
+
+                MethodInfo tryApplyOwnerPose = typeof(FusionNativeCharacterDriver).GetMethod(
+                    "TryApplyOwnerPose",
+                    BindingFlags.Instance | BindingFlags.NonPublic);
+                Assert.That(tryApplyOwnerPose, Is.Not.Null);
+
+                bool ordinaryAccepted = (bool)tryApplyOwnerPose.Invoke(
+                    driver,
+                    new object[] { target, 0, 1f / 60f, true });
+                Assert.That(ordinaryAccepted, Is.False);
+                Assert.That(
+                    character.transform.position.x,
+                    Is.LessThan(1f),
+                    "Without a gameplay allowance the authoritative CharacterController sweep " +
+                    "must remain blocked by another player capsule.");
+
+                CharacterController ownerController =
+                    characterObject.GetComponent<CharacterController>();
+                ownerController.enabled = false;
+                characterObject.transform.position = start;
+                ownerController.enabled = true;
+                Physics.SyncTransforms();
+
+                allowAbsolute = (candidate, _) => candidate == character
+                    ? "test-interactive-traversal"
+                    : string.Empty;
+                NetworkOwnerMotionAuthorityHooks.ExternalRootWriteAllowanceRequested +=
+                    allowAbsolute;
+
+                driver.CloseServerOwnerMotionWindow();
+                bool rejectedWithoutWindow = (bool)tryApplyOwnerPose.Invoke(
+                    driver,
+                    new object[] { target, 1, 1f / 60f, true });
+                Assert.That(rejectedWithoutWindow, Is.False);
+                Assert.That(
+                    character.transform.position,
+                    Is.EqualTo(start),
+                    "A gameplay root-write allowance must not bypass the server-issued " +
+                    "owner-motion window.");
+
+                driver.OpenServerOwnerMotionWindow(1f, 74u);
+                bool traversalAccepted = (bool)tryApplyOwnerPose.Invoke(
+                    driver,
+                    new object[] { target, 1, 1f / 60f, true });
+                Assert.That(traversalAccepted, Is.True);
+                Assert.That(character.transform.position, Is.EqualTo(target));
+            }
+            finally
+            {
+                if (allowAbsolute != null)
+                {
+                    NetworkOwnerMotionAuthorityHooks.ExternalRootWriteAllowanceRequested -=
+                        allowAbsolute;
+                }
+
+                driver?.OnDispose(characterObject.GetComponent<Character>());
+
+                bool previousIgnore = LogAssert.ignoreFailingMessages;
+                LogAssert.ignoreFailingMessages = true;
+                try
+                {
+                    UnityEngine.Object.DestroyImmediate(blockerObject);
+                    UnityEngine.Object.DestroyImmediate(characterObject);
+                }
+                finally
+                {
+                    LogAssert.ignoreFailingMessages = previousIgnore;
+                }
+            }
         }
 
         [Test]
@@ -1453,6 +1637,9 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
                 driver,
                 "ResetNetworkTransientState");
             StringAssert.Contains("m_OwnerMotionUntilTick = int.MinValue", resetTransient);
+            StringAssert.Contains(
+                "m_IsApplyingAuthenticatedRemoteOwnerPose = false",
+                resetTransient);
             StringAssert.Contains("m_ServerMotionAuthorizations", resetTransient);
             StringAssert.Contains("m_ServerMotionAuthorizationCount = 0", resetTransient);
             StringAssert.Contains("m_SampledRootMotionVelocity = Vector3.zero", resetTransient);
@@ -1729,6 +1916,15 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
                 motionEnter,
                 "MotionInteractive.Enter owns the live Climb State start; prestarting it from " +
                 "EventMotionEnter creates two playables on the same layer.");
+            StringAssert.DoesNotContain(
+                "StartHostLocalLinkMotionAnimation",
+                motionEnter,
+                "MotionLink.Run owns its animation/gesture start; Host loopback must not " +
+                "prestart the same PullUp animation from EventMotionEnter.");
+            StringAssert.DoesNotContain(
+                "StartHostLocalLinkMotionAnimation",
+                traversal,
+                "The obsolete Host-only TraverseLink prestart helper must not return.");
 
             string snapshotRestore = ExtractDeclaredMethodBody(
                 traversal,
@@ -1931,12 +2127,23 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
         }
 
         [Test]
-        public void FusionServerTime_WaitsForSharedRuntimeConfiguration()
+        public void FusionServerTime_UsesConfirmedClockForClientsAndWaitsForRuntimeConfiguration()
         {
             string bridge = ReadAssetSource(
                 "Arawn/NetworkingLayerForGC2/Runtime/Transport/Fusion/" +
                 "FusionTransportBridge.cs");
-            StringAssert.Contains("IsRunnerTimeReady ? m_Runner.SimulationTime", bridge);
+            StringAssert.Contains("if (!IsRunnerTimeReady) return Time.time;", bridge);
+            StringAssert.Contains("if (IsServer) return m_Runner.SimulationTime;", bridge);
+            StringAssert.Contains(
+                "m_Runner.LatestServerTick.Raw * m_Runner.DeltaTime",
+                bridge,
+                "Non-authority peers must derive timestamps from Fusion's latest confirmed " +
+                "server tick instead of their prediction-ahead simulation tick.");
+            StringAssert.Contains("return latestServerTime > 0f", bridge);
+            StringAssert.DoesNotContain(
+                "IsRunnerTimeReady ? m_Runner.SimulationTime : Time.time",
+                bridge,
+                "A predicted client clock must not be exposed as confirmed server time.");
             StringAssert.Contains("m_Runner.Tick.Raw > 0", bridge);
             AssertAppearsBefore(
                 bridge,
@@ -1961,7 +2168,11 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
                     prefab != null
                         ? prefab.GetComponentInChildren<NetworkCharacter>(true)
                         : null;
-                if (character == null) continue;
+                if (character == null ||
+                    character.ActorType == NetworkCharacterActorType.NPC)
+                {
+                    continue;
+                }
 
                 networkCharacterPrefabCount++;
                 Assert.AreEqual(
@@ -2046,6 +2257,35 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
             StringAssert.Contains(
                 "GC2SceneSetupShared.ConfigureNetworkReadyCharacterKernel(",
                 purrNetSource);
+        }
+
+        [Test]
+        [NUnit.Framework.Category("GC2Networking.FreeFlow")]
+        public void FusionWizard_PreparesAndValidatesServerNpcsAndBotSlots()
+        {
+            string source = ReadAssetSource(
+                "Arawn/NetworkingLayerForGC2/Editor/Transport/Fusion/" +
+                "FusionSceneSetupWizard.cs");
+
+            StringAssert.Contains("Server-Owned NPCs and Bot Slots", source);
+            StringAssert.Contains("private string PrepareNpcPrefab(GameObject prefab)", source);
+            StringAssert.Contains("typeof(NetworkObject)", source);
+            StringAssert.Contains("NetworkObjectFlags.MasterClientObject", source);
+            StringAssert.Contains("NetworkNpcSetupEditorUtility.ConfigureServerNpc(", source);
+            StringAssert.Contains("NetworkNpcSetupEditorUtility.ValidateServerNpc(", source);
+            StringAssert.Contains("m_NpcAuthorityRootPaths.Count == 0", source);
+            StringAssert.Contains("NetworkPredictionBackend.FusionNative", source);
+            StringAssert.Contains("NetworkPredictionBackend.FusionKCC", source);
+            StringAssert.Contains("FusionBotSlotCoordinator", source);
+            StringAssert.Contains("FusionBotSlotStateReplicator", source);
+            StringAssert.Contains("m_BotSlotCoordinator", source);
+            StringAssert.Contains("EnsureFusionPrefabLabel(m_NpcPrefab)", source);
+            StringAssert.Contains("Server-authoritative Free Flow Combat", source);
+            StringAssert.Contains("NetworkFreeFlowCombatAdapterType", source);
+            StringAssert.Contains(
+                "m_ModuleMelee && m_EnableFreeFlowCombat",
+                source);
+            StringAssert.Contains("IsFreeFlowCombatAvailable", source);
         }
 
         [Test]
@@ -2189,6 +2429,97 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
                 autoSource,
                 "private void Update()");
             StringAssert.Contains("TryNotifyGameplayReady();", readinessUpdate);
+        }
+
+        [Test]
+        public void FusionOwnership_UsesAdmittedIdentityWhileRuntimeRoleReinitializes()
+        {
+            string transportSource = ReadAssetSource(
+                "Arawn/NetworkingLayerForGC2/Runtime/Transport/Fusion/" +
+                "FusionTransportBridge.cs");
+            string verifyOwnership = ExtractMethodBody(
+                transportSource,
+                "public override bool TryVerifyActorOwnership(");
+
+            StringAssert.Contains(
+                "character.ActorType == NetworkCharacterActorType.NPC",
+                verifyOwnership,
+                "Explicit NPCs must never acquire player ownership through a Fusion identity.");
+            StringAssert.Contains("identity.TransportAdmitted", verifyOwnership);
+            StringAssert.Contains("registry.IsAdmitted(identity)", verifyOwnership);
+            StringAssert.Contains("identity.TryGetLogicalOwnerClientId", verifyOwnership);
+            StringAssert.DoesNotContain(
+                "!character.IsPlayerOwnedActor",
+                verifyOwnership,
+                "Authenticated ownership must survive the transient role reset used during " +
+                "Fusion re-admission and Shared-master migration.");
+        }
+
+        [Test]
+        public void FusionTraversal_LocalOwnerRefreshesPoseWindowOnHostAndSharedMaster()
+        {
+            string traversalSource = ReadAssetSource(
+                "Arawn/NetworkingLayerForGC2/Traversal/NetworkTraversalController.cs");
+            string refresh = ExtractDeclaredMethodBody(
+                traversalSource,
+                "RefreshLocalTraversalPoseAuthority");
+
+            StringAssert.Contains("!m_IsLocalClient || m_IsRemoteClient", refresh);
+            StringAssert.Contains("ActivateLocalTraversalPoseAuthority", refresh);
+            StringAssert.DoesNotContain(
+                "m_IsServer ||",
+                refresh,
+                "A locally owned Host or Shared-master character still requires the owner " +
+                "pose window used by Fusion Native's single-writer traversal path.");
+        }
+
+        [Test]
+        public void SharedAuthorityMigration_QuarantinesUntilFusionTransfersStateAuthority()
+        {
+            string registrySource = ReadAssetSource(
+                "Arawn/NetworkingLayerForGC2/Runtime/Transport/Fusion/" +
+                "FusionAuthoritySpawnRegistry.cs");
+            string rebuild = ExtractDeclaredMethodBody(
+                registrySource,
+                "RebuildAfterAuthorityChange");
+            string validate = ExtractDeclaredMethodBody(
+                registrySource,
+                "ValidateAllIdentities");
+            string quarantine = ExtractDeclaredMethodBody(
+                registrySource,
+                "ShouldQuarantineDuringAuthorityMigration");
+
+            StringAssert.Contains("m_PendingAuthorityMigrationIds.Add", rebuild);
+            StringAssert.Contains("m_AuthorityMigrationDeadline", rebuild);
+            StringAssert.Contains("m_PendingAuthorityMigrationIds.Contains", validate);
+            StringAssert.Contains("ShouldQuarantineDuringAuthorityMigration", validate);
+            StringAssert.Contains("identity.SetTransportAdmission(false)", validate);
+            StringAssert.Contains("identity.HasAuthorityAdmission", quarantine);
+            StringAssert.Contains("HasSafeAuthorityFlags", quarantine);
+            StringAssert.DoesNotContain(
+                "TryIssueAuthorityAdmission(false)",
+                quarantine,
+                "The replicated trust marker must survive the bounded Fusion authority-transfer " +
+                "window while local gameplay admission remains fail-closed.");
+        }
+
+        [Test]
+        public void MotionRejection_RespondsImmediatelyInsteadOfMasqueradingAsTimeout()
+        {
+            string managerSource = ReadAssetSource(
+                "Arawn/NetworkingLayerForGC2/Runtime/Motion/NetworkMotionManager.cs");
+            string receive = ExtractMethodBody(
+                managerSource,
+                "public void ReceiveCommand(");
+            string reject = ExtractDeclaredMethodBody(
+                managerSource,
+                "SendRejectedResult");
+
+            StringAssert.Contains("SendRejectedResult", receive);
+            StringAssert.Contains("NetworkMotionResult.REJECT_NOT_ALLOWED", receive);
+            StringAssert.Contains("NetworkMotionResult.Rejected", reject);
+            StringAssert.Contains("message.Command.sequenceNumber", reject);
+            StringAssert.Contains("SendResultToClient?.Invoke", reject);
         }
 
         [Test]
@@ -2821,6 +3152,758 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
                 "private IEnumerable<string> GetAssetUndoPaths()");
             StringAssert.Contains("GeneratedFolder", undoPaths);
             StringAssert.Contains("GeneratedFolder + \".meta\"", undoPaths);
+        }
+
+        [Test]
+        public void FusionClimbSmoke_CoversHostObservationAndSharedOwnerProgress()
+        {
+            string bootstrap = ReadAssetSource(
+                "Arawn/NetworkingLayerForGC2/Runtime/Transport/Fusion/Traversal/" +
+                "FusionTraversalClimbSmokeBootstrap.cs");
+            StringAssert.Contains("fusion-traversal-climb", bootstrap);
+            StringAssert.Contains("AttachSettleSeconds", bootstrap);
+            StringAssert.Contains("ShortcutPlayer.Instance != actor.gameObject", bootstrap);
+            StringAssert.Contains("_ = interactive.Enter(", bootstrap);
+            StringAssert.Contains("new KeyboardState(Key.W)", bootstrap);
+            StringAssert.Contains("Application.targetFrameRate = 60", bootstrap);
+            StringAssert.Contains("ObserverResultGraceSeconds", bootstrap);
+            StringAssert.Contains("SharedAuthorityResultGraceSeconds", bootstrap);
+            StringAssert.Contains(
+                "#if GC2_TRAVERSAL && (UNITY_EDITOR || DEVELOPMENT_BUILD)",
+                bootstrap);
+            StringAssert.Contains("actor.transform.position.y - climbStart.y", bootstrap);
+            StringAssert.Contains("RunHostObserver()", bootstrap);
+            StringAssert.Contains("remoteObserver ??= FindRemotePlayer()", bootstrap);
+            StringAssert.Contains("--gc2-network-smoke-region", bootstrap);
+            StringAssert.Contains("new FusionSessionStartOptions(session, region)", bootstrap);
+            StringAssert.Contains("observer-host-climb-fall-smooth", bootstrap);
+            StringAssert.Contains("GetPresentedPosition(actor)", bootstrap);
+            StringAssert.Contains("ActiveRemotePresentationTarget", bootstrap);
+            StringAssert.Contains("observer-host-disconnected", bootstrap);
+            StringAssert.Contains("reverseDistance", bootstrap);
+            StringAssert.Contains("maxReverseStep", bootstrap);
+            StringAssert.Contains("RequiredObserverFallDistance", bootstrap);
+            StringAssert.Contains("stance.TryCancel(", bootstrap);
+            StringAssert.Contains("host-owner-detach-requested", bootstrap);
+            StringAssert.Contains("observer-host-detached", bootstrap);
+            StringAssert.Contains("observer-host-climb-fall-smooth", bootstrap);
+            StringAssert.Contains("fallReverseDistance", bootstrap);
+            StringAssert.Contains("maxFallFrameStep", bootstrap);
+            StringAssert.Contains("idleOwnerDrift", bootstrap);
+            StringAssert.Contains("RequiredConnectedOwnerMoveDistance", bootstrap);
+            StringAssert.Contains("connected-owner-move-start", bootstrap);
+            StringAssert.Contains("ShortcutPlayer.Instance == localOwner.gameObject", bootstrap);
+            StringAssert.Contains("player.InjectInput(Vector2.up)", bootstrap);
+            StringAssert.Contains("connectedOwnerInputHealthy", bootstrap);
+            StringAssert.Contains("connectedOwnerMoveDistance", bootstrap);
+            StringAssert.DoesNotContain(
+                "controller.RequestEnterTraverseInteractive(interactive)",
+                bootstrap,
+                "The smoke must enter through GC2's patched TraverseInteractive path.");
+
+            string builder = ReadAssetSource(
+                "Arawn/NetworkingLayerForGC2/Runtime/Transport/Fusion/Traversal/Editor/" +
+                "FusionTraversalClimbSmokeBuilder.cs");
+            StringAssert.Contains("FusionClimbDemo.unity", builder);
+
+            string projectRoot = Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
+            string smokeScript = File.ReadAllText(Path.Combine(
+                projectRoot,
+                "Tools/run_unity_network_smoke.sh"));
+            StringAssert.Contains("fusion-shared-climb", smokeScript);
+            StringAssert.Contains("fusion-host-climb", smokeScript);
+            StringAssert.Contains("GC2_NETWORK_SMOKE_PHOTON_REGION:-asia", smokeScript);
+            StringAssert.Contains("--gc2-network-ci-trace", smokeScript);
+
+            string workflow = File.ReadAllText(Path.Combine(
+                projectRoot,
+                ".github/workflows/unity-network-smoke.yml"));
+            StringAssert.Contains("fusion-shared-climb", workflow);
+            StringAssert.Contains("fusion-host-climb", workflow);
+        }
+
+        [Test]
+        public void FusionCoverSmoke_ExercisesExactCoverTransitionRecoveryAndPresentation()
+        {
+            string bootstrap = ReadAssetSource(
+                "Arawn/NetworkingLayerForGC2/Runtime/Transport/Fusion/Traversal/" +
+                "FusionTraversalCoverSmokeBootstrap.cs");
+            StringAssert.Contains("fusion-traversal-cover", bootstrap);
+            StringAssert.Contains(
+                "#if GC2_TRAVERSAL && (UNITY_EDITOR || DEVELOPMENT_BUILD)",
+                bootstrap,
+                "The regression harness must remain absent from release players.");
+            StringAssert.Contains("FindCover(\"Cover_Low\")", bootstrap);
+            StringAssert.Contains("FindCover(\"Cover_High\")", bootstrap);
+            StringAssert.Contains("_ = lowCover.Enter(", bootstrap);
+            StringAssert.Contains("new KeyboardState(Key.D)", bootstrap);
+            StringAssert.Contains("motion.RequestTeleport(", bootstrap);
+            StringAssert.Contains("CalculateCharacterRootStart", bootstrap);
+            StringAssert.Contains("CoverConnectionGraceSeconds", bootstrap);
+            StringAssert.Contains("stance.TryCancel(", bootstrap);
+            StringAssert.Contains("GetPresentedPosition(actor)", bootstrap);
+            StringAssert.Contains("ActiveRemotePresentationTarget", bootstrap);
+            StringAssert.Contains("maxReverseStep", bootstrap);
+            StringAssert.Contains("maxFrameStep", bootstrap);
+            StringAssert.Contains("Application.logMessageReceived += CaptureTraversalFailure", bootstrap);
+            StringAssert.Contains("MissingReferenceException", bootstrap);
+            StringAssert.Contains("collider2", bootstrap);
+            StringAssert.Contains("authoritative traversal task failed", bootstrap);
+            StringAssert.Contains("player.InjectInput(Vector2.up, sendJump)", bootstrap);
+            StringAssert.Contains("ShortcutPlayer.Instance != actor.gameObject", bootstrap);
+            StringAssert.Contains("host-cover-transition-detach-move-jump", bootstrap);
+            StringAssert.Contains("observer-cover-smooth-detach-local-input", bootstrap);
+
+            string builder = ReadAssetSource(
+                "Arawn/NetworkingLayerForGC2/Runtime/Transport/Fusion/Traversal/Editor/" +
+                "FusionTraversalClimbSmokeBuilder.cs");
+            StringAssert.Contains("BuildCoverNetworkSmokePlayer", builder);
+            StringAssert.Contains("TraversalExamples@1.0.1", builder);
+            StringAssert.Contains("TraversalExamples@1.0.0", builder);
+            AssertAppearsBefore(
+                builder,
+                "LoadAssetAtPath<SceneAsset>(SceneVersion101)",
+                "LoadAssetAtPath<SceneAsset>(SceneVersion100)");
+
+            string projectRoot = Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
+            string smokeScript = File.ReadAllText(Path.Combine(
+                projectRoot,
+                "Tools/run_unity_network_smoke.sh"));
+            StringAssert.Contains("fusion-host-cover", smokeScript);
+            StringAssert.Contains("fusion-traversal-cover", smokeScript);
+            StringAssert.Contains("BuildCoverNetworkSmokePlayer", smokeScript);
+            StringAssert.Contains("--pristine-gc2-root", smokeScript);
+            StringAssert.Contains("GC2_NETWORK_PRISTINE_ROOT", smokeScript);
+
+            string workflow = File.ReadAllText(Path.Combine(
+                projectRoot,
+                ".github/workflows/unity-network-smoke.yml"));
+            Assert.GreaterOrEqual(
+                Regex.Matches(workflow, "fusion-host-cover").Count,
+                2,
+                "The manual choice and CI matrix must both expose the Cover regression smoke.");
+        }
+
+        [Test]
+        public void FusionLedgeTransitionSmoke_ProvesHostProxyUsesAnimatedTransportPose()
+        {
+            string bootstrap = ReadAssetSource(
+                "Arawn/NetworkingLayerForGC2/Runtime/Transport/Fusion/Traversal/" +
+                "FusionTraversalLedgeTransitionSmokeBootstrap.cs");
+            StringAssert.Contains("fusion-traversal-ledge-transition", bootstrap);
+            StringAssert.Contains(
+                "#if GC2_TRAVERSAL && (UNITY_EDITOR || DEVELOPMENT_BUILD)",
+                bootstrap,
+                "The regression harness must remain absent from release players.");
+            StringAssert.Contains("new(0f, 6f, -0.05f)", bootstrap);
+            StringAssert.Contains("new(0f, 8f, -0.05f)", bootstrap);
+            StringAssert.Contains("new(0f, 10f, -0.05f)", bootstrap);
+            StringAssert.Contains("MotionName = \"Motion_Ledge_Climb\"", bootstrap);
+            StringAssert.Contains("_ = source.Enter(", bootstrap);
+            Assert.GreaterOrEqual(
+                Regex.Matches(bootstrap, @"stance\.TryJump\(\);").Count,
+                2,
+                "Both ledge changes must use GC2's patched authoritative connection route.");
+            StringAssert.DoesNotContain("middle.Enter(", bootstrap);
+            StringAssert.DoesNotContain("top.Enter(", bootstrap);
+            StringAssert.Contains("--gc2-network-smoke-ready", bootstrap);
+            StringAssert.Contains(
+                "CreateSharedWithExactSessionNameAsync",
+                bootstrap);
+            StringAssert.Contains("JoinSharedAsync", bootstrap);
+            StringAssert.Contains("fusion-shared-master", bootstrap);
+            StringAssert.Contains("fusion-shared-client", bootstrap);
+            StringAssert.Contains("transport.IsLocalGameplayReady", bootstrap);
+            StringAssert.Contains("!IsSharedTransition ||", bootstrap);
+            StringAssert.Contains("transport.IsServer", bootstrap);
+            StringAssert.Contains("actor.IsServerInstance", bootstrap);
+            StringAssert.Contains("!actor.IsOwnerInstance", bootstrap);
+            StringAssert.Contains("actor.HasAuthenticatedPlayerOwner", bootstrap);
+            StringAssert.Contains("identity.TransportAdmitted", bootstrap);
+            StringAssert.Contains("identity.HasAuthorityAdmission", bootstrap);
+            StringAssert.Contains("identity.IsLogicalAuthority", bootstrap);
+            StringAssert.Contains("identity.TryGetLogicalOwnerClientId", bootstrap);
+            StringAssert.Contains("transport.IsClientReady(ownerClientId)", bootstrap);
+            StringAssert.Contains("controller.IsServer", bootstrap);
+            StringAssert.Contains("OwnerGameplayReadySettleSeconds", bootstrap);
+            StringAssert.Contains("SetupTeleportRetrySeconds", bootstrap);
+            StringAssert.Contains("MaxSetupTeleportAttempts = 3", bootstrap);
+            StringAssert.Contains("requestAttempt != teleportAttempt && !result.approved", bootstrap);
+            StringAssert.Contains("shared-owner-source-position-no-response", bootstrap);
+            StringAssert.Contains("sourceEnterRequested = TryRequestSourceEntry(actor, source)", bootstrap);
+            StringAssert.Contains("gravity cannot advance", bootstrap);
+            StringAssert.Contains("OwnerSourceSettledMarkerSuffix", bootstrap);
+            StringAssert.Contains("IsInteractiveTransitionActive(stance)", bootstrap);
+            StringAssert.Contains("expectedSource", bootstrap);
+            StringAssert.Contains("IsMarkerForActor", bootstrap);
+            StringAssert.Contains(".observer-finished", bootstrap);
+            StringAssert.Contains("observer-source-ready", bootstrap);
+            StringAssert.Contains("observer-transition-sample", bootstrap);
+            StringAssert.Contains("observer-transition-complete", bootstrap);
+            StringAssert.Contains("RequiredIntermediateSamples = 8", bootstrap);
+            StringAssert.Contains("ReverseCorrectionCount == 0", bootstrap);
+            StringAssert.Contains("LargeTeleportCount == 0", bootstrap);
+            StringAssert.Contains("MaximumFrameStep = 0.25f", bootstrap);
+            StringAssert.Contains("FinalConvergenceTolerance", bootstrap);
+            StringAssert.Contains("GetPresentedPosition(actor)", bootstrap);
+            StringAssert.Contains("TryGetCommittedRemotePresentationPosition", bootstrap);
+            StringAssert.Contains("ActiveRemotePresentationTarget", bootstrap);
+            StringAssert.Contains("ShortcutPlayer.Instance == actor.gameObject", bootstrap);
+            StringAssert.Contains("player.InjectInput(Vector2.up)", bootstrap);
+            StringAssert.Contains(
+                "observer-host-ledge-transitions-smooth-local-owner-healthy",
+                bootstrap);
+            StringAssert.Contains(
+                "observer-shared-owner-ledge-transitions-smooth-local-owner-healthy",
+                bootstrap);
+            StringAssert.Contains(
+                "shared-owner-center-low-middle-top-transitioned",
+                bootstrap);
+
+            string ownerFlow = ExtractDeclaredMethodBody(bootstrap, "RunTransitionOwner");
+            AssertAppearsBefore(
+                ownerFlow,
+                "!transport.IsLocalGameplayReady",
+                "motion.RequestTeleport(");
+            AssertAppearsBefore(
+                ownerFlow,
+                "OwnerSourceSettledMarkerSuffix",
+                "stance.TryJump();");
+            string observerFlow = ExtractDeclaredMethodBody(bootstrap, "RunObserver");
+            AssertAppearsBefore(
+                observerFlow,
+                "remoteOwnerGameplayReady",
+                "WriteMarker(m_ReadyPath");
+            AssertAppearsBefore(
+                observerFlow,
+                "OwnerSourceSettledMarkerSuffix",
+                "TransitionMetrics.Begin(");
+
+            string traversal = ReadAssetSource(
+                "Arawn/NetworkingLayerForGC2/Traversal/NetworkTraversalController.cs");
+            StringAssert.Contains("remote-interactive-transition-presentation", traversal);
+            StringAssert.Contains("remote-interactive-transition-exit-started", traversal);
+            StringAssert.Contains("remote-interactive-transition-enter-started", traversal);
+            StringAssert.Contains("rootPose=transport", traversal);
+            StringAssert.Contains(
+                "authoritative-interactive-transition-started",
+                traversal);
+            string jumpConnection = ExtractDeclaredMethodBody(
+                traversal,
+                "TryStartInteractiveJumpConnectionAsync");
+            AssertAppearsBefore(
+                jumpConnection,
+                "TraceAuthoritativeInteractiveTransitionStart",
+                "Traverse.ChangeTo");
+            string authoritativeApply = ExtractDeclaredMethodBody(
+                traversal,
+                "ApplyAuthoritativeActionAsync");
+            AssertAppearsBefore(
+                authoritativeApply,
+                "TraceAuthoritativeInteractiveTransitionStart",
+                "Task interactiveTask = transitionSource");
+
+            string nativeMotor = ReadAssetSource(
+                "Arawn/NetworkingLayerForGC2/Runtime/Transport/Fusion/" +
+                "FusionNativeNetworkCharacterMotor.cs");
+            StringAssert.Contains("TryGetCommittedRemotePresentationPosition", nativeMotor);
+            StringAssert.Contains("m_PresentationWorldPosition", nativeMotor);
+            StringAssert.Contains(
+                "authority-authenticated-owner-pose-applied",
+                nativeMotor);
+
+            string builder = ReadAssetSource(
+                "Arawn/NetworkingLayerForGC2/Runtime/Transport/Fusion/Traversal/Editor/" +
+                "FusionTraversalClimbSmokeBuilder.cs");
+            StringAssert.Contains("BuildLedgeTransitionNetworkSmokePlayer", builder);
+            StringAssert.Contains("Fusion Traversal Ledge Transition", builder);
+
+            string projectRoot = Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
+            string smokeScript = File.ReadAllText(Path.Combine(
+                projectRoot,
+                "Tools/run_unity_network_smoke.sh"));
+            StringAssert.Contains("fusion-host-ledge-transition", smokeScript);
+            StringAssert.Contains("fusion-shared-ledge-transition", smokeScript);
+            StringAssert.Contains("fusion-traversal-ledge-transition", smokeScript);
+            StringAssert.Contains("BuildLedgeTransitionNetworkSmokePlayer", smokeScript);
+            StringAssert.Contains("stage=remote-interactive-transition-presentation", smokeScript);
+            StringAssert.Contains("stage=remote-interactive-transition-exit-started", smokeScript);
+            StringAssert.Contains("stage=remote-interactive-transition-enter-started", smokeScript);
+            StringAssert.Contains("Traverse@Climb_ExitU", smokeScript);
+            StringAssert.Contains("Traverse@Climb_EnterD", smokeScript);
+            StringAssert.Contains("rootPose=transport", smokeScript);
+            StringAssert.Contains("teleportKeys=", smokeScript);
+            StringAssert.Contains("firstIntermediateSamples", smokeScript);
+            StringAssert.Contains("reverseCorrectionCount", smokeScript);
+            StringAssert.Contains("largeTeleportCount", smokeScript);
+            StringAssert.Contains(
+                "stage=authority-authenticated-owner-pose-applied",
+                smokeScript);
+            StringAssert.Contains(
+                "stage=authoritative-interactive-transition-started",
+                smokeScript);
+            StringAssert.Contains("owner-pose-gameplay-rejection", smokeScript);
+            StringAssert.Contains(
+                "active && /owner-pose-gameplay-rejection",
+                smokeScript);
+
+            string workflow = File.ReadAllText(Path.Combine(
+                projectRoot,
+                ".github/workflows/unity-network-smoke.yml"));
+            Assert.GreaterOrEqual(
+                Regex.Matches(workflow, "fusion-host-ledge-transition").Count,
+                2,
+                "The manual choice and CI matrix must both expose the ledge transition smoke.");
+            Assert.GreaterOrEqual(
+                Regex.Matches(workflow, "fusion-shared-ledge-transition").Count,
+                2,
+                "The manual choice and CI matrix must both expose the inverse Shared ledge transition smoke.");
+        }
+
+        [Test]
+        public void FusionLedgeReconnectSmoke_ProvesLiveFirstAndSnapshotReconnectEdgeRight()
+        {
+            string bootstrap = ReadAssetSource(
+                "Arawn/NetworkingLayerForGC2/Runtime/Transport/Fusion/Traversal/" +
+                "FusionTraversalLedgeReconnectSmokeBootstrap.cs");
+            StringAssert.Contains("fusion-traversal-ledge-reconnect", bootstrap);
+            StringAssert.Contains(
+                "#if GC2_TRAVERSAL && (UNITY_EDITOR || DEVELOPMENT_BUILD)",
+                bootstrap,
+                "The regression harness must remain absent from release players.");
+            StringAssert.Contains("ExactLedgeFixtureLocalPosition", bootstrap);
+            StringAssert.Contains("new Vector3(2.55f, 4f, 1.5f)", bootstrap);
+            StringAssert.Contains("--gc2-network-smoke-ready", bootstrap);
+            StringAssert.Contains("first-observer-ready", bootstrap);
+            StringAssert.Contains("first-observer-active-before-ready", bootstrap);
+            StringAssert.Contains("RequiredDisconnectGapSeconds", bootstrap);
+            StringAssert.Contains("HostReconnectCompletionGraceSeconds", bootstrap);
+            StringAssert.Contains("ReconnectObservationGraceSeconds", bootstrap);
+            StringAssert.Contains("HostStartLedgeFraction", bootstrap);
+            StringAssert.Contains("BlockerLedgeFraction", bootstrap);
+            StringAssert.Contains(
+                "!transport.IsLocalGameplayReady",
+                bootstrap,
+                "The connected blocker setup request must wait until Fusion has consumed and " +
+                "acknowledged its initial gameplay snapshot.");
+            StringAssert.Contains(
+                "UnityObjectSearch.FindAny<FusionTransportBridge>()",
+                bootstrap,
+                "The smoke harness must use the package's unordered Unity object search boundary.");
+            StringAssert.DoesNotContain(
+                "FindFirstObjectByType",
+                bootstrap,
+                "The reconnect smoke must not depend on obsolete Unity instance-ID ordering.");
+            StringAssert.Contains("first-blocker-position-requested", bootstrap);
+            StringAssert.Contains("first-blocker-enter-requested", bootstrap);
+            StringAssert.Contains("UpdateOverlapObservation", bootstrap);
+            StringAssert.Contains("CombinedCharacterRadius", bootstrap);
+            StringAssert.Contains("HostStartedLeftOfBlocker", bootstrap);
+            StringAssert.Contains("HostCrossedBlocker", bootstrap);
+            StringAssert.Contains("overlap.IsProven", bootstrap);
+            StringAssert.Contains("Intent-X", bootstrap);
+            StringAssert.Contains("Speed-XY", bootstrap);
+            StringAssert.Contains("RequiredIntentX", bootstrap);
+            StringAssert.Contains("MaximumSpeedXY", bootstrap);
+            StringAssert.Contains("new KeyboardState(Key.D)", bootstrap);
+            StringAssert.Contains(
+                "(!enterRequested &&",
+                bootstrap,
+                "The setup-position guard must stop constraining the harness after the " +
+                "owner begins moving away from the rail center.");
+            Assert.AreEqual(
+                1,
+                Regex.Matches(bootstrap, @"m_SmokeCamera\.rotation\s*=").Count,
+                "The synthetic camera must be oriented once, not fed back from the " +
+                "Traversal-controlled Character rotation on every held-input frame.");
+
+            string projectRoot = Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
+            string smokeScript = File.ReadAllText(Path.Combine(
+                projectRoot,
+                "Tools/run_unity_network_smoke.sh"));
+            StringAssert.Contains("fusion-host-ledge-reconnect", smokeScript);
+            StringAssert.Contains("fusion-traversal-ledge-reconnect", smokeScript);
+            StringAssert.Contains("--gc2-network-smoke-connection-phase first", smokeScript);
+            StringAssert.Contains("--gc2-network-smoke-connection-phase reconnect", smokeScript);
+            StringAssert.Contains("stage=remote-interactive-presentation-start", smokeScript);
+            StringAssert.Contains("snapshot=True", smokeScript);
+            StringAssert.Contains("first-observer-edge-right", smokeScript);
+            StringAssert.Contains("reconnect-observer-edge-right", smokeScript);
+            StringAssert.Contains("hostCrossedBlocker", smokeScript);
+            StringAssert.Contains("blockerActiveLedgeTraverse", smokeScript);
+            StringAssert.Contains("stage=first-blocker-enter-requested", smokeScript);
+
+            string workflow = File.ReadAllText(Path.Combine(
+                projectRoot,
+                ".github/workflows/unity-network-smoke.yml"));
+            Assert.GreaterOrEqual(
+                Regex.Matches(workflow, "fusion-host-ledge-reconnect").Count,
+                2,
+                "The manual choice and CI matrix must both expose the ledge reconnect regression smoke.");
+        }
+
+        [Test]
+        public void FusionPullUpSmoke_ProvesBoundaryTrajectoryAndConnectedOwnerHealth()
+        {
+            string bootstrap = ReadAssetSource(
+                "Arawn/NetworkingLayerForGC2/Runtime/Transport/Fusion/Traversal/" +
+                "FusionTraversalPullUpSmokeBootstrap.cs");
+            StringAssert.Contains("fusion-traversal-pullup", bootstrap);
+            StringAssert.Contains(
+                "#if GC2_TRAVERSAL && (UNITY_EDITOR || DEVELOPMENT_BUILD)",
+                bootstrap,
+                "The PullUp regression harness must remain absent from release players.");
+            StringAssert.Contains("private const int AttemptsRequired = 3", bootstrap);
+            StringAssert.Contains("new(-5f, 0f, 7f)", bootstrap);
+            StringAssert.Contains("new(-5f, 8f, 7f)", bootstrap);
+            StringAssert.Contains("candidate.ContinueB is not TraverseLink candidatePullUp", bootstrap);
+            StringAssert.Contains("PullUpMotionName = \"Motion_PullUp\"", bootstrap);
+            StringAssert.Contains("TraverseLinkTypeWarpToTarget", bootstrap);
+            StringAssert.Contains("motion.RequestTeleport(", bootstrap);
+            StringAssert.Contains("ToDriverPosition(actor.Character, targetRoot)", bootstrap);
+            StringAssert.Contains("_ = freeClimb.Enter(ShortcutPlayer.Instance", bootstrap);
+            StringAssert.Contains("new KeyboardState(Key.W)", bootstrap);
+            StringAssert.Contains("--gc2-network-smoke-ready", bootstrap);
+            StringAssert.Contains("WriteReadyMarker()", bootstrap);
+            StringAssert.Contains("IsReadyMarkerPresent()", bootstrap);
+
+            StringAssert.Contains("TryGetStanceRelativePosition(stance", bootstrap);
+            StringAssert.Contains("relativePosition.z >=", bootstrap);
+            StringAssert.Contains(
+                "freeClimb.PositionB - BoundaryOffsetFromPositionB",
+                bootstrap,
+                "Boundary sampling must use GC2's authored TraversalStance relative position, " +
+                "because collision sweeps may leave the Fusion root below PositionB.");
+            AssertAppearsBefore(
+                bootstrap,
+                "CaptureBoundary(metrics, current)",
+                "BeginLinkTrajectory(metrics, actor.Character, pullUp, current)");
+            StringAssert.Contains("pullup-boundary-reached", bootstrap);
+            StringAssert.Contains("pullup-link-enter", bootstrap);
+            StringAssert.Contains("pullup-link-exit", bootstrap);
+            StringAssert.Contains("pullup-attempt-result", bootstrap);
+
+            StringAssert.Contains("private const float MaximumHostPreEnterDrop = 0.2f", bootstrap);
+            StringAssert.Contains("private const float MaximumHostPreEnterReverseStep = 0.12f", bootstrap);
+            StringAssert.Contains("MaximumHostBoundaryAlignmentError", bootstrap);
+            StringAssert.Contains("boundaryAlignmentError", bootstrap);
+            StringAssert.Contains("private const float GroundTeleportMargin = 0.5f", bootstrap);
+            StringAssert.Contains("private const float AirLaunchMargin = 0.25f", bootstrap);
+            StringAssert.Contains("preEnterDrop", bootstrap);
+            StringAssert.Contains("minimumPreEnterY", bootstrap);
+            StringAssert.Contains("entryRollback", bootstrap);
+            StringAssert.Contains("entryWarpDistance", bootstrap);
+            StringAssert.Contains("linkWarpPosition", bootstrap);
+            StringAssert.Contains("landingSurfaceResolved", bootstrap);
+            StringAssert.Contains("TryCalculateLandingBounds(", bootstrap);
+            StringAssert.Contains("CaptureFinalLanding(", bootstrap);
+            StringAssert.Contains("pullup-boundary-coalesced", bootstrap);
+            StringAssert.Contains("WriteAttemptAcknowledgement(attemptIndex)", bootstrap);
+            StringAssert.Contains("IsAttemptAcknowledgementPresent(attemptIndex)", bootstrap);
+            StringAssert.Contains("groundTeleportCount", bootstrap);
+            StringAssert.Contains("airLaunchCount", bootstrap);
+            StringAssert.Contains("maxRollbackFromHighWater", bootstrap);
+            StringAssert.Contains("maxLateralDeviation", bootstrap);
+            StringAssert.Contains("duplicateTransitionCount", bootstrap);
+            StringAssert.Contains("CharactersUsingCount", bootstrap);
+            StringAssert.Contains("GetPresentedPosition(actor)", bootstrap);
+            StringAssert.Contains("ActiveRemotePresentationTarget", bootstrap);
+            StringAssert.Contains("RequiredConnectedOwnerMoveDistance", bootstrap);
+            StringAssert.Contains("ShortcutPlayer.Instance == localOwner.gameObject", bootstrap);
+            StringAssert.Contains("connectedOwnerInputHealthy", bootstrap);
+            StringAssert.Contains("connectedOwnerTraversalMovementTested", bootstrap);
+            StringAssert.Contains("host-pullup-trajectory-stable", bootstrap);
+            StringAssert.Contains(
+                "observer-host-pullup-stable-local-owner-healthy",
+                bootstrap);
+
+            string builder = ReadAssetSource(
+                "Arawn/NetworkingLayerForGC2/Runtime/Transport/Fusion/Traversal/Editor/" +
+                "FusionTraversalClimbSmokeBuilder.cs");
+            StringAssert.Contains("BuildPullUpNetworkSmokePlayer", builder);
+            StringAssert.Contains("Fusion Traversal PullUp", builder);
+
+            string projectRoot = Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
+            string smokeScript = File.ReadAllText(Path.Combine(
+                projectRoot,
+                "Tools/run_unity_network_smoke.sh"));
+            StringAssert.Contains("fusion-host-pullup", smokeScript);
+            StringAssert.Contains("authority_final", smokeScript);
+            StringAssert.Contains("client_final", smokeScript);
+            StringAssert.Contains("final pose divergence", smokeScript);
+            StringAssert.Contains("fusion-traversal-pullup", smokeScript);
+            StringAssert.Contains("BuildPullUpNetworkSmokePlayer", smokeScript);
+            StringAssert.Contains("host-pullup-trajectory-stable", smokeScript);
+            StringAssert.Contains("groundTeleportCount", smokeScript);
+            StringAssert.Contains("duplicateTransitionCount", smokeScript);
+            StringAssert.Contains("stage=pullup-boundary-reached", smokeScript);
+            StringAssert.Contains("--gc2-network-smoke-ready \"$ready_marker\"", smokeScript);
+
+            string workflow = File.ReadAllText(Path.Combine(
+                projectRoot,
+                ".github/workflows/unity-network-smoke.yml"));
+            Assert.GreaterOrEqual(
+                Regex.Matches(workflow, "fusion-host-pullup").Count,
+                2,
+                "The manual choice and CI matrix must both expose the PullUp regression smoke.");
+        }
+
+        [Test]
+        public void NetworkCiTrace_IsOptInAndCompiledOutOfReleasePlayers()
+        {
+            string trace = ReadAssetSource(
+                "Arawn/NetworkingLayerForGC2/Runtime/Utilities/NetworkCiTrace.cs");
+            StringAssert.Contains("--gc2-network-ci-trace", trace);
+            StringAssert.Contains("GC2_NETWORK_CI_TRACE", trace);
+            StringAssert.Contains("[Conditional(\"UNITY_EDITOR\")]", trace);
+            StringAssert.Contains("[Conditional(\"DEVELOPMENT_BUILD\")]", trace);
+            StringAssert.Contains("#if !UNITY_EDITOR && !DEVELOPMENT_BUILD", trace);
+            StringAssert.Contains("HasTraversalActivity", trace);
+            StringAssert.Contains("TraversalTraceWindowActive", trace);
+            StringAssert.Contains("TraversalTraceLingerSeconds = 30f", trace);
+            StringAssert.Contains("--gc2-network-trace-role", trace);
+            StringAssert.Contains("--gc2-network-trace-frame-rate", trace);
+            StringAssert.Contains("GC2_NETWORK_CI_FRAME_RATE", trace);
+            StringAssert.Contains("DefaultTraceFrameRate = 60", trace);
+            StringAssert.Contains("Application.isEditor", trace);
+            StringAssert.Contains("Application.targetFrameRate = targetFrameRate", trace);
+            StringAssert.Contains("parsed <= 0", trace);
+            StringAssert.Contains("actor-entered", trace);
+            StringAssert.Contains("actor-exited", trace);
+            StringAssert.Contains("LogOption.NoStacktrace", trace);
+
+            string motionTypes = ReadAssetSource(
+                "Arawn/NetworkingLayerForGC2/Runtime/Motion/NetworkMotionTypes.cs");
+            StringAssert.Contains("#if UNITY_EDITOR || DEVELOPMENT_BUILD", motionTypes);
+            StringAssert.Contains(
+                "return NetworkCiTrace.Enabled && s_ActiveManagerCount > 0;",
+                motionTypes);
+            StringAssert.Contains("#else\n                return false;", motionTypes);
+
+            string traversal = ReadAssetSource(
+                "Arawn/NetworkingLayerForGC2/Traversal/NetworkTraversalController.cs");
+            StringAssert.Contains("NetworkCiTrace.Log(", traversal);
+
+            string motor = ReadAssetSource(
+                "Arawn/NetworkingLayerForGC2/Runtime/Transport/Fusion/" +
+                "FusionNativeNetworkCharacterMotor.cs");
+            StringAssert.Contains("authority-owner-pose-accepted", motor);
+            StringAssert.Contains("owner-reconciled", motor);
+            StringAssert.Contains("render-sample", motor);
+            StringAssert.Contains("post-render-root-write", motor);
+            StringAssert.Contains("teleportKeys=", motor);
+            StringAssert.Contains("simulation-sample", motor);
+            StringAssert.Contains("owner-payload", motor);
+            StringAssert.Contains("NetworkCiTrace.TraversalTraceWindowActive", motor);
+
+            string bridge = ReadAssetSource(
+                "Arawn/NetworkingLayerForGC2/Runtime/Transport/Fusion/" +
+                "FusionTransportBridge.cs");
+            StringAssert.Contains("unity-heartbeat", bridge);
+            StringAssert.Contains("tick-stalled", bridge);
+            StringAssert.Contains("tick-recovered", bridge);
+            StringAssert.Contains("authority-input-missing", bridge);
+            StringAssert.Contains("TryConsumeNetworkInput-returned-false", bridge);
+            StringAssert.Contains("shortcutMatches=", bridge);
+
+            string player = ReadAssetSource(
+                "Arawn/NetworkingLayerForGC2/Runtime/Motion/" +
+                "UnitPlayerDirectionalNetwork.cs");
+            StringAssert.Contains("gc2-player-input", player);
+            StringAssert.Contains("character-not-controllable", player);
+            StringAssert.Contains("network-input-sink-missing", player);
+
+            string autoRole = ReadAssetSource(
+                "Arawn/NetworkingLayerForGC2/Runtime/Transport/Fusion/" +
+                "FusionNetworkCharacterAuto.cs");
+            StringAssert.Contains("role-refreshed", autoRole);
+
+            string manager = ReadAssetSource(
+                "Arawn/NetworkingLayerForGC2/Traversal/NetworkTraversalManager.cs");
+            StringAssert.Contains("NetworkCiTrace.Enabled", manager);
+        }
+
+        [Test]
+        public void FusionNativeTraversalPresentation_SmoothsSnapshotUnderrunsWithoutExtrapolation()
+        {
+            string motor = ReadAssetSource(
+                "Arawn/NetworkingLayerForGC2/Runtime/Transport/Fusion/" +
+                "FusionNativeNetworkCharacterMotor.cs");
+            string smoothing = ExtractDeclaredMethodBody(
+                motor,
+                "ApplyRemoteSnapshotUnderrunPresentation");
+            StringAssert.Contains("IsLocalLogicalOwner", smoothing);
+            StringAssert.Contains("TryGetSnapshotsBuffers", smoothing);
+            StringAssert.Contains("MotionFlagTraversalPresentation", smoothing);
+            StringAssert.Contains("RemoteTraversalPresentationLingerSeconds", smoothing);
+            StringAssert.Contains("traversalPresentationWindow", smoothing);
+            StringAssert.Contains("IsRemoteSnapshotTeleportBoundary", smoothing);
+            StringAssert.Contains("m_LastRemoteSnapshotTeleportKey", smoothing);
+            StringAssert.Contains("selectedTeleportKey", smoothing);
+            StringAssert.Contains("collapsedMovingPair", smoothing);
+            StringAssert.Contains("QueueRemoteSnapshotPresentationError", smoothing);
+            StringAssert.Contains(
+                "previousPresentedPosition,\n                    basePosition",
+                smoothing,
+                "The hard-snap envelope must be measured against the authoritative base pose.");
+            StringAssert.Contains(
+                "if (!correctionWithinSmoothEnvelope)",
+                smoothing);
+            StringAssert.Contains(
+                "ClearRemoteSnapshotPresentationError();",
+                smoothing,
+                "An over-envelope authoritative correction must discard stale smoothing error.");
+            StringAssert.Contains("LimitRemoteTraversalPresentationStep", smoothing);
+            StringAssert.Contains(
+                "presentedPosition - basePosition",
+                smoothing,
+                "A limited frame must retain its residual as presentation-only error so " +
+                "the next frame continues converging instead of snapping.");
+            StringAssert.Contains("renderTarget.SetPositionAndRotation", smoothing);
+            StringAssert.Contains("snapshot-underrun-entered", smoothing);
+            StringAssert.Contains("snapshot-underrun-recovered", smoothing);
+            StringAssert.DoesNotContain(
+                "basePosition + replicatedVelocity",
+                smoothing,
+                "The observer fallback must not extrapolate beyond trusted snapshots.");
+
+            string queue = ExtractDeclaredMethodBody(
+                motor,
+                "QueueRemoteSnapshotPresentationError");
+            StringAssert.Contains(
+                "previousPresentedPosition - basePosition",
+                queue);
+            StringAssert.Contains("maxReconciliationDistance", queue);
+
+            StringAssert.Contains("presentationOnly=True extrapolation=False", motor);
+            StringAssert.DoesNotContain(
+                "NetworkOwnerMotionAuthorityHooks.IsContinuousOwnerPose",
+                smoothing,
+                "Remote smoothing must follow Fusion's pose timeline rather than a separately delivered GC2 traversal state.");
+
+            string limiter = ExtractDeclaredMethodBody(
+                motor,
+                "LimitRemoteTraversalPresentationStep");
+            StringAssert.Contains("!traversalPresentationWindow", limiter);
+            StringAssert.Contains("teleportBoundary", limiter);
+            StringAssert.Contains("!correctionWithinSmoothEnvelope", limiter);
+            StringAssert.Contains("Vector3.MoveTowards", limiter);
+            StringAssert.Contains(
+                "RemoteTraversalMaximumPresentationFrameStep",
+                limiter);
+            Assert.GreaterOrEqual(
+                CountOccurrences(motor, "ResetRemoteSnapshotPresentation();"),
+                6,
+                "Spawn, despawn, reset, disable, destroy, and invalid-target paths must " +
+                "discard stale presentation state.");
+        }
+
+        [Test]
+        public void FusionNativeTraversalPresentation_FrameLimiterIsBoundedAndConvergent()
+        {
+            Type motorType = typeof(FusionNativeNetworkCharacterMotor);
+            FieldInfo limitField = motorType.GetField(
+                "RemoteTraversalMaximumPresentationFrameStep",
+                BindingFlags.Static | BindingFlags.NonPublic);
+            MethodInfo limiter = motorType.GetMethod(
+                "LimitRemoteTraversalPresentationStep",
+                BindingFlags.Static | BindingFlags.NonPublic);
+            MethodInfo envelope = motorType.GetMethod(
+                "IsRemoteTraversalCorrectionWithinSmoothEnvelope",
+                BindingFlags.Static | BindingFlags.NonPublic);
+            MethodInfo teleportBoundary = motorType.GetMethod(
+                "IsRemoteSnapshotTeleportBoundary",
+                BindingFlags.Static | BindingFlags.NonPublic);
+            Assert.That(limitField, Is.Not.Null);
+            Assert.That(limiter, Is.Not.Null);
+            Assert.That(envelope, Is.Not.Null);
+            Assert.That(teleportBoundary, Is.Not.Null);
+
+            float limit = (float)limitField.GetRawConstantValue();
+            Assert.That(limit, Is.GreaterThan(0f).And.LessThanOrEqualTo(0.25f));
+
+            Vector3 previous = Vector3.zero;
+            Vector3 candidate = new Vector3(1.1f, 0.7f, -0.2f);
+            Vector3 Invoke(
+                bool hasPrevious,
+                bool traversalWindow,
+                bool teleportBoundary,
+                bool withinEnvelope,
+                Vector3 from,
+                Vector3 target)
+            {
+                return (Vector3)limiter.Invoke(
+                    null,
+                    new object[]
+                    {
+                        from,
+                        target,
+                        hasPrevious,
+                        traversalWindow,
+                        teleportBoundary,
+                        withinEnvelope
+                    });
+            }
+
+            Assert.That(
+                Invoke(true, false, false, true, previous, candidate),
+                Is.EqualTo(candidate),
+                "Ordinary non-traversal presentation must remain on Fusion's normal path.");
+            Assert.That(
+                Invoke(true, true, true, true, previous, candidate),
+                Is.EqualTo(candidate),
+                "A real Fusion teleport-key boundary must snap immediately.");
+            Assert.That(
+                Invoke(false, true, false, true, previous, candidate),
+                Is.EqualTo(candidate),
+                "The first observed pose has no prior presentation point to bridge.");
+            Assert.That(
+                Invoke(true, true, false, false, previous, candidate),
+                Is.EqualTo(candidate),
+                "Corrections outside the reconciliation envelope must remain hard snaps.");
+            Assert.That(
+                (bool)envelope.Invoke(
+                    null,
+                    new object[] { Vector3.zero, Vector3.right * 10f, 3f }),
+                Is.False,
+                "The hard-snap envelope must measure the authoritative base, not an already " +
+                "smoothed candidate that happens to remain near the previous presentation.");
+            Assert.That(
+                (bool)teleportBoundary.Invoke(
+                    null,
+                    new object[] { 8, 8, 7, true }),
+                Is.True,
+                "A skipped old/new snapshot pair must still expose the changed teleport key.");
+            Assert.That(
+                (bool)teleportBoundary.Invoke(
+                    null,
+                    new object[] { 8, 8, 8, true }),
+                Is.False);
+
+            Vector3 current = previous;
+            float previousRemaining = Vector3.Distance(current, candidate);
+            for (int i = 0; i < 32 && current != candidate; i++)
+            {
+                Vector3 next = Invoke(
+                    true,
+                    true,
+                    false,
+                    true,
+                    current,
+                    candidate);
+                float step = Vector3.Distance(current, next);
+                float remaining = Vector3.Distance(next, candidate);
+                Assert.That(step, Is.LessThanOrEqualTo(limit + 0.00001f));
+                Assert.That(remaining, Is.LessThan(previousRemaining));
+                Assert.That(
+                    Vector3.Dot(next - current, candidate - current),
+                    Is.GreaterThanOrEqualTo(0f),
+                    "The limiter must never overshoot or reverse away from the received pose.");
+                current = next;
+                previousRemaining = remaining;
+            }
+
+            Assert.That(current, Is.EqualTo(candidate));
         }
 
         private static string[] GetFusionDemoPrefabAssetPaths()

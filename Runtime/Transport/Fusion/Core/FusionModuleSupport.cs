@@ -551,7 +551,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             if (candidate == null)
                 candidate = NetworkTransportBridge.Active as FusionTransportBridge;
             if (candidate == null)
-                candidate = FindFirstObjectByType<FusionTransportBridge>(FindObjectsInactive.Include);
+                candidate = UnityObjectSearch.FindAny<FusionTransportBridge>(FindObjectsInactive.Include);
 
             if (candidate == m_BoundBridge) return;
             Unbind();

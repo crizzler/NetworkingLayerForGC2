@@ -36,7 +36,7 @@ namespace Arawn.GameCreator2.Networking
             {
                 if (s_Instance == null)
                 {
-                    s_Instance = FindFirstObjectByType<NetworkVariableManager>();
+                    s_Instance = UnityObjectSearch.FindAny<NetworkVariableManager>();
                 }
 
                 return s_Instance;

@@ -280,7 +280,21 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 return false;
             }
 
-            if (m_IsServer && !m_IsLocalClient) return true;
+            if (m_IsServer && !m_IsLocalClient)
+            {
+                bool trustedNpc =
+                    m_NetworkCharacter != null &&
+                    m_NetworkCharacter.IsServerAuthoritativeNPC &&
+                    m_NetworkCharacter.HasSimulationAuthority;
+                if (!trustedNpc && logReason)
+                {
+                    LogDiagnosticsWarning(
+                        "shot request suppressed: non-local server replica is not a " +
+                        "server-authoritative NPC");
+                }
+
+                return trustedNpc;
+            }
 
             if (logReason && m_LogShots)
             {
@@ -583,7 +597,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
 
             EnsureShooterManagerRegistration();
 
-            int targetId = target.GetInstanceID();
+            int targetId = target.GetLegacyInstanceId();
 
             Collider hitCollider = target.GetComponent<Collider>();
             Rigidbody hitRigidbody = hitCollider != null && hitCollider.attachedRigidbody != null
@@ -845,7 +859,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
         internal bool TryConsumeServerNativeHitContinuation(GameObject target)
         {
             if (!m_IsServer || target == null) return false;
-            return m_ServerNativeHitContinuations.Remove(target.GetInstanceID());
+            return m_ServerNativeHitContinuations.Remove(target.GetLegacyInstanceId());
         }
 
         internal void NotifyPatchedHitResolved(
@@ -856,7 +870,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
         {
             if (!m_IsServer || data.Target == null) return;
 
-            int targetId = data.Target.GetInstanceID();
+            int targetId = data.Target.GetLegacyInstanceId();
             // A legacy Condition may already have consumed this token. Removing it here also
             // guarantees condition-free weapons cannot leak it into a later hit sequence.
             m_ServerNativeHitContinuations.Remove(targetId);
@@ -1022,6 +1036,14 @@ namespace Arawn.GameCreator2.Networking.Shooter
             if (registeredCharacter != m_Character)
             {
                 reason = $"registered-character-mismatch registered={registeredCharacter.name}";
+                return false;
+            }
+
+            if (m_NetworkCharacter == null ||
+                !m_NetworkCharacter.IsServerAuthoritativeNPC ||
+                !m_NetworkCharacter.HasSimulationAuthority)
+            {
+                reason = "unowned-actor-is-not-authoritative-npc";
                 return false;
             }
 
@@ -2567,7 +2589,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
             CleanupServerNativeEnvironmentImpactMarkers(now);
             m_RecentServerNativeEnvironmentImpacts.Add(new RecentServerNativeEnvironmentImpact
             {
-                RigidbodyInstanceId = rigidbody.GetInstanceID(),
+                RigidbodyInstanceId = rigidbody.GetLegacyInstanceId(),
                 WeaponHash = data.Weapon.Id.Hash,
                 HitPoint = data.HitPoint,
                 ExpiresAt = now + SERVER_NATIVE_IMPACT_MARKER_LIFETIME_SECONDS
@@ -2596,7 +2618,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
             float now = Time.time;
             float toleranceSqr =
                 SERVER_NATIVE_IMPACT_POSITION_TOLERANCE * SERVER_NATIVE_IMPACT_POSITION_TOLERANCE;
-            int rigidbodyInstanceId = rigidbody.GetInstanceID();
+            int rigidbodyInstanceId = rigidbody.GetLegacyInstanceId();
 
             for (int i = m_RecentServerNativeEnvironmentImpacts.Count - 1; i >= 0; i--)
             {
@@ -2661,7 +2683,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
         {
             if (rigidbody == null) return "rigidbody=null";
 
-            return $"rigidbody={rigidbody.name} rbInstance={rigidbody.GetInstanceID()} " +
+            return $"rigidbody={rigidbody.name} rbInstance={rigidbody.GetLegacyInstanceId()} " +
                    $"kinematic={rigidbody.isKinematic} mass={rigidbody.mass:F2} " +
                    $"simulationMode={Physics.simulationMode} " +
                    $"sleeping={rigidbody.IsSleeping()} position={rigidbody.position} " +
@@ -2926,7 +2948,10 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 textureMode,
                 textureAlign
             );
-            UnityEngine.Object.Destroy(lineObject, Mathf.Max(0.05f, duration) + 0.1f);
+            if (Application.isPlaying)
+            {
+                UnityEngine.Object.Destroy(lineObject, Mathf.Max(0.05f, duration) + 0.1f);
+            }
         }
 
         private static LayerMask GetLayerMaskField(FieldInfo field, object target, LayerMask fallback)
@@ -3009,7 +3034,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
             line.startColor = Color.yellow;
             line.endColor = new Color(1f, 0.65f, 0.1f, 0f);
             line.material = new Material(Shader.Find("Sprites/Default"));
-            UnityEngine.Object.Destroy(lineObject, 0.18f);
+            if (Application.isPlaying) UnityEngine.Object.Destroy(lineObject, 0.18f);
         }
 
         private static void DrawRemoteImpact(Vector3 point, Vector3 normal)
@@ -3021,7 +3046,8 @@ namespace Arawn.GameCreator2.Networking.Shooter
 
             if (impact.TryGetComponent<Collider>(out var collider))
             {
-                UnityEngine.Object.Destroy(collider);
+                if (Application.isPlaying) UnityEngine.Object.Destroy(collider);
+                else UnityEngine.Object.DestroyImmediate(collider);
             }
 
             var renderer = impact.GetComponent<Renderer>();
@@ -3038,7 +3064,7 @@ namespace Arawn.GameCreator2.Networking.Shooter
                 impact.transform.rotation = Quaternion.LookRotation(normal.normalized);
             }
 
-            UnityEngine.Object.Destroy(impact, 0.12f);
+            if (Application.isPlaying) UnityEngine.Object.Destroy(impact, 0.12f);
         }
 
         // ════════════════════════════════════════════════════════════════════════════════════════

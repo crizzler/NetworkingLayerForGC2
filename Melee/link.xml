@@ -6,4 +6,12 @@
     <assembly fullname="GameCreator.Runtime.Melee">
         <type fullname="GameCreator.Runtime.Melee.Skill" preserve="all" />
     </assembly>
+    <!-- Optional Free Flow integration currently lives in Assembly-CSharp to preserve its
+         existing managed-reference assembly names. ignoreIfMissing keeps standalone installs
+         of the Networking Layer valid when Free Flow Combat is not present. -->
+    <assembly fullname="Assembly-CSharp" ignoreIfMissing="1">
+        <type fullname="Arawn.FreeFlowCombat.FreeFlowNetworkIntegration" preserve="all" />
+        <type fullname="Arawn.FreeFlowCombat.AI.FreeFlowEnemyAgent" preserve="all" />
+        <type fullname="Arawn.FreeFlowCombat.FreeFlowCombatTarget" preserve="all" />
+    </assembly>
 </linker>

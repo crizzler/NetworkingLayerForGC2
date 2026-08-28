@@ -1,0 +1,21 @@
+{
+    "name": "Arawn.GameCreator2.Networking.TestUtilities",
+    "rootNamespace": "Arawn.GameCreator2.Networking.TestUtilities",
+    "references": [
+        "Arawn.GameCreator2.Networking",
+        "GameCreator.Runtime.Core"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": false,
+    "defineConstraints": [
+        "UNITY_INCLUDE_TESTS"
+    ],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

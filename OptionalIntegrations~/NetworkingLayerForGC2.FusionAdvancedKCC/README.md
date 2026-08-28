@@ -6,7 +6,7 @@ Fusion Native remains the built-in, recommended movement backend. Install this c
 
 ## Requirements
 
-- Game Creator 2 Networking Layer 2.2.1
+- Game Creator 2 Networking Layer 2.3.0
 - Photon Fusion 2.1.1
 - Photon Advanced KCC 2.1.0, or a compatible API version recognized by the Fusion setup wizard
 

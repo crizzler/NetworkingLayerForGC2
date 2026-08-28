@@ -10,7 +10,7 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
     public class InventoryPatcher : GC2PatcherBase
     {
         public override string ModuleName => "Inventory";
-        public override string PatchVersion => "3.0.0-inventory";
+        public override string PatchVersion => "3.1.0-inventory";
         public override string DisplayName => "Inventory (Game Creator 2)";
 
         public override string PatchDescription =>
@@ -38,7 +38,10 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
         {
             return new[]
             {
-                VersionRequirement("Plugins/GameCreator/Packages/Inventory/Editor/Version.txt", "2.8.*")
+                VersionRequirement(
+                    "Plugins/GameCreator/Packages/Inventory/Editor/Version.txt",
+                    "2.8.*",
+                    "2.9.*")
             };
         }
 

@@ -94,7 +94,7 @@ namespace Arawn.GameCreator2.Networking
             manager = NetworkCoreManager.Instance;
             if (manager == null)
             {
-                manager = UnityEngine.Object.FindFirstObjectByType<NetworkCoreManager>(
+                manager = UnityObjectSearch.FindAny<NetworkCoreManager>(
                     FindObjectsInactive.Include);
             }
 
@@ -231,13 +231,12 @@ namespace Arawn.GameCreator2.Networking
             NetworkCoreManager manager = NetworkCoreManager.Instance;
             if (manager == null)
             {
-                manager = UnityEngine.Object.FindFirstObjectByType<NetworkCoreManager>(
+                manager = UnityObjectSearch.FindAny<NetworkCoreManager>(
                     FindObjectsInactive.Include);
             }
 
-            InteractionTracker[] trackers = UnityEngine.Object.FindObjectsByType<InteractionTracker>(
-                FindObjectsInactive.Include,
-                FindObjectsSortMode.None);
+            InteractionTracker[] trackers =
+                UnityObjectSearch.FindAll<InteractionTracker>(FindObjectsInactive.Include);
             for (int i = 0; i < trackers.Length; i++)
             {
                 if (trackers[i] == null) continue;

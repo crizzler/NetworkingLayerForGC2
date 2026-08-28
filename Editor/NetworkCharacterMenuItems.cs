@@ -97,6 +97,12 @@ namespace Arawn.EnemyMasses.Editor.GameCreator2
             // Configure NetworkCharacter based on type
             ConfigureNetworkCharacterComponent(networkCharacter, type);
 
+            if (type == NetworkCharacterType.NPCServerAuthoritative)
+            {
+                instance.AddComponent<NetworkCharacterAuthorityGate>();
+                instance.AddComponent<NetworkNpcTargetSelector>();
+            }
+
             // Parent to selected object if any
             GameObjectUtility.SetParentAndAlign(instance, menuCommand?.context as GameObject);
 
@@ -162,6 +168,15 @@ namespace Arawn.EnemyMasses.Editor.GameCreator2
         private static void ConfigureNetworkCharacterComponent(NetworkCharacter networkCharacter, NetworkCharacterType type)
         {
             SerializedObject serializedNetChar = new SerializedObject(networkCharacter);
+
+            SerializedProperty actorTypeProperty =
+                serializedNetChar.FindProperty("m_ActorType");
+            if (actorTypeProperty != null)
+            {
+                actorTypeProperty.enumValueIndex = type == NetworkCharacterType.Player
+                    ? (int)NetworkCharacterActorType.PlayerOwned
+                    : (int)NetworkCharacterActorType.NPC;
+            }
 
             // Set NPC mode for client-side characters
             SerializedProperty npcModeProperty = serializedNetChar.FindProperty("m_NPCMode");

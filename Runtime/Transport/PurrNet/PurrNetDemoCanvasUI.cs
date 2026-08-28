@@ -258,7 +258,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
         private void EnsureEventSystem()
         {
 #if UNITY_2023_1_OR_NEWER || UNITY_6000_0_OR_NEWER || UNITY_6000
-            var es = UnityEngine.Object.FindFirstObjectByType<EventSystem>();
+            var es = UnityObjectSearch.FindAny<EventSystem>();
 #else
             var es = UnityEngine.Object.FindObjectOfType<EventSystem>();
 #endif

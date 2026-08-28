@@ -881,7 +881,7 @@ namespace Arawn.GameCreator2.Networking.Editor
 
         private void EnsureCustomTransportBridgePlaceholder(GameObject setupRoot, SetupReport report)
         {
-            var placeholder = FindFirstObjectByType<CustomTransportBridgePlaceholder>();
+            var placeholder = UnityObjectSearch.FindAny<CustomTransportBridgePlaceholder>();
             if (placeholder == null)
             {
                 var go = new GameObject("Custom Transport Bridge Placeholder");
@@ -915,7 +915,7 @@ namespace Arawn.GameCreator2.Networking.Editor
 
         private void EnsureSecurityManager(GameObject setupRoot, SetupReport report)
         {
-            var securityManager = FindFirstObjectByType<NetworkSecurityManager>();
+            var securityManager = UnityObjectSearch.FindAny<NetworkSecurityManager>();
             if (securityManager == null)
             {
                 var go = new GameObject("Network Security Manager");
@@ -1029,7 +1029,7 @@ namespace Arawn.GameCreator2.Networking.Editor
             GameObject setupRoot,
             SetupReport report) where T : Component
         {
-            var component = FindFirstObjectByType<T>();
+            var component = UnityObjectSearch.FindAny<T>();
             if (component == null)
             {
                 var go = new GameObject(objectName);
@@ -1060,7 +1060,7 @@ namespace Arawn.GameCreator2.Networking.Editor
                 return;
             }
 
-            var component = UnityEngine.Object.FindFirstObjectByType(componentType) as Component;
+            var component = UnityObjectSearch.FindAny(componentType) as Component;
             if (component == null)
             {
                 var go = new GameObject(objectName);
@@ -1348,7 +1348,7 @@ namespace Arawn.GameCreator2.Networking.Editor
         {
             int count = 0;
 
-            var servers = FindObjectsByType<OffMeshLinkNetworkServer>(FindObjectsInactive.Include, FindObjectsSortMode.None);
+            var servers = UnityObjectSearch.FindAll<OffMeshLinkNetworkServer>(FindObjectsInactive.Include);
             for (int i = 0; i < servers.Length; i++)
             {
                 var so = new SerializedObject(servers[i]);
@@ -1361,7 +1361,7 @@ namespace Arawn.GameCreator2.Networking.Editor
                 count++;
             }
 
-            var clients = FindObjectsByType<OffMeshLinkNetworkClient>(FindObjectsInactive.Include, FindObjectsSortMode.None);
+            var clients = UnityObjectSearch.FindAll<OffMeshLinkNetworkClient>(FindObjectsInactive.Include);
             for (int i = 0; i < clients.Length; i++)
             {
                 var so = new SerializedObject(clients[i]);
@@ -1381,7 +1381,7 @@ namespace Arawn.GameCreator2.Networking.Editor
         {
             int count = 0;
 
-            var controllers = FindObjectsByType<UnitAnimimNetworkController>(FindObjectsInactive.Include, FindObjectsSortMode.None);
+            var controllers = UnityObjectSearch.FindAll<UnitAnimimNetworkController>(FindObjectsInactive.Include);
             for (int i = 0; i < controllers.Length; i++)
             {
                 var so = new SerializedObject(controllers[i]);
@@ -1399,7 +1399,7 @@ namespace Arawn.GameCreator2.Networking.Editor
 
         private NetworkCharacter FindPlayerTemplate()
         {
-            var all = FindObjectsByType<NetworkCharacter>(FindObjectsInactive.Include, FindObjectsSortMode.None);
+            var all = UnityObjectSearch.FindAll<NetworkCharacter>(FindObjectsInactive.Include);
             for (int i = 0; i < all.Length; i++)
             {
                 var character = all[i].GetComponent<Character>();

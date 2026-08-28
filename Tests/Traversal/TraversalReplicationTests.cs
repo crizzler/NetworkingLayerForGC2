@@ -5,6 +5,7 @@ using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using Arawn.GameCreator2.Networking;
+using Arawn.GameCreator2.Networking.TestUtilities;
 using Arawn.GameCreator2.Networking.Traversal.Transport.PurrNet;
 using GameCreator.Runtime.Characters;
 using GameCreator.Runtime.Common;
@@ -42,19 +43,54 @@ namespace Arawn.GameCreator2.Networking.Traversal.Tests
 
     public sealed class TraversalReplicationTests
     {
+        [System.Serializable]
+        private sealed class CountingInstruction : Instruction
+        {
+            public static int RunCount { get; private set; }
+
+            public static void Reset()
+            {
+                RunCount = 0;
+            }
+
+            protected override Task Run(Args args)
+            {
+                RunCount++;
+                return DefaultResult;
+            }
+        }
+
+        [System.Serializable]
+        private sealed class AuthenticatedRemoteOwnerPoseDriver :
+            UnitDriverNetworkServer,
+            INetworkAuthenticatedRemoteOwnerPoseContext
+        {
+            public bool IsApplyingAuthenticatedRemoteOwnerPose { get; set; }
+        }
+
         private GameObject m_ManagerObject;
         private readonly List<UnityEngine.Object> m_Cleanup = new();
 
         [TearDown]
         public void TearDown()
         {
-            for (int i = m_Cleanup.Count - 1; i >= 0; i--)
+            bool previousIgnore = LogAssert.ignoreFailingMessages;
+            LogAssert.ignoreFailingMessages = true;
+            try
             {
-                if (m_Cleanup[i] != null) Object.DestroyImmediate(m_Cleanup[i]);
+                for (int i = m_Cleanup.Count - 1; i >= 0; i--)
+                {
+                    if (m_Cleanup[i] != null) Object.DestroyImmediate(m_Cleanup[i]);
+                }
+
+                if (m_ManagerObject != null) Object.DestroyImmediate(m_ManagerObject);
+            }
+            finally
+            {
+                LogAssert.ignoreFailingMessages = previousIgnore;
             }
 
             m_Cleanup.Clear();
-            if (m_ManagerObject != null) Object.DestroyImmediate(m_ManagerObject);
             m_ManagerObject = null;
         }
 
@@ -239,11 +275,11 @@ namespace Arawn.GameCreator2.Networking.Traversal.Tests
         }
 
         [Test]
-        public void InteractiveSnapshot_ExactIdentityReplacesActiveAToB()
+        public async Task InteractiveSnapshot_ExactIdentityReplacesActiveAToB()
         {
             NetworkTraversalController controller = CreateRemoteController(
                 101,
-                out _,
+                out Character character,
                 out TraversalStance stance);
             TraverseInteractive traverseA = CreateInteractive("Snapshot Traverse A");
             TraverseInteractive traverseB = CreateInteractive("Snapshot Traverse B");
@@ -254,11 +290,32 @@ namespace Arawn.GameCreator2.Networking.Traversal.Tests
             stance.EventMotionExit += () => exitCount++;
 
             controller.ReceiveFullSnapshot(CreateActiveInteractiveSnapshot(controller, traverseA, 1));
+            await WaitForClientApplyToSettle(controller);
             Assert.That(stance.Traverse, Is.SameAs(traverseA));
 
-            controller.ReceiveFullSnapshot(CreateActiveInteractiveSnapshot(controller, traverseB, 2));
+            Vector3 transportRoot = new Vector3(8f, 3f, -4f);
+            character.transform.position = transportRoot;
+            NetworkTraversalSnapshot replacementSnapshot = CreateActiveInteractiveSnapshot(
+                controller,
+                traverseB,
+                2);
+            replacementSnapshot.RelativePosition = new Vector3(0f, 0f, 0.75f);
+            controller.ReceiveFullSnapshot(replacementSnapshot);
+            await WaitForClientApplyToSettle(controller);
 
             Assert.That(stance.Traverse, Is.SameAs(traverseB));
+            Assert.That(
+                GetProperty(stance, "RelativePosition"),
+                Is.EqualTo(replacementSnapshot.RelativePosition),
+                "The traversal snapshot must still converge the observer's semantic ledge pose");
+            Assert.That(
+                character.transform.position,
+                Is.EqualTo(transportRoot),
+                "A remote traversal snapshot must not teleport the root owned by movement replication");
+            Assert.That(
+                character.Gestures.IsPlaying,
+                Is.False,
+                "A late/persistent snapshot must not replay an historical connection gesture");
             Assert.That(enterCount, Is.EqualTo(2));
             Assert.That(exitCount, Is.EqualTo(1));
             Assert.That(GetPrivateField<uint>(controller, "m_LastAppliedStateVersion"), Is.EqualTo(2));
@@ -309,6 +366,7 @@ namespace Arawn.GameCreator2.Networking.Traversal.Tests
                 }
 
                 Assert.That(stance.Traverse, Is.SameAs(traverseB));
+                await WaitForClientApplyToSettle(controller);
                 Assert.That(GetPrivateField<uint>(controller, "m_LastAppliedStateVersion"), Is.EqualTo(1));
             }
             finally
@@ -318,7 +376,7 @@ namespace Arawn.GameCreator2.Networking.Traversal.Tests
         }
 
         [Test]
-        public void ActiveLinkSnapshot_CancelsStaleInteractiveWithoutReplayingLink()
+        public async Task ActiveLinkSnapshot_CancelsStaleInteractiveWithoutReplayingLink()
         {
             NetworkTraversalController controller = CreateRemoteController(
                 102,
@@ -334,6 +392,7 @@ namespace Arawn.GameCreator2.Networking.Traversal.Tests
 
             controller.ReceiveFullSnapshot(
                 CreateActiveInteractiveSnapshot(controller, activeInteractive, 1));
+            await WaitForClientApplyToSettle(controller);
             Assert.That(stance.Traverse, Is.SameAs(activeInteractive));
 
             string linkId = BuildTraverseId(transientLink);
@@ -362,7 +421,7 @@ namespace Arawn.GameCreator2.Networking.Traversal.Tests
         }
 
         [Test]
-        public void UnresolvedSnapshot_SameVersionRemainsRetryableUntilTargetSpawns()
+        public async Task UnresolvedSnapshot_SameVersionRemainsRetryableUntilTargetSpawns()
         {
             NetworkTraversalController controller = CreateRemoteController(
                 103,
@@ -383,6 +442,7 @@ namespace Arawn.GameCreator2.Networking.Traversal.Tests
             delayedTraverse.gameObject.SetActive(true);
             SetPrivateField(controller, "m_NextUnresolvedStateRetryTime", 0f);
             InvokePrivate(controller, "RetryPendingUnresolvedAuthoritativeState");
+            await WaitForClientApplyToSettle(controller);
 
             Assert.That(stance.Traverse, Is.SameAs(delayedTraverse));
             Assert.That(GetPrivateField<bool>(controller, "m_HasPendingUnresolvedSnapshot"), Is.False);
@@ -653,6 +713,75 @@ namespace Arawn.GameCreator2.Networking.Traversal.Tests
         }
 
         [Test]
+        public async Task FaultedAuthoritativeTraversal_ClearsItsExactHalfEnteredStance()
+        {
+            NetworkTraversalController controller = CreateRemoteController(
+                118,
+                out _,
+                out TraversalStance stance);
+            TraverseInteractive failedTraverse = CreateInteractive("Faulted Authoritative Traverse");
+
+            MethodInfo enterMethod = typeof(TraversalStance).GetMethod(
+                "OnTraverseEnter",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.That(enterMethod, Is.Not.Null);
+            TraversalToken failedToken = await (Task<TraversalToken>)enterMethod.Invoke(
+                stance,
+                new object[] { failedTraverse });
+            Assert.That(stance.Traverse, Is.SameAs(failedTraverse));
+
+            bool recovered = (bool)InvokePrivateResult(
+                controller,
+                "TryRecoverFailedAuthoritativeTraversal",
+                stance,
+                failedTraverse,
+                failedToken,
+                TraversalActionType.EnterTraverseInteractive);
+
+            Assert.That(recovered, Is.True);
+            Assert.That(failedToken.IsCancelled, Is.True);
+            Assert.That(stance.Traverse, Is.Null);
+            Assert.That(stance.NetworkSnapshotToken, Is.Null);
+            Assert.That((bool)GetProperty(stance, "AllowMovement"), Is.True);
+        }
+
+        [Test]
+        public async Task FaultedAuthoritativeTraversal_StaleTaskCannotClearNewerTraverse()
+        {
+            NetworkTraversalController controller = CreateRemoteController(
+                119,
+                out _,
+                out TraversalStance stance);
+            TraverseInteractive staleTraverse = CreateInteractive("Stale Faulted Traverse");
+            TraverseInteractive currentTraverse = CreateInteractive("Current Authoritative Traverse");
+
+            MethodInfo enterMethod = typeof(TraversalStance).GetMethod(
+                "OnTraverseEnter",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.That(enterMethod, Is.Not.Null);
+            TraversalToken staleToken = await (Task<TraversalToken>)enterMethod.Invoke(
+                stance,
+                new object[] { staleTraverse });
+
+            Assert.That(stance.NetworkClearSnapshot(), Is.True);
+            Assert.That(stance.NetworkRestoreInteractiveSnapshot(currentTraverse, Vector3.zero), Is.True);
+            TraversalToken currentToken = stance.NetworkSnapshotToken;
+
+            bool recovered = (bool)InvokePrivateResult(
+                controller,
+                "TryRecoverFailedAuthoritativeTraversal",
+                stance,
+                staleTraverse,
+                staleToken,
+                TraversalActionType.EnterTraverseInteractive);
+
+            Assert.That(recovered, Is.False);
+            Assert.That(stance.Traverse, Is.SameAs(currentTraverse));
+            Assert.That(stance.NetworkSnapshotToken, Is.SameAs(currentToken));
+            Assert.That(currentToken.IsCancelled, Is.False);
+        }
+
+        [Test]
         public void AuthoritativeStateMatch_RequiresExactTraversalIdentity()
         {
             NetworkTraversalController controller = CreateRemoteController(
@@ -717,6 +846,296 @@ namespace Arawn.GameCreator2.Networking.Traversal.Tests
         }
 
         [Test]
+        public async Task RemoteLiveInteractiveEnter_UsesSnapshotShellWithoutRunningGameplayMotion()
+        {
+            NetworkTraversalController controller = CreateRemoteController(
+                124,
+                out Character character,
+                out TraversalStance stance);
+            TraverseInteractive interactive = CreateInteractive("Remote Live Enter Traverse");
+            MotionInteractive motion = Track(ScriptableObject.CreateInstance<MotionInteractive>());
+            SetPrivateField(interactive, "m_Motion", motion);
+            SetPrivateField(
+                motion,
+                "m_OnStart",
+                new RunInstructionsList(new CountingInstruction()));
+
+            CountingInstruction.Reset();
+            try
+            {
+                controller.ReceiveTraversalChangeBroadcast(
+                    CreateInteractiveEnterBroadcast(controller, interactive, 31, 3101));
+                await WaitForClientApplyToSettle(controller);
+                await Task.Yield();
+
+                Assert.That(stance.Traverse, Is.SameAs(interactive));
+                Assert.That(
+                    (bool)GetProperty(stance, "AllowMovement"),
+                    Is.False,
+                    "An observer must not run local traversal input against an owner's interactive state");
+                Assert.That(
+                    GetPrivateField<bool>(controller, "m_IsSnapshotRestoredTraversal"),
+                    Is.True,
+                    "A live observer enter must use the same presentation shell as a late-join snapshot");
+                Assert.That(stance.NetworkSnapshotToken, Is.Not.Null);
+                Assert.That(stance.NetworkSnapshotToken.IsCancelled, Is.False);
+                Assert.That(
+                    character.Driver.UpdateKinematics,
+                    Is.True,
+                    "A RemoteClient must not start MotionInteractive's full update loop");
+                Assert.That(
+                    CountingInstruction.RunCount,
+                    Is.Zero,
+                    "A live observer enter must not execute MotionInteractive m_OnStart gameplay instructions");
+                Assert.That(
+                    GetPrivateField<uint>(controller, "m_LastAppliedStateVersion"),
+                    Is.EqualTo(31));
+            }
+            finally
+            {
+                CountingInstruction.Reset();
+            }
+        }
+
+        [Test]
+        public async Task RemoteLiveInteractiveReplacement_PresentsAuthoredTransitionWithoutTeleport()
+        {
+            NetworkTraversalController controller = CreateRemoteController(
+                127,
+                out Character character,
+                out TraversalStance stance);
+            TraverseInteractive source = CreateInteractive("Remote Transition Source");
+            TraverseInteractive target = CreateInteractive("Remote Transition Target");
+            MotionInteractive sourceMotion = Track(
+                ScriptableObject.CreateInstance<MotionInteractive>());
+            MotionInteractive targetMotion = Track(
+                ScriptableObject.CreateInstance<MotionInteractive>());
+            SetPrivateField(sourceMotion, "m_Anchor", Anchor.Center);
+            SetPrivateField(targetMotion, "m_Anchor", Anchor.Center);
+            SetPrivateField(source, "m_Motion", sourceMotion);
+            SetPrivateField(target, "m_Motion", targetMotion);
+            target.transform.position = Vector3.right * 2f;
+
+            AnimationClip exitClip = CreateTestClip("Remote Ledge Exit", 0.75f);
+            AnimationClip enterClip = CreateTestClip("Remote Ledge Enter", 0.8f);
+            SetAllTransitionClips(sourceMotion.m_ExitAnimations, exitClip);
+            SetAllTransitionClips(targetMotion.m_EnterAnimations, enterClip);
+            SetPrivateField(
+                targetMotion,
+                "m_OnStart",
+                new RunInstructionsList(new CountingInstruction()));
+
+            controller.ReceiveFullSnapshot(
+                CreateActiveInteractiveSnapshot(controller, source, 30));
+            await WaitForClientApplyToSettle(controller);
+            Assert.That(stance.Traverse, Is.SameAs(source));
+
+            Vector3 transportRoot = new Vector3(0f, 0.5f, 0f);
+            character.transform.position = transportRoot;
+            CountingInstruction.Reset();
+            try
+            {
+                controller.ReceiveTraversalChangeBroadcast(
+                    CreateInteractiveEnterBroadcast(controller, target, 31, 3102));
+                await WaitForClientApplyToSettle(controller);
+
+                Assert.That(stance.Traverse, Is.SameAs(target));
+                Assert.That(
+                    (bool)GetProperty(stance, "AllowMovement"),
+                    Is.False,
+                    "The connection presentation must remain an input-free observer shell");
+                Assert.That(
+                    character.Driver.UpdateKinematics,
+                    Is.True,
+                    "The observer must not start MotionInteractive's gameplay update loop");
+                Assert.That(
+                    Vector3.Distance(character.transform.position, transportRoot),
+                    Is.LessThan(0.01f),
+                    "Starting the presentation gesture must not write or teleport the remote root");
+                Assert.That(CountingInstruction.RunCount, Is.Zero);
+                Assert.That(
+                    character.Gestures.IsPlaying,
+                    Is.True,
+                    "The live A-to-B observer replacement must start its local transition gesture");
+                Assert.That(HasActiveGestureClip(character, exitClip), Is.True);
+                Assert.That(
+                    HasActiveGestureClip(character, enterClip),
+                    Is.False,
+                    "The target enter gesture must not start before the authored exit overlap");
+                Assert.That(
+                    await WaitForActiveGestureClip(character, enterClip, 2f),
+                    Is.True,
+                    "The target enter gesture must start after the source exit gesture");
+
+                NetworkTraversalSnapshot matchingSnapshot = CreateActiveInteractiveSnapshot(
+                    controller,
+                    target,
+                    31);
+                matchingSnapshot.RelativePosition = new Vector3(0f, 0f, 0.5f);
+                controller.ReceiveFullSnapshot(matchingSnapshot);
+                await Task.Yield();
+
+                Assert.That(
+                    GetProperty(stance, "RelativePosition"),
+                    Is.EqualTo(matchingSnapshot.RelativePosition),
+                    "The matching snapshot still updates semantic traversal state");
+                Assert.That(
+                    Vector3.Distance(character.transform.position, transportRoot),
+                    Is.LessThan(0.01f),
+                    "The matching full snapshot must leave Fusion/PurrNet root interpolation intact");
+            }
+            finally
+            {
+                CountingInstruction.Reset();
+            }
+        }
+
+        [Test]
+        public async Task RemoteSnapshotFirstReplacement_DefersGestureUntilMatchingLiveBroadcast()
+        {
+            NetworkTraversalController controller = CreateRemoteController(
+                128,
+                out Character character,
+                out TraversalStance stance);
+            TraverseInteractive source = CreateInteractive("Snapshot First Source");
+            TraverseInteractive target = CreateInteractive("Snapshot First Target");
+            MotionInteractive sourceMotion = Track(
+                ScriptableObject.CreateInstance<MotionInteractive>());
+            MotionInteractive targetMotion = Track(
+                ScriptableObject.CreateInstance<MotionInteractive>());
+            SetPrivateField(sourceMotion, "m_Anchor", Anchor.Center);
+            SetPrivateField(targetMotion, "m_Anchor", Anchor.Center);
+            SetPrivateField(source, "m_Motion", sourceMotion);
+            SetPrivateField(target, "m_Motion", targetMotion);
+            target.transform.position = Vector3.up * 2f;
+
+            AnimationClip exitClip = CreateTestClip("Snapshot First Exit", 0.5f);
+            AnimationClip enterClip = CreateTestClip("Snapshot First Enter", 0.65f);
+            SetAllTransitionClips(sourceMotion.m_ExitAnimations, exitClip);
+            SetAllTransitionClips(targetMotion.m_EnterAnimations, enterClip);
+
+            controller.ReceiveFullSnapshot(
+                CreateActiveInteractiveSnapshot(controller, source, 40));
+            await WaitForClientApplyToSettle(controller);
+
+            Vector3 transportRoot = new Vector3(0f, 0.5f, 0f);
+            character.transform.position = transportRoot;
+            controller.ReceiveFullSnapshot(
+                CreateActiveInteractiveSnapshot(controller, target, 41));
+            await WaitForClientApplyToSettle(controller);
+
+            Assert.That(stance.Traverse, Is.SameAs(target));
+            Assert.That(
+                Vector3.Distance(character.transform.position, transportRoot),
+                Is.LessThan(0.01f));
+            Assert.That(
+                character.Gestures.IsPlaying,
+                Is.False,
+                "A persistent snapshot alone must not replay an historical transition");
+
+            controller.ReceiveTraversalChangeBroadcast(
+                CreateInteractiveEnterBroadcast(controller, target, 41, 4101));
+            await Task.Yield();
+
+            Assert.That(
+                HasActiveGestureClip(character, exitClip),
+                Is.True,
+                "The matching live broadcast must recover the deferred source exit gesture");
+            Assert.That(
+                HasActiveGestureClip(character, enterClip),
+                Is.False,
+                "The deferred target enter gesture must preserve source-before-target ordering");
+            Assert.That(
+                await WaitForActiveGestureClip(character, enterClip, 2f),
+                Is.True,
+                "The matching live broadcast must recover the deferred target enter gesture");
+            Assert.That(
+                Vector3.Distance(character.transform.position, transportRoot),
+                Is.LessThan(0.01f));
+        }
+
+        [Test]
+        public async Task RemoteLiveEnterAndSnapshotFirst_ConvergeToEquivalentPresentationState()
+        {
+            NetworkTraversalController liveFirstController = CreateRemoteController(
+                125,
+                out Character liveFirstCharacter,
+                out TraversalStance liveFirstStance);
+            NetworkTraversalController snapshotFirstController = CreateRemoteController(
+                126,
+                out Character snapshotFirstCharacter,
+                out TraversalStance snapshotFirstStance);
+            TraverseInteractive interactive = CreateInteractive("Remote Enter Ordering Traverse");
+            MotionInteractive motion = Track(ScriptableObject.CreateInstance<MotionInteractive>());
+            SetPrivateField(interactive, "m_Motion", motion);
+
+            const uint stateVersion = 41;
+            NetworkTraversalSnapshot liveFirstSnapshot = CreateActiveInteractiveSnapshot(
+                liveFirstController,
+                interactive,
+                stateVersion);
+            NetworkTraversalSnapshot snapshotFirstSnapshot = CreateActiveInteractiveSnapshot(
+                snapshotFirstController,
+                interactive,
+                stateVersion);
+            Vector3 authoritativeRelativePosition = new Vector3(0f, 0f, 0.75f);
+            liveFirstSnapshot.RelativePosition = authoritativeRelativePosition;
+            snapshotFirstSnapshot.RelativePosition = authoritativeRelativePosition;
+
+            liveFirstController.ReceiveTraversalChangeBroadcast(
+                CreateInteractiveEnterBroadcast(
+                    liveFirstController,
+                    interactive,
+                    stateVersion,
+                    4101));
+            await WaitForClientApplyToSettle(liveFirstController);
+            liveFirstController.ReceiveFullSnapshot(liveFirstSnapshot);
+
+            snapshotFirstController.ReceiveFullSnapshot(snapshotFirstSnapshot);
+            await WaitForClientApplyToSettle(snapshotFirstController);
+            snapshotFirstController.ReceiveTraversalChangeBroadcast(
+                CreateInteractiveEnterBroadcast(
+                    snapshotFirstController,
+                    interactive,
+                    stateVersion,
+                    4102));
+            await Task.Yield();
+
+            Assert.That(liveFirstStance.Traverse, Is.SameAs(interactive));
+            Assert.That(snapshotFirstStance.Traverse, Is.SameAs(interactive));
+            Assert.That(
+                GetProperty(liveFirstStance, "RelativePosition"),
+                Is.EqualTo(GetProperty(snapshotFirstStance, "RelativePosition")));
+            Assert.That(
+                GetProperty(liveFirstStance, "RelativePosition"),
+                Is.EqualTo(authoritativeRelativePosition));
+            Assert.That(
+                (bool)GetProperty(liveFirstStance, "AllowMovement"),
+                Is.False);
+            Assert.That(
+                (bool)GetProperty(snapshotFirstStance, "AllowMovement"),
+                Is.False);
+            Assert.That(
+                GetPrivateField<bool>(liveFirstController, "m_IsSnapshotRestoredTraversal"),
+                Is.True);
+            Assert.That(
+                GetPrivateField<bool>(snapshotFirstController, "m_IsSnapshotRestoredTraversal"),
+                Is.True);
+            Assert.That(
+                GetPrivateField<uint>(liveFirstController, "m_LastAppliedStateVersion"),
+                Is.EqualTo(stateVersion));
+            Assert.That(
+                GetPrivateField<uint>(snapshotFirstController, "m_LastAppliedStateVersion"),
+                Is.EqualTo(stateVersion));
+            Assert.That(liveFirstStance.NetworkSnapshotToken, Is.Not.Null);
+            Assert.That(snapshotFirstStance.NetworkSnapshotToken, Is.Not.Null);
+            Assert.That(liveFirstStance.NetworkSnapshotToken.IsCancelled, Is.False);
+            Assert.That(snapshotFirstStance.NetworkSnapshotToken.IsCancelled, Is.False);
+            Assert.That(liveFirstCharacter.Driver.UpdateKinematics, Is.True);
+            Assert.That(snapshotFirstCharacter.Driver.UpdateKinematics, Is.True);
+        }
+
+        [Test]
         public async Task RepeatedInteractiveSnapshot_DoesNotPullActiveLocalOwnerBackToStalePose()
         {
             NetworkTraversalController controller = CreateController(
@@ -724,11 +1143,6 @@ namespace Arawn.GameCreator2.Networking.Traversal.Tests
                 isLocalClient: true,
                 out Character character,
                 out TraversalStance stance);
-            NetworkCharacter networkCharacter = character.GetComponent<NetworkCharacter>();
-            networkCharacter.InitializeNetworkRole(
-                isServer: false,
-                isOwner: true,
-                isHost: false);
             controller.Initialize(isServer: false, isLocalClient: true);
 
             TraverseInteractive interactive = CreateInteractive("Owner Repeated Snapshot Traverse");
@@ -778,7 +1192,7 @@ namespace Arawn.GameCreator2.Networking.Traversal.Tests
         }
 
         [Test]
-        public void NewerServerInteractiveSnapshot_CorrectsLocallyClearedState()
+        public async Task NewerServerInteractiveSnapshot_CorrectsLocallyClearedState()
         {
             NetworkTraversalController controller = CreateRemoteController(
                 111,
@@ -788,6 +1202,7 @@ namespace Arawn.GameCreator2.Networking.Traversal.Tests
 
             controller.ReceiveFullSnapshot(
                 CreateActiveInteractiveSnapshot(controller, authoritative, 1));
+            await WaitForClientApplyToSettle(controller);
             Assert.That(stance.Traverse, Is.SameAs(authoritative));
 
             InvokePrivateResult(
@@ -800,6 +1215,7 @@ namespace Arawn.GameCreator2.Networking.Traversal.Tests
 
             controller.ReceiveFullSnapshot(
                 CreateActiveInteractiveSnapshot(controller, authoritative, 2));
+            await WaitForClientApplyToSettle(controller);
             Assert.That(stance.Traverse, Is.SameAs(authoritative));
             Assert.That(GetPrivateField<uint>(controller, "m_LastAppliedStateVersion"), Is.EqualTo(2));
         }
@@ -1155,12 +1571,7 @@ namespace Arawn.GameCreator2.Networking.Traversal.Tests
                 isLocalClient: true,
                 out Character character,
                 out TraversalStance stance);
-            NetworkCharacter networkCharacter = character.GetComponent<NetworkCharacter>();
             character.Kernel.ChangeDriver(character, new UnitDriverNetworkClient());
-            networkCharacter.InitializeNetworkRole(
-                isServer: false,
-                isOwner: true,
-                isHost: false);
             controller.Initialize(isServer: false, isLocalClient: true);
             SetPrivateField(controller, "m_OptimisticUpdates", true);
 
@@ -1237,7 +1648,7 @@ namespace Arawn.GameCreator2.Networking.Traversal.Tests
         public void ClientPredictionReplay_CapturesAndHonorsDisabledKinematics()
         {
             GameObject gameObject = Track(new GameObject("Traversal Kinematics Replay"));
-            Character character = gameObject.AddComponent<Character>();
+            Character character = EditModeLifecycle.AddComponent<Character>(gameObject);
             var driver = new UnitDriverNetworkClient();
             driver.OnStartup(character);
 
@@ -1312,7 +1723,7 @@ namespace Arawn.GameCreator2.Networking.Traversal.Tests
                 useSetPosition
                     ? "Interactive SetPosition Prediction Replay"
                     : "PullUp AddPosition Prediction Replay"));
-            Character character = gameObject.AddComponent<Character>();
+            Character character = EditModeLifecycle.AddComponent<Character>(gameObject);
             var driver = new UnitDriverNetworkClient();
             driver.OnStartup(character);
 
@@ -1379,7 +1790,7 @@ namespace Arawn.GameCreator2.Networking.Traversal.Tests
         public void ServerSimulation_HonorsDisabledKinematicsAndPreservesTraversalVelocity()
         {
             GameObject gameObject = Track(new GameObject("Traversal Server Kinematics"));
-            Character character = gameObject.AddComponent<Character>();
+            Character character = EditModeLifecycle.AddComponent<Character>(gameObject);
             var driver = new UnitDriverNetworkServer();
             driver.OnStartup(character);
 
@@ -1417,7 +1828,7 @@ namespace Arawn.GameCreator2.Networking.Traversal.Tests
         public void ServerSimulation_SequencedTraversalDirectionSurvivesAClampedOwnerPose()
         {
             GameObject gameObject = Track(new GameObject("Sequenced Traversal Edge Intent"));
-            Character character = gameObject.AddComponent<Character>();
+            Character character = EditModeLifecycle.AddComponent<Character>(gameObject);
             var motion = new UnitMotionNetworkController { IsServer = true };
             character.Kernel.ChangeMotion(character, motion);
             var driver = new UnitDriverNetworkServer();
@@ -1473,7 +1884,7 @@ namespace Arawn.GameCreator2.Networking.Traversal.Tests
         {
             const float skinWidth = 0.08f;
             GameObject characterObject = Track(new GameObject($"Owner Pose {anchor} Character"));
-            Character character = characterObject.AddComponent<Character>();
+            Character character = EditModeLifecycle.AddComponent<Character>(characterObject);
             var driver = new UnitDriverNetworkServer();
             SetPrivateField(driver, "m_SkinWidth", skinWidth);
             SetPrivateField(character.Kernel, "m_Driver", driver);
@@ -1545,11 +1956,569 @@ namespace Arawn.GameCreator2.Networking.Traversal.Tests
                 "The next server MotionInteractive update must not move the accepted owner root");
         }
 
+        [TestCase(Anchor.Crown)]
+        [TestCase(Anchor.Center)]
+        [TestCase(Anchor.Feet)]
+        public void OwnerAuthorityPose_AllowsAuthoredSurfaceAndRejectsOffSurfaceSpoofs(
+            Anchor anchor)
+        {
+            CreateManager();
+            GameObject characterObject = Track(new GameObject(
+                $"Owner Surface Validation {anchor} Character"));
+            Character character = EditModeLifecycle.AddComponent<Character>(characterObject);
+            var driver = new UnitDriverNetworkServer();
+            SetPrivateField(character.Kernel, "m_Driver", driver);
+            driver.OnStartup(character);
+            InvokePrivateResult(character.Combat, "OnStartup", character);
+
+            TraverseInteractive interactive = CreateInteractive(
+                $"Owner Surface Validation {anchor} Traverse");
+            MotionInteractive motion = Track(ScriptableObject.CreateInstance<MotionInteractive>());
+            SetPrivateField(motion, "m_Anchor", anchor);
+            SetPrivateField(interactive, "m_Motion", motion);
+            SetPrivateField(interactive, "m_Width", 2f);
+            SetPrivateField(interactive, "m_PositionA", -1f);
+            SetPrivateField(interactive, "m_PositionB", 1f);
+            interactive.transform.SetPositionAndRotation(
+                new Vector3(4f, 2f, -3f),
+                Quaternion.Euler(-70f, 25f, 8f));
+            interactive.transform.localScale = new Vector3(0.8f, 1.2f, 1.5f);
+
+            TraversalStance stance = character.Combat.RequestStance<TraversalStance>();
+            Assert.That(
+                stance.NetworkRestoreInteractiveSnapshot(interactive, Vector3.zero),
+                Is.True);
+
+            float halfHeight = character.Motion.Height * 0.5f;
+            Vector3 anchorOffset = anchor switch
+            {
+                Anchor.Crown => Vector3.up * halfHeight,
+                Anchor.Center => Vector3.zero,
+                Anchor.Feet => Vector3.down * halfHeight,
+                _ => throw new System.ArgumentOutOfRangeException(nameof(anchor), anchor, null)
+            };
+
+            Vector3 ToOwnerRoot(Vector3 localAnchor)
+            {
+                return interactive.Transform.TransformPoint(localAnchor) - anchorOffset;
+            }
+
+            void AssertAllowed(Vector3 root)
+            {
+                NetworkInputState input = NetworkInputState.Create(
+                    Vector2.zero,
+                    sequence: 1,
+                    deltaTime: 1f / 60f,
+                    ownerAuthorityPosition: root);
+                Vector3 quantizedRoot = input.GetOwnerAuthorityPosition();
+                Assert.That(
+                    NetworkOwnerMotionAuthorityHooks.TryGetPositionRejection(
+                        character,
+                        quantizedRoot,
+                        out string rejection),
+                    Is.False,
+                    rejection);
+                Assert.That(
+                    NetworkOwnerMotionAuthorityHooks.TryGetExternalRootWriteAllowance(
+                        character,
+                        quantizedRoot,
+                        out string allowance),
+                    Is.True);
+                StringAssert.StartsWith("traversal-interactive:", allowance);
+            }
+
+            void AssertRejected(Vector3 root)
+            {
+                NetworkInputState input = NetworkInputState.Create(
+                    Vector2.zero,
+                    sequence: 2,
+                    deltaTime: 1f / 60f,
+                    ownerAuthorityPosition: root);
+                Vector3 quantizedRoot = input.GetOwnerAuthorityPosition();
+                Assert.That(
+                    NetworkOwnerMotionAuthorityHooks.TryGetPositionRejection(
+                        character,
+                        quantizedRoot,
+                        out string rejection),
+                    Is.True);
+                StringAssert.StartsWith(
+                    "traversal-interactive-off-surface:",
+                    rejection);
+                Assert.That(
+                    NetworkOwnerMotionAuthorityHooks.TryGetExternalRootWriteAllowance(
+                        character,
+                        quantizedRoot,
+                        out _),
+                    Is.False,
+                    "An off-surface owner pose must never reach the absolute-root branch");
+            }
+
+            foreach (Vector3 validLocalAnchor in new[]
+                     {
+                         new Vector3(0.4f, 0f, 0.95f),
+                         new Vector3(-1f, 0f, -1f),
+                         new Vector3(1f, 0f, 1f)
+                     })
+            {
+                AssertAllowed(ToOwnerRoot(validLocalAnchor));
+            }
+
+            Vector3 validRailRoot = ToOwnerRoot(new Vector3(0.4f, 0f, 0.95f));
+            AssertAllowed(validRailRoot + interactive.Transform.up * 0.01f);
+
+            Vector3 offPlaneRoot = validRailRoot + interactive.Transform.up * 0.05f;
+            Vector3 outsideWidthRoot = ToOwnerRoot(new Vector3(1.0625f, 0f, 0.5f));
+            Vector3 outsideEndRoot = ToOwnerRoot(new Vector3(0f, 0f, 1.034f));
+            foreach (Vector3 spoofedRoot in new[]
+                     {
+                         offPlaneRoot,
+                         outsideWidthRoot,
+                         outsideEndRoot
+                     })
+            {
+                AssertRejected(spoofedRoot);
+            }
+
+            SetPrivateField(interactive, "m_Width", -1f);
+            Assert.That(
+                NetworkOwnerMotionAuthorityHooks.TryGetPositionRejection(
+                    character,
+                    validRailRoot,
+                    out _),
+                Is.True,
+                "Malformed authored bounds must fail closed instead of widening authority");
+        }
+
+        [Test]
+        public void OwnerAuthorityPose_HostInteractiveTransition_AcceptsSamplesAndPreservesDestination()
+        {
+            CreateManager();
+            NetworkTraversalController controller = CreateHostController(
+                904,
+                NetworkPredictionBackend.BuiltIn);
+            Character character = controller.GetComponent<Character>();
+            TraversalStance stance = character.Combat.RequestStance<TraversalStance>();
+
+            TraverseInteractive destination = CreateInteractive(
+                "Host Transition Destination");
+            MotionInteractive motion = Track(
+                ScriptableObject.CreateInstance<MotionInteractive>());
+            SetPrivateField(motion, "m_Anchor", Anchor.Feet);
+            SetPrivateField(destination, "m_Motion", motion);
+            SetPrivateField(destination, "m_Width", 2f);
+            SetPrivateField(destination, "m_PositionA", -1f);
+            SetPrivateField(destination, "m_PositionB", 1f);
+            destination.transform.position = Vector3.up * 2f;
+
+            Vector3 destinationRelative = new Vector3(0.25f, 0f, 0.5f);
+            Assert.That(
+                stance.NetworkRestoreInteractiveSnapshot(
+                    destination,
+                    destinationRelative),
+                Is.True);
+            SetTraversalTransitionState(stance, true);
+
+            Vector3 intermediateRoot = character.transform.position + Vector3.up * 0.35f;
+            Assert.That(
+                NetworkOwnerMotionAuthorityHooks.TryGetPositionRejection(
+                    character,
+                    intermediateRoot,
+                    out string rejection),
+                Is.False,
+                rejection);
+            Assert.That(
+                NetworkOwnerMotionAuthorityHooks.TryGetExternalRootWriteAllowance(
+                    character,
+                    intermediateRoot,
+                    out string allowance),
+                Is.True);
+            StringAssert.StartsWith("traversal-interactive-transition:", allowance);
+
+            NetworkOwnerMotionAuthorityHooks.NotifyPositionAccepted(
+                character,
+                intermediateRoot);
+            Assert.That(
+                GetTraversalRelativePosition(stance),
+                Is.EqualTo(destinationRelative),
+                "An accepted Host transition sample must not overwrite GC2's stored " +
+                "destination pose while MotionInteractive is still easing toward it");
+        }
+
+        [Test]
+        public void OwnerAuthorityPose_ConnectedClientInteractiveTransition_RemainsRejected()
+        {
+            CreateManager();
+            GameObject characterObject = Track(new GameObject(
+                "Connected Client Transition Server Replica"));
+            Character character = EditModeLifecycle.AddComponent<Character>(characterObject);
+            NetworkCharacter networkCharacter =
+                EditModeLifecycle.AddComponent<NetworkCharacter>(characterObject);
+            networkCharacter.SetManualNetworkId(905);
+            NetworkTraversalController controller =
+                EditModeLifecycle.AddComponent<NetworkTraversalController>(characterObject);
+            EditModeLifecycle.InitializeNetworkRole(
+                networkCharacter,
+                isServer: true,
+                isOwner: false,
+                isHost: true,
+                hasAuthenticatedPlayerOwner: true);
+            controller.Initialize(isServer: true, isLocalClient: false);
+
+            TraverseInteractive destination = CreateInteractive(
+                "Connected Client Transition Destination");
+            MotionInteractive motion = Track(
+                ScriptableObject.CreateInstance<MotionInteractive>());
+            SetPrivateField(motion, "m_Anchor", Anchor.Feet);
+            SetPrivateField(destination, "m_Motion", motion);
+            TraversalStance stance = character.Combat.RequestStance<TraversalStance>();
+            Assert.That(
+                stance.NetworkRestoreInteractiveSnapshot(destination, Vector3.zero),
+                Is.True);
+            SetTraversalTransitionState(stance, true);
+
+            Assert.That(networkCharacter.IsServerInstance, Is.True);
+            Assert.That(networkCharacter.IsOwnerInstance, Is.False);
+            Assert.That(
+                NetworkOwnerMotionAuthorityHooks.TryGetPositionRejection(
+                    character,
+                    character.transform.position + Vector3.up * 0.35f,
+                    out string rejection),
+                Is.True);
+            StringAssert.StartsWith(
+                "traversal-interactive-transition:",
+                rejection,
+                "A connected-client replica outside the authenticated Shared apply context " +
+                "must not reuse the transition-pose path");
+        }
+
+        [Test]
+        public void OwnerAuthorityPose_AuthenticatedSharedTransitionScope_AcceptsOnlyPlayerSampleAndPreservesDestination()
+        {
+            CreateManager();
+            GameObject characterObject = Track(new GameObject(
+                "Authenticated Shared Transition Server Replica"));
+            Character character = EditModeLifecycle.AddComponent<Character>(characterObject);
+            NetworkCharacter networkCharacter =
+                EditModeLifecycle.AddComponent<NetworkCharacter>(characterObject);
+            networkCharacter.SetManualNetworkId(907);
+            NetworkTraversalController controller =
+                EditModeLifecycle.AddComponent<NetworkTraversalController>(characterObject);
+            EditModeLifecycle.InitializeNetworkRole(
+                networkCharacter,
+                isServer: true,
+                isOwner: false,
+                isHost: true,
+                hasAuthenticatedPlayerOwner: true);
+            controller.Initialize(isServer: true, isLocalClient: false);
+
+            var driver = new AuthenticatedRemoteOwnerPoseDriver();
+            SetPrivateField(character.Kernel, "m_Driver", driver);
+            driver.OnStartup(character);
+
+            SetPrivateField(
+                networkCharacter,
+                "m_ActorType",
+                NetworkCharacterActorType.PlayerOwned);
+
+            TraverseInteractive source = CreateInteractive(
+                "Authenticated Shared Transition Source");
+            MotionInteractive sourceMotion = Track(
+                ScriptableObject.CreateInstance<MotionInteractive>());
+            SetPrivateField(sourceMotion, "m_Anchor", Anchor.Feet);
+            SetPrivateField(source, "m_Motion", sourceMotion);
+
+            TraverseInteractive destination = CreateInteractive(
+                "Authenticated Shared Transition Destination");
+            MotionInteractive motion = Track(
+                ScriptableObject.CreateInstance<MotionInteractive>());
+            SetPrivateField(motion, "m_Anchor", Anchor.Feet);
+            SetPrivateField(destination, "m_Motion", motion);
+            SetPrivateField(destination, "m_Width", 2f);
+            SetPrivateField(destination, "m_PositionA", -1f);
+            SetPrivateField(destination, "m_PositionB", 1f);
+            destination.transform.position = Vector3.up * 2f;
+
+            TraversalStance stance = character.Combat.RequestStance<TraversalStance>();
+            Vector3 destinationRelative = new Vector3(0.15f, 0f, 0.65f);
+            Assert.That(
+                stance.NetworkRestoreInteractiveSnapshot(
+                    destination,
+                    destinationRelative),
+                Is.True);
+            SetTraversalTransitionState(stance, true);
+
+            Vector3 transitionStartRoot = character.transform.position;
+            Vector3 transitionTargetRoot = transitionStartRoot +
+                (destination.CalculateStartPosition(character) -
+                 motion.CharacterPosition(character));
+            Assert.That(networkCharacter.IsPlayerOwnedActor, Is.True);
+            Assert.That(networkCharacter.HasAuthenticatedPlayerOwner, Is.True);
+            Assert.That(character.Driver, Is.SameAs(driver));
+            Assert.That(character.Driver, Is.AssignableTo<INetworkServerOwnerMotionAuthority>());
+            Assert.That(
+                Vector3.Distance(transitionStartRoot, transitionTargetRoot),
+                Is.GreaterThan(Traverse.MIN_DISTANCE_TRANSITION));
+            InvokePrivateResult(
+                controller,
+                "ArmServerRemoteInteractiveTransitionAuthorization",
+                source,
+                destination,
+                4701u);
+            InvokePrivateResult(controller, "OpenServerOwnerMotionWindow", 4701u);
+            object authorization = GetPrivateField<object>(
+                controller,
+                "m_ServerRemoteInteractiveTransitionAuthorization");
+            FieldInfo authorizationCorrelation = FindField(
+                authorization.GetType(),
+                "CorrelationId");
+            FieldInfo authorizationStart = FindField(
+                authorization.GetType(),
+                "StartRootPosition");
+            FieldInfo authorizationTarget = FindField(
+                authorization.GetType(),
+                "TargetRootPosition");
+            Assert.That(
+                (uint)authorizationCorrelation.GetValue(authorization),
+                Is.EqualTo(4701u),
+                "The transition corridor must arm for the authenticated remote player.");
+            Assert.That(
+                GetPrivateField<bool>(controller, "m_ServerOwnerMotionWindowOpen"),
+                Is.True);
+            Assert.That(
+                GetPrivateField<uint>(controller, "m_ServerOwnerMotionOperationId"),
+                Is.EqualTo(4701u));
+
+            Vector3 intermediateRoot = Vector3.Lerp(
+                transitionStartRoot,
+                transitionTargetRoot,
+                0.25f);
+            Vector3 authorizedStart = (Vector3)authorizationStart.GetValue(authorization);
+            Vector3 authorizedTarget = (Vector3)authorizationTarget.GetValue(authorization);
+            Assert.That(
+                (bool)InvokePrivateResult(
+                    controller,
+                    "AllowsAuthenticatedRemoteInteractiveTransitionPose",
+                    destination,
+                    intermediateRoot),
+                Is.True,
+                "The synthetic server fixture must have the same correlated corridor and " +
+                "owner-motion window that the real Shared request opens before testing the " +
+                $"transport-owned apply scope. expected={transitionStartRoot:F3}->" +
+                $"{transitionTargetRoot:F3} authorized={authorizedStart:F3}->" +
+                $"{authorizedTarget:F3} sample={intermediateRoot:F3}");
+            Assert.That(
+                NetworkOwnerMotionAuthorityHooks.TryGetPositionRejection(
+                    character,
+                    intermediateRoot,
+                    out _),
+                Is.True,
+                "A server replica has no transition authority outside the transport-owned scope");
+
+            driver.IsApplyingAuthenticatedRemoteOwnerPose = true;
+            Assert.That(
+                NetworkOwnerMotionAuthorityHooks.TryGetPositionRejection(
+                    character,
+                    intermediateRoot,
+                    out string scopedRejection),
+                Is.False,
+                scopedRejection);
+            Assert.That(
+                NetworkOwnerMotionAuthorityHooks.TryGetExternalRootWriteAllowance(
+                    character,
+                    intermediateRoot,
+                    out string scopedAllowance),
+                Is.True);
+            StringAssert.StartsWith(
+                "traversal-interactive-transition:",
+                scopedAllowance);
+            NetworkOwnerMotionAuthorityHooks.NotifyPositionAccepted(
+                character,
+                intermediateRoot);
+            Assert.That(
+                GetTraversalRelativePosition(stance),
+                Is.EqualTo(destinationRelative),
+                "The Shared master's accepted intermediate pose must not replace GC2's " +
+                "authored destination while the transition is easing");
+
+            SetPrivateField(
+                networkCharacter,
+                "m_ActorType",
+                NetworkCharacterActorType.NPC);
+            Assert.That(
+                NetworkOwnerMotionAuthorityHooks.TryGetPositionRejection(
+                    character,
+                    intermediateRoot,
+                    out _),
+                Is.True,
+                "Even an asserted transport scope must not authorize an explicitly classified NPC");
+
+            SetPrivateField(
+                networkCharacter,
+                "m_ActorType",
+                NetworkCharacterActorType.PlayerOwned);
+            SetPrivateField(
+                networkCharacter,
+                "m_RuntimeHasAuthenticatedPlayerOwner",
+                false);
+            Assert.That(
+                NetworkOwnerMotionAuthorityHooks.TryGetPositionRejection(
+                    character,
+                    intermediateRoot,
+                    out _),
+                Is.True,
+                "The scoped context must not authorize an unauthenticated player object");
+
+            SetPrivateField(
+                networkCharacter,
+                "m_RuntimeHasAuthenticatedPlayerOwner",
+                true);
+
+            Vector3 onSurfaceOutsideCorridor =
+                transitionTargetRoot + Vector3.right * 0.5f;
+            Assert.That(
+                NetworkOwnerMotionAuthorityHooks.TryGetPositionRejection(
+                    character,
+                    onSurfaceOutsideCorridor,
+                    out _),
+                Is.True);
+            Assert.That(
+                NetworkOwnerMotionAuthorityHooks.TryGetExternalRootWriteAllowance(
+                    character,
+                    onSurfaceOutsideCorridor,
+                    out _),
+                Is.False,
+                "Even a geometrically valid target-surface pose must not bypass the exact " +
+                "operation corridor through the allowance hook while the transition is active");
+            SetTraversalTransitionState(stance, false);
+
+            Vector3 delayedTransitionRoot = Vector3.Lerp(
+                transitionStartRoot,
+                transitionTargetRoot,
+                0.75f);
+            Assert.That(
+                NetworkOwnerMotionAuthorityHooks.TryGetPositionRejection(
+                    character,
+                    transitionTargetRoot,
+                    out string finalPreflightRejection),
+                Is.False,
+                finalPreflightRejection);
+            Assert.That(
+                (bool)InvokePrivateResult(
+                    controller,
+                    "AllowsAuthenticatedRemoteInteractiveTransitionPose",
+                    destination,
+                    delayedTransitionRoot),
+                Is.True,
+                "A merely preflighted endpoint must not consume the operation before the " +
+                "movement backend actually accepts it");
+            Assert.That(
+                NetworkOwnerMotionAuthorityHooks.TryGetPositionRejection(
+                    character,
+                    delayedTransitionRoot,
+                    out string delayedRejection),
+                Is.False,
+                delayedRejection);
+            Assert.That(
+                NetworkOwnerMotionAuthorityHooks.TryGetExternalRootWriteAllowance(
+                    character,
+                    delayedTransitionRoot,
+                    out string delayedAllowance),
+                Is.True);
+            StringAssert.StartsWith(
+                "traversal-interactive-transition:",
+                delayedAllowance,
+                "A latency-delayed pose from the correlated Shared transition must retain " +
+                "its absolute-root semantics after the authority's local GC2 flag clears");
+            NetworkOwnerMotionAuthorityHooks.NotifyPositionAccepted(
+                character,
+                delayedTransitionRoot);
+            Assert.That(
+                GetTraversalRelativePosition(stance),
+                Is.EqualTo(destinationRelative),
+                "A delayed intermediate Shared pose must not replace the stored destination");
+
+            Assert.That(
+                NetworkOwnerMotionAuthorityHooks.TryGetPositionRejection(
+                    character,
+                    transitionTargetRoot,
+                    out string finalAcceptedRejection),
+                Is.False,
+                finalAcceptedRejection);
+            NetworkOwnerMotionAuthorityHooks.NotifyPositionAccepted(
+                character,
+                transitionTargetRoot);
+            Assert.That(
+                (bool)InvokePrivateResult(
+                    controller,
+                    "AllowsAuthenticatedRemoteInteractiveTransitionPose",
+                    destination,
+                    transitionTargetRoot),
+                Is.False,
+                "The correlated corridor must close only after the backend commits its endpoint");
+
+            Assert.That(
+                NetworkOwnerMotionAuthorityHooks.TryGetPositionRejection(
+                    character,
+                    delayedTransitionRoot + Vector3.right * 0.5f,
+                    out string corridorRejection),
+                Is.True,
+                "The correlated operation must authorize only the authored transition corridor");
+            StringAssert.StartsWith(
+                "traversal-interactive-off-surface:",
+                corridorRejection);
+
+            Assert.That(
+                NetworkOwnerMotionAuthorityHooks.TryGetPositionRejection(
+                    character,
+                    character.transform.position + Vector3.one * 50f,
+                    out string offSurfaceRejection),
+                Is.True,
+                "The Shared scope must not become a general off-surface teleport path");
+            StringAssert.StartsWith(
+                "traversal-interactive-off-surface:",
+                offSurfaceRejection);
+
+            SetTraversalTransitionState(stance, true);
+            driver.IsApplyingAuthenticatedRemoteOwnerPose = false;
+            Assert.That(
+                NetworkOwnerMotionAuthorityHooks.TryGetPositionRejection(
+                    character,
+                    intermediateRoot,
+                    out _),
+                Is.True,
+                "The authenticated Shared allowance must disappear immediately after the sample");
+        }
+
+        [Test]
+        public void ServerExitSnapshot_DebouncesUntilInteractiveReplacementFrameCompletes()
+        {
+            CreateManager();
+            NetworkTraversalController controller = CreateHostController(
+                906,
+                NetworkPredictionBackend.BuiltIn);
+            IEnumerator exitSnapshot = (IEnumerator)InvokePrivateResult(
+                controller,
+                "BroadcastServerTraversalExitSnapshotNextFrame",
+                "source-traverse");
+
+            Assert.That(exitSnapshot.MoveNext(), Is.True);
+            Assert.That(
+                exitSnapshot.Current,
+                Is.Null,
+                "The first yield must defer the snapshot into the replacement frame");
+            Assert.That(exitSnapshot.MoveNext(), Is.True);
+            Assert.That(
+                exitSnapshot.Current,
+                Is.Null,
+                "The replacement frame must finish before a durable detached snapshot can be " +
+                "broadcast; entering the target during that frame cancels this coroutine");
+        }
+
         [Test]
         public async Task LedgeAnimationOverride_HoldsIntentPoseAtBoundaryAndUsesOnlyShortReleaseMemory()
         {
             GameObject characterObject = Track(new GameObject("Ledge Animation Character"));
-            Character character = characterObject.AddComponent<Character>();
+            Character character = EditModeLifecycle.AddComponent<Character>(characterObject);
             var networkPlayer = new UnitPlayerDirectionalNetwork();
             character.Kernel.ChangePlayer(character, networkPlayer);
 
@@ -1624,7 +2593,7 @@ namespace Arawn.GameCreator2.Networking.Traversal.Tests
             Assert.That(((Vector3)releaseArguments[1]).x, Is.EqualTo(-1f));
 
             IDictionary memory = GetPrivateField<IDictionary>(hooks, "m_LedgeEdgeIntentMemory");
-            int characterKey = character.GetInstanceID();
+            int characterKey = character.GetLegacyInstanceId();
             object expiredMemory = memory[characterKey];
             Assert.That(expiredMemory, Is.Not.Null);
             SetField(expiredMemory, "Timestamp", Time.time - 1f);
@@ -1715,7 +2684,7 @@ namespace Arawn.GameCreator2.Networking.Traversal.Tests
         public async Task LedgeAnimationOverride_MapsBlockedVerticalInputToForwardAndBackwardEdgeIntent()
         {
             GameObject characterObject = Track(new GameObject("Vertical Ledge Animation Character"));
-            Character character = characterObject.AddComponent<Character>();
+            Character character = EditModeLifecycle.AddComponent<Character>(characterObject);
             var networkPlayer = new UnitPlayerDirectionalNetwork();
             character.Kernel.ChangePlayer(character, networkPlayer);
 
@@ -1801,8 +2770,8 @@ namespace Arawn.GameCreator2.Networking.Traversal.Tests
         public async Task LedgeAnimationOverride_AllNonOwnerRolesUseCurrentPoseAndReplicatedIntent()
         {
             GameObject characterObject = Track(new GameObject("Observed Ledge Animation Character"));
-            Character character = characterObject.AddComponent<Character>();
-            NetworkCharacter networkCharacter = characterObject.AddComponent<NetworkCharacter>();
+            Character character = EditModeLifecycle.AddComponent<Character>(characterObject);
+            NetworkCharacter networkCharacter = EditModeLifecycle.AddComponent<NetworkCharacter>(characterObject);
             networkCharacter.SetManualNetworkId(902);
             var networkMotion = new UnitMotionNetworkController
             {
@@ -1841,6 +2810,11 @@ namespace Arawn.GameCreator2.Networking.Traversal.Tests
             {
                 (new Vector3(0f, 0f, -1f), Vector3.back, Vector3.left),
                 (new Vector3(0f, 0f, 1f), Vector3.forward, Vector3.right),
+                // The production terminal rail reports an oblique attempted direction at B.
+                // Its local-Y component can be slightly larger than local Z even though the
+                // owner is holding right. The authored boundary and outward Z component must
+                // therefore select Edge Right on every non-owner role.
+                (new Vector3(0f, 0f, 1f), new Vector3(0f, 0.737f, 0.676f), Vector3.right),
                 (Vector3.zero, Vector3.up, Vector3.up),
                 (Vector3.zero, Vector3.down, Vector3.down)
             };
@@ -1898,7 +2872,7 @@ namespace Arawn.GameCreator2.Networking.Traversal.Tests
         public void TraversalMoveDirection_LocalPredictionConsumesItsServerEcho()
         {
             GameObject characterObject = Track(new GameObject("Traversal Direction Prediction"));
-            Character character = characterObject.AddComponent<Character>();
+            Character character = EditModeLifecycle.AddComponent<Character>(characterObject);
             var motion = new UnitMotionNetworkController
             {
                 IsServer = false
@@ -1928,6 +2902,75 @@ namespace Arawn.GameCreator2.Networking.Traversal.Tests
         }
 
         [Test]
+        public void TraversalMoveDirection_ServerOwnerCoalescesRepeatedRenderCalls()
+        {
+            GameObject characterObject = Track(new GameObject("Host Traversal Direction"));
+            Character character = EditModeLifecycle.AddComponent<Character>(characterObject);
+            var motion = new UnitMotionNetworkController
+            {
+                IsServer = true
+            };
+            motion.OnStartup(character);
+
+            var broadcasts = new List<NetworkMotionCommand>();
+            motion.OnBroadcastCommand += broadcasts.Add;
+
+            for (int i = 0; i < 8; i++)
+            {
+                motion.MoveToDirection(Vector3.right, Space.World, 9);
+            }
+
+            Assert.That(
+                broadcasts.Count,
+                Is.EqualTo(1),
+                "A Host must apply traversal every render call without flooding ReliableOrdered commands");
+            Assert.That(
+                broadcasts[0].commandType,
+                Is.EqualTo(NetworkMotionCommandType.MoveToDirection));
+            Assert.That(broadcasts[0].GetVelocity(), Is.EqualTo(Vector3.right));
+            Assert.That(
+                motion.TryGetTraversalPresentationDirection(out Vector3 presentationDirection),
+                Is.True,
+                "Coalescing the wire command must not discard the Host's local traversal presentation");
+            Assert.That(presentationDirection, Is.EqualTo(Vector3.right));
+
+            motion.StopToDirection(9);
+            motion.MoveToDirection(Vector3.right, Space.World, 9);
+
+            Assert.That(broadcasts.Count, Is.EqualTo(3));
+            Assert.That(broadcasts[1].commandType, Is.EqualTo(NetworkMotionCommandType.StopDirection));
+            Assert.That(broadcasts[2].commandType, Is.EqualTo(NetworkMotionCommandType.MoveToDirection));
+        }
+
+        [Test]
+        public void TraversalMoveDirection_SendGatePreservesChangesHeartbeatAndStopStart()
+        {
+            GameObject characterObject = Track(new GameObject("Traversal Direction Send Gate"));
+            Character character = EditModeLifecycle.AddComponent<Character>(characterObject);
+            var motion = new UnitMotionNetworkController();
+            motion.OnStartup(character);
+
+            bool Gate(Vector3 velocity, float now)
+            {
+                return (bool)InvokePrivateResult(
+                    motion,
+                    "ShouldSendMoveDirectionCommandAtTime",
+                    velocity,
+                    Space.World,
+                    9,
+                    now);
+            }
+
+            Assert.That(Gate(Vector3.right, 0f), Is.True, "The first direction must send immediately");
+            Assert.That(Gate(Vector3.right, 0.049f), Is.False, "Identical render calls must coalesce");
+            Assert.That(Gate(Vector3.up, 0.05f), Is.True, "A changed direction sends at the minimum interval");
+            Assert.That(Gate(Vector3.up, 0.169f), Is.False, "Constant input waits for its heartbeat");
+            Assert.That(Gate(Vector3.up, 0.17f), Is.True, "Constant traversal input sends its heartbeat");
+            Assert.That(Gate(Vector3.zero, 0.171f), Is.True, "Stop must bypass the interval");
+            Assert.That(Gate(Vector3.right, 0.172f), Is.True, "Restart must bypass the interval");
+        }
+
+        [Test]
         public void TraversalMoveDirection_PassiveServerReplicaCannotOverrideClientOwner()
         {
             GameObject bridgeObject = Track(new GameObject("Traversal Motion Test Bridge"));
@@ -1935,8 +2978,8 @@ namespace Arawn.GameCreator2.Networking.Traversal.Tests
                 bridgeObject.AddComponent<TraversalMotionTestTransportBridge>();
 
             GameObject characterObject = Track(new GameObject("Client-Owned Server Traversal Replica"));
-            Character character = characterObject.AddComponent<Character>();
-            NetworkCharacter networkCharacter = characterObject.AddComponent<NetworkCharacter>();
+            Character character = EditModeLifecycle.AddComponent<Character>(characterObject);
+            NetworkCharacter networkCharacter = EditModeLifecycle.AddComponent<NetworkCharacter>(characterObject);
             networkCharacter.SetManualNetworkId(901);
             SetPrivateField(networkCharacter, "m_RuntimeIsServer", true);
             SetPrivateField(networkCharacter, "m_RuntimeIsOwner", false);
@@ -1977,15 +3020,34 @@ namespace Arawn.GameCreator2.Networking.Traversal.Tests
             Assert.That(broadcastCount, Is.EqualTo(1));
             Assert.That(broadcast.sequenceNumber, Is.EqualTo(77));
             Assert.That(broadcast.GetVelocity(), Is.EqualTo(Vector3.right));
+
+            NetworkMotionCommand nextOwnerCommand = NetworkMotionCommand.CreateMoveToDirection(
+                Vector3.forward,
+                true,
+                9,
+                78);
+            result = (NetworkMotionResult)InvokePrivateResult(
+                motion,
+                "ProcessValidatedClientCommand",
+                nextOwnerCommand);
+
+            Assert.That(result.approved, Is.True);
+            Assert.That(
+                broadcastCount,
+                Is.EqualTo(2),
+                "Authority must forward every distinct command already throttled by its connected owner");
+            Assert.That(broadcast.sequenceNumber, Is.EqualTo(78));
+            Assert.That(broadcast.GetVelocity(), Is.EqualTo(Vector3.forward));
         }
 
         [Test]
         public async Task FreeClimbAnimationOverride_MapsAllBlockedEdgesToIntentPlane()
         {
             GameObject characterObject = Track(new GameObject("Free Climb Edge Animation Character"));
-            Character character = characterObject.AddComponent<Character>();
-            NetworkCharacter networkCharacter = characterObject.AddComponent<NetworkCharacter>();
+            Character character = EditModeLifecycle.AddComponent<Character>(characterObject);
+            NetworkCharacter networkCharacter = EditModeLifecycle.AddComponent<NetworkCharacter>(characterObject);
             networkCharacter.SetManualNetworkId(903);
+            EditModeLifecycle.InitializeNetworkRole(networkCharacter, isServer: false, isOwner: true);
 
             TraverseInteractive freeClimb = CreateInteractive("Free Climb Edge Traverse");
             MotionInteractive motion = Track(ScriptableObject.CreateInstance<MotionInteractive>());
@@ -2089,20 +3151,31 @@ namespace Arawn.GameCreator2.Networking.Traversal.Tests
 
             manager.UnregisterController(321);
             SetPrivateField(manager, "m_LogNetworkMessages", true);
+            int registrationLogs = 0;
+            void CountRegistrationLog(string condition, string stackTrace, LogType type)
+            {
+                if (type == LogType.Log &&
+                    condition == "[NetworkTraversalManager] Registered controller for NetworkId=321")
+                {
+                    registrationLogs++;
+                }
+            }
+
+            Application.logMessageReceived += CountRegistrationLog;
             try
             {
-                LogAssert.Expect(
-                    LogType.Log,
-                    "[NetworkTraversalManager] Registered controller for NetworkId=321");
-
                 manager.RegisterController(321, controller);
                 manager.RegisterController(321, controller);
 
-                LogAssert.NoUnexpectedReceived();
+                Assert.That(
+                    registrationLogs,
+                    Is.EqualTo(1),
+                    "Repeated registration of the same controller must not log twice");
                 Assert.That(manager.GetController(321), Is.SameAs(controller));
             }
             finally
             {
+                Application.logMessageReceived -= CountRegistrationLog;
                 SetPrivateField(manager, "m_LogNetworkMessages", false);
             }
         }
@@ -2167,7 +3240,26 @@ namespace Arawn.GameCreator2.Networking.Traversal.Tests
         private NetworkTraversalManager CreateManager()
         {
             m_ManagerObject = new GameObject("Traversal Replication Test Manager");
-            return m_ManagerObject.AddComponent<NetworkTraversalManager>();
+            return EditModeLifecycle.AddComponent<NetworkTraversalManager>(m_ManagerObject);
+        }
+
+        private static async Task WaitForClientApplyToSettle(
+            NetworkTraversalController controller)
+        {
+            for (int i = 0; i < 100; i++)
+            {
+                if (GetPrivateField<object>(controller, "m_ClientAuthoritativeStateApply") == null)
+                {
+                    return;
+                }
+
+                await Task.Yield();
+            }
+
+            Assert.That(
+                GetPrivateField<object>(controller, "m_ClientAuthoritativeStateApply"),
+                Is.Null,
+                "The authoritative traversal apply did not settle within 100 EditMode yields.");
         }
 
         private NetworkTraversalController CreateRemoteController(
@@ -2189,10 +3281,13 @@ namespace Arawn.GameCreator2.Networking.Traversal.Tests
             out TraversalStance stance)
         {
             GameObject gameObject = Track(new GameObject($"Traversal Controller {networkId}"));
-            character = gameObject.AddComponent<Character>();
-            NetworkCharacter networkCharacter = gameObject.AddComponent<NetworkCharacter>();
+            character = EditModeLifecycle.AddComponent<Character>(gameObject);
+            NetworkCharacter networkCharacter = EditModeLifecycle.AddComponent<NetworkCharacter>(gameObject);
             networkCharacter.SetManualNetworkId(networkId);
-            NetworkTraversalController controller = gameObject.AddComponent<NetworkTraversalController>();
+            NetworkTraversalController controller = EditModeLifecycle.AddComponent<NetworkTraversalController>(gameObject);
+            EditModeLifecycle.InitializeNetworkRole(networkCharacter,
+                isServer: false,
+                isOwner: isLocalClient);
             controller.Initialize(false, isLocalClient);
             stance = character.Combat.RequestStance<TraversalStance>();
             Assert.That(stance, Is.Not.Null);
@@ -2205,14 +3300,14 @@ namespace Arawn.GameCreator2.Networking.Traversal.Tests
             bool hostUsesClientPrediction = false)
         {
             GameObject gameObject = Track(new GameObject($"Traversal Host Controller {networkId}"));
-            Character character = gameObject.AddComponent<Character>();
-            NetworkCharacter networkCharacter = gameObject.AddComponent<NetworkCharacter>();
+            Character character = EditModeLifecycle.AddComponent<Character>(gameObject);
+            NetworkCharacter networkCharacter = EditModeLifecycle.AddComponent<NetworkCharacter>(gameObject);
             SetPrivateField(networkCharacter, "m_PredictionBackend", predictionBackend);
             SetPrivateField(networkCharacter, "m_HostOwnerUsesClientPrediction", hostUsesClientPrediction);
             networkCharacter.SetManualNetworkId(networkId);
-            NetworkTraversalController controller = gameObject.AddComponent<NetworkTraversalController>();
+            NetworkTraversalController controller = EditModeLifecycle.AddComponent<NetworkTraversalController>(gameObject);
 
-            networkCharacter.InitializeNetworkRole(isServer: true, isOwner: true, isHost: true);
+            EditModeLifecycle.InitializeNetworkRole(networkCharacter, isServer: true, isOwner: true, isHost: true);
             controller.Initialize(isServer: true, isLocalClient: true);
             Assert.That(character.Combat.RequestStance<TraversalStance>(), Is.Not.Null);
             return controller;
@@ -2226,6 +3321,78 @@ namespace Arawn.GameCreator2.Networking.Traversal.Tests
         private TraverseLink CreateLink(string name)
         {
             return Track(new GameObject(name)).AddComponent<TraverseLink>();
+        }
+
+        private AnimationClip CreateTestClip(string name, float duration)
+        {
+            AnimationClip clip = Track(new AnimationClip { name = name });
+            clip.SetCurve(
+                "__NetworkTraversalTestVisual",
+                typeof(Transform),
+                "localPosition.x",
+                AnimationCurve.Linear(0f, 0f, duration, 1f));
+            Assert.That(clip.length, Is.EqualTo(duration).Within(0.001f));
+            return clip;
+        }
+
+        private static void SetAllTransitionClips(object transitions, AnimationClip clip)
+        {
+            SetPrivateField(transitions, "m_Forward", clip);
+            SetPrivateField(transitions, "m_Backward", clip);
+            SetPrivateField(transitions, "m_Left", clip);
+            SetPrivateField(transitions, "m_Right", clip);
+            SetPrivateField(transitions, "m_Upward", clip);
+            SetPrivateField(transitions, "m_Downward", clip);
+        }
+
+        private static bool HasActiveGestureClip(Character character, AnimationClip clip)
+        {
+            if (character?.Gestures == null || clip == null) return false;
+            IList active = GetPrivateField<IList>(character.Gestures, "m_ActiveList");
+            foreach (object gesture in active)
+            {
+                if ((int)GetProperty(gesture, "AnimationClipHash") == clip.GetHashCode())
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static async Task<bool> WaitForActiveGestureClip(
+            Character character,
+            AnimationClip clip,
+            float timeoutSeconds)
+        {
+            float deadline = Time.realtimeSinceStartup + timeoutSeconds;
+            while (Time.realtimeSinceStartup < deadline)
+            {
+                if (HasActiveGestureClip(character, clip)) return true;
+                await Task.Yield();
+            }
+
+            return HasActiveGestureClip(character, clip);
+        }
+
+        private static Vector3 GetTraversalRelativePosition(TraversalStance stance)
+        {
+            PropertyInfo property = typeof(TraversalStance).GetProperty(
+                "RelativePosition",
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            Assert.That(property, Is.Not.Null);
+            return (Vector3)property.GetValue(stance);
+        }
+
+        private static void SetTraversalTransitionState(
+            TraversalStance stance,
+            bool inTransition)
+        {
+            PropertyInfo property = typeof(TraversalStance).GetProperty(
+                "InInteractiveTransition",
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            Assert.That(property, Is.Not.Null);
+            property.SetValue(stance, inTransition);
         }
 
         private NetworkTraversalSnapshot CreateActiveInteractiveSnapshot(
@@ -2246,6 +3413,29 @@ namespace Arawn.GameCreator2.Networking.Traversal.Tests
                 HasRelativePose = true,
                 RelativePosition = Vector3.zero,
                 RelativeRotation = Quaternion.identity
+            };
+        }
+
+        private static NetworkTraversalBroadcast CreateInteractiveEnterBroadcast(
+            NetworkTraversalController controller,
+            TraverseInteractive traverse,
+            uint stateVersion,
+            uint correlationId)
+        {
+            string traverseId = BuildTraverseId(traverse);
+            return new NetworkTraversalBroadcast
+            {
+                NetworkId = controller.NetworkId,
+                ActorNetworkId = controller.NetworkId,
+                CorrelationId = correlationId,
+                Action = TraversalActionType.EnterTraverseInteractive,
+                TraverseHash = StableHashUtility.GetStableHash(traverseId),
+                TraverseIdString = traverseId,
+                IsTraversing = true,
+                StateVersion = stateVersion,
+                ServerTime = stateVersion,
+                ArgsSelfNetworkId = controller.NetworkId,
+                ArgsTargetNetworkId = controller.NetworkId
             };
         }
 

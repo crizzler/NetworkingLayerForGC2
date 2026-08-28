@@ -187,7 +187,12 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             uint networkId = m_Identity.NetworkId;
             if (networkId == 0) return;
 
-            bool isOwner = m_Identity.IsOwnedBy(Runner.LocalPlayer);
+            uint ownerClientId = NetworkTransportBridge.InvalidClientId;
+            bool hasAuthenticatedPlayerOwner =
+                m_Character.ActorType != NetworkCharacterActorType.NPC &&
+                m_Identity.TryGetLogicalOwnerClientId(out ownerClientId);
+            bool isOwner = hasAuthenticatedPlayerOwner &&
+                m_Identity.IsOwnedBy(Runner.LocalPlayer);
             bool isServer = m_Bridge.IsServer;
             // A Shared master is still a graphical client peer. Treat it as host-like only for
             // character presentation so NetworkCharacter does not apply dedicated-server
@@ -204,12 +209,20 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             }
 
             m_Character.SetManualNetworkId(networkId);
-            m_Character.InitializeNetworkRole(isServer, isOwner, isHost);
+            m_Character.InitializeNetworkRole(
+                isServer,
+                isOwner,
+                isHost,
+                hasAuthenticatedPlayerOwner);
             m_Bridge.RegisterCharacter(m_Character);
 
-            if (m_Identity.TryGetLogicalOwnerClientId(out uint ownerClientId))
+            if (m_Character.IsPlayerOwnedActor && hasAuthenticatedPlayerOwner)
             {
                 m_Bridge.SetCharacterOwner(networkId, ownerClientId);
+            }
+            else
+            {
+                m_Bridge.ClearCharacterOwner(networkId);
             }
 
             m_LastNetworkId = networkId;
@@ -217,7 +230,27 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             m_LastEpoch = m_Bridge.AuthorityEpoch;
             m_Initialized = true;
 
-            if (isOwner && m_Bridge.IsClient) ArmGameplayReadiness();
+            if (NetworkCiTrace.TraversalTraceWindowActive)
+            {
+                NetworkCiTrace.Log(
+                    "fusion-role",
+                    "role-refreshed",
+                    networkId,
+                    0,
+                    $"resetExisting={resetExisting} owner={m_Identity.LogicalOwner} " +
+                    $"localPlayer={Runner.LocalPlayer} authenticated={hasAuthenticatedPlayerOwner} " +
+                    $"isOwner={isOwner} isServer={isServer} isHost={isHost} " +
+                    $"role={m_Character.CurrentRole} actorType={m_Character.EffectiveActorType} " +
+                    $"isPlayer={m_Character.Character?.IsPlayer ?? false} " +
+                    $"driver={m_Character.Character?.Driver?.GetType().Name ?? "<none>"} " +
+                    $"epoch={m_LastEpoch}",
+                    this);
+            }
+
+            if (m_Character.IsPlayerOwnedActor && isOwner && m_Bridge.IsClient)
+            {
+                ArmGameplayReadiness();
+            }
             else m_GameplayReadyPending = false;
         }
 
@@ -339,9 +372,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             bool hasAnimationMotion = false;
             var moduleIds = new HashSet<ushort>();
 
-            MonoBehaviour[] behaviours = FindObjectsByType<MonoBehaviour>(
-                FindObjectsInactive.Exclude,
-                FindObjectsSortMode.None);
+            MonoBehaviour[] behaviours = UnityObjectSearch.FindAll<MonoBehaviour>(FindObjectsInactive.Exclude);
             for (int i = 0; i < behaviours.Length; i++)
             {
                 MonoBehaviour behaviour = behaviours[i];

@@ -327,7 +327,7 @@ namespace Arawn.GameCreator2.Networking.Traversal
         private void WarnRouteInvariant(Character character, string key, string reason)
         {
             float now = Time.realtimeSinceStartup;
-            string diagnosticKey = $"{(character != null ? character.GetInstanceID() : 0)}:{key}";
+            string diagnosticKey = $"{(character != null ? character.GetLegacyInstanceId() : 0)}:{key}";
             if (m_RouteDiagnosticTimes.TryGetValue(diagnosticKey, out float previous) && now - previous < 5f)
             {
                 return;
@@ -441,8 +441,10 @@ namespace Arawn.GameCreator2.Networking.Traversal
                 out float verticalInput,
                 out string verticalInputSource);
 
-            // Remote representations have no owner input unit. They do receive the exact
+            // Remote representations have no owner input unit. They do receive the retained
             // authored Motion.MoveDirection through the priority-9 motion broadcast, however.
+            // A curved/authored rail can express that attempted direction with both local Y
+            // and Z components, so the confirmed boundary is also part of disambiguation.
             // Convert Animim's character-local intent back into the Traverse local plane so
             // every observer can make the same blocked-edge decision as the owner.
             if (TryGetObservedTraversalLocalIntent(
@@ -470,13 +472,27 @@ namespace Arawn.GameCreator2.Networking.Traversal
                 }
             }
 
+            Vector3 localPosition = GetTraversalLocalPosition(stance, interactive, character);
+            float edgePositionTolerance = GetTraversalEdgePositionTolerance(character);
+            bool horizontalInputPushesAuthoredBoundary =
+                hasHorizontalInput &&
+                ((localPosition.z <= interactive.PositionA + edgePositionTolerance &&
+                  horizontalInput < -LEDGE_EDGE_INPUT_THRESHOLD) ||
+                 (localPosition.z >= interactive.PositionB - edgePositionTolerance &&
+                  horizontalInput > LEDGE_EDGE_INPUT_THRESHOLD));
+
             // A ledge traverse is one-dimensional: ClampInBounds always fixes its local
             // Y coordinate, so forward/back input cannot produce locomotion. GC2's climb
             // controller represents that blocked direction through Intent-Y (Edge Forward /
             // Edge Backward), while a non-zero Speed-Y selects Move Forward / Move Backward.
             // Resolve the live input directly because the mapped intent remains on Z and the
             // attempted driver velocity remains on Y even though the stance cannot move.
+            // At A/B, an outward local-Z component is stronger evidence of a rail-edge push
+            // than the magnitude of an oblique local-Y component. This is what keeps a remote
+            // observer on Edge Left/Right for curved rails while preserving pure vertical
+            // Edge Forward/Backward input away from those endpoints.
             bool hasDominantVerticalInput = hasVerticalInput &&
+                                            !horizontalInputPushesAuthoredBoundary &&
                                             Mathf.Abs(verticalInput) > Mathf.Abs(horizontalInput);
             if (hasDominantVerticalInput)
             {
@@ -508,8 +524,6 @@ namespace Arawn.GameCreator2.Networking.Traversal
                 remembered = true;
             }
 
-            Vector3 localPosition = GetTraversalLocalPosition(stance, interactive, character);
-            float edgePositionTolerance = GetTraversalEdgePositionTolerance(character);
             if (Mathf.Abs(horizontalInput) < LEDGE_EDGE_INPUT_THRESHOLD)
             {
                 ClearLedgeEdgeIntent(character);
@@ -691,7 +705,7 @@ namespace Arawn.GameCreator2.Networking.Traversal
                 string signature =
                     $"{edge}:{AxisSign(targetIntent.x)},{AxisSign(targetIntent.y)}";
                 bool changed = NetworkTraversalClimbDiagnostics.HasChanged(
-                    $"free-edge-override:{character.GetInstanceID()}",
+                    $"free-edge-override:{character.GetLegacyInstanceId()}",
                     signature);
                 NetworkTraversalClimbDiagnostics.Log(
                     changed ? "FreeEdgeOverrideChange" : "FreeEdgeOverride",
@@ -708,7 +722,7 @@ namespace Arawn.GameCreator2.Networking.Traversal
                     $"speedPost={NetworkTraversalClimbDiagnostics.Vector(targetSpeed)} " +
                     $"currentSpeed={NetworkTraversalClimbDiagnostics.Vector(currentSpeed)}",
                     character,
-                    changed ? null : $"free-edge-override:{character.GetInstanceID()}");
+                    changed ? null : $"free-edge-override:{character.GetLegacyInstanceId()}");
             }
 
             return true;
@@ -829,10 +843,10 @@ namespace Arawn.GameCreator2.Networking.Traversal
         {
             if (character == null || interactive == null) return;
 
-            int key = character.GetInstanceID();
+            int key = character.GetLegacyInstanceId();
             float direction = Mathf.Sign(horizontalInput);
             bool changed = !m_LedgeEdgeIntentMemory.TryGetValue(key, out LedgeEdgeIntentMemory previous) ||
-                           previous.TraverseInstanceId != interactive.GetInstanceID() ||
+                           previous.TraverseInstanceId != interactive.GetLegacyInstanceId() ||
                            !Mathf.Approximately(previous.Direction, direction);
 
             if (changed && m_LedgeEdgeIntentMemory.ContainsKey(key))
@@ -844,7 +858,7 @@ namespace Arawn.GameCreator2.Networking.Traversal
 
             m_LedgeEdgeIntentMemory[key] = new LedgeEdgeIntentMemory
             {
-                TraverseInstanceId = interactive.GetInstanceID(),
+                TraverseInstanceId = interactive.GetLegacyInstanceId(),
                 Direction = direction,
                 Timestamp = Time.time
             };
@@ -868,13 +882,13 @@ namespace Arawn.GameCreator2.Networking.Traversal
             horizontalInput = 0f;
             if (character == null || interactive == null) return false;
 
-            int key = character.GetInstanceID();
+            int key = character.GetLegacyInstanceId();
             if (!m_LedgeEdgeIntentMemory.TryGetValue(key, out LedgeEdgeIntentMemory memory))
             {
                 return false;
             }
 
-            if (memory.TraverseInstanceId != interactive.GetInstanceID() ||
+            if (memory.TraverseInstanceId != interactive.GetLegacyInstanceId() ||
                 Time.time - memory.Timestamp > LEDGE_EDGE_INTENT_MEMORY_SECONDS)
             {
                 m_LedgeEdgeIntentMemory.Remove(key);
@@ -901,7 +915,7 @@ namespace Arawn.GameCreator2.Networking.Traversal
         internal void ClearLedgeEdgeIntent(Character character)
         {
             if (character == null) return;
-            m_LedgeEdgeIntentMemory.Remove(character.GetInstanceID());
+            m_LedgeEdgeIntentMemory.Remove(character.GetLegacyInstanceId());
         }
 
         private void ClearAllLedgeEdgeIntents()
@@ -931,7 +945,7 @@ namespace Arawn.GameCreator2.Networking.Traversal
             string signature =
                 $"{source}:{Mathf.Sign(horizontalInput)}:{pushingA}:{pushingB}:{remembered}:{overridden}";
             bool changed = NetworkTraversalClimbDiagnostics.HasChanged(
-                $"ledge-override:{character.GetInstanceID()}",
+                $"ledge-override:{character.GetLegacyInstanceId()}",
                 signature);
             NetworkTraversalClimbDiagnostics.Log(
                 changed ? "LedgeOverrideChange" : "LedgeOverride",
@@ -943,7 +957,7 @@ namespace Arawn.GameCreator2.Networking.Traversal
                 $"speedPre={NetworkTraversalClimbDiagnostics.Vector(speedBefore)} speedPost={NetworkTraversalClimbDiagnostics.Vector(speedAfter)} " +
                 $"currentSpeed={NetworkTraversalClimbDiagnostics.Vector(currentSpeed)} overridden={overridden}",
                 character,
-                changed ? null : $"ledge-override:{character.GetInstanceID()}");
+                changed ? null : $"ledge-override:{character.GetLegacyInstanceId()}");
         }
 
         private static void LogFocusedVerticalLedgeInput(
@@ -963,7 +977,7 @@ namespace Arawn.GameCreator2.Networking.Traversal
 
             string signature = $"{source}:{Mathf.Sign(verticalInput)}";
             bool changed = NetworkTraversalClimbDiagnostics.HasChanged(
-                $"ledge-vertical-override:{character.GetInstanceID()}",
+                $"ledge-vertical-override:{character.GetLegacyInstanceId()}",
                 signature);
             NetworkTraversalClimbDiagnostics.Log(
                 changed ? "LedgeVerticalOverrideChange" : "LedgeVerticalOverride",
@@ -974,7 +988,7 @@ namespace Arawn.GameCreator2.Networking.Traversal
                 $"speedPre={NetworkTraversalClimbDiagnostics.Vector(speedBefore)} speedPost={NetworkTraversalClimbDiagnostics.Vector(speedAfter)} " +
                 $"currentSpeed={NetworkTraversalClimbDiagnostics.Vector(currentSpeed)} overridden=True",
                 character,
-                changed ? null : $"ledge-vertical-override:{character.GetInstanceID()}");
+                changed ? null : $"ledge-vertical-override:{character.GetLegacyInstanceId()}");
         }
 
         private static Vector3 GetTraversalLocalPosition(

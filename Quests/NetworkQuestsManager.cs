@@ -24,7 +24,7 @@ namespace Arawn.GameCreator2.Networking.Quests
             {
                 if (s_Instance == null)
                 {
-                    s_Instance = FindFirstObjectByType<NetworkQuestsManager>();
+                    s_Instance = UnityObjectSearch.FindAny<NetworkQuestsManager>();
                 }
 
                 return s_Instance;

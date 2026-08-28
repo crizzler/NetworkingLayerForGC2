@@ -4,9 +4,11 @@ using System.Reflection;
 using System.Threading;
 using Arawn.GameCreator2.Networking;
 using Arawn.GameCreator2.Networking.Security;
+using Arawn.GameCreator2.Networking.TestUtilities;
 using Arawn.NetworkingCore;
 using Arawn.NetworkingCore.LagCompensation;
 using UnityEngine;
+using UnityEngine.TestTools;
 
 namespace Arawn.GameCreator2.Networking.Tests
 {
@@ -58,7 +60,7 @@ namespace Arawn.GameCreator2.Networking.Tests
             }
 
             var go = new UnityEngine.GameObject("SecurityManager_Test_Runtime");
-            go.AddComponent<NetworkSecurityManager>();
+            EditModeLifecycle.AddComponent<NetworkSecurityManager>(go);
             SecurityIntegration.EnsureSecurityManagerInitialized(true, () => 1f);
             return go;
         }
@@ -69,6 +71,14 @@ namespace Arawn.GameCreator2.Networking.Tests
             {
                 UnityEngine.Object.DestroyImmediate(securityManagerGo);
             }
+        }
+
+        private static void ExpectMissingSecurityManager(string module, string requestType)
+        {
+            LogAssert.Expect(
+                LogType.Error,
+                $"[SecurityIntegration] Rejecting {module}/{requestType}: " +
+                "NetworkSecurityManager is missing while running in server context.");
         }
 
         private sealed class OwnershipBootstrapTestBridge : NetworkTransportBridge
@@ -110,6 +120,44 @@ namespace Arawn.GameCreator2.Networking.Tests
 
                 SetCharacterOwner(actorNetworkId, ownerClientId);
                 return true;
+            }
+        }
+
+        [Test]
+        public void UnityObjectIdentity_LegacyKeyMatchesCurrentUnityIdentityContract()
+        {
+            var gameObject = new GameObject("Legacy object identity test");
+            try
+            {
+                #if UNITY_6000_5_OR_NEWER
+                Assert.That(
+                    gameObject.GetLegacyInstanceId(),
+                    Is.EqualTo(gameObject.GetEntityId().GetHashCode()));
+                #else
+                Assert.That(gameObject.GetLegacyInstanceId(), Is.EqualTo(gameObject.GetInstanceID()));
+                #endif
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(gameObject);
+            }
+        }
+
+        [Test]
+        public void UnityObjectIdentity_PropsRemovalAdapterAcceptsExactInstance()
+        {
+            var prefab = new GameObject("Props compatibility prefab");
+            var instance = new GameObject("Props compatibility instance");
+            var props = new GameCreator.Runtime.Characters.Props();
+
+            try
+            {
+                Assert.DoesNotThrow(() => props.RemovePrefabInstance(prefab, instance));
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(instance);
+                UnityEngine.Object.DestroyImmediate(prefab);
             }
         }
 
@@ -1399,6 +1447,7 @@ namespace Arawn.GameCreator2.Networking.Tests
             SecurityIntegration.SetModuleServerContext("Core", true);
             var ctx = NetworkRequestContext.Create(42, NetworkCorrelation.Compose(42, (ushort)1));
 
+            ExpectMissingSecurityManager("Core", "TestRequest");
             Assert.IsFalse(SecurityIntegration.ValidateModuleRequest(1, in ctx, "Core", "TestRequest"));
         }
 
@@ -1413,6 +1462,7 @@ namespace Arawn.GameCreator2.Networking.Tests
         public void SecurityIntegration_ValidateOwnership_NullManager_AuthoritativeModuleContext_ReturnsFalse()
         {
             SecurityIntegration.SetModuleServerContext("Core", true);
+            ExpectMissingSecurityManager("Core", "ValidateOwnership");
             Assert.IsFalse(SecurityIntegration.ValidateOwnership(1, 1001, "Core"));
         }
 
@@ -1422,7 +1472,7 @@ namespace Arawn.GameCreator2.Networking.Tests
             var originalResolver = SecurityIntegration.OwnershipResolver;
             UnityEngine.GameObject securityGo = EnsureSecurityManagerForServerTests();
             var bridgeGo = new UnityEngine.GameObject("OwnershipBootstrapBridge");
-            var bridge = bridgeGo.AddComponent<OwnershipBootstrapTestBridge>();
+            var bridge = EditModeLifecycle.AddComponent<OwnershipBootstrapTestBridge>(bridgeGo);
 
             try
             {
@@ -1448,7 +1498,7 @@ namespace Arawn.GameCreator2.Networking.Tests
             var originalResolver = SecurityIntegration.OwnershipResolver;
             UnityEngine.GameObject securityGo = EnsureSecurityManagerForServerTests();
             var bridgeGo = new UnityEngine.GameObject("OwnershipMismatchBridge");
-            var bridge = bridgeGo.AddComponent<OwnershipBootstrapTestBridge>();
+            var bridge = EditModeLifecycle.AddComponent<OwnershipBootstrapTestBridge>(bridgeGo);
 
             try
             {
@@ -1479,7 +1529,7 @@ namespace Arawn.GameCreator2.Networking.Tests
             var originalResolver = SecurityIntegration.OwnershipResolver;
             UnityEngine.GameObject securityGo = EnsureSecurityManagerForServerTests();
             var bridgeGo = new UnityEngine.GameObject("TargetOwnershipBootstrapBridge");
-            var bridge = bridgeGo.AddComponent<OwnershipBootstrapTestBridge>();
+            var bridge = EditModeLifecycle.AddComponent<OwnershipBootstrapTestBridge>(bridgeGo);
 
             try
             {
@@ -1537,7 +1587,7 @@ namespace Arawn.GameCreator2.Networking.Tests
             }
 
             var go = new UnityEngine.GameObject("SecurityManager_Test");
-            var manager = go.AddComponent<NetworkSecurityManager>();
+            var manager = EditModeLifecycle.AddComponent<NetworkSecurityManager>(go);
 
             try
             {
@@ -1648,6 +1698,7 @@ namespace Arawn.GameCreator2.Networking.Tests
                 return;
             }
 
+            ExpectMissingSecurityManager("Core", "Move");
             Assert.IsFalse(SecurityIntegration.ValidateCoreRequest(1, 1001, correlationId, "Move"));
         }
 
@@ -1662,6 +1713,7 @@ namespace Arawn.GameCreator2.Networking.Tests
                 return;
             }
 
+            ExpectMissingSecurityManager("Stats", "ModifyStat");
             Assert.IsFalse(SecurityIntegration.ValidateStatsRequest(1, 1001, correlationId, "ModifyStat", 42, 10f));
         }
 
@@ -1676,6 +1728,7 @@ namespace Arawn.GameCreator2.Networking.Tests
                 return;
             }
 
+            ExpectMissingSecurityManager("Melee", "Attack");
             Assert.IsFalse(SecurityIntegration.ValidateMeleeRequest(1, 1001, correlationId, "Attack"));
         }
 
@@ -1690,6 +1743,7 @@ namespace Arawn.GameCreator2.Networking.Tests
                 return;
             }
 
+            ExpectMissingSecurityManager("Shooter", "Fire");
             Assert.IsFalse(SecurityIntegration.ValidateShooterRequest(1, 1001, correlationId, "Fire"));
         }
 
@@ -1704,6 +1758,7 @@ namespace Arawn.GameCreator2.Networking.Tests
                 return;
             }
 
+            ExpectMissingSecurityManager("Abilities", "Cast");
             Assert.IsFalse(SecurityIntegration.ValidateAbilitiesRequest(1, 1001, correlationId, "Cast"));
         }
 
@@ -2435,6 +2490,10 @@ namespace Arawn.GameCreator2.Networking.Tests
             var ctx = NetworkRequestContext.Create(actorId, correlation);
 
             // With no NetworkSecurityManager, server-like requests fail closed by default.
+            ExpectMissingSecurityManager("Core", "Move");
+            ExpectMissingSecurityManager("Stats", "ModifyStat");
+            ExpectMissingSecurityManager("Melee", "Attack");
+            ExpectMissingSecurityManager("Shooter", "Fire");
             Assert.IsFalse(SecurityIntegration.ValidateModuleRequest(1, in ctx, "Core", "Move"));
             Assert.IsFalse(SecurityIntegration.ValidateModuleRequest(1, in ctx, "Stats", "ModifyStat"));
             Assert.IsFalse(SecurityIntegration.ValidateModuleRequest(1, in ctx, "Melee", "Attack"));
@@ -2538,6 +2597,7 @@ namespace Arawn.GameCreator2.Networking.Tests
             object driver = null;
             Type driverType = null;
             Component character = null;
+            NetworkCharacter networkCharacter = null;
 
             try
             {
@@ -2548,7 +2608,7 @@ namespace Arawn.GameCreator2.Networking.Tests
                 Type characterType = Type.GetType(
                     "GameCreator.Runtime.Characters.Character, GameCreator.Runtime.Core");
                 Assert.That(characterType, Is.Not.Null, "Game Creator Character type was not loaded.");
-                character = characterObject.AddComponent(characterType);
+                character = EditModeLifecycle.AddComponent(characterObject, characterType);
 
                 // Root-motion blending is outside the directional-queue behavior under test.
                 // Supply the normal Animator dependency and disable positional root motion so the
@@ -2563,16 +2623,16 @@ namespace Arawn.GameCreator2.Networking.Tests
                 rootMotionUsage.SetValue(character, false);
                 characterObject.SetActive(true);
 
-                driverType = Type.GetType(
-                    "Arawn.GameCreator2.Networking.UnitDriverNetworkServer, " +
-                    "Arawn.GameCreator2.Networking");
-                Assert.That(driverType, Is.Not.Null, "Server driver type was not loaded.");
-                driver = Activator.CreateInstance(driverType);
+                networkCharacter = EditModeLifecycle.AddComponent<NetworkCharacter>(characterObject);
+                networkCharacter.SetManualNetworkId(9001);
+                EditModeLifecycle.InitializeNetworkRole(networkCharacter,
+                    isServer: true,
+                    isOwner: true,
+                    isHost: true);
+                driver = networkCharacter.ServerDriver;
+                Assert.That(driver, Is.Not.Null, "Strict-host role did not create a server driver.");
+                driverType = driver.GetType();
                 Assert.That(driver, Is.InstanceOf<INetworkDirectionalInputSink>());
-
-                MethodInfo startup = driverType.GetMethod("OnStartup");
-                Assert.That(startup, Is.Not.Null);
-                startup.Invoke(driver, new object[] { character });
 
                 cameraObject = new GameObject("Strict Host Input Camera");
                 cameraObject.transform.rotation = Quaternion.Euler(0f, 90f, 0f);
@@ -2623,12 +2683,6 @@ namespace Arawn.GameCreator2.Networking.Tests
             }
             finally
             {
-                if (driver != null && character != null)
-                {
-                    driverType
-                        ?.GetMethod("OnDispose")
-                        ?.Invoke(driver, new object[] { character });
-                }
                 if (cameraObject != null) UnityEngine.Object.DestroyImmediate(cameraObject);
                 if (characterObject != null) UnityEngine.Object.DestroyImmediate(characterObject);
                 Physics.SyncTransforms();
@@ -2647,6 +2701,7 @@ namespace Arawn.GameCreator2.Networking.Tests
             object driver = null;
             Type driverType = null;
             Component character = null;
+            NetworkCharacter networkCharacter = null;
 
             try
             {
@@ -2657,24 +2712,24 @@ namespace Arawn.GameCreator2.Networking.Tests
                 Type characterType = Type.GetType(
                     "GameCreator.Runtime.Characters.Character, GameCreator.Runtime.Core");
                 Assert.That(characterType, Is.Not.Null, "Game Creator Character type was not loaded.");
-                character = characterObject.AddComponent(characterType);
+                character = EditModeLifecycle.AddComponent(characterObject, characterType);
+                networkCharacter = EditModeLifecycle.AddComponent<NetworkCharacter>(characterObject);
+                networkCharacter.SetManualNetworkId(9002);
+                EditModeLifecycle.InitializeNetworkRole(networkCharacter,
+                    isServer: true,
+                    isOwner: true,
+                    isHost: true);
+                driver = networkCharacter.ServerDriver;
+                Assert.That(driver, Is.Not.Null, "Server-owner role did not create a server driver.");
+                driverType = driver.GetType();
+
+                // Read the controller after the role swap. GC2 disposes the stock driver's
+                // generated controller when NetworkCharacter installs the server driver.
                 CharacterController controller = characterObject.GetComponent<CharacterController>();
-                if (controller == null)
-                {
-                    controller = characterObject.AddComponent<CharacterController>();
-                }
+                Assert.That(controller, Is.Not.Null, "Server driver did not create a native controller.");
                 controller.height = 2f;
                 controller.radius = 0.2f;
                 controller.center = Vector3.zero;
-
-                driverType = Type.GetType(
-                    "Arawn.GameCreator2.Networking.UnitDriverNetworkServer, " +
-                    "Arawn.GameCreator2.Networking");
-                Assert.That(driverType, Is.Not.Null, "Server driver type was not loaded.");
-                driver = Activator.CreateInstance(driverType);
-                MethodInfo startup = driverType.GetMethod("OnStartup");
-                Assert.That(startup, Is.Not.Null);
-                startup.Invoke(driver, new object[] { character });
 
                 object busy = characterType.GetProperty("Busy")?.GetValue(character);
                 Assert.That(busy, Is.Not.Null);
@@ -2835,12 +2890,6 @@ namespace Arawn.GameCreator2.Networking.Tests
             }
             finally
             {
-                if (driver != null && character != null)
-                {
-                    driverType
-                        ?.GetMethod("OnDispose")
-                        ?.Invoke(driver, new object[] { character });
-                }
                 if (characterObject != null) UnityEngine.Object.DestroyImmediate(characterObject);
                 autoSyncTransformsProperty?.SetValue(null, previousAutoSyncTransforms);
                 Physics.SyncTransforms();

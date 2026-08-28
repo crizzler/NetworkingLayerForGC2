@@ -143,7 +143,7 @@ namespace Arawn.GameCreator2.Networking.Dialogue
             }
 
             NetworkDialogueController[] controllers =
-                FindObjectsByType<NetworkDialogueController>(FindObjectsSortMode.None);
+                UnityObjectSearch.FindAll<NetworkDialogueController>(FindObjectsInactive.Exclude);
 
             for (int i = 0; i < controllers.Length; i++)
             {
@@ -171,7 +171,7 @@ namespace Arawn.GameCreator2.Networking.Dialogue
             }
 
             NetworkDialogueController[] controllers =
-                FindObjectsByType<NetworkDialogueController>(FindObjectsSortMode.None);
+                UnityObjectSearch.FindAll<NetworkDialogueController>(FindObjectsInactive.Exclude);
 
             for (int i = 0; i < controllers.Length; i++)
             {

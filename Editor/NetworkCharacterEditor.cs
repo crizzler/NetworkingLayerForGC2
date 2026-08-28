@@ -13,6 +13,12 @@ namespace Arawn.EnemyMasses.Editor.GameCreator2
     {
         // SERIALIZED PROPERTIES: -----------------------------------------------------------------
 
+        private SerializedProperty m_ActorType;
+        private SerializedProperty m_NPCMode;
+        private SerializedProperty m_DeterministicSeed;
+        private SerializedProperty m_PredictionBackend;
+        private SerializedProperty m_HostOwnerUsesClientPrediction;
+
         private SerializedProperty m_IKMode;
         private SerializedProperty m_FootstepsMode;
         private SerializedProperty m_InteractionMode;
@@ -43,6 +49,13 @@ namespace Arawn.EnemyMasses.Editor.GameCreator2
 
         private void OnEnable()
         {
+            m_ActorType = serializedObject.FindProperty("m_ActorType");
+            m_NPCMode = serializedObject.FindProperty("m_NPCMode");
+            m_DeterministicSeed = serializedObject.FindProperty("m_DeterministicSeed");
+            m_PredictionBackend = serializedObject.FindProperty("m_PredictionBackend");
+            m_HostOwnerUsesClientPrediction = serializedObject.FindProperty(
+                "m_HostOwnerUsesClientPrediction");
+
             m_IKMode = serializedObject.FindProperty("m_IKMode");
             m_FootstepsMode = serializedObject.FindProperty("m_FootstepsMode");
             m_InteractionMode = serializedObject.FindProperty("m_InteractionMode");
@@ -78,6 +91,10 @@ namespace Arawn.EnemyMasses.Editor.GameCreator2
 
             // Header info box
             DrawInfoBox(networkCharacter);
+
+            EditorGUILayout.Space(5);
+
+            DrawActorAuthoritySection(networkCharacter);
 
             EditorGUILayout.Space(5);
 
@@ -140,7 +157,8 @@ namespace Arawn.EnemyMasses.Editor.GameCreator2
                 "This component automatically assigns the correct driver based on network role:\n" +
                 "• Server → UnitDriverNetworkServer (authoritative)\n" +
                 "• Local Player → UnitDriverNetworkClient (prediction)\n" +
-                "• Remote Player → UnitDriverNetworkRemote (interpolation)\n\n" +
+                "• Remote Player/NPC → UnitDriverNetworkRemote (interpolation)\n" +
+                "• Authoritative NPC → preserves its authored GC2/NavMesh driver\n\n" +
                 "Configure the GC2 Character's Player and Motion units in the Character component above.",
                 MessageType.Info
             );
@@ -176,6 +194,72 @@ namespace Arawn.EnemyMasses.Editor.GameCreator2
 
             EditorGUILayout.PropertyField(m_CombatMode, new GUIContent("Combat Mode",
                 "Usually Disabled - combat should be server-authoritative"));
+
+            EditorGUILayout.EndVertical();
+        }
+
+        private void DrawActorAuthoritySection(NetworkCharacter networkCharacter)
+        {
+            EditorGUILayout.BeginVertical("box");
+            EditorGUILayout.LabelField("Actor Classification and Authority", m_HeaderStyle);
+            EditorGUILayout.PropertyField(
+                m_ActorType,
+                new GUIContent(
+                    "Actor Type",
+                    "Network authority classification. Character.IsPlayer is only a local GC2 " +
+                    "input/UI flag and cannot grant network ownership."));
+
+            NetworkCharacterActorType actorType =
+                (NetworkCharacterActorType)m_ActorType.enumValueIndex;
+            if (actorType == NetworkCharacterActorType.LegacyAutomatic)
+            {
+                EditorGUILayout.HelpBox(
+                    "Legacy Automatic preserves old prefabs, but unowned/scene characters can be " +
+                    "ambiguous. Migrate player prefabs to Player Owned and AI prefabs to NPC. " +
+                    "Authority is still derived from the authenticated transport owner, never " +
+                    "from Character.IsPlayer.",
+                    MessageType.Warning);
+
+                EditorGUILayout.BeginHorizontal();
+                if (GUILayout.Button("Migrate to Player Owned"))
+                {
+                    m_ActorType.enumValueIndex =
+                        (int)NetworkCharacterActorType.PlayerOwned;
+                }
+                if (GUILayout.Button("Migrate to NPC"))
+                {
+                    m_ActorType.enumValueIndex = (int)NetworkCharacterActorType.NPC;
+                }
+                EditorGUILayout.EndHorizontal();
+            }
+
+            if ((NetworkCharacterActorType)m_ActorType.enumValueIndex ==
+                NetworkCharacterActorType.NPC)
+            {
+                EditorGUILayout.PropertyField(m_NPCMode, new GUIContent(
+                    "NPC Sync Mode",
+                    "Server Authoritative runs gameplay AI only on server/Shared master. " +
+                    "Client-Side Deterministic is cosmetic and cannot author durable combat or Stats state."));
+                if ((NetworkCharacter.NPCSyncMode)m_NPCMode.enumValueIndex ==
+                    NetworkCharacter.NPCSyncMode.ClientSideDeterministic)
+                {
+                    EditorGUILayout.PropertyField(m_DeterministicSeed);
+                    EditorGUILayout.HelpBox(
+                        "Deterministic NPCs are cosmetic. Do not equip network Shooter/Melee/Stats " +
+                        "controllers or use them to change durable gameplay state.",
+                        MessageType.Warning);
+                }
+            }
+
+            EditorGUILayout.PropertyField(m_PredictionBackend, new GUIContent(
+                "Movement Backend",
+                "Server NPCs normally use their authored GC2/NavMesh driver. Fusion Native is " +
+                "supported; owner-predicted PurrDiction and Fusion KCC are player backends."));
+            if ((NetworkCharacterActorType)m_ActorType.enumValueIndex ==
+                NetworkCharacterActorType.PlayerOwned)
+            {
+                EditorGUILayout.PropertyField(m_HostOwnerUsesClientPrediction);
+            }
 
             EditorGUILayout.EndVertical();
         }
@@ -303,6 +387,15 @@ namespace Arawn.EnemyMasses.Editor.GameCreator2
             GUI.color = roleColor;
             EditorGUILayout.LabelField("Network Role", roleText);
             GUI.color = Color.white;
+
+            EditorGUILayout.LabelField("Authored Actor Type", networkCharacter.ActorType.ToString());
+            EditorGUILayout.LabelField("Effective Actor Type", networkCharacter.EffectiveActorType.ToString());
+            EditorGUILayout.LabelField(
+                "Authenticated Player Owner",
+                networkCharacter.HasAuthenticatedPlayerOwner ? "Resolved" : "None");
+            EditorGUILayout.LabelField(
+                "Simulation Authority",
+                networkCharacter.HasSimulationAuthority ? "Yes" : "No");
 
             // Active Driver
             if (networkCharacter.ActiveDriver != null)

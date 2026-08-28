@@ -141,7 +141,7 @@ namespace Arawn.GameCreator2.Networking.Abilities.Transport.Fusion
         {
             FusionTransportBridge candidate = m_TransportBridge;
             if (candidate == null) candidate = NetworkTransportBridge.Active as FusionTransportBridge;
-            if (candidate == null) candidate = FindFirstObjectByType<FusionTransportBridge>();
+            if (candidate == null) candidate = UnityObjectSearch.FindAny<FusionTransportBridge>();
             if (!force && candidate == m_BoundBridge) return;
             if (candidate == m_BoundBridge) return;
 
@@ -370,8 +370,7 @@ namespace Arawn.GameCreator2.Networking.Abilities.Transport.Fusion
             PrunePawnRegistry();
             if (!m_AutoRegisterScenePawns && !force) return;
 
-            Pawn[] pawns = FindObjectsByType<Pawn>(
-                FindObjectsInactive.Exclude, FindObjectsSortMode.None);
+            Pawn[] pawns = UnityObjectSearch.FindAll<Pawn>(FindObjectsInactive.Exclude);
             for (int i = 0; i < pawns.Length; i++) RegisterPawn(pawns[i]);
         }
 
@@ -568,8 +567,7 @@ namespace Arawn.GameCreator2.Networking.Abilities.Transport.Fusion
                 return characterId;
             }
 
-            NetworkCharacter[] characters = FindObjectsByType<NetworkCharacter>(
-                FindObjectsInactive.Exclude, FindObjectsSortMode.None);
+            NetworkCharacter[] characters = UnityObjectSearch.FindAll<NetworkCharacter>(FindObjectsInactive.Exclude);
             for (int i = 0; i < characters.Length; i++)
             {
                 if (characters[i] != null &&
@@ -599,7 +597,7 @@ namespace Arawn.GameCreator2.Networking.Abilities.Transport.Fusion
         {
             return NetworkAbilitiesController.HasInstance
                 ? NetworkAbilitiesController.Instance
-                : FindFirstObjectByType<NetworkAbilitiesController>();
+                : UnityObjectSearch.FindAny<NetworkAbilitiesController>();
         }
     }
 

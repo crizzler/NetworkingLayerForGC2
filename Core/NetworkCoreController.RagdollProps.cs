@@ -646,7 +646,7 @@ namespace Arawn.GameCreator2.Networking
                 GameObject prefab = GetPropPrefabByHash?.Invoke(state.PropHash);
                 if (prefab != null)
                 {
-                    character.Props.RemovePrefab(prefab, tracker.gameObject.GetInstanceID());
+                    character.Props.RemovePrefabInstance(prefab, tracker.gameObject);
                 }
                 else
                 {

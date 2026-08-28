@@ -196,7 +196,7 @@ namespace Arawn.GameCreator2.Networking
                 "OwnerWindow",
                 $"side=client operation=open duration={duration:F3} until={m_OwnerAuthorityPoseSyncUntil:F3} " +
                 $"position={NetworkTraversalClimbDiagnostics.Vector(this.Transform.position)}",
-                $"client-window-open:{this.Character?.GetInstanceID() ?? 0}");
+                $"client-window-open:{this.Character?.GetLegacyInstanceId() ?? 0}");
             LogTraversalPose(
                 $"owner-authority-pose-sync-enabled duration={duration:F3} until={m_OwnerAuthorityPoseSyncUntil:F3} " +
                 $"rootMotion={this.Character?.RootMotionPosition ?? 0f:F3} {FormatBusyState()}");
@@ -564,7 +564,7 @@ namespace Arawn.GameCreator2.Networking
                         $"ownerWindowRemaining={OwnerMotionAuthorityRemaining:F3} " +
                         $"updateKinematics={this.UpdateKinematics} grounded={IsGrounded} " +
                         $"rootMotion={this.Character.RootMotionPosition:F3}",
-                        $"client-owner-pose:{this.Character.GetInstanceID()}");
+                        $"client-owner-pose:{this.Character.GetLegacyInstanceId()}");
                     LogTraversalPose(
                         $"send-owner-authority-input seq={input.sequenceNumber} dt={input.GetDeltaTime():F3} " +
                         $"rawInput={FormatVector2(m_LastInputDirection)} networkInput={FormatVector2(networkInput)} " +
@@ -990,7 +990,7 @@ namespace Arawn.GameCreator2.Networking
                     $"grounded={IsGrounded} reconciling={m_IsReconciling} " +
                     $"ownerRemaining={Mathf.Max(0f, m_OwnerAuthorityPoseSyncUntil - Time.time):F3} " +
                     $"suppressRemaining={Mathf.Max(0f, m_ReconciliationSuppressedUntil - Time.time):F3}",
-                    $"client-reconcile:{this.Character.GetInstanceID()}");
+                    $"client-reconcile:{this.Character.GetLegacyInstanceId()}");
             }
         }
 
@@ -1809,7 +1809,7 @@ namespace Arawn.GameCreator2.Networking
                 $"pendingExternal={NetworkTraversalClimbDiagnostics.Vector(m_PendingExternalRootTranslationForTick)} " +
                 $"inputAccumulator={m_InputAccumulator:F3} ownerWindowRemaining={OwnerMotionAuthorityRemaining:F3} " +
                 $"updateKinematics={this.UpdateKinematics} grounded={IsGrounded}",
-                $"client-pullup-delta:{this.Character.GetInstanceID()}:{writer}");
+                $"client-pullup-delta:{this.Character.GetLegacyInstanceId()}:{writer}");
         }
 
         private Vector3 ConsumePendingMovementTranslationForTick()

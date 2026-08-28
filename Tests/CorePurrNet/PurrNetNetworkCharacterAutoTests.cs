@@ -10,6 +10,95 @@ namespace Arawn.GameCreator2.Networking.CorePurrNet.Tests
             typeof(PurrNetNetworkCharacterAuto).GetMethod(
                 "TryResolveInitializationOwner",
                 BindingFlags.NonPublic | BindingFlags.Static);
+        private static readonly MethodInfo NpcIdentityDecisionMethod =
+            typeof(PurrNetNetworkCharacterAuto).GetMethod(
+                "ShouldDeferExplicitNpcUntilIdentityReady",
+                BindingFlags.NonPublic | BindingFlags.Static);
+        private static readonly MethodInfo LegacyCompatibilityDecisionMethod =
+            typeof(PurrNetNetworkCharacterAuto).GetMethod(
+                "ShouldUseLegacyCompatibilityInitialization",
+                BindingFlags.NonPublic | BindingFlags.Static);
+
+        [Test]
+        [Category("GC2Networking.FreeFlow")]
+        public void ExplicitNpc_WithPurrNetIdentity_DefersUntilReplicatedIdentitySpawns()
+        {
+            Assert.That(NpcIdentityDecisionMethod, Is.Not.Null);
+
+            Assert.That(
+                DeferNpcIdentity(
+                    NetworkCharacterActorType.NPC,
+                    NetworkCharacter.NPCSyncMode.ServerAuthoritative,
+                    hasNetworkIdentity: true,
+                    identitySpawned: false,
+                    identityIdUsable: false),
+                Is.True,
+                "An observer must not register an explicit NPC under its local GC2 hash " +
+                "before PurrNet supplies the shared object id.");
+            Assert.That(
+                DeferNpcIdentity(
+                    NetworkCharacterActorType.NPC,
+                    NetworkCharacter.NPCSyncMode.ServerAuthoritative,
+                    hasNetworkIdentity: true,
+                    identitySpawned: true,
+                    identityIdUsable: false),
+                Is.True,
+                "A spawned identity without a usable replicated object id must still defer.");
+            Assert.That(
+                DeferNpcIdentity(
+                    NetworkCharacterActorType.NPC,
+                    NetworkCharacter.NPCSyncMode.ServerAuthoritative,
+                    hasNetworkIdentity: true,
+                    identitySpawned: true,
+                    identityIdUsable: true),
+                Is.False);
+            Assert.That(
+                DeferNpcIdentity(
+                    NetworkCharacterActorType.PlayerOwned,
+                    NetworkCharacter.NPCSyncMode.ServerAuthoritative,
+                    hasNetworkIdentity: true,
+                    identitySpawned: false,
+                    identityIdUsable: false),
+                Is.False,
+                "Player ownership has its separate replicated-owner readiness path.");
+            Assert.That(
+                DeferNpcIdentity(
+                    NetworkCharacterActorType.NPC,
+                    NetworkCharacter.NPCSyncMode.ClientSideDeterministic,
+                    hasNetworkIdentity: true,
+                    identitySpawned: false,
+                    identityIdUsable: false),
+                Is.False,
+                "Cosmetic client-deterministic NPCs do not author durable state and must not " +
+                "wait forever for an intentionally absent network spawn.");
+            Assert.That(
+                DeferNpcIdentity(
+                    NetworkCharacterActorType.NPC,
+                    NetworkCharacter.NPCSyncMode.ServerAuthoritative,
+                    hasNetworkIdentity: false,
+                    identitySpawned: false,
+                    identityIdUsable: false),
+                Is.False,
+                "Custom PurrNet NPC integrations without NetworkIdentity retain the normal " +
+                    "transport/manual-id path.");
+
+            Assert.That(LegacyCompatibilityDecisionMethod, Is.Not.Null);
+            Assert.That(
+                UseLegacyCompatibilityInitialization(
+                    NetworkCharacterActorType.LegacyAutomatic,
+                    identityApplicable: true,
+                    identityReady: false),
+                Is.True,
+                "An unresolved legacy character must retain the compatibility overload's " +
+                "authored-player classification during its Owner Mode fallback.");
+            Assert.That(
+                UseLegacyCompatibilityInitialization(
+                    NetworkCharacterActorType.PlayerOwned,
+                    identityApplicable: true,
+                    identityReady: false),
+                Is.False,
+                "Explicit actor types must use transport-authenticated role initialization.");
+        }
 
         [Test]
         public void ResolvedIdentityOwner_TakesPriorityOverOwnerMode()
@@ -170,6 +259,35 @@ namespace Arawn.GameCreator2.Networking.CorePurrNet.Tests
 
             bool canInitialize = (bool)OwnerDecisionMethod.Invoke(null, arguments);
             return (canInitialize, (bool)arguments[9]);
+        }
+
+        private static bool DeferNpcIdentity(
+            NetworkCharacterActorType actorType,
+            NetworkCharacter.NPCSyncMode npcSyncMode,
+            bool hasNetworkIdentity,
+            bool identitySpawned,
+            bool identityIdUsable)
+        {
+            return (bool)NpcIdentityDecisionMethod.Invoke(
+                null,
+                new object[]
+                {
+                    actorType,
+                    npcSyncMode,
+                    hasNetworkIdentity,
+                    identitySpawned,
+                    identityIdUsable
+                });
+        }
+
+        private static bool UseLegacyCompatibilityInitialization(
+            NetworkCharacterActorType actorType,
+            bool identityApplicable,
+            bool identityReady)
+        {
+            return (bool)LegacyCompatibilityDecisionMethod.Invoke(
+                null,
+                new object[] { actorType, identityApplicable, identityReady });
         }
     }
 }

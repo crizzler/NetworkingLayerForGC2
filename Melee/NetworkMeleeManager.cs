@@ -154,6 +154,12 @@ namespace Arawn.GameCreator2.Networking.Melee
         public Action<NetworkSkillBroadcast> BroadcastSkillToAllClients;
 
         /// <summary>
+        /// [Server] Assign to broadcast the latest authority-owned Free Flow presentation state.
+        /// This delegate is optional and remains unused when Free Flow Combat is not installed.
+        /// </summary>
+        public Action<NetworkFreeFlowCombatState> BroadcastFreeFlowStateToAllClients;
+
+        /// <summary>
         /// [Client] Assign to send charge requests to server.
         /// </summary>
         public Action<NetworkChargeRequest> SendChargeRequestToServer;
@@ -248,6 +254,7 @@ namespace Arawn.GameCreator2.Networking.Melee
 
         // Controller registry
         private readonly Dictionary<uint, NetworkMeleeController> m_Controllers = new(32);
+        private readonly Dictionary<uint, NetworkFreeFlowCombatAdapter> m_FreeFlowAdapters = new(32);
 
         // Presentation registry and rate-limited diagnostics
         private readonly Dictionary<int, MeleeHitEffectRegistration> m_HitEffectRegistry = new(32);
@@ -274,6 +281,7 @@ namespace Arawn.GameCreator2.Networking.Melee
 
         // Server skill queue
         private readonly Queue<QueuedSkillRequest> m_ServerSkillQueue = new(32);
+        private readonly Dictionary<ulong, float> m_TrustedServerSkillBroadcasts = new(32);
 
         // Server charge queue
         private readonly Queue<QueuedChargeRequest> m_ServerChargeQueue = new(16);
@@ -1065,6 +1073,8 @@ namespace Arawn.GameCreator2.Networking.Melee
             m_LatestCharacterStates.Clear();
             m_PendingHitBroadcasts.Clear();
             m_PendingReactionBroadcasts.Clear();
+            m_TrustedServerSkillBroadcasts.Clear();
+            m_FreeFlowAdapters.Clear();
         }
 
         // ════════════════════════════════════════════════════════════════════════════════════════
@@ -1177,6 +1187,37 @@ namespace Arawn.GameCreator2.Networking.Melee
             m_PendingCharacterStates.Remove(networkId);
         }
 
+        /// <summary>
+        /// Registers the optional Free Flow adapter for a character. Registration is independent
+        /// from the concrete Free Flow runtime so this assembly remains usable without that asset.
+        /// </summary>
+        public void RegisterFreeFlowAdapter(uint networkId, NetworkFreeFlowCombatAdapter adapter)
+        {
+            if (networkId == 0 || adapter == null) return;
+            m_FreeFlowAdapters[networkId] = adapter;
+
+            // Controller and adapter OnEnable ordering is not guaranteed. Retry the complete
+            // pending snapshot whenever either side becomes available.
+            if (m_Controllers.TryGetValue(networkId, out NetworkMeleeController controller) &&
+                controller != null &&
+                m_PendingCharacterStates.TryGetValue(networkId, out NetworkMeleeCharacterSnapshot pending) &&
+                ApplyCharacterState(controller, pending))
+            {
+                m_PendingCharacterStates.Remove(networkId);
+            }
+        }
+
+        /// <summary>Removes a Free Flow adapter without erasing authoritative late-join state.</summary>
+        public void UnregisterFreeFlowAdapter(uint networkId, NetworkFreeFlowCombatAdapter adapter)
+        {
+            if (networkId == 0 || adapter == null) return;
+            if (m_FreeFlowAdapters.TryGetValue(networkId, out NetworkFreeFlowCombatAdapter current) &&
+                current == adapter)
+            {
+                m_FreeFlowAdapters.Remove(networkId);
+            }
+        }
+
         /// <summary>Cache a validated weapon state as the server's latest persistent state.</summary>
         public void RecordAuthoritativeWeaponState(uint characterNetworkId, NetworkMeleeWeaponState state)
         {
@@ -1199,6 +1240,52 @@ namespace Arawn.GameCreator2.Networking.Melee
             NetworkMeleeCharacterSnapshot update = NetworkMeleeCharacterSnapshot.Create(characterNetworkId);
             update.HasWeaponState = true;
             update.WeaponState = state;
+            ApplyOrQueueCharacterState(update);
+        }
+
+        /// <summary>
+        /// Publishes a revisioned Free Flow state from a genuine server-owned NPC. Client-owned
+        /// replicas and runtime IsPlayer changes cannot enter this path.
+        /// </summary>
+        public bool PublishAuthoritativeFreeFlowState(
+            NetworkFreeFlowCombatAdapter adapter,
+            NetworkFreeFlowCombatState state)
+        {
+            if (!m_IsServer || adapter == null || state.CharacterNetworkId == 0 ||
+                state.StateVersion == 0 ||
+                !m_FreeFlowAdapters.TryGetValue(
+                    state.CharacterNetworkId,
+                    out NetworkFreeFlowCombatAdapter registered) ||
+                registered != adapter ||
+                !IsTrustedServerOwnedNpc(state.CharacterNetworkId))
+            {
+                return false;
+            }
+
+            NetworkMeleeCharacterSnapshot snapshot = GetOrCreateLatestState(state.CharacterNetworkId);
+            if (snapshot.HasFreeFlowState &&
+                !NetworkFreeFlowStateVersion.IsNewer(
+                    state.StateVersion,
+                    snapshot.FreeFlowState.StateVersion))
+            {
+                return state.StateVersion == snapshot.FreeFlowState.StateVersion;
+            }
+
+            snapshot.HasFreeFlowState = true;
+            snapshot.FreeFlowState = state;
+            m_LatestCharacterStates[state.CharacterNetworkId] = snapshot;
+            BroadcastFreeFlowStateToAllClients?.Invoke(state);
+            return true;
+        }
+
+        /// <summary>Applies or queues a live Free Flow state broadcast from authority.</summary>
+        public void ReceiveFreeFlowState(NetworkFreeFlowCombatState state)
+        {
+            if (state.CharacterNetworkId == 0 || state.StateVersion == 0) return;
+            NetworkMeleeCharacterSnapshot update = NetworkMeleeCharacterSnapshot.Create(
+                state.CharacterNetworkId);
+            update.HasFreeFlowState = true;
+            update.FreeFlowState = state;
             ApplyOrQueueCharacterState(update);
         }
 
@@ -1228,6 +1315,20 @@ namespace Arawn.GameCreator2.Networking.Melee
             else
             {
                 snapshot.BlockState.CharacterNetworkId = snapshot.CharacterNetworkId;
+            }
+
+            if (!snapshot.HasFreeFlowState)
+            {
+                // Version zero is a snapshot-only tombstone. Live Free Flow broadcasts reject
+                // it in ReceiveFreeFlowState, while a full replacement needs it to clear state
+                // that was applied before this authoritative point-in-time snapshot arrived.
+                snapshot.HasFreeFlowState = true;
+                snapshot.FreeFlowState = NetworkFreeFlowCombatState.Create(
+                    snapshot.CharacterNetworkId);
+            }
+            else
+            {
+                snapshot.FreeFlowState.CharacterNetworkId = snapshot.CharacterNetworkId;
             }
 
             // A targeted snapshot is a complete point-in-time replacement. Do not merge it
@@ -1263,6 +1364,16 @@ namespace Arawn.GameCreator2.Networking.Melee
                         CharacterNetworkId = networkId,
                         Action = NetworkBlockAction.Lower
                     };
+                }
+
+                if (m_FreeFlowAdapters.TryGetValue(
+                        networkId,
+                        out NetworkFreeFlowCombatAdapter adapter) &&
+                    adapter != null &&
+                    adapter.CurrentState.StateVersion != 0)
+                {
+                    snapshot.HasFreeFlowState = true;
+                    snapshot.FreeFlowState = adapter.CurrentState;
                 }
 
                 m_LatestCharacterStates[networkId] = snapshot;
@@ -1320,6 +1431,21 @@ namespace Arawn.GameCreator2.Networking.Melee
                 pending.BlockState.CharacterNetworkId = networkId;
             }
 
+            if (update.HasFreeFlowState)
+            {
+                bool accept = !pending.HasFreeFlowState ||
+                              NetworkFreeFlowStateVersion.IsNewer(
+                                  update.FreeFlowState.StateVersion,
+                                  pending.FreeFlowState.StateVersion) ||
+                              update.FreeFlowState.StateVersion == pending.FreeFlowState.StateVersion;
+                if (accept)
+                {
+                    pending.HasFreeFlowState = true;
+                    pending.FreeFlowState = update.FreeFlowState;
+                    pending.FreeFlowState.CharacterNetworkId = networkId;
+                }
+            }
+
             if (m_Controllers.TryGetValue(networkId, out NetworkMeleeController controller) &&
                 controller != null &&
                 ApplyCharacterState(controller, pending))
@@ -1357,6 +1483,18 @@ namespace Arawn.GameCreator2.Networking.Melee
                 NetworkBlockBroadcast blockState = snapshot.BlockState;
                 blockState.CharacterNetworkId = snapshot.CharacterNetworkId;
                 controller.ReceiveBlockBroadcast(blockState);
+            }
+
+            if (snapshot.HasFreeFlowState)
+            {
+                if (!m_FreeFlowAdapters.TryGetValue(
+                        snapshot.CharacterNetworkId,
+                        out NetworkFreeFlowCombatAdapter adapter) ||
+                    adapter == null ||
+                    !adapter.ApplyReplicatedSnapshotState(snapshot.FreeFlowState))
+                {
+                    return false;
+                }
             }
 
             return true;
@@ -1633,14 +1771,33 @@ namespace Arawn.GameCreator2.Networking.Melee
         /// <summary>
         /// [Server] Queue a hit observed by a server-owned actor. This deliberately bypasses
         /// client ownership and request-security checks because there is no remote sender, while
-        /// retaining the ordinary server validation, damage, block, reaction, and broadcast path.
+        /// requiring the correlation of an already accepted Skill operation and retaining the
+        /// ordinary validation, damage, block, reaction, and broadcast path.
         /// </summary>
         public bool TryServerQueueTrustedHit(NetworkMeleeHitRequest request)
         {
             if (!m_IsServer ||
                 request.ActorNetworkId == 0 ||
-                request.ActorNetworkId != request.AttackerNetworkId)
+                request.ActorNetworkId != request.AttackerNetworkId ||
+                request.AttackCorrelationId == 0 ||
+                !IsTrustedServerOriginActor(request.ActorNetworkId))
             {
+                return false;
+            }
+
+            if (!m_Controllers.TryGetValue(
+                    request.ActorNetworkId,
+                    out NetworkMeleeController controller) ||
+                controller == null ||
+                controller.EvaluateAuthoritativeAttackAuthorization(
+                    request,
+                    Time.time,
+                    false,
+                    out _) != NetworkMeleeController.AttackAuthorizationStatus.Authorized)
+            {
+                // A native hit cannot create authority for its rejected/missing Skill. The
+                // accepted lease is produced only after TryPublishTrustedServerSkill validates
+                // actor ownership, equipped assets, and the optional Free Flow policy.
                 return false;
             }
 
@@ -1663,6 +1820,46 @@ namespace Arawn.GameCreator2.Networking.Melee
             });
             m_Stats.HitRequestsReceived++;
             return true;
+        }
+
+        private static bool IsTrustedServerOriginActor(uint actorNetworkId)
+        {
+            NetworkTransportBridge bridge = NetworkTransportBridge.Active;
+            if (bridge == null || !bridge.IsServer) return false;
+
+            Character character = bridge.ResolveCharacter(actorNetworkId);
+            NetworkCharacter networkCharacter =
+                character != null ? character.GetComponent<NetworkCharacter>() : null;
+            if (networkCharacter == null ||
+                !networkCharacter.IsServerInstance ||
+                !networkCharacter.HasSimulationAuthority)
+            {
+                return false;
+            }
+
+            if (networkCharacter.IsServerAuthoritativeNPC)
+            {
+                return !bridge.TryGetCharacterOwner(actorNetworkId, out _);
+            }
+
+            return networkCharacter.IsPlayerOwnedActor &&
+                networkCharacter.HasAuthenticatedPlayerOwner &&
+                networkCharacter.IsOwnerInstance;
+        }
+
+        private static bool IsTrustedServerOwnedNpc(uint actorNetworkId)
+        {
+            NetworkTransportBridge bridge = NetworkTransportBridge.Active;
+            if (bridge == null || !bridge.IsServer) return false;
+
+            Character character = bridge.ResolveCharacter(actorNetworkId);
+            NetworkCharacter networkCharacter =
+                character != null ? character.GetComponent<NetworkCharacter>() : null;
+            return networkCharacter != null &&
+                   networkCharacter.IsServerAuthoritativeNPC &&
+                   networkCharacter.IsServerInstance &&
+                   networkCharacter.HasSimulationAuthority &&
+                   !bridge.TryGetCharacterOwner(actorNetworkId, out _);
         }
 
         private void ProcessServerHitQueue()
@@ -2551,6 +2748,104 @@ namespace Arawn.GameCreator2.Networking.Melee
                 $"queued skill request client={clientNetworkId} actor={request.ActorNetworkId} " +
                 $"req={request.RequestId} corr={request.CorrelationId} queueCount={m_ServerSkillQueue.Count}");
             LogMeleeFlow($"queued skill request actor={request.ActorNetworkId} queueCount={m_ServerSkillQueue.Count}");
+        }
+
+        /// <summary>
+        /// Publishes a Skill already started by a genuine server-owned NPC. This is not an RPC
+        /// bypass for clients: the registered authoritative controller, actor classification,
+        /// ownership, equipped weapon, Skill identity, and optional Free Flow policy are checked
+        /// before an attack lease and presentation broadcast are produced.
+        /// </summary>
+        public bool TryPublishTrustedServerSkill(
+            NetworkMeleeController controller,
+            NetworkSkillRequest request)
+        {
+            if (!m_IsServer || controller == null || request.ActorNetworkId == 0 ||
+                request.CorrelationId == 0 ||
+                !NetworkCorrelation.MatchesActor(request.CorrelationId, request.ActorNetworkId) ||
+                !m_Controllers.TryGetValue(
+                    request.ActorNetworkId,
+                    out NetworkMeleeController registered) ||
+                registered != controller ||
+                !IsTrustedServerOwnedNpc(request.ActorNetworkId))
+            {
+                return false;
+            }
+
+            MeleeWeapon weapon = controller.CurrentMeleeWeapon;
+            Skill skill = GetSkillByHash(request.SkillHash);
+            if (weapon == null || skill == null || weapon.Id.Hash != request.WeaponHash)
+            {
+                return false;
+            }
+
+            if (request.ComboNodeId != ComboTree.NODE_INVALID)
+            {
+                ComboItem combo = weapon.Combo?.Get(request.ComboNodeId);
+                if (combo == null || combo.Skill == null || !ReferenceEquals(combo.Skill, skill))
+                {
+                    return false;
+                }
+            }
+
+            if (!NetworkFreeFlowCombatAdapter.ValidateTrustedServerNpcSkill(
+                    controller,
+                    weapon,
+                    skill,
+                    request,
+                    out string validationDetails))
+            {
+                LogSkillFlowWarning(
+                    $"rejected trusted NPC skill actor={request.ActorNetworkId} " +
+                    $"skill={request.SkillHash}: {validationDetails}");
+                return false;
+            }
+
+            float now = Time.time;
+            ulong operationKey = ((ulong)request.ActorNetworkId << 32) | request.CorrelationId;
+            if (m_TrustedServerSkillBroadcasts.TryGetValue(operationKey, out float seenAt) &&
+                now - seenAt <= 15f)
+            {
+                return true;
+            }
+
+            if (m_TrustedServerSkillBroadcasts.Count >= 128)
+            {
+                ulong oldestKey = 0;
+                float oldestTime = float.PositiveInfinity;
+                foreach (KeyValuePair<ulong, float> pair in m_TrustedServerSkillBroadcasts)
+                {
+                    if (pair.Value >= oldestTime) continue;
+                    oldestKey = pair.Key;
+                    oldestTime = pair.Value;
+                }
+
+                if (oldestKey != 0) m_TrustedServerSkillBroadcasts.Remove(oldestKey);
+            }
+
+            m_TrustedServerSkillBroadcasts[operationKey] = now;
+            controller.RecordTrustedServerSkillLease(request, now);
+            var broadcast = new NetworkSkillBroadcast
+            {
+                CharacterNetworkId = request.ActorNetworkId,
+                TargetNetworkId = request.TargetNetworkId,
+                SkillHash = request.SkillHash,
+                WeaponHash = request.WeaponHash,
+                ComboNodeId = request.ComboNodeId,
+                ServerTimestamp = now,
+                IsCharged = request.IsChargeRelease,
+                ChargeLevel = request.IsChargeRelease
+                    ? (byte)Mathf.Clamp(
+                        Mathf.RoundToInt(request.ChargeDuration / 3f * 255f),
+                        0,
+                        255)
+                    : (byte)0
+            };
+
+            m_Stats.SkillsValidated++;
+            BroadcastSkillToAllClients?.Invoke(broadcast);
+            OnSkillValidated?.Invoke(broadcast);
+            return true;
         }
 
         private void ProcessServerSkillQueue()

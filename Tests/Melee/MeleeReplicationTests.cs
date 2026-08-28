@@ -5,6 +5,7 @@ using System.IO;
 using System.Reflection;
 using Arawn.GameCreator2.Networking.Melee.Transport.PurrNet;
 using Arawn.GameCreator2.Networking.Security;
+using Arawn.GameCreator2.Networking.TestUtilities;
 using GameCreator.Runtime.Characters;
 using GameCreator.Runtime.Common;
 using GameCreator.Runtime.Melee;
@@ -20,6 +21,78 @@ namespace Arawn.GameCreator2.Networking.Melee.Tests
 
         private sealed class TestReaction : Reaction
         {
+        }
+
+        private sealed class TestFreeFlowReceiver : MonoBehaviour, INetworkFreeFlowCombatReceiver
+        {
+            public int ApplyCount;
+            public bool Attackable;
+            public bool Counterable;
+            public bool AttackToken;
+            public float ScoreBonus;
+            public GameObject SelectedPlayer;
+
+            public bool IsNetworkFreeFlowWeapon(MeleeWeapon weapon) => true;
+            public void CollectNetworkSkills(
+                MeleeWeapon weapon,
+                System.Action<Skill, NetworkFreeFlowSkillUse> registerUse,
+                System.Action<Skill> registerDirectPlay) { }
+            public void GetNetworkSettings(
+                MeleeWeapon weapon,
+                out float attackRadius,
+                out float scanRadius,
+                out float counterRadius,
+                out float counterCooldown,
+                out bool requireAttackLineOfSight,
+                out bool requireCounterLineOfSight,
+                out int occlusionLayerMask)
+            {
+                attackRadius = 3f;
+                scanRadius = 8f;
+                counterRadius = 4f;
+                counterCooldown = 0.5f;
+                requireAttackLineOfSight = false;
+                requireCounterLineOfSight = false;
+                occlusionLayerMask = Physics.DefaultRaycastLayers;
+            }
+            public bool TryCaptureNetworkState(
+                out bool isAttackable,
+                out bool isCounterable,
+                out bool hasAttackToken,
+                out float scoreBonus)
+            {
+                isAttackable = Attackable;
+                isCounterable = Counterable;
+                hasAttackToken = AttackToken;
+                scoreBonus = ScoreBonus;
+                return true;
+            }
+            public void ApplyReplicatedNetworkState(
+                bool isAttackable,
+                bool isCounterable,
+                bool hasAttackToken,
+                float scoreBonus,
+                GameObject selectedPlayer)
+            {
+                ApplyCount++;
+                Attackable = isAttackable;
+                Counterable = isCounterable;
+                AttackToken = hasAttackToken;
+                ScoreBonus = scoreBonus;
+                SelectedPlayer = selectedPlayer;
+            }
+            public bool TryConsumeNetworkCounterWindow()
+            {
+                if (!Counterable) return false;
+                Counterable = false;
+                return true;
+            }
+            public Vector3 GetNetworkAimPoint() => transform.position;
+            public void SetNetworkSelectedPlayer(GameObject selectedPlayer) =>
+                SelectedPlayer = selectedPlayer;
+            public void SetNetworkSimulation(
+                bool runLocalPlayerRuntime,
+                bool runAuthoritativeNpcSimulation) { }
         }
 
         private sealed class TestTransportBridge : NetworkTransportBridge
@@ -89,6 +162,7 @@ namespace Arawn.GameCreator2.Networking.Melee.Tests
         }
 
         [Test]
+        [NUnit.Framework.Category("GC2Networking.FreeFlow")]
         public void CharacterSnapshot_PurrNetRoundTrip_PreservesWeaponAndBlock()
         {
             var expected = new NetworkMeleeCharacterSnapshot
@@ -109,6 +183,16 @@ namespace Arawn.GameCreator2.Networking.Melee.Tests
                     Action = NetworkBlockAction.Raise,
                     ServerTimestamp = 12.25f,
                     ShieldHash = 119
+                },
+                HasFreeFlowState = true,
+                FreeFlowState = new NetworkFreeFlowCombatState
+                {
+                    CharacterNetworkId = 73,
+                    StateVersion = 19,
+                    TargetNetworkId = 74,
+                    Flags = NetworkFreeFlowCombatState.AttackableFlag |
+                            NetworkFreeFlowCombatState.CounterableFlag,
+                    ScoreBonus = 2.75f
                 }
             };
 
@@ -122,6 +206,12 @@ namespace Arawn.GameCreator2.Networking.Melee.Tests
             Assert.That(actual.HasBlockState, Is.True);
             Assert.That(actual.BlockState.Action, Is.EqualTo(NetworkBlockAction.Raise));
             Assert.That(actual.BlockState.ServerTimestamp, Is.EqualTo(12.25f));
+            Assert.That(actual.HasFreeFlowState, Is.True);
+            Assert.That(actual.FreeFlowState.StateVersion, Is.EqualTo(19));
+            Assert.That(actual.FreeFlowState.TargetNetworkId, Is.EqualTo(74));
+            Assert.That(actual.FreeFlowState.IsAttackable, Is.True);
+            Assert.That(actual.FreeFlowState.IsCounterable, Is.True);
+            Assert.That(actual.FreeFlowState.ScoreBonus, Is.EqualTo(2.75f));
         }
 
         [Test]
@@ -219,6 +309,7 @@ namespace Arawn.GameCreator2.Networking.Melee.Tests
         }
 
         [Test]
+        [NUnit.Framework.Category("GC2Networking.FreeFlow")]
         public void SkillPackets_PurrNetRoundTrip_PreserveFullWidthComboIds()
         {
             var expectedRequest = new NetworkSkillRequest
@@ -234,7 +325,9 @@ namespace Arawn.GameCreator2.Networking.Melee.Tests
                 ClientTimestamp = 21.75f,
                 InputKey = 3,
                 IsChargeRelease = true,
-                ChargeDuration = 1.25f
+                ChargeDuration = 1.25f,
+                ActionFlags = NetworkMeleeSkillActionFlags.FreeFlowCounter,
+                ActionStateRevision = 0xF1020304u
             };
             var expectedResponse = new NetworkSkillResponse
             {
@@ -264,6 +357,8 @@ namespace Arawn.GameCreator2.Networking.Melee.Tests
             Assert.That(actualRequest.ComboNodeId, Is.EqualTo(expectedRequest.ComboNodeId));
             Assert.That(actualRequest.PreviousComboNodeId, Is.EqualTo(expectedRequest.PreviousComboNodeId));
             Assert.That(actualRequest.ClientTimestamp, Is.EqualTo(expectedRequest.ClientTimestamp));
+            Assert.That(actualRequest.ActionFlags, Is.EqualTo(expectedRequest.ActionFlags));
+            Assert.That(actualRequest.ActionStateRevision, Is.EqualTo(expectedRequest.ActionStateRevision));
             Assert.That(actualResponse.ComboNodeId, Is.EqualTo(expectedResponse.ComboNodeId));
             Assert.That(actualBroadcast.ComboNodeId, Is.EqualTo(expectedBroadcast.ComboNodeId));
         }
@@ -340,6 +435,176 @@ namespace Arawn.GameCreator2.Networking.Melee.Tests
         }
 
         [Test]
+        [NUnit.Framework.Category("GC2Networking.FreeFlow")]
+        public void FreeFlowState_PurrNetRoundTrip_PreservesRevisionFlagsAndScore()
+        {
+            var expected = new NetworkFreeFlowCombatState
+            {
+                CharacterNetworkId = 501,
+                StateVersion = uint.MaxValue - 4,
+                TargetNetworkId = 502,
+                Flags = NetworkFreeFlowCombatState.AttackableFlag |
+                        NetworkFreeFlowCombatState.AttackTokenFlag,
+                ScoreBonus = 6.5f
+            };
+
+            NetworkFreeFlowCombatState actual = RoundTrip(expected);
+            Assert.That(actual.CharacterNetworkId, Is.EqualTo(expected.CharacterNetworkId));
+            Assert.That(actual.StateVersion, Is.EqualTo(expected.StateVersion));
+            Assert.That(actual.TargetNetworkId, Is.EqualTo(expected.TargetNetworkId));
+            Assert.That(actual.Flags, Is.EqualTo(expected.Flags));
+            Assert.That(actual.ScoreBonus, Is.EqualTo(expected.ScoreBonus));
+        }
+
+        [Test]
+        [NUnit.Framework.Category("GC2Networking.FreeFlow")]
+        public void FreeFlowState_PendingBeforeAdapter_AppliesLatestRevisionOnceReady()
+        {
+            NetworkMeleeManager manager = CreateManager(false, true);
+            manager.ReceiveFreeFlowState(new NetworkFreeFlowCombatState
+            {
+                CharacterNetworkId = 503,
+                StateVersion = 7,
+                Flags = NetworkFreeFlowCombatState.AttackableFlag |
+                        NetworkFreeFlowCombatState.CounterableFlag,
+                ScoreBonus = 3.25f
+            });
+
+            GameObject actor = Track(new GameObject("Late Free Flow NPC"));
+            EditModeLifecycle.AddComponent<Character>(actor);
+            NetworkCharacter networkCharacter =
+                EditModeLifecycle.AddComponent<NetworkCharacter>(actor);
+            networkCharacter.SetManualNetworkId(503);
+            NetworkMeleeController controller =
+                EditModeLifecycle.AddComponent<NetworkMeleeController>(actor);
+            controller.Initialize(false, false);
+            TestFreeFlowReceiver receiver = actor.AddComponent<TestFreeFlowReceiver>();
+            NetworkFreeFlowCombatAdapter adapter =
+                EditModeLifecycle.AddComponent<NetworkFreeFlowCombatAdapter>(actor);
+
+            manager.RegisterController(503, controller);
+            manager.RegisterFreeFlowAdapter(503, adapter);
+
+            Assert.That(receiver.ApplyCount, Is.GreaterThanOrEqualTo(1));
+            Assert.That(receiver.Attackable, Is.True);
+            Assert.That(receiver.Counterable, Is.False,
+                "A global counterable flag without an assigned authenticated local player must " +
+                "not expose the counter prompt on this observer.");
+            Assert.That(adapter.CurrentState.IsCounterable, Is.True,
+                "The transport-neutral state still retains the authority counter window.");
+            Assert.That(receiver.ScoreBonus, Is.EqualTo(3.25f));
+            Assert.That(adapter.CurrentState.StateVersion, Is.EqualTo(7));
+            Assert.That(
+                GetPrivateField<IDictionary>(manager, "m_PendingCharacterStates").Contains(503u),
+                Is.False);
+
+            int applied = receiver.ApplyCount;
+            manager.ReceiveFreeFlowState(new NetworkFreeFlowCombatState
+            {
+                CharacterNetworkId = 503,
+                StateVersion = 6,
+                Flags = 0,
+                ScoreBonus = -10f
+            });
+            Assert.That(adapter.CurrentState.StateVersion, Is.EqualTo(7));
+            Assert.That(receiver.ApplyCount, Is.EqualTo(applied),
+                "A stale revision must be ignored without entering the pending cache.");
+        }
+
+        [Test]
+        [NUnit.Framework.Category("GC2Networking.FreeFlow")]
+        public void FreeFlowState_FullSnapshotOmissionClearsPriorState_ButLiveZeroDoesNot()
+        {
+            NetworkMeleeManager manager = CreateManager(false, true);
+
+            GameObject selectedPlayer = Track(new GameObject("Selected Free Flow Player"));
+            EditModeLifecycle.AddComponent<Character>(selectedPlayer);
+            NetworkCharacter selectedNetworkCharacter =
+                EditModeLifecycle.AddComponent<NetworkCharacter>(selectedPlayer);
+            SetPrivateField(
+                selectedNetworkCharacter,
+                "m_ActorType",
+                NetworkCharacterActorType.PlayerOwned);
+            selectedNetworkCharacter.SetManualNetworkId(504);
+            // This test only needs an authenticated local identity for assignment filtering.
+            // Running full role initialization in EditMode replaces GC2's default driver, whose
+            // disposal calls Object.Destroy and produces an expected-in-PlayMode error log.
+            SetPrivateField(selectedNetworkCharacter, "m_RuntimeIsOwner", true);
+            SetPrivateField(
+                selectedNetworkCharacter,
+                "m_RuntimeHasAuthenticatedPlayerOwner",
+                true);
+            NetworkMeleeController selectedController =
+                EditModeLifecycle.AddComponent<NetworkMeleeController>(selectedPlayer);
+            selectedController.Initialize(false, false);
+            manager.RegisterController(504, selectedController);
+
+            GameObject actor = Track(new GameObject("Free Flow Snapshot NPC"));
+            EditModeLifecycle.AddComponent<Character>(actor);
+            NetworkCharacter networkCharacter =
+                EditModeLifecycle.AddComponent<NetworkCharacter>(actor);
+            networkCharacter.SetManualNetworkId(503);
+            NetworkMeleeController controller =
+                EditModeLifecycle.AddComponent<NetworkMeleeController>(actor);
+            controller.Initialize(false, false);
+            TestFreeFlowReceiver receiver = actor.AddComponent<TestFreeFlowReceiver>();
+            NetworkFreeFlowCombatAdapter adapter =
+                EditModeLifecycle.AddComponent<NetworkFreeFlowCombatAdapter>(actor);
+            manager.RegisterController(503, controller);
+            manager.RegisterFreeFlowAdapter(503, adapter);
+
+            manager.ReceiveFreeFlowState(new NetworkFreeFlowCombatState
+            {
+                CharacterNetworkId = 503,
+                StateVersion = 7,
+                TargetNetworkId = 504,
+                Flags = NetworkFreeFlowCombatState.AttackableFlag |
+                        NetworkFreeFlowCombatState.CounterableFlag |
+                        NetworkFreeFlowCombatState.AttackTokenFlag,
+                ScoreBonus = 4.5f
+            });
+
+            Assert.That(adapter.CurrentState.StateVersion, Is.EqualTo(7));
+            Assert.That(receiver.Attackable, Is.True);
+            Assert.That(receiver.Counterable, Is.True);
+            Assert.That(receiver.AttackToken, Is.True);
+            Assert.That(receiver.ScoreBonus, Is.EqualTo(4.5f));
+            Assert.That(receiver.SelectedPlayer, Is.SameAs(selectedPlayer));
+
+            int appliedBeforeLiveZero = receiver.ApplyCount;
+            NetworkFreeFlowCombatState liveZero = NetworkFreeFlowCombatState.Create(503);
+            liveZero.Flags = NetworkFreeFlowCombatState.AttackableFlag;
+            liveZero.ScoreBonus = 99f;
+            manager.ReceiveFreeFlowState(liveZero);
+
+            Assert.That(adapter.CurrentState.StateVersion, Is.EqualTo(7));
+            Assert.That(receiver.ApplyCount, Is.EqualTo(appliedBeforeLiveZero),
+                "A live version-zero packet must not be interpreted as a clear tombstone.");
+
+            manager.ReceiveCharacterSnapshot(NetworkMeleeCharacterSnapshot.Create(503));
+
+            Assert.That(adapter.CurrentState.StateVersion, Is.Zero);
+            Assert.That(adapter.CurrentState.TargetNetworkId, Is.Zero);
+            Assert.That(adapter.CurrentState.Flags, Is.Zero);
+            Assert.That(adapter.CurrentState.ScoreBonus, Is.Zero);
+            Assert.That(receiver.Attackable, Is.False);
+            Assert.That(receiver.Counterable, Is.False);
+            Assert.That(receiver.AttackToken, Is.False);
+            Assert.That(receiver.ScoreBonus, Is.Zero);
+            Assert.That(receiver.SelectedPlayer, Is.Null);
+        }
+
+        [Test]
+        [NUnit.Framework.Category("GC2Networking.FreeFlow")]
+        public void FreeFlowStateVersion_WrapsWithoutAcceptingStaleRevisions()
+        {
+            Assert.That(NetworkFreeFlowStateVersion.Next(uint.MaxValue), Is.EqualTo(1u));
+            Assert.That(NetworkFreeFlowStateVersion.IsNewer(1u, uint.MaxValue), Is.True);
+            Assert.That(NetworkFreeFlowStateVersion.IsNewer(uint.MaxValue, 1u), Is.False);
+            Assert.That(NetworkFreeFlowStateVersion.IsNewer(9u, 9u), Is.False);
+        }
+
+        [Test]
         public void AuthoritativeUnregister_RemovesCharacterFromLateJoinSnapshots()
         {
             NetworkMeleeManager manager = CreateManager(true, false);
@@ -405,18 +670,18 @@ namespace Arawn.GameCreator2.Networking.Melee.Tests
             SetPrivateField(manager, "m_LogSkillFlowDiagnostics", diagnosticsEnabled);
 
             GameObject attackerObject = Track(new GameObject("Melee Host Diagnostic Attacker"));
-            attackerObject.AddComponent<Character>();
-            NetworkCharacter attackerCharacter = attackerObject.AddComponent<NetworkCharacter>();
+            EditModeLifecycle.AddComponent<Character>(attackerObject);
+            NetworkCharacter attackerCharacter = EditModeLifecycle.AddComponent<NetworkCharacter>(attackerObject);
             attackerCharacter.SetManualNetworkId(3);
-            NetworkMeleeController attacker = attackerObject.AddComponent<NetworkMeleeController>();
+            NetworkMeleeController attacker = EditModeLifecycle.AddComponent<NetworkMeleeController>(attackerObject);
             attacker.Initialize(true, true);
             SetPrivateField(attacker, "m_LogMeleeSync", diagnosticsEnabled);
 
             GameObject targetObject = Track(new GameObject("Melee Host Diagnostic Remote Target"));
-            targetObject.AddComponent<Character>();
-            NetworkCharacter targetCharacter = targetObject.AddComponent<NetworkCharacter>();
+            EditModeLifecycle.AddComponent<Character>(targetObject);
+            NetworkCharacter targetCharacter = EditModeLifecycle.AddComponent<NetworkCharacter>(targetObject);
             targetCharacter.SetManualNetworkId(4);
-            NetworkMeleeController target = targetObject.AddComponent<NetworkMeleeController>();
+            NetworkMeleeController target = EditModeLifecycle.AddComponent<NetworkMeleeController>(targetObject);
             target.Initialize(true, false);
             SetPrivateField(target, "m_LogMeleeSync", diagnosticsEnabled);
 
@@ -607,10 +872,10 @@ namespace Arawn.GameCreator2.Networking.Melee.Tests
                 Is.EqualTo(1));
 
             GameObject targetObject = Track(new GameObject("Melee Late Reaction Target"));
-            targetObject.AddComponent<Character>();
-            NetworkCharacter networkCharacter = targetObject.AddComponent<NetworkCharacter>();
+            EditModeLifecycle.AddComponent<Character>(targetObject);
+            NetworkCharacter networkCharacter = EditModeLifecycle.AddComponent<NetworkCharacter>(targetObject);
             networkCharacter.SetManualNetworkId(31);
-            NetworkMeleeController controller = targetObject.AddComponent<NetworkMeleeController>();
+            NetworkMeleeController controller = EditModeLifecycle.AddComponent<NetworkMeleeController>(targetObject);
             controller.Initialize(false, false);
             int received = 0;
             controller.OnReactionReceived += _ => received++;
@@ -697,16 +962,16 @@ namespace Arawn.GameCreator2.Networking.Melee.Tests
         {
             NetworkMeleeManager manager = CreateManager(true, true);
             GameObject attackerObject = Track(new GameObject("Melee Host Attacker"));
-            attackerObject.AddComponent<Character>();
-            NetworkCharacter attackerCharacter = attackerObject.AddComponent<NetworkCharacter>();
+            EditModeLifecycle.AddComponent<Character>(attackerObject);
+            NetworkCharacter attackerCharacter = EditModeLifecycle.AddComponent<NetworkCharacter>(attackerObject);
             attackerCharacter.SetManualNetworkId(31);
-            NetworkMeleeController controller = attackerObject.AddComponent<NetworkMeleeController>();
+            NetworkMeleeController controller = EditModeLifecycle.AddComponent<NetworkMeleeController>(attackerObject);
             controller.Initialize(true, true);
             manager.RegisterController(31, controller);
 
             GameObject targetObject = Track(new GameObject("Melee Host Target"));
-            targetObject.AddComponent<Character>();
-            NetworkCharacter targetCharacter = targetObject.AddComponent<NetworkCharacter>();
+            EditModeLifecycle.AddComponent<Character>(targetObject);
+            NetworkCharacter targetCharacter = EditModeLifecycle.AddComponent<NetworkCharacter>(targetObject);
             targetCharacter.SetManualNetworkId(32);
             GameObject targetHurtbox = Track(new GameObject("Melee Host Target Hurtbox"));
             targetHurtbox.transform.SetParent(targetObject.transform, false);
@@ -761,17 +1026,17 @@ namespace Arawn.GameCreator2.Networking.Melee.Tests
         {
             NetworkMeleeManager manager = CreateManager(false, true);
             GameObject attackerObject = Track(new GameObject("Melee Dedup Attacker"));
-            attackerObject.AddComponent<Character>();
-            NetworkCharacter attackerCharacter = attackerObject.AddComponent<NetworkCharacter>();
+            EditModeLifecycle.AddComponent<Character>(attackerObject);
+            NetworkCharacter attackerCharacter = EditModeLifecycle.AddComponent<NetworkCharacter>(attackerObject);
             attackerCharacter.SetManualNetworkId(33);
-            NetworkMeleeController controller = attackerObject.AddComponent<NetworkMeleeController>();
+            NetworkMeleeController controller = EditModeLifecycle.AddComponent<NetworkMeleeController>(attackerObject);
             controller.Initialize(false, true);
             controller.OptimisticEffects = false;
             manager.RegisterController(33, controller);
 
             GameObject targetObject = Track(new GameObject("Melee Dedup Target"));
-            targetObject.AddComponent<Character>();
-            NetworkCharacter targetCharacter = targetObject.AddComponent<NetworkCharacter>();
+            EditModeLifecycle.AddComponent<Character>(targetObject);
+            NetworkCharacter targetCharacter = EditModeLifecycle.AddComponent<NetworkCharacter>(targetObject);
             targetCharacter.SetManualNetworkId(34);
 
             int requests = 0;
@@ -798,16 +1063,16 @@ namespace Arawn.GameCreator2.Networking.Melee.Tests
         {
             NetworkMeleeManager manager = CreateManager(false, true);
             GameObject attackerObject = Track(new GameObject("Melee Chained Token Attacker"));
-            attackerObject.AddComponent<Character>();
-            NetworkCharacter attackerCharacter = attackerObject.AddComponent<NetworkCharacter>();
+            EditModeLifecycle.AddComponent<Character>(attackerObject);
+            NetworkCharacter attackerCharacter = EditModeLifecycle.AddComponent<NetworkCharacter>(attackerObject);
             attackerCharacter.SetManualNetworkId(35);
-            NetworkMeleeController controller = attackerObject.AddComponent<NetworkMeleeController>();
+            NetworkMeleeController controller = EditModeLifecycle.AddComponent<NetworkMeleeController>(attackerObject);
             controller.Initialize(false, true);
             manager.RegisterController(35, controller);
 
             GameObject targetObject = Track(new GameObject("Melee Chained Token Target"));
-            targetObject.AddComponent<Character>();
-            NetworkCharacter targetCharacter = targetObject.AddComponent<NetworkCharacter>();
+            EditModeLifecycle.AddComponent<Character>(targetObject);
+            NetworkCharacter targetCharacter = EditModeLifecycle.AddComponent<NetworkCharacter>(targetObject);
             targetCharacter.SetManualNetworkId(36);
 
             Skill skill = Track(ScriptableObject.CreateInstance<Skill>());
@@ -849,10 +1114,10 @@ namespace Arawn.GameCreator2.Networking.Melee.Tests
         public void TrustedAttackOperation_RotatesAndMatchesItsActor()
         {
             GameObject attackerObject = Track(new GameObject("Melee Trusted Token Attacker"));
-            attackerObject.AddComponent<Character>();
-            NetworkCharacter networkCharacter = attackerObject.AddComponent<NetworkCharacter>();
+            EditModeLifecycle.AddComponent<Character>(attackerObject);
+            NetworkCharacter networkCharacter = EditModeLifecycle.AddComponent<NetworkCharacter>(attackerObject);
             networkCharacter.SetManualNetworkId(37);
-            NetworkMeleeController controller = attackerObject.AddComponent<NetworkMeleeController>();
+            NetworkMeleeController controller = EditModeLifecycle.AddComponent<NetworkMeleeController>(attackerObject);
             controller.Initialize(true, false);
 
             uint first = InvokePrivateResult<uint>(
@@ -871,24 +1136,33 @@ namespace Arawn.GameCreator2.Networking.Melee.Tests
         }
 
         [Test]
-        public void DedicatedServerHit_QueuesTrustedRequestAndSuppressesNativeHit()
+        public void DedicatedServerHit_WithoutAcceptedSkillDoesNotQueueOrCreateLease()
         {
             TestTransportBridge bridge = Track(
                 new GameObject("Melee Server Bridge").AddComponent<TestTransportBridge>());
             NetworkMeleeManager manager = CreateManager(true, false);
 
             GameObject attackerObject = Track(new GameObject("Melee Server Attacker"));
-            attackerObject.AddComponent<Character>();
-            NetworkCharacter attackerCharacter = attackerObject.AddComponent<NetworkCharacter>();
+            EditModeLifecycle.AddComponent<Character>(attackerObject);
+            NetworkCharacter attackerCharacter = EditModeLifecycle.AddComponent<NetworkCharacter>(attackerObject);
+            SetPrivateField(
+                attackerCharacter,
+                "m_ActorType",
+                NetworkCharacterActorType.NPC);
             attackerCharacter.SetManualNetworkId(41);
-            NetworkMeleeController controller = attackerObject.AddComponent<NetworkMeleeController>();
+            attackerCharacter.InitializeNetworkRole(
+                isServer: true,
+                isOwner: false,
+                isHost: false,
+                hasAuthenticatedPlayerOwner: false);
+            NetworkMeleeController controller = EditModeLifecycle.AddComponent<NetworkMeleeController>(attackerObject);
             controller.Initialize(true, false);
             manager.RegisterController(41, controller);
             bridge.RegisterCharacter(attackerCharacter);
 
             GameObject targetObject = Track(new GameObject("Melee Server Target"));
-            targetObject.AddComponent<Character>();
-            NetworkCharacter targetCharacter = targetObject.AddComponent<NetworkCharacter>();
+            EditModeLifecycle.AddComponent<Character>(targetObject);
+            NetworkCharacter targetCharacter = EditModeLifecycle.AddComponent<NetworkCharacter>(targetObject);
             targetCharacter.SetManualNetworkId(42);
             GameObject targetHurtbox = Track(new GameObject("Melee Server Target Hurtbox"));
             targetHurtbox.transform.SetParent(targetObject.transform, false);
@@ -906,21 +1180,12 @@ namespace Arawn.GameCreator2.Networking.Melee.Tests
             Assert.That(clientRequestCount, Is.Zero);
 
             IEnumerable queue = GetPrivateField<IEnumerable>(manager, "m_ServerHitQueue");
-            IEnumerator enumerator = queue.GetEnumerator();
-            Assert.That(enumerator.MoveNext(), Is.True);
-            object queued = enumerator.Current;
-            FieldInfo trustedField = queued.GetType().GetField(
-                "TrustedServerOrigin",
-                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-            FieldInfo requestField = queued.GetType().GetField(
-                "Request",
-                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-            Assert.That(trustedField, Is.Not.Null);
-            Assert.That(requestField, Is.Not.Null);
-            Assert.That((bool)trustedField.GetValue(queued), Is.True);
-            var request = (NetworkMeleeHitRequest)requestField.GetValue(queued);
-            Assert.That(request.ActorNetworkId, Is.EqualTo(41));
-            Assert.That(request.TargetNetworkId, Is.EqualTo(42));
+            Assert.That(queue.GetEnumerator().MoveNext(), Is.False);
+            IDictionary leases = GetPrivateField<IDictionary>(
+                controller,
+                "m_ServerAttackLeases");
+            Assert.That(leases.Count, Is.Zero,
+                "A native server hit must not synthesize authority for a missing Skill operation.");
         }
 
         [Test]
@@ -931,18 +1196,18 @@ namespace Arawn.GameCreator2.Networking.Melee.Tests
                 new GameObject("Melee Owner Bridge").AddComponent<TestTransportBridge>());
 
             GameObject attackerObject = Track(new GameObject("Melee Remote-Owned Server Replica"));
-            attackerObject.AddComponent<Character>();
-            NetworkCharacter attackerCharacter = attackerObject.AddComponent<NetworkCharacter>();
+            EditModeLifecycle.AddComponent<Character>(attackerObject);
+            NetworkCharacter attackerCharacter = EditModeLifecycle.AddComponent<NetworkCharacter>(attackerObject);
             attackerCharacter.SetManualNetworkId(51);
-            NetworkMeleeController controller = attackerObject.AddComponent<NetworkMeleeController>();
+            NetworkMeleeController controller = EditModeLifecycle.AddComponent<NetworkMeleeController>(attackerObject);
             controller.Initialize(true, false);
             manager.RegisterController(51, controller);
             bridge.RegisterCharacter(attackerCharacter);
             bridge.SetCharacterOwner(51, 7);
 
             GameObject targetObject = Track(new GameObject("Melee Remote-Owned Target"));
-            targetObject.AddComponent<Character>();
-            NetworkCharacter targetCharacter = targetObject.AddComponent<NetworkCharacter>();
+            EditModeLifecycle.AddComponent<Character>(targetObject);
+            NetworkCharacter targetCharacter = EditModeLifecycle.AddComponent<NetworkCharacter>(targetObject);
             targetCharacter.SetManualNetworkId(52);
             GameObject targetHurtbox = Track(new GameObject("Melee Remote-Owned Target Hurtbox"));
             targetHurtbox.transform.SetParent(targetObject.transform, false);
@@ -962,10 +1227,10 @@ namespace Arawn.GameCreator2.Networking.Melee.Tests
         public void ServerReactionLoopback_RaisesCompatibilityEventWithoutGameplayReplay()
         {
             GameObject targetObject = Track(new GameObject("Melee Host Reaction Target"));
-            targetObject.AddComponent<Character>();
-            NetworkCharacter targetCharacter = targetObject.AddComponent<NetworkCharacter>();
+            EditModeLifecycle.AddComponent<Character>(targetObject);
+            NetworkCharacter targetCharacter = EditModeLifecycle.AddComponent<NetworkCharacter>(targetObject);
             targetCharacter.SetManualNetworkId(53);
-            NetworkMeleeController controller = targetObject.AddComponent<NetworkMeleeController>();
+            NetworkMeleeController controller = EditModeLifecycle.AddComponent<NetworkMeleeController>(targetObject);
             controller.Initialize(true, true);
 
             int compatibilityEvents = 0;
@@ -991,10 +1256,10 @@ namespace Arawn.GameCreator2.Networking.Melee.Tests
         public void ServerSkillLoopback_RaisesCompatibilityEventWithoutGameplayReplay()
         {
             GameObject actorObject = Track(new GameObject("Melee Server Skill Actor"));
-            actorObject.AddComponent<Character>();
-            NetworkCharacter networkCharacter = actorObject.AddComponent<NetworkCharacter>();
+            EditModeLifecycle.AddComponent<Character>(actorObject);
+            NetworkCharacter networkCharacter = EditModeLifecycle.AddComponent<NetworkCharacter>(actorObject);
             networkCharacter.SetManualNetworkId(54);
-            NetworkMeleeController controller = actorObject.AddComponent<NetworkMeleeController>();
+            NetworkMeleeController controller = EditModeLifecycle.AddComponent<NetworkMeleeController>(actorObject);
             controller.Initialize(true, false);
 
             var sentinelState = new NetworkAttackState
@@ -1048,15 +1313,15 @@ namespace Arawn.GameCreator2.Networking.Melee.Tests
             NetworkMeleeManager manager = CreateManager(true, false);
 
             GameObject attackerObject = Track(new GameObject("Melee Reaction Source"));
-            attackerObject.AddComponent<Character>();
-            NetworkCharacter attackerCharacter = attackerObject.AddComponent<NetworkCharacter>();
+            EditModeLifecycle.AddComponent<Character>(attackerObject);
+            NetworkCharacter attackerCharacter = EditModeLifecycle.AddComponent<NetworkCharacter>(attackerObject);
             attackerCharacter.SetManualNetworkId(55);
 
             GameObject targetObject = Track(new GameObject("Melee Reaction Callback Target"));
-            targetObject.AddComponent<Character>();
-            NetworkCharacter targetCharacter = targetObject.AddComponent<NetworkCharacter>();
+            EditModeLifecycle.AddComponent<Character>(targetObject);
+            NetworkCharacter targetCharacter = EditModeLifecycle.AddComponent<NetworkCharacter>(targetObject);
             targetCharacter.SetManualNetworkId(56);
-            NetworkMeleeController controller = targetObject.AddComponent<NetworkMeleeController>();
+            NetworkMeleeController controller = EditModeLifecycle.AddComponent<NetworkMeleeController>(targetObject);
             controller.Initialize(true, false);
             manager.RegisterController(56, controller);
 
@@ -1090,17 +1355,17 @@ namespace Arawn.GameCreator2.Networking.Melee.Tests
             NetworkMeleeManager manager = CreateManager(false, true);
 
             GameObject attackerObject = Track(new GameObject("Melee Optimistic Attacker"));
-            attackerObject.AddComponent<Character>();
-            NetworkCharacter attackerCharacter = attackerObject.AddComponent<NetworkCharacter>();
+            EditModeLifecycle.AddComponent<Character>(attackerObject);
+            NetworkCharacter attackerCharacter = EditModeLifecycle.AddComponent<NetworkCharacter>(attackerObject);
             attackerCharacter.SetManualNetworkId(71);
-            NetworkMeleeController controller = attackerObject.AddComponent<NetworkMeleeController>();
+            NetworkMeleeController controller = EditModeLifecycle.AddComponent<NetworkMeleeController>(attackerObject);
             controller.Initialize(false, true);
             controller.OptimisticEffects = true;
             manager.RegisterController(71, controller);
 
             GameObject targetObject = Track(new GameObject("Melee Optimistic Target"));
-            targetObject.AddComponent<Character>();
-            NetworkCharacter targetCharacter = targetObject.AddComponent<NetworkCharacter>();
+            EditModeLifecycle.AddComponent<Character>(targetObject);
+            NetworkCharacter targetCharacter = EditModeLifecycle.AddComponent<NetworkCharacter>(targetObject);
             targetCharacter.SetManualNetworkId(72);
             GameObject targetHurtbox = Track(new GameObject("Melee Optimistic Target Hurtbox"));
             targetHurtbox.transform.SetParent(targetObject.transform, false);
@@ -1188,10 +1453,10 @@ namespace Arawn.GameCreator2.Networking.Melee.Tests
         public void HitValidation_MissingAuthoredSkillFailsClosedBeforeGameplay()
         {
             GameObject attackerObject = Track(new GameObject("Melee Missing Skill Attacker"));
-            attackerObject.AddComponent<Character>();
-            NetworkCharacter networkCharacter = attackerObject.AddComponent<NetworkCharacter>();
+            EditModeLifecycle.AddComponent<Character>(attackerObject);
+            NetworkCharacter networkCharacter = EditModeLifecycle.AddComponent<NetworkCharacter>(attackerObject);
             networkCharacter.SetManualNetworkId(79);
-            NetworkMeleeController controller = attackerObject.AddComponent<NetworkMeleeController>();
+            NetworkMeleeController controller = EditModeLifecycle.AddComponent<NetworkMeleeController>(attackerObject);
             controller.Initialize(true, false);
 
             NetworkMeleeHitResponse response = controller.ProcessHitRequest(
@@ -1385,10 +1650,10 @@ namespace Arawn.GameCreator2.Networking.Melee.Tests
         public void SkillRejection_RecordsCurrentIdentityButIgnoresUnrelatedStaleResponse()
         {
             GameObject actorObject = Track(new GameObject("Melee Rejection Identity Actor"));
-            actorObject.AddComponent<Character>();
-            NetworkCharacter networkCharacter = actorObject.AddComponent<NetworkCharacter>();
+            EditModeLifecycle.AddComponent<Character>(actorObject);
+            NetworkCharacter networkCharacter = EditModeLifecycle.AddComponent<NetworkCharacter>(actorObject);
             networkCharacter.SetManualNetworkId(86);
-            NetworkMeleeController controller = actorObject.AddComponent<NetworkMeleeController>();
+            NetworkMeleeController controller = EditModeLifecycle.AddComponent<NetworkMeleeController>(actorObject);
             controller.Initialize(true, true);
 
             uint rejectedCorrelation = NetworkCorrelation.Compose(86u, 1u);
@@ -2048,8 +2313,8 @@ namespace Arawn.GameCreator2.Networking.Melee.Tests
         public void RemoteWeaponApplyVersion_ConvergesToNewestSynchronousState()
         {
             GameObject controllerObject = Track(new GameObject("Melee Version Test"));
-            controllerObject.AddComponent<Character>();
-            NetworkMeleeController controller = controllerObject.AddComponent<NetworkMeleeController>();
+            EditModeLifecycle.AddComponent<Character>(controllerObject);
+            NetworkMeleeController controller = EditModeLifecycle.AddComponent<NetworkMeleeController>(controllerObject);
             controller.Initialize(false, false);
 
             controller.ApplyRemoteWeaponState(
@@ -2072,14 +2337,16 @@ namespace Arawn.GameCreator2.Networking.Melee.Tests
         private NetworkMeleeManager CreateManager(bool isServer, bool isClient)
         {
             GameObject managerObject = Track(new GameObject("Melee Manager Test"));
-            NetworkMeleeManager manager = managerObject.AddComponent<NetworkMeleeManager>();
+            NetworkMeleeManager manager = EditModeLifecycle.AddComponent<NetworkMeleeManager>(managerObject);
             manager.Initialize(isServer, isClient);
             return manager;
         }
 
         private NetworkMeleeController CreateController(string name)
         {
-            return Track(new GameObject(name)).AddComponent<NetworkMeleeController>();
+            GameObject controllerObject = Track(new GameObject(name));
+            EditModeLifecycle.AddComponent<Character>(controllerObject);
+            return EditModeLifecycle.AddComponent<NetworkMeleeController>(controllerObject);
         }
 
         private MeleeWeapon CreateComboWeapon(out ComboTree comboTree, out Skill previousSkill)
@@ -2169,6 +2436,17 @@ namespace Arawn.GameCreator2.Networking.Melee.Tests
             return result;
         }
 
+        private static NetworkFreeFlowCombatState RoundTrip(NetworkFreeFlowCombatState value)
+        {
+            using BitPacker packer = BitPackerPool.Get();
+            PurrNetMeleeValuePackers.Write(packer, value);
+            packer.ResetPositionAndMode(true);
+
+            NetworkFreeFlowCombatState result = default;
+            PurrNetMeleeValuePackers.Read(packer, ref result);
+            return result;
+        }
+
         private static NetworkReactionBroadcast RoundTrip(NetworkReactionBroadcast value)
         {
             using BitPacker packer = BitPackerPool.Get();
@@ -2234,7 +2512,7 @@ namespace Arawn.GameCreator2.Networking.Melee.Tests
         {
             FieldInfo field = target.GetType().GetField(
                 name,
-                BindingFlags.Instance | BindingFlags.NonPublic);
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
             Assert.That(field, Is.Not.Null, $"Missing field {name}");
             return (T)field.GetValue(target);
         }
@@ -2243,7 +2521,7 @@ namespace Arawn.GameCreator2.Networking.Melee.Tests
         {
             FieldInfo field = target.GetType().GetField(
                 name,
-                BindingFlags.Instance | BindingFlags.NonPublic);
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
             Assert.That(field, Is.Not.Null, $"Missing field {name}");
             field.SetValue(target, value);
         }

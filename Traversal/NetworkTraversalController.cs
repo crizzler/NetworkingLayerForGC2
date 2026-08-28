@@ -58,10 +58,48 @@ namespace Arawn.GameCreator2.Networking.Traversal
             public bool IsArmed => Sequence != 0 && ExpectedTraverseInstanceId != 0;
         }
 
+        private struct ServerRemoteInteractiveTransitionAuthorization
+        {
+            public uint CorrelationId;
+            public int TargetTraverseInstanceId;
+            public Vector3 StartRootPosition;
+            public Vector3 TargetRootPosition;
+            public float ExpiresAt;
+
+            public bool IsArmed =>
+                CorrelationId != 0 && TargetTraverseInstanceId != 0;
+        }
+
         private struct PendingUnresolvedBroadcast
         {
             public NetworkTraversalBroadcast Value;
             public float ReceivedAt;
+        }
+
+        private readonly struct RemoteInteractiveTransitionPresentation
+        {
+            public readonly string SourceName;
+            public readonly string TargetName;
+            public readonly AnimationClip ExitClip;
+            public readonly AnimationClip EnterClip;
+            public readonly float Distance;
+            public readonly float TransitionOut;
+
+            public RemoteInteractiveTransitionPresentation(
+                TraverseInteractive source,
+                TraverseInteractive target,
+                AnimationClip exitClip,
+                AnimationClip enterClip,
+                float distance,
+                float transitionOut)
+            {
+                SourceName = source != null ? source.name : "none";
+                TargetName = target != null ? target.name : "none";
+                ExitClip = exitClip;
+                EnterClip = enterClip;
+                Distance = distance;
+                TransitionOut = transitionOut;
+            }
         }
 
         [Header("Network Settings")]
@@ -125,6 +163,8 @@ namespace Arawn.GameCreator2.Networking.Traversal
         private bool m_HasAppliedAuthoritativeState;
         private bool m_ServerOwnerMotionWindowOpen;
         private bool m_ServerOwnerMotionUsesClientAuthority;
+        private ServerRemoteInteractiveTransitionAuthorization
+            m_ServerRemoteInteractiveTransitionAuthorization;
         private int m_ProtectedConnectionLinkInstanceId;
         private uint m_ProtectedConnectionLinkCorrelationId;
         private uint m_ProtectedConnectionLinkStateVersion;
@@ -152,6 +192,13 @@ namespace Arawn.GameCreator2.Networking.Traversal
         private bool m_IsSnapshotRestoredTraversal;
         private int m_HostLocalInteractiveStateLayer = -1;
         private float m_HostLocalInteractiveStateTransitionOut;
+        private bool m_HasPendingRemoteInteractiveTransitionPresentation;
+        private RemoteInteractiveTransitionPresentation m_PendingRemoteInteractiveTransitionPresentation;
+        private uint m_PendingRemoteInteractiveTransitionStateVersion;
+        private int m_PendingRemoteInteractiveTransitionTargetHash;
+        private string m_PendingRemoteInteractiveTransitionTargetId = string.Empty;
+        private float m_PendingRemoteInteractiveTransitionExpiresAt;
+        private uint m_RemoteInteractiveTransitionPresentationSequence;
         private TraverseInteractive m_LastEdgeConnectionSource;
         private Traverse m_LastEdgeConnectionTarget;
         private Vector3 m_LastEdgeConnectionLocalPosition;
@@ -191,6 +238,12 @@ namespace Arawn.GameCreator2.Networking.Traversal
         // samples arrive. Keep the correlated server gate open long enough for one final
         // client-to-server delivery after GC2 clears Busy/root motion on the server.
         private const float SERVER_OWNER_MOTION_EXIT_GRACE_SECONDS = 0.5f;
+        private const float SERVER_REMOTE_INTERACTIVE_TRANSITION_MIN_SECONDS = 1.5f;
+        private const float SERVER_REMOTE_INTERACTIVE_TRANSITION_MAX_SECONDS = 5f;
+        private const float SERVER_REMOTE_INTERACTIVE_TRANSITION_NETWORK_GRACE_SECONDS = 1f;
+        private const float SERVER_REMOTE_INTERACTIVE_TRANSITION_CORRIDOR_RADIUS = 0.25f;
+        private const float SERVER_REMOTE_INTERACTIVE_TRANSITION_ENDPOINT_PADDING = 0.1f;
+        private const float SERVER_REMOTE_INTERACTIVE_TRANSITION_COMPLETION_RADIUS = 0.1f;
         private const float EDGE_CONNECTION_REQUEST_INTERVAL_SECONDS = 0.25f;
         private const float EDGE_CONNECTION_JUMP_MEMORY_SECONDS = 1.25f;
         private const float AUTHORITATIVE_CONNECTION_EXIT_SUPPRESSION_SECONDS = 2f;
@@ -199,6 +252,9 @@ namespace Arawn.GameCreator2.Networking.Traversal
         private const int MAX_PENDING_UNRESOLVED_BROADCASTS = 8;
         private const float DOWNWARD_JUMP_INPUT_THRESHOLD = -0.25f;
         private const float DOWNWARD_JUMP_VERTICAL_THRESHOLD = -0.1f;
+        private const float INTERACTIVE_EXIT_GESTURE_BLEND_SECONDS = 0.1f;
+        private const float INTERACTIVE_LINK_GESTURE_BLEND_SECONDS = 0.1f;
+        private const float REMOTE_INTERACTIVE_TRANSITION_PENDING_SECONDS = 2f;
         private const string INTERACTIVE_CONNECTION_ACTION_ID = "__network_interactive_connection";
         private const BindingFlags MOTION_INTERACTIVE_FIELD_FLAGS =
             BindingFlags.Instance | BindingFlags.NonPublic;
@@ -223,21 +279,6 @@ namespace Arawn.GameCreator2.Networking.Traversal
 
         private static readonly FieldInfo s_MotionInteractiveInputZField =
             typeof(MotionInteractive).GetField("m_InputZ", MOTION_INTERACTIVE_FIELD_FLAGS);
-
-        private static readonly FieldInfo s_MotionLinkAnimationClipField =
-            typeof(MotionLink).GetField("m_AnimationClip", MOTION_INTERACTIVE_FIELD_FLAGS);
-
-        private static readonly FieldInfo s_MotionLinkMaskField =
-            typeof(MotionLink).GetField("m_Mask", MOTION_INTERACTIVE_FIELD_FLAGS);
-
-        private static readonly FieldInfo s_MotionLinkAnimationStateField =
-            typeof(MotionLink).GetField("m_AnimationState", MOTION_INTERACTIVE_FIELD_FLAGS);
-
-        private static readonly FieldInfo s_MotionLinkLayerField =
-            typeof(MotionLink).GetField("m_Layer", MOTION_INTERACTIVE_FIELD_FLAGS);
-
-        private static readonly FieldInfo s_MotionLinkAnimationSpeedField =
-            typeof(MotionLink).GetField("m_AnimationSpeed", MOTION_INTERACTIVE_FIELD_FLAGS);
 
         private static readonly FieldInfo s_StatesOutputLayersField =
             typeof(StatesOutput).GetField("m_Layers", BindingFlags.Instance | BindingFlags.NonPublic);
@@ -454,6 +495,8 @@ namespace Arawn.GameCreator2.Networking.Traversal
                 }
             }
             StopHostLocalInteractiveMotionState();
+            ClearPendingRemoteInteractiveTransitionPresentation();
+            CancelRemoteInteractiveTransitionPresentation();
             RestoreTraversalMotionValues("disable");
             m_PendingAuthoritativeMotionEnter = default;
             m_PendingAuthoritativeMotionExit = default;
@@ -474,7 +517,13 @@ namespace Arawn.GameCreator2.Networking.Traversal
             CleanupPendingRequests();
             CleanupServerStartAcknowledgements();
             CleanupAuthoritativeMotionOperations();
+            CleanupServerRemoteInteractiveTransitionAuthorization();
             RetryPendingUnresolvedAuthoritativeState();
+            if (m_HasPendingRemoteInteractiveTransitionPresentation &&
+                Time.unscaledTime > m_PendingRemoteInteractiveTransitionExpiresAt)
+            {
+                ClearPendingRemoteInteractiveTransitionPresentation();
+            }
             RefreshLocalTraversalPoseAuthority();
             RefreshServerOwnerMotionWindow();
             UpdateFocusedClimbDiagnostics();
@@ -491,6 +540,13 @@ namespace Arawn.GameCreator2.Networking.Traversal
 
         public void Initialize(bool isServer, bool isLocalClient)
         {
+            bool roleChanged = m_IsServer != isServer ||
+                               m_IsLocalClient != isLocalClient;
+            if (roleChanged)
+            {
+                ClearServerRemoteInteractiveTransitionAuthorization(0);
+            }
+
             m_IsServer = isServer;
             m_IsLocalClient = isLocalClient;
             m_IsRemoteClient = !isServer && !isLocalClient;
@@ -994,6 +1050,15 @@ namespace Arawn.GameCreator2.Networking.Traversal
                 $"request-built action={request.Action} requestId={request.RequestId} " +
                 $"correlation={request.CorrelationId} alreadyApplied={alreadyAppliedLocally}",
                 traverse);
+            NetworkCiTrace.Log(
+                "traversal",
+                "owner-request-built",
+                request.ActorNetworkId,
+                request.CorrelationId,
+                $"request={request.RequestId} action={request.Action} " +
+                $"role={m_NetworkCharacter?.CurrentRole} traverse='{request.TraverseIdString}' " +
+                $"alreadyApplied={alreadyAppliedLocally}",
+                this);
 
             NetworkTraversalManager manager = NetworkTraversalManager.Instance;
             bool trustedDedicatedServerRequest = m_IsServer && !m_IsLocalClient;
@@ -1086,6 +1151,16 @@ namespace Arawn.GameCreator2.Networking.Traversal
                         TraversalRejectionReason.RouteUnavailable,
                         $"Traversal request route became unavailable before send: {routeStatus}",
                         $"route-send:{routeStatus}");
+                }
+                else
+                {
+                    NetworkCiTrace.Log(
+                        "traversal",
+                        "owner-request-sent",
+                        request.ActorNetworkId,
+                        request.CorrelationId,
+                        $"request={request.RequestId} action={request.Action} route={routeStatus}",
+                        this);
                 }
             }
         }
@@ -1411,6 +1486,14 @@ namespace Arawn.GameCreator2.Networking.Traversal
             NetworkTraversalRequest request,
             uint senderClientId)
         {
+            NetworkCiTrace.Log(
+                "traversal",
+                "authority-request-processing",
+                request.ActorNetworkId,
+                request.CorrelationId,
+                $"sender={senderClientId} request={request.RequestId} action={request.Action} " +
+                $"role={m_NetworkCharacter?.CurrentRole} traverse='{request.TraverseIdString}'",
+                this);
             LogTraversal(
                 $"server processing request action={request.Action} requestId={request.RequestId} " +
                 $"sender={senderClientId} actor={request.ActorNetworkId} target={request.TargetNetworkId} " +
@@ -1607,6 +1690,14 @@ namespace Arawn.GameCreator2.Networking.Traversal
             }
 
             NetworkTraversalResponse response = BuildSuccessResponse(request);
+            NetworkCiTrace.Log(
+                "traversal",
+                "authority-request-applied",
+                request.ActorNetworkId,
+                request.CorrelationId,
+                $"request={request.RequestId} action={request.Action} version={response.StateVersion} " +
+                $"traversing={response.IsTraversing} active='{ResolveTraversalStance()?.Traverse?.name ?? "none"}'",
+                this);
             if (m_ClimbDiagnosticFocused)
             {
                 FocusedClimbLog(
@@ -1667,6 +1758,16 @@ namespace Arawn.GameCreator2.Networking.Traversal
             float roundTrip = pendingFound
                 ? Mathf.Max(0f, Time.time - pending.SentTime)
                 : -1f;
+            NetworkCiTrace.Log(
+                "traversal",
+                "owner-response-received",
+                response.ActorNetworkId,
+                response.CorrelationId,
+                $"request={response.RequestId} action={response.Action} pending={pendingFound} " +
+                $"authorized={response.Authorized} applied={response.Applied} " +
+                $"version={response.StateVersion} traversing={response.IsTraversing} " +
+                $"local='{ResolveTraversalStance()?.Traverse?.name ?? "none"}'",
+                this);
 
             if (m_ClimbDiagnosticFocused || pullUpResponse)
             {
@@ -1784,6 +1885,16 @@ namespace Arawn.GameCreator2.Networking.Traversal
             if (broadcast.NetworkId != NetworkId) return;
             if (m_IsServer) return;
 
+            NetworkCiTrace.Log(
+                "traversal",
+                "client-broadcast-received",
+                broadcast.NetworkId,
+                broadcast.CorrelationId,
+                $"action={broadcast.Action} version={broadcast.StateVersion} " +
+                $"traversing={broadcast.IsTraversing} traverse='{broadcast.TraverseIdString}' " +
+                $"local='{ResolveTraversalStance()?.Traverse?.name ?? "none"}'",
+                this);
+
             bool focusedPullUpBroadcast =
                 ContainsDiagnosticName(broadcast.ActionIdString, "PullUp") ||
                 ContainsDiagnosticName(broadcast.TraverseIdString, "PullUp");
@@ -1845,6 +1956,20 @@ namespace Arawn.GameCreator2.Networking.Traversal
                             repeatedInteractive,
                             0,
                             "repeated-broadcast");
+                    }
+
+                    if (broadcast.Action == TraversalActionType.EnterTraverseInteractive &&
+                        TryConsumePendingRemoteInteractiveTransitionPresentation(
+                            broadcast.StateVersion,
+                            broadcast.TraverseHash,
+                            broadcast.TraverseIdString,
+                            out RemoteInteractiveTransitionPresentation pendingPresentation))
+                    {
+                        PlayRemoteInteractiveTransitionPresentation(
+                            pendingPresentation,
+                            m_ClientApplySequence,
+                            broadcast.StateVersion,
+                            broadcast.CorrelationId);
                     }
                 }
 
@@ -2594,6 +2719,15 @@ namespace Arawn.GameCreator2.Networking.Traversal
             };
 
             m_ClientAuthoritativeStateApply = operation;
+            NetworkCiTrace.Log(
+                "traversal",
+                "client-apply-begin",
+                NetworkId,
+                correlationId,
+                $"sequence={operation.Sequence} action={action} version={stateVersion} " +
+                $"traversing={isTraversing} target='{traverseIdString}' " +
+                $"local='{ResolveTraversalStance()?.Traverse?.name ?? "none"}' snapshot={presentationSafeSnapshot}",
+                this);
             if (m_ClimbDiagnosticFocused)
             {
                 TraversalStance stance = ResolveTraversalStance();
@@ -2640,13 +2774,49 @@ namespace Arawn.GameCreator2.Networking.Traversal
                     operation.TraverseHash,
                     operation.TraverseIdString);
 
+                bool remoteInteractivePresentationStart =
+                    !presentationSafeSnapshot &&
+                    m_IsRemoteClient &&
+                    operation.IsTraversing &&
+                    action == TraversalActionType.EnterTraverseInteractive &&
+                    authoritativeTraverse is TraverseInteractive;
+
                 bool applied;
-                if (presentationSafeSnapshot)
+                if (presentationSafeSnapshot || remoteInteractivePresentationStart)
                 {
+                    // A RemoteClient is an observer, not a second gameplay simulation of the
+                    // owner's interactive traversal. Historically a live Enter broadcast ran
+                    // TraverseInteractive.Enter here, while a reconnect restored the same state
+                    // through NetworkRestoreInteractiveSnapshot. The live path consequently
+                    // started an input-less MotionInteractive loop which wrote priority-9 zero
+                    // directions and raced the owner's replicated ledge intent. That is why a
+                    // first observer could remain on Move Right at a clamped rail edge while a
+                    // reconnect correctly selected Edge Right.
+                    //
+                    // Give live observers the exact presentation-only lifecycle used by late
+                    // join snapshots. Owners and authority still execute the full GC2 motion and
+                    // its gameplay instruction lists. A broadcast has no durable relative pose,
+                    // so the restore shell deliberately starts from the currently replicated root
+                    // until the next authoritative pose/snapshot arrives.
+                    NetworkTraversalSnapshot presentationSnapshot = presentationSafeSnapshot
+                        ? snapshot
+                        : CreateRemoteInteractivePresentationSnapshot(operation);
+                    if (remoteInteractivePresentationStart)
+                    {
+                        NetworkCiTrace.Log(
+                            "traversal",
+                            "remote-interactive-presentation-start",
+                            NetworkId,
+                            operation.CorrelationId,
+                            $"sequence={operation.Sequence} version={operation.StateVersion} " +
+                            $"target='{operation.TraverseIdString}' relativePose=current-root",
+                            this);
+                    }
                     applied = await ApplyAuthoritativeSnapshotStateAsync(
                         operation,
-                        snapshot,
-                        authoritativeTraverse);
+                        presentationSnapshot,
+                        authoritativeTraverse,
+                        remoteInteractivePresentationStart);
                 }
                 else if (localStateMatches &&
                     (IsTraversalStartAction(action) ||
@@ -2731,6 +2901,17 @@ namespace Arawn.GameCreator2.Networking.Traversal
             }
             finally
             {
+                TraversalStance ciFinalStance = ResolveTraversalStance();
+                NetworkCiTrace.Log(
+                    "traversal",
+                    "client-apply-end",
+                    NetworkId,
+                    operation.CorrelationId,
+                    $"sequence={operation.Sequence} action={action} version={operation.StateVersion} " +
+                    $"applied={appliedForDiagnostics} converged={convergedForDiagnostics} " +
+                    $"currentSequence={IsCurrentClientApply(operation.Sequence)} " +
+                    $"active='{ciFinalStance?.Traverse?.name ?? "none"}'",
+                    this);
                 if (m_ClimbDiagnosticFocused)
                 {
                     TraversalStance finalStance = ResolveTraversalStance();
@@ -2755,16 +2936,36 @@ namespace Arawn.GameCreator2.Networking.Traversal
             }
         }
 
+        private NetworkTraversalSnapshot CreateRemoteInteractivePresentationSnapshot(
+            ClientAuthoritativeStateApply operation)
+        {
+            return new NetworkTraversalSnapshot
+            {
+                NetworkId = NetworkId,
+                ServerTime = Time.time,
+                IsTraversing = true,
+                TraverseHash = operation?.TraverseHash ?? 0,
+                TraverseIdString = operation?.TraverseIdString ?? string.Empty,
+                StateVersion = operation?.StateVersion ?? 0,
+                Kind = TraversalSnapshotKind.ActiveInteractive,
+                HasRelativePose = false,
+                RelativePosition = default,
+                RelativeRotation = Quaternion.identity
+            };
+        }
+
         private async Task<bool> ApplyAuthoritativeSnapshotStateAsync(
             ClientAuthoritativeStateApply operation,
             NetworkTraversalSnapshot snapshot,
-            Traverse authoritativeTraverse)
+            Traverse authoritativeTraverse,
+            bool presentRemoteInteractiveTransition)
         {
             TraversalStance stance = ResolveTraversalStance();
             if (stance == null) return false;
 
             if (!operation.IsTraversing)
             {
+                CancelRemoteInteractiveTransitionPresentation();
                 if (stance.Traverse == null)
                 {
                     InvalidatePendingTraversalEnter(stance);
@@ -2783,8 +2984,19 @@ namespace Arawn.GameCreator2.Networking.Traversal
                 return false;
             }
 
+            bool hasTransitionPresentation = false;
+            RemoteInteractiveTransitionPresentation transitionPresentation = default;
             if (!ReferenceEquals(stance.Traverse, interactive))
             {
+                CancelRemoteInteractiveTransitionPresentation();
+                if (m_IsRemoteClient)
+                {
+                    hasTransitionPresentation = TryCreateRemoteInteractiveTransitionPresentation(
+                        stance,
+                        interactive,
+                        out transitionPresentation);
+                }
+
                 if (stance.Traverse != null)
                 {
                     ClearLedgeEdgeIntent();
@@ -2808,7 +3020,340 @@ namespace Arawn.GameCreator2.Networking.Traversal
             }
 
             ApplySnapshotRelativePose(snapshot, stance, interactive);
+            if (presentRemoteInteractiveTransition)
+            {
+                if (!hasTransitionPresentation)
+                {
+                    hasTransitionPresentation =
+                        TryConsumePendingRemoteInteractiveTransitionPresentation(
+                            operation.StateVersion,
+                            operation.TraverseHash,
+                            operation.TraverseIdString,
+                            out transitionPresentation);
+                }
+
+                if (hasTransitionPresentation)
+                {
+                    ClearPendingRemoteInteractiveTransitionPresentation();
+                    PlayRemoteInteractiveTransitionPresentation(
+                        transitionPresentation,
+                        operation.Sequence,
+                        operation.StateVersion,
+                        operation.CorrelationId);
+                }
+            }
+            else if (hasTransitionPresentation)
+            {
+                StorePendingRemoteInteractiveTransitionPresentation(
+                    transitionPresentation,
+                    operation);
+            }
             return true;
+        }
+
+        private void StorePendingRemoteInteractiveTransitionPresentation(
+            in RemoteInteractiveTransitionPresentation presentation,
+            ClientAuthoritativeStateApply operation)
+        {
+            if (!m_IsRemoteClient || operation == null)
+            {
+                return;
+            }
+
+            m_HasPendingRemoteInteractiveTransitionPresentation = true;
+            m_PendingRemoteInteractiveTransitionPresentation = presentation;
+            m_PendingRemoteInteractiveTransitionStateVersion = operation.StateVersion;
+            m_PendingRemoteInteractiveTransitionTargetHash = operation.TraverseHash;
+            m_PendingRemoteInteractiveTransitionTargetId = operation.TraverseIdString ?? string.Empty;
+            m_PendingRemoteInteractiveTransitionExpiresAt =
+                Time.unscaledTime + REMOTE_INTERACTIVE_TRANSITION_PENDING_SECONDS;
+            NetworkCiTrace.Log(
+                "traversal",
+                "remote-interactive-transition-deferred",
+                NetworkId,
+                operation.CorrelationId,
+                $"sequence={operation.Sequence} version={operation.StateVersion} " +
+                $"source='{presentation.SourceName}' target='{presentation.TargetName}' " +
+                "awaiting=matching-live-broadcast",
+                this);
+        }
+
+        private bool TryConsumePendingRemoteInteractiveTransitionPresentation(
+            uint stateVersion,
+            int targetHash,
+            string targetId,
+            out RemoteInteractiveTransitionPresentation presentation)
+        {
+            presentation = default;
+            if (!m_HasPendingRemoteInteractiveTransitionPresentation)
+            {
+                return false;
+            }
+
+            bool expired = Time.unscaledTime > m_PendingRemoteInteractiveTransitionExpiresAt;
+            bool versionMatches = stateVersion != 0 &&
+                                  m_PendingRemoteInteractiveTransitionStateVersion != 0
+                ? stateVersion == m_PendingRemoteInteractiveTransitionStateVersion
+                : true;
+            bool identityMatches = !string.IsNullOrEmpty(targetId)
+                ? string.Equals(
+                    targetId,
+                    m_PendingRemoteInteractiveTransitionTargetId,
+                    StringComparison.Ordinal)
+                : targetHash != 0 &&
+                  targetHash == m_PendingRemoteInteractiveTransitionTargetHash;
+            if (expired || !versionMatches || !identityMatches)
+            {
+                if (expired)
+                {
+                    ClearPendingRemoteInteractiveTransitionPresentation();
+                }
+                return false;
+            }
+
+            presentation = m_PendingRemoteInteractiveTransitionPresentation;
+            ClearPendingRemoteInteractiveTransitionPresentation();
+            return true;
+        }
+
+        private void ClearPendingRemoteInteractiveTransitionPresentation()
+        {
+            m_HasPendingRemoteInteractiveTransitionPresentation = false;
+            m_PendingRemoteInteractiveTransitionPresentation = default;
+            m_PendingRemoteInteractiveTransitionStateVersion = 0;
+            m_PendingRemoteInteractiveTransitionTargetHash = 0;
+            m_PendingRemoteInteractiveTransitionTargetId = string.Empty;
+            m_PendingRemoteInteractiveTransitionExpiresAt = 0f;
+        }
+
+        private bool TryCreateRemoteInteractiveTransitionPresentation(
+            TraversalStance stance,
+            TraverseInteractive target,
+            out RemoteInteractiveTransitionPresentation presentation)
+        {
+            presentation = default;
+            if (!m_IsRemoteClient ||
+                m_Character == null ||
+                stance?.Traverse is not TraverseInteractive source ||
+                ReferenceEquals(source, target) ||
+                source.Motion == null ||
+                target?.MotionInteractive == null)
+            {
+                return false;
+            }
+
+            MotionInteractive targetMotion = target.MotionInteractive;
+            Vector3 currentPosition = targetMotion.CharacterPosition(m_Character);
+            Vector3 targetPosition = target.CalculateStartPosition(m_Character);
+            Vector3 direction = targetPosition - currentPosition;
+            float distance = direction.magnitude;
+            if (distance <= Traverse.MIN_DISTANCE_TRANSITION)
+            {
+                return false;
+            }
+
+            Quaternion characterRotation = m_Character.transform.rotation;
+            AnimationClip exitClip = source.Motion.GetExitAnimation(
+                direction,
+                characterRotation);
+
+            Quaternion enterSelectionRotation = targetMotion.GetRotation(
+                target,
+                m_Character.transform.forward,
+                0f,
+                out Quaternion targetRotation)
+                    ? targetRotation
+                    : characterRotation;
+            AnimationClip enterClip = targetMotion.m_EnterAnimations?.Get(
+                direction,
+                enterSelectionRotation);
+
+            if (exitClip == null && enterClip == null)
+            {
+                return false;
+            }
+
+            presentation = new RemoteInteractiveTransitionPresentation(
+                source,
+                target,
+                exitClip,
+                enterClip,
+                distance,
+                targetMotion.TransitionOut);
+            return true;
+        }
+
+        private void PlayRemoteInteractiveTransitionPresentation(
+            in RemoteInteractiveTransitionPresentation presentation,
+            uint applySequence,
+            uint stateVersion,
+            uint correlationId)
+        {
+            if (!m_IsRemoteClient ||
+                m_Character?.Gestures == null ||
+                !IsCurrentClientApply(applySequence))
+            {
+                return;
+            }
+
+            uint presentationSequence = BeginRemoteInteractiveTransitionPresentation();
+            _ = RunRemoteInteractiveTransitionPresentationAsync(
+                presentation,
+                presentationSequence,
+                stateVersion,
+                correlationId);
+            AnimationClip exitClip = presentation.ExitClip;
+            AnimationClip enterClip = presentation.EnterClip;
+
+            NetworkCiTrace.Log(
+                "traversal",
+                "remote-interactive-transition-presentation",
+                NetworkId,
+                correlationId,
+                $"sequence={applySequence} version={stateVersion} " +
+                $"source='{presentation.SourceName}' target='{presentation.TargetName}' " +
+                $"distance={presentation.Distance:F3} exit='{exitClip?.name ?? "none"}' " +
+                $"enter='{enterClip?.name ?? "none"}' rootPose=transport",
+                this);
+        }
+
+        private async Task RunRemoteInteractiveTransitionPresentationAsync(
+            RemoteInteractiveTransitionPresentation presentation,
+            uint presentationSequence,
+            uint stateVersion,
+            uint correlationId)
+        {
+            try
+            {
+                AnimationClip exitClip = presentation.ExitClip;
+                AnimationClip enterClip = presentation.EnterClip;
+                if (exitClip != null)
+                {
+                    if (!IsCurrentRemoteInteractiveTransitionPresentation(presentationSequence))
+                    {
+                        return;
+                    }
+
+                    ConfigGesture exitConfig = new ConfigGesture(
+                        0f,
+                        exitClip.length,
+                        1f,
+                        false,
+                        INTERACTIVE_EXIT_GESTURE_BLEND_SECONDS,
+                        enterClip != null ? 0f : presentation.TransitionOut);
+                    _ = m_Character.Gestures.CrossFade(
+                        exitClip,
+                        null,
+                        BlendMode.Blend,
+                        exitConfig,
+                        true);
+                    LogRemoteInteractiveTransitionGestureStarted(
+                        "exit",
+                        exitClip,
+                        presentation,
+                        presentationSequence,
+                        stateVersion,
+                        correlationId);
+                }
+
+                if (enterClip == null)
+                {
+                    return;
+                }
+
+                if (exitClip != null)
+                {
+                    double enterAt = m_Character.Time.TimeAsDouble + Mathf.Max(
+                        0f,
+                        exitClip.length - INTERACTIVE_EXIT_GESTURE_BLEND_SECONDS);
+                    while (IsCurrentRemoteInteractiveTransitionPresentation(presentationSequence) &&
+                           m_Character.Time.TimeAsDouble < enterAt)
+                    {
+                        await Task.Yield();
+                    }
+                }
+
+                if (!IsCurrentRemoteInteractiveTransitionPresentation(presentationSequence))
+                {
+                    return;
+                }
+
+                ConfigGesture enterConfig = new ConfigGesture(
+                    0f,
+                    enterClip.length,
+                    1f,
+                    false,
+                    INTERACTIVE_LINK_GESTURE_BLEND_SECONDS,
+                    presentation.TransitionOut);
+                _ = m_Character.Gestures.CrossFade(
+                    enterClip,
+                    null,
+                    BlendMode.Blend,
+                    enterConfig,
+                    true);
+                LogRemoteInteractiveTransitionGestureStarted(
+                    "enter",
+                    enterClip,
+                    presentation,
+                    presentationSequence,
+                    stateVersion,
+                    correlationId);
+            }
+            catch (Exception exception)
+            {
+                WarnRateLimited(
+                    $"remote-interactive-transition-presentation:{NetworkId}",
+                    $"[NetworkTraversalController] Remote interactive transition presentation " +
+                    $"failed for NetworkId={NetworkId}: {exception.GetBaseException().Message}");
+            }
+        }
+
+        private void LogRemoteInteractiveTransitionGestureStarted(
+            string phase,
+            AnimationClip clip,
+            in RemoteInteractiveTransitionPresentation presentation,
+            uint presentationSequence,
+            uint stateVersion,
+            uint correlationId)
+        {
+            string stage = string.Equals(phase, "exit", StringComparison.Ordinal)
+                ? "remote-interactive-transition-exit-started"
+                : "remote-interactive-transition-enter-started";
+            NetworkCiTrace.Log(
+                "traversal",
+                stage,
+                NetworkId,
+                correlationId,
+                $"presentation={presentationSequence} version={stateVersion} " +
+                $"source='{presentation.SourceName}' target='{presentation.TargetName}' " +
+                $"clip='{clip?.name ?? "none"}' rootMotion=false rootPose=transport",
+                this);
+        }
+
+        private uint BeginRemoteInteractiveTransitionPresentation()
+        {
+            m_RemoteInteractiveTransitionPresentationSequence = unchecked(
+                m_RemoteInteractiveTransitionPresentationSequence + 1u);
+            if (m_RemoteInteractiveTransitionPresentationSequence == 0)
+            {
+                m_RemoteInteractiveTransitionPresentationSequence = 1;
+            }
+
+            return m_RemoteInteractiveTransitionPresentationSequence;
+        }
+
+        private void CancelRemoteInteractiveTransitionPresentation()
+        {
+            _ = BeginRemoteInteractiveTransitionPresentation();
+        }
+
+        private bool IsCurrentRemoteInteractiveTransitionPresentation(uint sequence)
+        {
+            return sequence != 0 &&
+                   sequence == m_RemoteInteractiveTransitionPresentationSequence &&
+                   isActiveAndEnabled &&
+                   m_IsRemoteClient &&
+                   m_Character?.Gestures != null;
         }
 
         private static bool MatchesClientAuthoritativeState(
@@ -3091,6 +3636,13 @@ namespace Arawn.GameCreator2.Networking.Traversal
             TraversalToken previousToken = s_TraversalStanceSnapshotTokenProperty?.GetValue(stance)
                 as TraversalToken;
             ForceCancelAuthoritativeTraversal(stance, correlationId, stateVersion);
+            if (m_IsServer)
+            {
+                // Replacement transitions deliberately spend one yielded frame with no active
+                // GC2 stance. Do not carry the previous operation's broad exit-grace admission
+                // through that gap; the target opens its own correlated window on MotionEnter.
+                CloseServerOwnerMotionWindow(0f);
+            }
 
             bool drained = await WaitForTraversalCleanupAsync(
                 stance,
@@ -3175,7 +3727,7 @@ namespace Arawn.GameCreator2.Networking.Traversal
             }
 
             WarnRateLimited(
-                $"traversal-cleanup-timeout:{NetworkId}:{previousTraverse?.GetInstanceID() ?? 0}",
+                $"traversal-cleanup-timeout:{NetworkId}:{previousTraverse?.GetLegacyInstanceId() ?? 0}",
                 $"[NetworkTraversalController] Timed out waiting {TRAVERSAL_CLEANUP_TIMEOUT_SECONDS:F1}s " +
                 $"for traversal cleanup on NetworkId={NetworkId}. Previous traversal " +
                 $"'{FormatTraverse(previousTraverse)}' remains '{FormatTraverse(stance.Traverse)}'; " +
@@ -3272,7 +3824,7 @@ namespace Arawn.GameCreator2.Networking.Traversal
             {
                 m_PendingAuthoritativeMotionEnter = default;
                 WarnRateLimited(
-                    $"snapshot-restore:{interactive.GetInstanceID()}",
+                    $"snapshot-restore:{interactive.GetLegacyInstanceId()}",
                     $"[NetworkTraversalController] Interactive traversal snapshot restore failed for " +
                     $"'{interactive.name}': {exception.GetBaseException().Message}");
                 return false;
@@ -3327,7 +3879,7 @@ namespace Arawn.GameCreator2.Networking.Traversal
             catch (Exception exception)
             {
                 WarnRateLimited(
-                    $"snapshot-owner-resume:{interactive.GetInstanceID()}",
+                    $"snapshot-owner-resume:{interactive.GetLegacyInstanceId()}",
                     $"[NetworkTraversalController] Local-owner traversal snapshot resume failed for " +
                     $"'{interactive.name}': {exception.GetBaseException().Message}");
             }
@@ -3386,31 +3938,64 @@ namespace Arawn.GameCreator2.Networking.Traversal
             }
 
             s_TraversalStanceRelativePositionProperty.SetValue(stance, snapshot.RelativePosition);
-            if (m_Character != null)
+            if (m_Character == null)
             {
-                Vector3 before = m_Character.transform.position;
-                Transform anchor = traverse.Transform;
-                Vector3 rootPosition = anchor.TransformPoint(snapshot.RelativePosition);
-                Vector3 driverPosition = rootPosition -
-                                         Vector3.up * (m_Character.Motion.Height * 0.5f);
-                Quaternion rotation = anchor.rotation * snapshot.RelativeRotation;
+                return;
+            }
 
-                // Route snapshot restoration through the active driver. Fusion Native captures
-                // this as an explicit teleport instead of having BeforeAllTicks silently erase a
-                // direct Transform write on the next prediction restore.
-                m_Character.Driver.SetPosition(driverPosition, true);
-                m_Character.Driver.SetRotation(rotation);
+            // A remote observer already receives the authoritative root pose from its movement
+            // transport. Applying the traversal snapshot to that same root with teleport=true
+            // races Fusion/PurrNet interpolation and makes an authored ledge-to-ledge transition
+            // snap to its destination. The traversal snapshot remains authoritative for semantic
+            // stance/relative state; only an owning client that is restoring durable state may use
+            // it as a root-pose fallback.
+            if (m_IsRemoteClient)
+            {
+                NetworkCiTrace.Log(
+                    "traversal",
+                    "remote-interactive-snapshot-semantic-pose",
+                    NetworkId,
+                    0,
+                    $"version={snapshot.StateVersion} traverse='{snapshot.TraverseIdString}' " +
+                    $"relative={NetworkTraversalClimbDiagnostics.Vector(snapshot.RelativePosition)} " +
+                    "rootPose=transport",
+                    this);
 
                 if (m_ClimbDiagnosticFocused)
                 {
                     FocusedClimbLog(
                         "SnapshotPoseApply",
-                        $"version={snapshot.StateVersion} traverse='{snapshot.TraverseIdString}' " +
+                        $"decision=semantic-only-remote version={snapshot.StateVersion} " +
+                        $"traverse='{snapshot.TraverseIdString}' " +
                         $"relative={NetworkTraversalClimbDiagnostics.Vector(snapshot.RelativePosition)} " +
-                        $"before={NetworkTraversalClimbDiagnostics.Vector(before)} " +
-                        $"requestedDriver={NetworkTraversalClimbDiagnostics.Vector(driverPosition)} " +
-                        $"after={NetworkTraversalClimbDiagnostics.Vector(m_Character.transform.position)}");
+                        $"preservedRoot={NetworkTraversalClimbDiagnostics.Vector(m_Character.transform.position)}");
                 }
+
+                return;
+            }
+
+            Vector3 before = m_Character.transform.position;
+            Transform anchor = traverse.Transform;
+            Vector3 rootPosition = anchor.TransformPoint(snapshot.RelativePosition);
+            Vector3 driverPosition = rootPosition -
+                                     Vector3.up * (m_Character.Motion.Height * 0.5f);
+            Quaternion rotation = anchor.rotation * snapshot.RelativeRotation;
+
+            // Route owning-client snapshot restoration through the active driver. Fusion Native
+            // captures this as an explicit teleport instead of having BeforeAllTicks silently
+            // erase a direct Transform write on the next prediction restore.
+            m_Character.Driver.SetPosition(driverPosition, true);
+            m_Character.Driver.SetRotation(rotation);
+
+            if (m_ClimbDiagnosticFocused)
+            {
+                FocusedClimbLog(
+                    "SnapshotPoseApply",
+                    $"version={snapshot.StateVersion} traverse='{snapshot.TraverseIdString}' " +
+                    $"relative={NetworkTraversalClimbDiagnostics.Vector(snapshot.RelativePosition)} " +
+                    $"before={NetworkTraversalClimbDiagnostics.Vector(before)} " +
+                    $"requestedDriver={NetworkTraversalClimbDiagnostics.Vector(driverPosition)} " +
+                    $"after={NetworkTraversalClimbDiagnostics.Vector(m_Character.transform.position)}");
             }
         }
 
@@ -3644,6 +4229,18 @@ namespace Arawn.GameCreator2.Networking.Traversal
                             traverseInteractive,
                             operationCorrelationId,
                             operationStateVersion);
+                        if (transitionSource != null)
+                        {
+                            ArmServerRemoteInteractiveTransitionAuthorization(
+                                transitionSource,
+                                traverseInteractive,
+                                operationCorrelationId);
+                            TraceAuthoritativeInteractiveTransitionStart(
+                                transitionSource,
+                                traverseInteractive,
+                                operationCorrelationId,
+                                operationStateVersion);
+                        }
                         Task interactiveTask = transitionSource != null
                             ? Traverse.ChangeTo(transitionSource, traverseInteractive, m_Character, false)
                             : traverseInteractive.Enter(m_Character, InteractiveTransitionData.None);
@@ -3709,7 +4306,7 @@ namespace Arawn.GameCreator2.Networking.Traversal
         {
             if (link == null) return;
 
-            m_ProtectedConnectionLinkInstanceId = link.GetInstanceID();
+            m_ProtectedConnectionLinkInstanceId = link.GetLegacyInstanceId();
             m_ProtectedConnectionLinkCorrelationId = correlationId;
             m_ProtectedConnectionLinkStateVersion = stateVersion;
             m_ProtectedConnectionLinkExpiresAt =
@@ -3729,11 +4326,11 @@ namespace Arawn.GameCreator2.Networking.Traversal
                 return false;
             }
 
-            if (traverse == null || traverse.GetInstanceID() != m_ProtectedConnectionLinkInstanceId)
+            if (traverse == null || traverse.GetLegacyInstanceId() != m_ProtectedConnectionLinkInstanceId)
             {
                 TraversalStance stance = ResolveTraversalStance();
                 if (stance?.Traverse == null ||
-                    stance.Traverse.GetInstanceID() != m_ProtectedConnectionLinkInstanceId)
+                    stance.Traverse.GetLegacyInstanceId() != m_ProtectedConnectionLinkInstanceId)
                 {
                     ClearProtectedConnectionLink(null);
                 }
@@ -3747,7 +4344,7 @@ namespace Arawn.GameCreator2.Networking.Traversal
         {
             if (m_ProtectedConnectionLinkInstanceId == 0) return;
             if (matchingTraverse != null &&
-                matchingTraverse.GetInstanceID() != m_ProtectedConnectionLinkInstanceId)
+                matchingTraverse.GetLegacyInstanceId() != m_ProtectedConnectionLinkInstanceId)
             {
                 return;
             }
@@ -3798,7 +4395,7 @@ namespace Arawn.GameCreator2.Networking.Traversal
                 Sequence = sequence,
                 CorrelationId = correlationId,
                 StateVersion = stateVersion,
-                ExpectedTraverseInstanceId = expectedTraverse != null ? expectedTraverse.GetInstanceID() : 0,
+                ExpectedTraverseInstanceId = expectedTraverse != null ? expectedTraverse.GetLegacyInstanceId() : 0,
                 ExpiresAt = Time.realtimeSinceStartup + Mathf.Max(0.1f, lifetime)
             };
         }
@@ -3835,7 +4432,7 @@ namespace Arawn.GameCreator2.Networking.Traversal
         {
             return operation.IsArmed &&
                    traverse != null &&
-                   operation.ExpectedTraverseInstanceId == traverse.GetInstanceID() &&
+                   operation.ExpectedTraverseInstanceId == traverse.GetLegacyInstanceId() &&
                    Time.realtimeSinceStartup <= operation.ExpiresAt;
         }
 
@@ -4099,6 +4696,15 @@ namespace Arawn.GameCreator2.Networking.Traversal
             m_SuppressInterception = true;
             try
             {
+                ArmServerRemoteInteractiveTransitionAuthorization(
+                    interactive,
+                    nextTraverse,
+                    correlationId);
+                TraceAuthoritativeInteractiveTransitionStart(
+                    interactive,
+                    nextTraverse,
+                    correlationId,
+                    stateVersion);
                 _ = ObserveAuthoritativeTraversalTask(
                     Traverse.ChangeTo(interactive, nextTraverse, m_Character, false),
                     TraversalActionType.TryJump,
@@ -4109,6 +4715,245 @@ namespace Arawn.GameCreator2.Networking.Traversal
                 m_SuppressInterception = previousSuppress;
             }
             return true;
+        }
+
+        /// <summary>
+        /// Retains the exact server-approved interactive connection long enough for reliable
+        /// Shared-owner pose samples captured during that transition to reach State Authority.
+        /// The authority's local GC2 copy can finish its easing before those samples arrive, so
+        /// TraversalStance.InInteractiveTransition alone is not a transport-safe admission
+        /// lifetime. The authorization is actor-local, operation-correlated, time-bounded and
+        /// restricted to the authored straight-line root corridor.
+        /// </summary>
+        private void ArmServerRemoteInteractiveTransitionAuthorization(
+            Traverse source,
+            Traverse target,
+            uint correlationId)
+        {
+            ClearServerRemoteInteractiveTransitionAuthorization(0);
+
+            if (!m_IsServer || m_IsLocalClient || correlationId == 0 ||
+                m_Character == null ||
+                m_NetworkCharacter == null ||
+                !m_NetworkCharacter.IsPlayerOwnedActor ||
+                !m_NetworkCharacter.HasAuthenticatedPlayerOwner ||
+                source?.Motion == null ||
+                target is not TraverseInteractive targetInteractive ||
+                targetInteractive.MotionInteractive == null)
+            {
+                return;
+            }
+
+            MotionInteractive targetMotion = targetInteractive.MotionInteractive;
+            Vector3 currentAnchor = targetMotion.CharacterPosition(m_Character);
+            Vector3 targetAnchor = targetInteractive.CalculateStartPosition(m_Character);
+            Vector3 startRoot = m_Character.transform.position;
+            Vector3 targetRoot = startRoot + (targetAnchor - currentAnchor);
+            Vector3 direction = targetAnchor - currentAnchor;
+            float distance = direction.magnitude;
+            if (!IsFinite(startRoot) || !IsFinite(targetRoot) ||
+                !float.IsFinite(distance) ||
+                distance <= Traverse.MIN_DISTANCE_TRANSITION)
+            {
+                return;
+            }
+
+            Quaternion characterRotation = m_Character.transform.rotation;
+            AnimationClip exitClip = source.Motion.GetExitAnimation(
+                direction,
+                characterRotation);
+            Quaternion enterSelectionRotation = targetMotion.GetRotation(
+                targetInteractive,
+                m_Character.transform.forward,
+                0f,
+                out Quaternion targetRotation)
+                    ? targetRotation
+                    : characterRotation;
+            AnimationClip enterClip = targetMotion.m_EnterAnimations?.Get(
+                direction,
+                enterSelectionRotation);
+            float transitionDuration = Mathf.Max(
+                (exitClip != null ? exitClip.length : 0f) +
+                Mathf.Max(
+                    enterClip != null
+                        ? enterClip.length - targetMotion.TransitionOut
+                        : 0f,
+                    0f),
+                targetMotion.TransitionIn);
+            float authorizationDuration = Mathf.Clamp(
+                transitionDuration +
+                SERVER_REMOTE_INTERACTIVE_TRANSITION_NETWORK_GRACE_SECONDS,
+                SERVER_REMOTE_INTERACTIVE_TRANSITION_MIN_SECONDS,
+                SERVER_REMOTE_INTERACTIVE_TRANSITION_MAX_SECONDS);
+
+            m_ServerRemoteInteractiveTransitionAuthorization =
+                new ServerRemoteInteractiveTransitionAuthorization
+                {
+                    CorrelationId = correlationId,
+                    TargetTraverseInstanceId = targetInteractive.GetLegacyInstanceId(),
+                    StartRootPosition = startRoot,
+                    TargetRootPosition = targetRoot,
+                    ExpiresAt = Time.realtimeSinceStartup + authorizationDuration
+                };
+
+            NetworkCiTrace.Log(
+                "traversal",
+                "authenticated-remote-transition-window-armed",
+                NetworkId,
+                correlationId,
+                $"target='{targetInteractive.name}' start={startRoot:F3} " +
+                $"end={targetRoot:F3} distance={distance:F3} " +
+                $"duration={authorizationDuration:F3}",
+                this);
+        }
+
+        internal bool AllowsAuthenticatedRemoteInteractiveTransitionPose(
+            TraverseInteractive activeInteractive,
+            Vector3 ownerRootPosition)
+        {
+            CleanupServerRemoteInteractiveTransitionAuthorization();
+            ServerRemoteInteractiveTransitionAuthorization authorization =
+                m_ServerRemoteInteractiveTransitionAuthorization;
+            if (!authorization.IsArmed ||
+                !m_IsServer || m_IsLocalClient ||
+                !m_ServerOwnerMotionWindowOpen ||
+                m_ServerOwnerMotionOperationId == 0 ||
+                m_ServerOwnerMotionOperationId != authorization.CorrelationId ||
+                activeInteractive == null ||
+                activeInteractive.GetLegacyInstanceId() !=
+                    authorization.TargetTraverseInstanceId ||
+                !IsFinite(ownerRootPosition))
+            {
+                return false;
+            }
+
+            Vector3 corridor = authorization.TargetRootPosition -
+                               authorization.StartRootPosition;
+            float corridorLength = corridor.magnitude;
+            if (!float.IsFinite(corridorLength) ||
+                corridorLength <= Traverse.MIN_DISTANCE_TRANSITION)
+            {
+                return false;
+            }
+
+            Vector3 corridorDirection = corridor / corridorLength;
+            float along = Vector3.Dot(
+                ownerRootPosition - authorization.StartRootPosition,
+                corridorDirection);
+            if (!float.IsFinite(along) ||
+                along < -SERVER_REMOTE_INTERACTIVE_TRANSITION_ENDPOINT_PADDING ||
+                along > corridorLength +
+                    SERVER_REMOTE_INTERACTIVE_TRANSITION_ENDPOINT_PADDING)
+            {
+                return false;
+            }
+
+            Vector3 nearest = authorization.StartRootPosition +
+                              corridorDirection * Mathf.Clamp(
+                                  along,
+                                  0f,
+                                  corridorLength);
+            float corridorDistance = Vector3.Distance(ownerRootPosition, nearest);
+            return float.IsFinite(corridorDistance) &&
+                   corridorDistance <=
+                       SERVER_REMOTE_INTERACTIVE_TRANSITION_CORRIDOR_RADIUS;
+        }
+
+        internal void CompleteAuthenticatedRemoteInteractiveTransitionPose(
+            TraverseInteractive activeInteractive,
+            Vector3 acceptedRootPosition)
+        {
+            ServerRemoteInteractiveTransitionAuthorization authorization =
+                m_ServerRemoteInteractiveTransitionAuthorization;
+            if (!authorization.IsArmed || activeInteractive == null ||
+                activeInteractive.GetLegacyInstanceId() !=
+                    authorization.TargetTraverseInstanceId ||
+                !IsFinite(acceptedRootPosition) ||
+                Vector3.Distance(
+                    acceptedRootPosition,
+                    authorization.TargetRootPosition) >
+                    SERVER_REMOTE_INTERACTIVE_TRANSITION_COMPLETION_RADIUS)
+            {
+                return;
+            }
+
+            ClearServerRemoteInteractiveTransitionAuthorization(
+                authorization.CorrelationId);
+        }
+
+        private void CleanupServerRemoteInteractiveTransitionAuthorization()
+        {
+            ServerRemoteInteractiveTransitionAuthorization authorization =
+                m_ServerRemoteInteractiveTransitionAuthorization;
+            if (!authorization.IsArmed ||
+                Time.realtimeSinceStartup <= authorization.ExpiresAt)
+            {
+                return;
+            }
+
+            ClearServerRemoteInteractiveTransitionAuthorization(
+                authorization.CorrelationId);
+        }
+
+        private void ClearServerRemoteInteractiveTransitionAuthorization(
+            uint operationId)
+        {
+            ServerRemoteInteractiveTransitionAuthorization authorization =
+                m_ServerRemoteInteractiveTransitionAuthorization;
+            if (!authorization.IsArmed ||
+                operationId != 0 && authorization.CorrelationId != operationId)
+            {
+                return;
+            }
+
+            m_ServerRemoteInteractiveTransitionAuthorization = default;
+        }
+
+        private void TraceAuthoritativeInteractiveTransitionStart(
+            Traverse source,
+            Traverse target,
+            uint correlationId,
+            uint stateVersion)
+        {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            if (!m_IsServer || source?.Motion == null ||
+                target is not TraverseInteractive targetInteractive ||
+                targetInteractive.MotionInteractive == null ||
+                m_Character == null)
+            {
+                return;
+            }
+
+            MotionInteractive targetMotion = targetInteractive.MotionInteractive;
+            Vector3 currentPosition = targetMotion.CharacterPosition(m_Character);
+            Vector3 targetPosition = targetInteractive.CalculateStartPosition(m_Character);
+            Vector3 direction = targetPosition - currentPosition;
+            Quaternion characterRotation = m_Character.transform.rotation;
+            AnimationClip exitClip = direction.magnitude > Traverse.MIN_DISTANCE_TRANSITION
+                ? source.Motion.GetExitAnimation(direction, characterRotation)
+                : null;
+            Quaternion enterSelectionRotation = targetMotion.GetRotation(
+                targetInteractive,
+                m_Character.transform.forward,
+                0f,
+                out Quaternion targetRotation)
+                    ? targetRotation
+                    : characterRotation;
+            AnimationClip enterClip = direction.magnitude > Traverse.MIN_DISTANCE_TRANSITION
+                ? targetMotion.m_EnterAnimations?.Get(direction, enterSelectionRotation)
+                : null;
+
+            NetworkCiTrace.Log(
+                "traversal",
+                "authoritative-interactive-transition-started",
+                NetworkId,
+                correlationId,
+                $"version={stateVersion} source='{source.name}' " +
+                $"target='{targetInteractive.name}' distance={direction.magnitude:F3} " +
+                $"exit='{exitClip?.name ?? "none"}' " +
+                $"enter='{enterClip?.name ?? "none"}' rootPose=authoritative",
+                this);
+#endif
         }
 
         private bool TrySelectInteractiveJumpConnection(
@@ -4600,6 +5445,11 @@ namespace Arawn.GameCreator2.Networking.Traversal
             TraversalActionType action,
             Traverse traverse)
         {
+            TraversalStance observedStance = ResolveTraversalStance();
+            TraversalToken observedToken = observedStance != null &&
+                ReferenceEquals(observedStance.Traverse, traverse)
+                    ? s_TraversalStanceSnapshotTokenProperty?.GetValue(observedStance) as TraversalToken
+                    : null;
             float startTime = Time.time;
             Vector3 startPosition = m_Character != null ? m_Character.transform.position : transform.position;
             string traverseName = FormatTraverse(traverse);
@@ -4619,10 +5469,85 @@ namespace Arawn.GameCreator2.Networking.Traversal
             }
             catch (Exception exception)
             {
+                bool recovered = TryRecoverFailedAuthoritativeTraversal(
+                    observedStance,
+                    traverse,
+                    observedToken,
+                    action);
                 Debug.LogError(
                     $"[NetworkTraversalDebug][Controller] {name} netId={NetworkId} " +
-                    $"authoritative traversal task failed action={action} traverse='{traverseName}': {exception}",
+                    $"authoritative traversal task failed action={action} traverse='{traverseName}' " +
+                    $"recovered={recovered}: {exception}",
                     this);
+            }
+        }
+
+        private bool TryRecoverFailedAuthoritativeTraversal(
+            TraversalStance observedStance,
+            Traverse expectedTraverse,
+            TraversalToken expectedToken,
+            TraversalActionType action)
+        {
+            // A traversal task can fault after OnTraverseEnter has already assigned the stance
+            // and raised the replicated enter event. Only clear the exact traverse/token pair
+            // owned by that failed task; an older continuation must never cancel a newer entry.
+            if (observedStance == null || expectedTraverse == null || expectedToken == null)
+            {
+                return false;
+            }
+
+            TraversalToken currentToken = s_TraversalStanceSnapshotTokenProperty?.GetValue(observedStance)
+                as TraversalToken;
+            if (!ReferenceEquals(observedStance.Traverse, expectedTraverse) ||
+                !ReferenceEquals(currentToken, expectedToken))
+            {
+                LogTraversal(
+                    $"ignored stale authoritative traversal task failure action={action} " +
+                    $"expected='{FormatTraverse(expectedTraverse)}' " +
+                    $"current='{FormatTraverse(observedStance.Traverse)}'");
+                return false;
+            }
+
+            if (s_TraversalStanceClearSnapshotMethod == null)
+            {
+                WarnRateLimited(
+                    "faulted-traversal-clear-hook-missing",
+                    "[NetworkTraversalController] Cannot recover a faulted authoritative traversal " +
+                    "because TraversalStance.NetworkClearSnapshot is unavailable. Apply the current " +
+                    "GC2 Traversal server-authority patch.");
+                return false;
+            }
+
+            InvalidatePendingTraversalEnter(observedStance);
+
+            bool previousSuppress = m_SuppressInterception;
+            m_SuppressInterception = true;
+            try
+            {
+                bool cleared = s_TraversalStanceClearSnapshotMethod.Invoke(observedStance, null) is true;
+                if (!cleared) return false;
+
+                m_IsSnapshotRestoredTraversal = false;
+                ClearProtectedConnectionLink(expectedTraverse);
+                ClearLedgeEdgeIntent();
+                LogTraversal(
+                    $"recovered faulted authoritative traversal action={action} " +
+                    $"traverse='{FormatTraverse(expectedTraverse)}'");
+                return true;
+            }
+            catch (Exception recoveryException)
+            {
+                Debug.LogError(
+                    $"[NetworkTraversalDebug][Controller] {name} netId={NetworkId} failed to " +
+                    $"recover authoritative traversal action={action} " +
+                    $"traverse='{FormatTraverse(expectedTraverse)}': " +
+                    recoveryException.GetBaseException(),
+                    this);
+                return false;
+            }
+            finally
+            {
+                m_SuppressInterception = previousSuppress;
             }
         }
 
@@ -5170,7 +6095,7 @@ namespace Arawn.GameCreator2.Networking.Traversal
                         "StateCheck",
                         $"reason='{reason}' result=active motion='{motion.name}' state='{state.name}' " +
                         $"layer={stateLayer} playables={stateSummary}",
-                        $"state-active:{GetInstanceID()}:{state.GetInstanceID()}:{stateLayer}");
+                        $"state-active:{this.GetLegacyInstanceId()}:{state.GetLegacyInstanceId()}:{stateLayer}");
                 }
                 return;
             }
@@ -5369,162 +6294,6 @@ namespace Arawn.GameCreator2.Networking.Traversal
                     $"[TraversalAnimDebug][Controller] {name} netId={NetworkId} role={FormatRole()} " +
                     $"host-local prestart state threw motion='{motion.name}' state='{state.name}' " +
                     $"layer={stateLayer}: {exception.Message}\n{exception.StackTrace}",
-                    this);
-            }
-        }
-
-        private void StartHostLocalLinkMotionAnimation(TraverseLink link)
-        {
-            if (link == null || m_Character == null)
-            {
-                return;
-            }
-
-            MotionLink motion = link.MotionLink;
-            if (motion == null)
-            {
-                LogTraversalAnimation(
-                    $"host-local link prestart skipped: link motion is null traverse='{FormatTraverse(link)}'");
-                return;
-            }
-
-            Args args = new Args(link.gameObject, m_Character.gameObject);
-            if (!motion.CanUse(args))
-            {
-                LogTraversalAnimation(
-                    $"host-local link prestart skipped: motion CanUse returned false motion='{motion.name}' " +
-                    $"traverse='{FormatTraverse(link)}'");
-                return;
-            }
-
-            float speed = 1f;
-            if (s_MotionLinkAnimationSpeedField?.GetValue(motion) is PropertyGetDecimal speedProperty)
-            {
-                speed = Mathf.Max(0.01f, (float)speedProperty.Get(args));
-            }
-
-            try
-            {
-                switch (motion.AnimationMode)
-                {
-                    case MotionLink.Mode.AnimationClip:
-                    {
-                        AnimationClip clip = s_MotionLinkAnimationClipField?.GetValue(motion) as AnimationClip;
-                        AvatarMask mask = s_MotionLinkMaskField?.GetValue(motion) as AvatarMask;
-                        if (clip == null)
-                        {
-                            LogTraversalAnimation(
-                                $"host-local link prestart skipped: motion clip is null motion='{motion.name}' " +
-                                $"traverse='{FormatTraverse(link)}'");
-                            return;
-                        }
-
-                        ConfigGesture gestureConfig = new ConfigGesture(
-                            0f,
-                            clip.length,
-                            speed,
-                            true,
-                            motion.TransitionIn,
-                            motion.TransitionOut);
-
-                        m_NetworkCharacter?.AnimimController?.RegisterClip(clip);
-
-                        LogTraversalAnimation(
-                            $"host-local link prestart gesture motion='{motion.name}' clip='{clip.name}' " +
-                            $"clipLength={clip.length:F3} speed={speed:F3} transitionIn={motion.TransitionIn:F3} " +
-                            $"transitionOut={motion.TransitionOut:F3} mask='{(mask != null ? mask.name : "none")}' " +
-                            $"traverse='{FormatTraverse(link)}' position={FormatVector(m_Character.transform.position)}");
-
-                        _ = ObserveHostLocalLinkMotionTask(
-                            m_Character.Gestures.CrossFade(clip, mask, BlendMode.Blend, gestureConfig, true),
-                            motion.name,
-                            "gesture",
-                            clip.name,
-                            -1);
-                        break;
-                    }
-
-                    case MotionLink.Mode.AnimationState:
-                    {
-                        State state = s_MotionLinkAnimationStateField?.GetValue(motion) as State;
-                        if (state == null)
-                        {
-                            LogTraversalAnimation(
-                                $"host-local link prestart skipped: motion state is null motion='{motion.name}' " +
-                                $"traverse='{FormatTraverse(link)}'");
-                            return;
-                        }
-
-                        int stateLayer = 1;
-                        if (s_MotionLinkLayerField?.GetValue(motion) is PropertyGetInteger layerProperty)
-                        {
-                            stateLayer = (int)layerProperty.Get(args);
-                        }
-
-                        ConfigState stateConfig = new ConfigState(
-                            0f,
-                            speed,
-                            1f,
-                            motion.TransitionIn,
-                            motion.TransitionOut);
-
-                        m_NetworkCharacter?.AnimimController?.RegisterState(state);
-
-                        LogTraversalAnimation(
-                            $"host-local link prestart state motion='{motion.name}' state='{state.name}' " +
-                            $"layer={stateLayer} speed={speed:F3} transitionIn={motion.TransitionIn:F3} " +
-                            $"transitionOut={motion.TransitionOut:F3} traverse='{FormatTraverse(link)}' " +
-                            $"position={FormatVector(m_Character.transform.position)}");
-
-                        _ = ObserveHostLocalLinkMotionTask(
-                            m_Character.States.SetState(state, stateLayer, BlendMode.Blend, stateConfig),
-                            motion.name,
-                            "state",
-                            state.name,
-                            stateLayer);
-                        break;
-                    }
-
-                    default:
-                        LogTraversalAnimation(
-                            $"host-local link prestart skipped: unsupported mode={motion.AnimationMode} " +
-                            $"motion='{motion.name}' traverse='{FormatTraverse(link)}'");
-                        break;
-                }
-            }
-            catch (Exception exception)
-            {
-                Debug.LogError(
-                    $"[TraversalAnimDebug][Controller] {name} netId={NetworkId} role={FormatRole()} " +
-                    $"host-local link prestart threw motion='{motion.name}' mode={motion.AnimationMode} " +
-                    $"traverse='{FormatTraverse(link)}': {exception.Message}\n{exception.StackTrace}",
-                    this);
-            }
-        }
-
-        private async Task ObserveHostLocalLinkMotionTask(
-            Task task,
-            string motionName,
-            string animationType,
-            string animationName,
-            int layer)
-        {
-            try
-            {
-                await task;
-                string layerText = layer >= 0 ? $" layer={layer}" : string.Empty;
-                LogTraversalAnimation(
-                    $"host-local link {animationType} completed motion='{motionName}' " +
-                    $"{animationType}='{animationName}'{layerText} " +
-                    $"position={FormatVector(m_Character != null ? m_Character.transform.position : transform.position)}");
-            }
-            catch (Exception exception)
-            {
-                string layerText = layer >= 0 ? $" layer={layer}" : string.Empty;
-                Debug.LogError(
-                    $"[TraversalAnimDebug][Controller] {name} netId={NetworkId} role={FormatRole()} " +
-                    $"host-local link {animationType} failed motion='{motionName}' " +
-                    $"{animationType}='{animationName}'{layerText}: {exception.Message}\n{exception.StackTrace}",
                     this);
             }
         }
@@ -5842,7 +6611,7 @@ namespace Arawn.GameCreator2.Networking.Traversal
             ClearLedgeEdgeIntent();
 
             if (m_ProtectedConnectionLinkInstanceId != 0 &&
-                traverse.GetInstanceID() != m_ProtectedConnectionLinkInstanceId)
+                traverse.GetLegacyInstanceId() != m_ProtectedConnectionLinkInstanceId)
             {
                 ClearProtectedConnectionLink(null);
             }
@@ -5897,13 +6666,8 @@ namespace Arawn.GameCreator2.Networking.Traversal
             // Starting it here too creates two playables on the same layer and resets Climb's
             // normalized time on a host/Shared creator. Snapshot restoration remains the only
             // path that explicitly prestarts an interactive state because it deliberately does
-            // not execute MotionInteractive.Enter.
-            if (m_IsServer && m_IsLocalClient && !m_IsRemoteClient &&
-                     traverse is TraverseLink hostLink)
-            {
-                StartHostLocalLinkMotionAnimation(hostLink);
-            }
-
+            // not execute MotionInteractive.Enter. TraverseLink.Run likewise owns its normal
+            // MotionLink gesture/state; EventMotionEnter must not start a second Host timeline.
             if (m_IsServer)
             {
                 NetworkTraversalManager manager = NetworkTraversalManager.Instance;
@@ -6063,6 +6827,12 @@ namespace Arawn.GameCreator2.Networking.Traversal
 
         private IEnumerator BroadcastServerTraversalExitSnapshotNextFrame(string exitingTraverseId)
         {
+            // Interactive A -> B replacement drains A asynchronously and enters B during the
+            // following Update. Resuming this coroutine at the start of that same frame used to
+            // publish a transient "not traversing" snapshot before B could cancel it. Observers
+            // consequently cleared A and could no longer select A's exit / B's enter gestures.
+            // Keep the durable detach fallback, but let the entire replacement frame finish first.
+            yield return null;
             yield return null;
 
             m_PendingServerExitSnapshotCoroutine = null;
@@ -6189,7 +6959,11 @@ namespace Arawn.GameCreator2.Networking.Traversal
 
         private void RefreshLocalTraversalPoseAuthority()
         {
-            if (m_IsServer || !m_IsLocalClient || m_IsRemoteClient) return;
+            // Host and Shared-master characters are both server-like and locally owned.
+            // They still need the owner window so Fusion Native captures GC2's climb pose
+            // through the same single-writer path used by a non-authority local owner.
+            // The independent server window continues to validate that captured pose.
+            if (!m_IsLocalClient || m_IsRemoteClient) return;
 
             TraversalStance stance = m_TraversalStance ?? ResolveTraversalStance();
             if (stance?.Traverse == null) return;
@@ -6219,7 +6993,7 @@ namespace Arawn.GameCreator2.Networking.Traversal
                     "OwnerWindow",
                     $"side=client operation=refresh duration={duration:F3} " +
                     $"pos={NetworkTraversalClimbDiagnostics.Vector(transform.position)}",
-                    $"owner-window-refresh:{GetInstanceID()}");
+                    $"owner-window-refresh:{this.GetLegacyInstanceId()}");
             }
         }
 
@@ -6321,6 +7095,7 @@ namespace Arawn.GameCreator2.Networking.Traversal
             m_ServerOwnerMotionWindowOpen = false;
             m_ServerOwnerMotionUsesClientAuthority = false;
             m_ServerOwnerMotionOperationId = 0;
+            ClearServerRemoteInteractiveTransitionAuthorization(operationId);
 
             if (wasOpen && m_ClimbDiagnosticFocused)
             {
@@ -6474,9 +7249,9 @@ namespace Arawn.GameCreator2.Networking.Traversal
 
             string axisSign = $"{Sign(rawInput.x)},{Sign(rawInput.y)}|{Sign(speed.x)},{Sign(speed.y)},{Sign(speed.z)}|{Sign(intent.x)},{Sign(intent.y)},{Sign(intent.z)}";
             string changeValue =
-                $"{traverse?.GetInstanceID() ?? 0}:{motion?.GetInstanceID() ?? 0}:{stateHash}:{clipName}:" +
+                $"{traverse?.GetLegacyInstanceId() ?? 0}:{motion?.GetLegacyInstanceId() ?? 0}:{stateHash}:{clipName}:" +
                 $"{axisSign}:{allowMovement}:{inTransition}:{animatorTransition}";
-            string changeKey = $"controller-state:{GetInstanceID()}";
+            string changeKey = $"controller-state:{this.GetLegacyInstanceId()}";
             bool changed = NetworkTraversalClimbDiagnostics.HasChanged(changeKey, changeValue);
 
             if (!string.IsNullOrEmpty(m_LastClimbDominantClip) &&
@@ -6539,7 +7314,7 @@ namespace Arawn.GameCreator2.Networking.Traversal
                 changed ? "ClimbChange" : "Climb",
                 message,
                 this,
-                changed ? null : $"controller-sample:{GetInstanceID()}");
+                changed ? null : $"controller-sample:{this.GetLegacyInstanceId()}");
         }
 
         private void SetClimbDiagnosticFocus(
@@ -6552,6 +7327,7 @@ namespace Arawn.GameCreator2.Networking.Traversal
 
             m_ClimbDiagnosticFocused = focused;
             NetworkTraversalClimbDiagnostics.SetCharacterFocus(gameObject, NetworkId, focused);
+            NetworkCiTrace.SetTraversalActivity(NetworkId, focused);
             if (!focused)
             {
                 m_LastClimbAnimatorNormalizedTime = -1f;
@@ -6565,6 +7341,21 @@ namespace Arawn.GameCreator2.Networking.Traversal
                 "Focus",
                 $"active={focused} reason='{reason}' traverse='{traverse?.name ?? "none"}' " +
                 $"motion='{motion?.name ?? "none"}' pos={NetworkTraversalClimbDiagnostics.Vector(transform.position)}");
+            NetworkCiTrace.Log(
+                "traversal-state",
+                focused ? "climb-active" : "climb-inactive",
+                NetworkId,
+                m_ClimbDiagnosticCorrelationId,
+                $"role={FormatRole()} reason='{reason}' traverse='{traverse?.name ?? "none"}' " +
+                $"motion='{motion?.name ?? "none"}' anchor={motion?.Anchor.ToString() ?? "none"} " +
+                $"gravity={motion?.Gravity ?? 0f:F3} forceGrounded=" +
+                $"{(traverse as TraverseInteractive)?.ForceGrounded ?? false} " +
+                $"bounds={(traverse as TraverseInteractive)?.PositionA ?? 0f:F3}/" +
+                $"{(traverse as TraverseInteractive)?.PositionB ?? 0f:F3} " +
+                $"width={(traverse as TraverseInteractive)?.Width ?? 0f:F3} " +
+                $"updateKinematics={m_Character?.Driver?.UpdateKinematics ?? true} " +
+                $"root={transform.position:F3}",
+                this);
         }
 
         private void FocusedClimbLog(string stage, string message, string sampleKey = null)
@@ -6732,7 +7523,7 @@ namespace Arawn.GameCreator2.Networking.Traversal
 
         private bool TryResolveTraverseByIdentity(int traverseHash, string traverseIdString, out Traverse traverse)
         {
-            Traverse[] traverses = FindObjectsByType<Traverse>(FindObjectsInactive.Exclude, FindObjectsSortMode.None);
+            Traverse[] traverses = UnityObjectSearch.FindAll<Traverse>(FindObjectsInactive.Exclude);
 
             if (!string.IsNullOrEmpty(traverseIdString))
             {

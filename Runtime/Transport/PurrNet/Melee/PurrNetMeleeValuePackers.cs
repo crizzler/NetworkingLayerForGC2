@@ -27,6 +27,7 @@ namespace Arawn.GameCreator2.Networking.Melee.Transport.PurrNet
             Hasher.PrepareType(typeof(NetworkChargeBroadcast));
             Hasher.PrepareType(typeof(NetworkReactionBroadcast));
             Hasher.PrepareType(typeof(NetworkMeleeWeaponState));
+            Hasher.PrepareType(typeof(NetworkFreeFlowCombatState));
             Hasher.PrepareType(typeof(NetworkMeleeCharacterSnapshot));
         }
 
@@ -199,6 +200,8 @@ namespace Arawn.GameCreator2.Networking.Melee.Transport.PurrNet
             packer.Write(value.InputKey);
             packer.Write(value.IsChargeRelease);
             packer.Write(value.ChargeDuration);
+            packer.Write((byte)value.ActionFlags);
+            packer.Write(value.ActionStateRevision);
         }
 
         [UsedByIL]
@@ -216,6 +219,10 @@ namespace Arawn.GameCreator2.Networking.Melee.Transport.PurrNet
             packer.Read(ref value.InputKey);
             packer.Read(ref value.IsChargeRelease);
             packer.Read(ref value.ChargeDuration);
+            byte actionFlags = 0;
+            packer.Read(ref actionFlags);
+            value.ActionFlags = (NetworkMeleeSkillActionFlags)actionFlags;
+            packer.Read(ref value.ActionStateRevision);
         }
 
         [UsedByIL]
@@ -375,6 +382,26 @@ namespace Arawn.GameCreator2.Networking.Melee.Transport.PurrNet
         }
 
         [UsedByIL]
+        public static void Write(this BitPacker packer, NetworkFreeFlowCombatState value)
+        {
+            packer.Write(value.CharacterNetworkId);
+            packer.Write(value.StateVersion);
+            packer.Write(value.TargetNetworkId);
+            packer.Write(value.Flags);
+            packer.Write(value.ScoreBonus);
+        }
+
+        [UsedByIL]
+        public static void Read(this BitPacker packer, ref NetworkFreeFlowCombatState value)
+        {
+            packer.Read(ref value.CharacterNetworkId);
+            packer.Read(ref value.StateVersion);
+            packer.Read(ref value.TargetNetworkId);
+            packer.Read(ref value.Flags);
+            packer.Read(ref value.ScoreBonus);
+        }
+
+        [UsedByIL]
         public static void Write(this BitPacker packer, NetworkMeleeCharacterSnapshot value)
         {
             packer.Write(value.CharacterNetworkId);
@@ -382,6 +409,8 @@ namespace Arawn.GameCreator2.Networking.Melee.Transport.PurrNet
             packer.Write(value.WeaponState);
             packer.Write(value.HasBlockState);
             packer.Write(value.BlockState);
+            packer.Write(value.HasFreeFlowState);
+            packer.Write(value.FreeFlowState);
         }
 
         [UsedByIL]
@@ -392,6 +421,8 @@ namespace Arawn.GameCreator2.Networking.Melee.Transport.PurrNet
             packer.Read(ref value.WeaponState);
             packer.Read(ref value.HasBlockState);
             packer.Read(ref value.BlockState);
+            packer.Read(ref value.HasFreeFlowState);
+            packer.Read(ref value.FreeFlowState);
         }
 
         private static void WriteVector3(BitPacker packer, Vector3 value)

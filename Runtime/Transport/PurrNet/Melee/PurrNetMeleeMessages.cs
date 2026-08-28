@@ -74,6 +74,11 @@ namespace Arawn.GameCreator2.Networking.Melee.Transport.PurrNet
         public NetworkMeleeWeaponState state;
     }
 
+    public struct GC2MeleeFreeFlowStatePacket : IPackedAuto
+    {
+        public NetworkFreeFlowCombatState state;
+    }
+
     public struct GC2MeleeCharacterSnapshotPacket : IPackedAuto
     {
         public NetworkMeleeCharacterSnapshot snapshot;

@@ -3,6 +3,7 @@
     "rootNamespace": "Arawn.GameCreator2.Networking.Shooter.Tests",
     "references": [
         "Arawn.GameCreator2.Networking",
+        "Arawn.GameCreator2.Networking.TestUtilities",
         "Arawn.GameCreator2.Networking.Shooter",
         "Arawn.GameCreator2.Networking.Shooter.Transport.PurrNet",
         "Arawn.GameCreator2.Networking.Transport.PurrNet",

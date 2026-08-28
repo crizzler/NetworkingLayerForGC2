@@ -41,9 +41,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                 if (component != null) return true;
             }
 
-            T[] candidates = UnityEngine.Object.FindObjectsByType<T>(
-                FindObjectsInactive.Include,
-                FindObjectsSortMode.None);
+            T[] candidates = UnityObjectSearch.FindAll<T>(FindObjectsInactive.Include);
             if (candidates.Length != 1) return false;
             component = candidates[0];
             return component != null;

@@ -145,7 +145,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
         private void ResolveNetwork()
         {
 #if UNITY_2023_1_OR_NEWER
-            m_LobbyNetwork = FindFirstObjectByType<PurrNetSteamLobbyNetwork>(
+            m_LobbyNetwork = UnityObjectSearch.FindAny<PurrNetSteamLobbyNetwork>(
                 FindObjectsInactive.Include);
 #else
             m_LobbyNetwork = FindObjectOfType<PurrNetSteamLobbyNetwork>(true);

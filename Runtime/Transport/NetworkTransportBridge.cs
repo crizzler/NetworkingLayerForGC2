@@ -41,6 +41,7 @@ namespace Arawn.GameCreator2.Networking
         void ClearCharacterOwner(uint characterNetworkId);
 
         Character ResolveCharacter(uint networkId);
+        int CopyRegisteredCharacters(List<NetworkCharacter> destination);
     }
 
     [DefaultExecutionOrder(-400)]
@@ -100,7 +101,7 @@ namespace Arawn.GameCreator2.Networking
             {
                 if (s_Active == null)
                 {
-                    s_Active = FindFirstObjectByType<NetworkTransportBridge>();
+                    s_Active = UnityObjectSearch.FindAny<NetworkTransportBridge>();
                 }
 
                 return s_Active;
@@ -307,9 +308,15 @@ namespace Arawn.GameCreator2.Networking
             m_CharacterRegistry[networkId] = networkCharacter;
             m_RegisteredCharacterIds[networkCharacter] = networkId;
 
-            if (TryResolveOwnerClientId(networkCharacter, out uint ownerClientId))
+            if (networkCharacter.IsPlayerOwnedActor &&
+                networkCharacter.HasAuthenticatedPlayerOwner &&
+                TryResolveOwnerClientId(networkCharacter, out uint ownerClientId))
             {
                 SetCharacterOwner(networkId, ownerClientId);
+            }
+            else if (!networkCharacter.IsPlayerOwnedActor)
+            {
+                ClearCharacterOwner(networkId);
             }
         }
 
@@ -340,6 +347,26 @@ namespace Arawn.GameCreator2.Networking
             return TryResolveNetworkCharacter(networkId, out var networkCharacter) ? networkCharacter.Character : null;
         }
 
+        /// <summary>
+        /// Copies the live registry into caller-owned storage without allocating an array or
+        /// scanning the scene. The destination is cleared before use.
+        /// </summary>
+        public int CopyRegisteredCharacters(List<NetworkCharacter> destination)
+        {
+            if (destination == null) throw new ArgumentNullException(nameof(destination));
+
+            destination.Clear();
+            foreach (NetworkCharacter networkCharacter in m_CharacterRegistry.Values)
+            {
+                if (networkCharacter != null && networkCharacter.isActiveAndEnabled)
+                {
+                    destination.Add(networkCharacter);
+                }
+            }
+
+            return destination.Count;
+        }
+
         public bool TryGetCharacterOwner(uint characterNetworkId, out uint ownerClientId)
         {
             return m_CharacterOwners.TryGetValue(characterNetworkId, out ownerClientId);
@@ -354,6 +381,12 @@ namespace Arawn.GameCreator2.Networking
         {
             ownerClientId = 0;
             if (!IsValidClientId(senderClientId) || actorNetworkId == 0) return false;
+            if (!TryResolveNetworkCharacter(actorNetworkId, out NetworkCharacter actor) ||
+                !actor.IsPlayerOwnedActor ||
+                !actor.HasAuthenticatedPlayerOwner)
+            {
+                return false;
+            }
 
             if (!TryGetCharacterOwner(actorNetworkId, out ownerClientId) || !IsValidClientId(ownerClientId))
             {
@@ -377,6 +410,8 @@ namespace Arawn.GameCreator2.Networking
                 if (ownedId == 0) continue;
                 if (!m_CharacterRegistry.TryGetValue(ownedId, out var networkCharacter)) continue;
                 if (networkCharacter == null) continue;
+                if (!networkCharacter.IsPlayerOwnedActor ||
+                    !networkCharacter.HasAuthenticatedPlayerOwner) continue;
 
                 characterNetworkId = ownedId;
                 return true;
@@ -393,6 +428,13 @@ namespace Arawn.GameCreator2.Networking
         public void SetCharacterOwner(uint characterNetworkId, uint ownerClientId)
         {
             if (characterNetworkId == 0) return;
+            if (TryResolveNetworkCharacter(characterNetworkId, out NetworkCharacter actor) &&
+                (!actor.IsPlayerOwnedActor || !actor.HasAuthenticatedPlayerOwner))
+            {
+                ClearCharacterOwner(characterNetworkId);
+                return;
+            }
+
             if (!IsValidClientId(ownerClientId))
             {
                 ClearCharacterOwner(characterNetworkId);
@@ -460,7 +502,8 @@ namespace Arawn.GameCreator2.Networking
                 return false;
             }
 
-            var characters = FindObjectsByType<NetworkCharacter>(FindObjectsInactive.Exclude, FindObjectsSortMode.None);
+            NetworkCharacter[] characters = UnityObjectSearch.FindAll<NetworkCharacter>(
+                FindObjectsInactive.Exclude);
             for (int i = 0; i < characters.Length; i++)
             {
                 var candidate = characters[i];
@@ -480,6 +523,15 @@ namespace Arawn.GameCreator2.Networking
         {
             if (!IsServer) return true;
             if (characterNetworkId == 0) return false;
+
+            if (TryResolveNetworkCharacter(characterNetworkId, out NetworkCharacter actor) &&
+                !actor.IsPlayerOwnedActor)
+            {
+                Debug.LogWarning(
+                    $"[NetworkTransportBridge] Rejected client input for NPC {characterNetworkId} " +
+                    $"from client {senderClientId}.");
+                return false;
+            }
 
             if (TryGetCharacterOwner(characterNetworkId, out uint ownerClientId))
             {

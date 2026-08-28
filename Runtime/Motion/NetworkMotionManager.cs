@@ -118,9 +118,8 @@ namespace Arawn.GameCreator2.Networking
 
         public void RefreshControllerRegistry()
         {
-            var characters = FindObjectsByType<NetworkCharacter>(
-                FindObjectsInactive.Exclude,
-                FindObjectsSortMode.None);
+            NetworkCharacter[] characters = UnityObjectSearch.FindAll<NetworkCharacter>(
+                FindObjectsInactive.Exclude);
 
             for (int i = 0; i < characters.Length; i++)
             {
@@ -143,12 +142,20 @@ namespace Arawn.GameCreator2.Networking
                     message.Command,
                     $"dropped server command: ownership validation failed sender={senderClientId} " +
                     $"character={message.CharacterNetworkId}");
+                SendRejectedResult(
+                    senderClientId,
+                    message,
+                    NetworkMotionResult.REJECT_NOT_ALLOWED);
                 return;
             }
 
             if (!TryGetController(message.CharacterNetworkId, out UnitMotionNetworkController controller))
             {
                 LogDash(message.Command, $"dropped server command: controller not found character={message.CharacterNetworkId}");
+                SendRejectedResult(
+                    senderClientId,
+                    message,
+                    NetworkMotionResult.REJECT_NOT_ALLOWED);
                 return;
             }
 
@@ -167,6 +174,22 @@ namespace Arawn.GameCreator2.Networking
             {
                 CharacterNetworkId = message.CharacterNetworkId,
                 Result = result
+            });
+        }
+
+        private void SendRejectedResult(
+            uint senderClientId,
+            NetworkMotionCommandMessage message,
+            byte reason)
+        {
+            if (!NetworkTransportBridge.IsValidClientId(senderClientId)) return;
+
+            SendResultToClient?.Invoke(senderClientId, new NetworkMotionResultMessage
+            {
+                CharacterNetworkId = message.CharacterNetworkId,
+                Result = NetworkMotionResult.Rejected(
+                    message.Command.sequenceNumber,
+                    reason)
             });
         }
 

@@ -135,6 +135,12 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         private const float LiveOwnerSimulationAdvancePositionTolerance = 0.005f;
         private const float LiveOwnerSimulationAdvanceRotationTolerance = 0.25f;
         private const float SharedPresentationPositionEpsilon = 0.0005f;
+        private const float RemoteSnapshotPositionEpsilon = 0.0005f;
+        private const float RemoteSnapshotRotationEpsilon = 0.05f;
+        private const float RemoteSnapshotVelocityEpsilon = 0.01f;
+        private const float RemoteSnapshotPresentationSpeed = 15f;
+        private const float RemoteTraversalMaximumPresentationFrameStep = 0.2f;
+        private const float RemoteTraversalPresentationLingerSeconds = 1.25f;
 
         public int LastAppliedSharedTransientSourceTick =>
             Object != null && Object.IsValid
@@ -144,12 +150,12 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         private const int SharedInputTickOffsetDiagnosticThreshold = 8;
         private const int SharedTransientReceiveBacklogCapacity = 128;
 
-        [Header("Listen Host Presentation")]
+        [Header("Remote Presentation")]
         [Tooltip(
             "Optional direct child of the Character root that contains visuals only. " +
-            "The listen host interpolates this child for remote players while the " +
-            "authoritative CharacterController root remains on the current Fusion tick. " +
-            "The GC2 Mannequin is used automatically only when it is a safe direct child.")]
+            "Fusion observers interpolate this child while the CharacterController root " +
+            "remains on the current trusted tick. The GC2 Mannequin is used automatically " +
+            "only when it is a safe direct child.")]
         [SerializeField] private Transform m_ListenHostPresentationVisualRoot;
 
         [Header("Diagnostics")]
@@ -190,6 +196,26 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         private Vector3 m_LiveExternalPresentationLocalScale = Vector3.one;
         private float m_LiveExternalPresentationHoldUntil;
         private bool m_HasLiveExternalPresentationPose;
+
+        // A heavily contended client can briefly reach Fusion's newest snapshot before a second
+        // endpoint is available. NetworkTRSP correctly falls back to that trusted snapshot, but
+        // a moving traversal proxy then appears to advance one packet at a time. Retain only a
+        // render-space error and decay it toward each newest authoritative target. This never
+        // extrapolates beyond received state and never changes the simulation/replicated root.
+        private Transform m_RemoteSnapshotPresentationTarget;
+        private Vector3 m_LastRemoteSnapshotBasePosition;
+        private Quaternion m_LastRemoteSnapshotBaseRotation = Quaternion.identity;
+        private Vector3 m_LastRemoteSnapshotPresentedPosition;
+        private Quaternion m_LastRemoteSnapshotPresentedRotation = Quaternion.identity;
+        private Vector3 m_RemoteSnapshotPresentationPositionError;
+        private Quaternion m_RemoteSnapshotPresentationRotationError = Quaternion.identity;
+        private bool m_HasLastRemoteSnapshotBasePose;
+        private bool m_HasLastRemoteSnapshotPresentedPose;
+        private bool m_HasRemoteSnapshotPresentationError;
+        private bool m_RemoteSnapshotUnderrunActive;
+        private float m_RemoteTraversalPresentationUntil;
+        private int m_LastRemoteSnapshotTeleportKey;
+        private bool m_HasLastRemoteSnapshotTeleportKey;
 
         // Shared logical owners without State Authority cannot use Fusion's replicated TRSP
         // buffers as their local predicted presentation. Retain two local simulation poses and
@@ -253,6 +279,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         // Shared mode intentionally keeps centralized authority. Fusion does not invoke the
         // regular input callback in Shared topology, so the owner submits intent to the master.
         private FusionNativeCharacterInput m_LatestSharedInput;
+        private PlayerRef m_LatestSharedInputSource = PlayerRef.Invalid;
         private bool m_HasSharedInput;
         private int m_LatestSharedTrustedTick = int.MinValue;
         private int m_LastSharedPayloadTick = int.MinValue;
@@ -278,14 +305,51 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         private float m_NextSharedTransientApplyDiagnosticTime;
         private float m_NextSharedTransientRejectionDiagnosticTime;
         private float m_NextSharedReconcileDiagnosticTime;
+        private int m_LastCiOwnerPoseSubmitTick = int.MinValue;
+        private int m_LastCiOwnerPoseAcceptTick = int.MinValue;
+        private int m_LastCiAuthenticatedOwnerPoseApplyTick = int.MinValue;
+        private int m_LastCiReconcileStateTick = int.MinValue;
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+        private Vector3 m_CiRenderBeginPosition;
+        private Vector3 m_CiRenderEndPosition;
+        private Vector3 m_CiLastFramePosition;
+        private int m_CiRenderFrame = -1;
+        private int m_CiLastFrame = -1;
+        private float m_CiNextRenderTraceTime;
+        private float m_CiNextPostRenderTraceTime;
+#endif
 
         public NetworkPredictionBackend Backend => NetworkPredictionBackend.FusionNative;
         public FusionNativeCharacterDriver Driver => m_Driver;
         public Transform ListenHostPresentationVisualRoot =>
             m_ListenHostPresentationVisualRoot;
+        public Transform ActiveRemotePresentationTarget =>
+            m_PresentationRoot != null ? m_PresentationRoot : transform;
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+        /// <summary>
+        /// Returns the world pose committed by the most recent Fusion Render pass. A direct
+        /// child presentation root can temporarily inherit a newer simulation-root transform
+        /// during Update before <see cref="ReapplyPresentationPose"/> restores this pose in
+        /// onBeforeRender, so development smoke tests must sample this cache instead of the
+        /// hierarchy's phase-dependent Transform value.
+        /// </summary>
+        public bool TryGetCommittedRemotePresentationPosition(out Vector3 position)
+        {
+            position = transform != null ? transform.position : default;
+            if (IsLocalLogicalOwner || m_PresentationRoot == null ||
+                !m_HasPresentationPose || !IsFinite(m_PresentationWorldPosition))
+            {
+                return false;
+            }
+
+            position = m_PresentationWorldPosition;
+            return true;
+        }
+#endif
         public bool UsesFusionInput => Runner != null && Runner.GameMode != GameMode.Shared;
         public bool UsesSharedIntentFallback => Runner != null && Runner.GameMode == GameMode.Shared;
         public bool RequiresSharedLogicalOwnerProxyPump => true;
+        private bool DiagnosticsEnabled => m_LogDiagnostics || NetworkCiTrace.Enabled;
         internal bool IsRemoteProxyRole =>
             m_Role == NetworkCharacter.NetworkRole.RemoteClient;
         internal int CurrentSimulationTick => Runner != null ? Runner.Tick.Raw : 0;
@@ -387,6 +451,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             m_NextOwnerMotionWindowDiagnosticTime = 0f;
             m_NextOwnerPredictionDiagnosticTime = 0f;
             ClearLiveExternalPresentationPose();
+            ResetRemoteSnapshotPresentation();
             ClearPendingExternalChanges();
         }
 
@@ -409,6 +474,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             m_NextOwnerMotionWindowDiagnosticTime = 0f;
             m_NextOwnerPredictionDiagnosticTime = 0f;
             ClearLiveExternalPresentationPose();
+            ResetRemoteSnapshotPresentation();
             m_RootHasRenderPose = false;
             m_HasInitialState = false;
             m_InitialRenderTick = default;
@@ -443,12 +509,14 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             m_NextOwnerMotionWindowDiagnosticTime = 0f;
             m_NextOwnerPredictionDiagnosticTime = 0f;
             ClearLiveExternalPresentationPose();
+            ResetRemoteSnapshotPresentation();
         }
 
         private void OnDestroy()
         {
             RestorePresentationHierarchy();
             ClearLiveExternalPresentationPose();
+            ResetRemoteSnapshotPresentation();
             UnsubscribeIdentity();
         }
 
@@ -461,6 +529,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             ResetSharedPredictedPresentation();
             m_LastSharedOwnerSimulationTick = int.MinValue;
             ClearLiveExternalPresentationPose();
+            ResetRemoteSnapshotPresentation();
         }
 
         public override void FixedUpdateNetwork()
@@ -538,6 +607,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             m_Driver.Simulate(input, Runner.DeltaTime, HasStateAuthority, invokeEvents);
             NativeState.LastProcessedInputTick = input.SourceTick;
             UpdateMotionState();
+            TraceCiFixedTick(hasInput, input);
             LogOwnerPredictionTick(
                 hasInput,
                 input,
@@ -550,16 +620,24 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         {
             if (!m_HasInitialState || Runner == null || m_Driver == null) return;
 
+            BeginCiTraversalRenderTrace();
+
+            if (IsLocalLogicalOwner)
+            {
+                ResetRemoteSnapshotPresentation();
+            }
+
             if (Runner.Mode == SimulationModes.Server && m_PresentationRoot != null)
             {
                 RestorePresentationHierarchy();
             }
 
-            // A dedicated server never presents a character. Authority-owned remote players on a
-            // listen host retain their simulation root and interpolate visuals only. Local owners
-            // normally use Fusion's native root render lifecycle. During validated GC2 traversal,
-            // the authored live pose presents the Character root and Mannequin together so the
-            // LateUpdate follow camera and the visible character never run on different clocks.
+            // A dedicated server never presents a character. Every observer keeps the
+            // CharacterController root on the current trusted tick and interpolates a safe
+            // visual-only child. Local owners normally use Fusion's native root render lifecycle.
+            // During validated GC2 traversal, the authored live pose presents the Character root
+            // and Mannequin together so the LateUpdate follow camera and the visible character
+            // never run on different clocks.
             if (Runner.Mode != SimulationModes.Server)
             {
                 bool locallySimulatedOwner =
@@ -573,7 +651,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                     (m_Driver.RequiresSimulationRootPresentation ||
                      IsExternalRootWritePresentationActive);
                 bool shouldUsePresentationRoot =
-                    (HasStateAuthority && !IsLocalLogicalOwner) ||
+                    !IsLocalLogicalOwner ||
                     (!sharedPredictedOwner &&
                      requiresSimulationRootPresentation &&
                      !useLiveOwnerPresentation);
@@ -607,6 +685,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                 }
                 else if (shouldUsePresentationRoot)
                 {
+                    RestoreRemoteProxySimulationRootForPresentation();
                     if (TryEnsurePresentationRoot())
                     {
                         NetworkTRSP.Render(
@@ -617,31 +696,56 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                             false,
                             ref m_InitialRenderTick);
 
+                        ApplyRemoteSnapshotUnderrunPresentation(m_PresentationRoot);
                         RememberPresentationPose();
                     }
-                    else if (!m_PresentationRootWarningIssued)
+                    else
                     {
-                        m_PresentationRootWarningIssued = true;
-                        Debug.LogWarning(
-                            $"[FusionNativeCharacterMotor] '{name}' has no safe, direct " +
-                            "visual-only presentation root. The simulated Character root will " +
-                            "remain tick-accurate and will not be interpolated. Assign the GC2 " +
-                            "Mannequin (or another visual-only direct child) in Listen Host " +
-                            "Presentation.",
-                            this);
+                        ResetRemoteSnapshotPresentation();
+                        if (!m_PresentationRootWarningIssued)
+                        {
+                            m_PresentationRootWarningIssued = true;
+                            Debug.LogWarning(
+                                $"[FusionNativeCharacterMotor] '{name}' has no safe, direct " +
+                                "visual-only presentation root. Assign the GC2 Mannequin (or " +
+                                "another visual-only direct child) in Remote Presentation. " +
+                                (HasStateAuthority
+                                    ? "The authoritative Character root will remain tick-accurate and will not be interpolated."
+                                    : "This non-authoritative proxy will fall back to Character-root interpolation."),
+                                this);
+                        }
+
+                        // A non-authoritative proxy has no local simulation state to protect, so
+                        // preserving the legacy root-render fallback is safe. A listen Host's
+                        // State Authority root must never be moved onto the past render timeline.
+                        if (!HasStateAuthority && !locallySimulatedOwner)
+                        {
+                            NetworkTRSP.Render(
+                                this,
+                                transform,
+                                false,
+                                false,
+                                false,
+                                ref m_InitialRenderTick);
+                            ApplyRemoteSnapshotUnderrunPresentation(transform);
+                        }
                     }
 
                     m_RootHasRenderPose = false;
                 }
                 else
                 {
+                    // NetworkTRSP.Render's third Boolean is named `local`: it selects local
+                    // transform space, not local ownership. Network characters are replicated
+                    // in world space, so owners and proxies must both pass false here.
                     NetworkTRSP.Render(
                         this,
                         transform,
-                        locallySimulatedOwner ? false : true,
+                        false,
                         false,
                         false,
                         ref m_InitialRenderTick);
+                    ApplyRemoteSnapshotUnderrunPresentation(transform);
                     m_RootHasRenderPose = locallySimulatedOwner;
                 }
             }
@@ -713,6 +817,392 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                 m_NetworkCharacter?.NetworkFacingUnit?.OnServerYawReceived(
                     transform.eulerAngles.y);
             }
+
+            EndCiTraversalRenderTrace();
+        }
+
+        /// <summary>
+        /// Smooths only the presentation target when Fusion temporarily has one usable remote
+        /// position endpoint during GC2 traversal or its short detach/gravity handoff. The target
+        /// always converges to a received authoritative snapshot; velocity is used solely to
+        /// recognize that identical endpoints represent an underrun, never to extrapolate a new
+        /// position.
+        /// </summary>
+        private void ApplyRemoteSnapshotUnderrunPresentation(Transform renderTarget)
+        {
+            if (renderTarget == null || IsLocalLogicalOwner ||
+                Object == null || !Object.IsValid)
+            {
+                ResetRemoteSnapshotPresentation();
+                return;
+            }
+
+            if (m_RemoteSnapshotPresentationTarget != renderTarget)
+            {
+                ResetRemoteSnapshotPresentation();
+                m_RemoteSnapshotPresentationTarget = renderTarget;
+            }
+
+            Vector3 basePosition = renderTarget.position;
+            Quaternion baseRotation = renderTarget.rotation;
+            if (!IsFinite(basePosition) || !IsUsableRotation(baseRotation))
+            {
+                ResetRemoteSnapshotPresentation();
+                return;
+            }
+
+            Vector3 previousPresentedPosition = m_HasLastRemoteSnapshotPresentedPose
+                ? m_LastRemoteSnapshotPresentedPosition
+                : basePosition;
+            Quaternion previousPresentedRotation = m_HasLastRemoteSnapshotPresentedPose
+                ? m_LastRemoteSnapshotPresentedRotation
+                : baseRotation;
+
+            bool hasSnapshotPair = TryGetSnapshotsBuffers(
+                out NetworkBehaviourBuffer fromBuffer,
+                out NetworkBehaviourBuffer toBuffer,
+                out float alpha);
+            bool teleportBoundary = false;
+            bool collapsedMovingPair = false;
+            bool traversalPresentationWindow =
+                m_RemoteSnapshotUnderrunActive ||
+                Time.unscaledTime <= m_RemoteTraversalPresentationUntil;
+            Vector3 fromPosition = basePosition;
+            Vector3 toPosition = basePosition;
+            int fromTeleportKey = NativeState.TRSPData.TeleportKey;
+            int toTeleportKey = fromTeleportKey;
+            int selectedTeleportKey = fromTeleportKey;
+            if (hasSnapshotPair)
+            {
+                FusionNativeCharacterState fromState =
+                    fromBuffer.ReinterpretState<FusionNativeCharacterState>();
+                FusionNativeCharacterState toState =
+                    toBuffer.ReinterpretState<FusionNativeCharacterState>();
+                NetworkTRSPData fromTrsp = fromState.TRSPData;
+                NetworkTRSPData toTrsp = toState.TRSPData;
+                fromPosition = fromTrsp.Position;
+                toPosition = toTrsp.Position;
+                fromTeleportKey = fromTrsp.TeleportKey;
+                toTeleportKey = toTrsp.TeleportKey;
+                selectedTeleportKey = alpha < 0.5f
+                    ? fromTeleportKey
+                    : toTeleportKey;
+
+                Vector3 replicatedVelocity = Vector3.LerpUnclamped(
+                    fromState.Velocity,
+                    toState.Velocity,
+                    Mathf.Clamp01(alpha));
+                bool snapshotTraversal =
+                    (fromState.MotionFlags & MotionFlagTraversalPresentation) != 0 ||
+                    (toState.MotionFlags & MotionFlagTraversalPresentation) != 0;
+                if (snapshotTraversal)
+                {
+                    m_RemoteTraversalPresentationUntil =
+                        Time.unscaledTime + RemoteTraversalPresentationLingerSeconds;
+                }
+
+                // Traversal state reaches the observer through a reliable gameplay route while
+                // the pose arrives on Fusion's snapshot timeline. Key smoothing to the pose
+                // pair itself, then retain a short presentation-only window for the detach and
+                // gravity handoff. Depending on the remote GC2 stance here can disable smoothing
+                // before the last climb/fall snapshots are presented.
+                traversalPresentationWindow =
+                    snapshotTraversal ||
+                    m_RemoteSnapshotUnderrunActive ||
+                    Time.unscaledTime <= m_RemoteTraversalPresentationUntil;
+                collapsedMovingPair =
+                    traversalPresentationWindow &&
+                    !teleportBoundary &&
+                    IsFinite(replicatedVelocity) &&
+                    replicatedVelocity.sqrMagnitude >
+                        RemoteSnapshotVelocityEpsilon * RemoteSnapshotVelocityEpsilon &&
+                    (toPosition - fromPosition).sqrMagnitude <=
+                        RemoteSnapshotPositionEpsilon * RemoteSnapshotPositionEpsilon;
+            }
+
+            // A render can skip over the pair that first contained a changed teleport key. Keep
+            // the key belonging to the last selected remote snapshot so a later same-key pair
+            // still preserves Fusion's immediate teleport semantics.
+            teleportBoundary = IsRemoteSnapshotTeleportBoundary(
+                fromTeleportKey,
+                toTeleportKey,
+                m_LastRemoteSnapshotTeleportKey,
+                m_HasLastRemoteSnapshotTeleportKey);
+
+            bool baseChanged = !m_HasLastRemoteSnapshotBasePose ||
+                (basePosition - m_LastRemoteSnapshotBasePosition).sqrMagnitude >
+                    RemoteSnapshotPositionEpsilon * RemoteSnapshotPositionEpsilon ||
+                Quaternion.Angle(
+                    baseRotation,
+                    m_LastRemoteSnapshotBaseRotation) > RemoteSnapshotRotationEpsilon;
+
+            if (teleportBoundary)
+            {
+                ResetRemoteSnapshotPresentation();
+                m_RemoteSnapshotPresentationTarget = renderTarget;
+            }
+            else if (collapsedMovingPair)
+            {
+                if (baseChanged)
+                {
+                    QueueRemoteSnapshotPresentationError(
+                        previousPresentedPosition,
+                        previousPresentedRotation,
+                        basePosition,
+                        baseRotation);
+                }
+
+                if (!m_RemoteSnapshotUnderrunActive)
+                {
+                    TraceRemoteSnapshotUnderrun(
+                        "snapshot-underrun-entered",
+                        fromPosition,
+                        toPosition,
+                        alpha);
+                }
+                m_RemoteSnapshotUnderrunActive = true;
+            }
+            else if (m_RemoteSnapshotUnderrunActive)
+            {
+                // Rebase once from the pose actually shown on the final underrun frame. The
+                // normal Fusion interpolation pair then takes over without a handoff pop.
+                QueueRemoteSnapshotPresentationError(
+                    previousPresentedPosition,
+                    previousPresentedRotation,
+                    basePosition,
+                    baseRotation);
+                m_RemoteSnapshotUnderrunActive = false;
+                TraceRemoteSnapshotUnderrun(
+                    "snapshot-underrun-recovered",
+                    fromPosition,
+                    toPosition,
+                    alpha);
+            }
+
+            float maximumSmoothDistance = m_Profile != null
+                ? Mathf.Max(0.1f, m_Profile.maxReconciliationDistance)
+                : 3f;
+            bool correctionWithinSmoothEnvelope =
+                IsRemoteTraversalCorrectionWithinSmoothEnvelope(
+                    previousPresentedPosition,
+                    basePosition,
+                    maximumSmoothDistance);
+            if (!correctionWithinSmoothEnvelope)
+            {
+                // The base pose is authoritative. A stale presentation residual must never hide
+                // a correction outside the configured reconciliation envelope, even when the
+                // current snapshot pair is no longer collapsed.
+                m_RemoteSnapshotUnderrunActive = false;
+                ClearRemoteSnapshotPresentationError();
+            }
+
+            Vector3 presentedPosition = basePosition;
+            Quaternion presentedRotation = baseRotation;
+            if (m_HasRemoteSnapshotPresentationError)
+            {
+                float deltaTime = Mathf.Clamp(Time.unscaledDeltaTime, 0f, 0.05f);
+                float decay = 1f - Mathf.Exp(-RemoteSnapshotPresentationSpeed * deltaTime);
+                m_RemoteSnapshotPresentationPositionError = Vector3.Lerp(
+                    m_RemoteSnapshotPresentationPositionError,
+                    Vector3.zero,
+                    decay);
+                m_RemoteSnapshotPresentationRotationError = Quaternion.Slerp(
+                    m_RemoteSnapshotPresentationRotationError,
+                    Quaternion.identity,
+                    decay);
+
+                presentedPosition =
+                    basePosition + m_RemoteSnapshotPresentationPositionError;
+                presentedRotation =
+                    m_RemoteSnapshotPresentationRotationError * baseRotation;
+                if (!IsFinite(presentedPosition) ||
+                    !IsUsableRotation(presentedRotation))
+                {
+                    ClearRemoteSnapshotPresentationError();
+                    presentedPosition = basePosition;
+                    presentedRotation = baseRotation;
+                }
+                else
+                {
+                    renderTarget.SetPositionAndRotation(
+                        presentedPosition,
+                        presentedRotation);
+                    if (m_RemoteSnapshotPresentationPositionError.sqrMagnitude <=
+                            RemoteSnapshotPositionEpsilon *
+                            RemoteSnapshotPositionEpsilon &&
+                        Quaternion.Angle(
+                            Quaternion.identity,
+                            m_RemoteSnapshotPresentationRotationError) <=
+                            RemoteSnapshotRotationEpsilon)
+                    {
+                        ClearRemoteSnapshotPresentationError();
+                    }
+                }
+            }
+
+            bool retainTraversalPresentationContinuity =
+                traversalPresentationWindow ||
+                m_RemoteSnapshotUnderrunActive ||
+                m_HasRemoteSnapshotPresentationError;
+            Vector3 limitedPresentedPosition =
+                LimitRemoteTraversalPresentationStep(
+                    previousPresentedPosition,
+                    presentedPosition,
+                    m_HasLastRemoteSnapshotPresentedPose,
+                    retainTraversalPresentationContinuity,
+                    teleportBoundary,
+                    correctionWithinSmoothEnvelope);
+            if ((limitedPresentedPosition - presentedPosition).sqrMagnitude >
+                RemoteSnapshotPositionEpsilon * RemoteSnapshotPositionEpsilon)
+            {
+                presentedPosition = limitedPresentedPosition;
+                m_RemoteSnapshotPresentationPositionError =
+                    presentedPosition - basePosition;
+                m_HasRemoteSnapshotPresentationError =
+                    m_RemoteSnapshotPresentationPositionError.sqrMagnitude >
+                        RemoteSnapshotPositionEpsilon *
+                        RemoteSnapshotPositionEpsilon ||
+                    Quaternion.Angle(
+                        Quaternion.identity,
+                        m_RemoteSnapshotPresentationRotationError) >
+                        RemoteSnapshotRotationEpsilon;
+                renderTarget.SetPositionAndRotation(
+                    presentedPosition,
+                    presentedRotation);
+            }
+
+            m_LastRemoteSnapshotBasePosition = basePosition;
+            m_LastRemoteSnapshotBaseRotation = baseRotation;
+            m_LastRemoteSnapshotPresentedPosition = presentedPosition;
+            m_LastRemoteSnapshotPresentedRotation = presentedRotation;
+            m_HasLastRemoteSnapshotBasePose = true;
+            m_HasLastRemoteSnapshotPresentedPose = true;
+            m_LastRemoteSnapshotTeleportKey = selectedTeleportKey;
+            m_HasLastRemoteSnapshotTeleportKey = true;
+        }
+
+        private static Vector3 LimitRemoteTraversalPresentationStep(
+            Vector3 previousPresentedPosition,
+            Vector3 candidatePresentedPosition,
+            bool hasPreviousPresentedPose,
+            bool traversalPresentationWindow,
+            bool teleportBoundary,
+            bool correctionWithinSmoothEnvelope)
+        {
+            if (!hasPreviousPresentedPose ||
+                !traversalPresentationWindow ||
+                teleportBoundary ||
+                !correctionWithinSmoothEnvelope ||
+                !IsFinite(previousPresentedPosition) ||
+                !IsFinite(candidatePresentedPosition))
+            {
+                return candidatePresentedPosition;
+            }
+
+            return Vector3.MoveTowards(
+                previousPresentedPosition,
+                candidatePresentedPosition,
+                RemoteTraversalMaximumPresentationFrameStep);
+        }
+
+        private static bool IsRemoteTraversalCorrectionWithinSmoothEnvelope(
+            Vector3 previousPresentedPosition,
+            Vector3 authoritativeBasePosition,
+            float maximumSmoothDistance)
+        {
+            return IsFinite(previousPresentedPosition) &&
+                   IsFinite(authoritativeBasePosition) &&
+                   float.IsFinite(maximumSmoothDistance) &&
+                   maximumSmoothDistance >= 0f &&
+                   Vector3.Distance(
+                       previousPresentedPosition,
+                       authoritativeBasePosition) <= maximumSmoothDistance;
+        }
+
+        private static bool IsRemoteSnapshotTeleportBoundary(
+            int fromTeleportKey,
+            int toTeleportKey,
+            int lastObservedTeleportKey,
+            bool hasLastObservedTeleportKey)
+        {
+            return fromTeleportKey != toTeleportKey ||
+                   hasLastObservedTeleportKey &&
+                   toTeleportKey != lastObservedTeleportKey;
+        }
+
+        private void QueueRemoteSnapshotPresentationError(
+            Vector3 previousPresentedPosition,
+            Quaternion previousPresentedRotation,
+            Vector3 basePosition,
+            Quaternion baseRotation)
+        {
+            Vector3 positionError = previousPresentedPosition - basePosition;
+            Quaternion rotationError =
+                previousPresentedRotation * Quaternion.Inverse(baseRotation);
+            float maximumSmoothDistance = m_Profile != null
+                ? Mathf.Max(0.1f, m_Profile.maxReconciliationDistance)
+                : 3f;
+            if (!IsFinite(positionError) || !IsUsableRotation(rotationError) ||
+                positionError.magnitude > maximumSmoothDistance)
+            {
+                ClearRemoteSnapshotPresentationError();
+                return;
+            }
+
+            m_RemoteSnapshotPresentationPositionError = positionError;
+            m_RemoteSnapshotPresentationRotationError = rotationError;
+            m_HasRemoteSnapshotPresentationError =
+                positionError.sqrMagnitude >
+                    RemoteSnapshotPositionEpsilon * RemoteSnapshotPositionEpsilon ||
+                Quaternion.Angle(Quaternion.identity, rotationError) >
+                    RemoteSnapshotRotationEpsilon;
+        }
+
+        private void ClearRemoteSnapshotPresentationError()
+        {
+            m_RemoteSnapshotPresentationPositionError = Vector3.zero;
+            m_RemoteSnapshotPresentationRotationError = Quaternion.identity;
+            m_HasRemoteSnapshotPresentationError = false;
+        }
+
+        private void ResetRemoteSnapshotPresentation()
+        {
+            m_RemoteSnapshotPresentationTarget = null;
+            m_LastRemoteSnapshotBasePosition = Vector3.zero;
+            m_LastRemoteSnapshotBaseRotation = Quaternion.identity;
+            m_LastRemoteSnapshotPresentedPosition = Vector3.zero;
+            m_LastRemoteSnapshotPresentedRotation = Quaternion.identity;
+            m_HasLastRemoteSnapshotBasePose = false;
+            m_HasLastRemoteSnapshotPresentedPose = false;
+            m_RemoteSnapshotUnderrunActive = false;
+            m_RemoteTraversalPresentationUntil = 0f;
+            m_LastRemoteSnapshotTeleportKey = 0;
+            m_HasLastRemoteSnapshotTeleportKey = false;
+            ClearRemoteSnapshotPresentationError();
+        }
+
+        [System.Diagnostics.Conditional("UNITY_EDITOR")]
+        [System.Diagnostics.Conditional("DEVELOPMENT_BUILD")]
+        private void TraceRemoteSnapshotUnderrun(
+            string stage,
+            Vector3 fromPosition,
+            Vector3 toPosition,
+            float alpha)
+        {
+            NetworkCiTrace.Log(
+                "fusion-native-pose",
+                stage,
+                m_Identity != null ? m_Identity.NetworkId : 0,
+                0,
+                $"lastReceive={(Object != null && Object.IsValid ? Object.LastReceiveTick.ToString() : "invalid")} " +
+                $"snapshots={fromPosition:F3}->{toPosition:F3} alpha={alpha:F3} " +
+                $"presentationOnly=True extrapolation=False",
+                this);
+        }
+
+        private void LateUpdate()
+        {
+            TraceCiPostRenderWrite();
         }
 
         public void Teleport(Vector3? position = null, Quaternion? rotation = null)
@@ -1022,6 +1512,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                 bool remoteSharedInput = false;
                 bool appliedSharedTransient = false;
                 int sharedPayloadTick = int.MinValue;
+                PlayerRef sharedInputSource = PlayerRef.Invalid;
                 if (localOwner)
                 {
                     input = m_Driver.CaptureInput(tick);
@@ -1036,6 +1527,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                     remoteSharedInput = true;
                     appliedSharedTransient = true;
                     sharedPayloadTick = input.SourceTick;
+                    sharedInputSource = transient.Source;
 
                     // Keep gameplay authorization on authenticated Fusion time while the owner
                     // payload tick remains an acknowledgement sequence only.
@@ -1046,6 +1538,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                     input = m_LatestSharedInput;
                     remoteSharedInput = true;
                     sharedPayloadTick = input.SourceTick;
+                    sharedInputSource = m_LatestSharedInputSource;
 
                     // The payload tick is useful only as the owner's monotonic sequence and
                     // acknowledgement. RpcInfo.Tick is Fusion-authenticated metadata and is
@@ -1076,8 +1569,42 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                     PrepareSharedLocalExternalPose(ref input);
                 }
 
-                m_Driver.Simulate(input, Runner.DeltaTime, authoritative: true,
-                    invokeGameplayEvents: !Runner.IsResimulation);
+                bool authenticatedRemoteOwnerPose =
+                    remoteSharedInput &&
+                    CanApplyAuthenticatedSharedRemoteOwnerPose(
+                        sharedInputSource,
+                        input);
+                m_Driver.SetAuthenticatedRemoteOwnerPoseApplication(
+                    authenticatedRemoteOwnerPose);
+                bool authenticatedRemoteOwnerPoseApplied = false;
+                try
+                {
+                    m_Driver.Simulate(input, Runner.DeltaTime, authoritative: true,
+                        invokeGameplayEvents: !Runner.IsResimulation);
+                    authenticatedRemoteOwnerPoseApplied =
+                        authenticatedRemoteOwnerPose &&
+                        m_Driver.LastAcceptedOwnerPoseTick == input.SourceTick;
+                }
+                finally
+                {
+                    m_Driver.SetAuthenticatedRemoteOwnerPoseApplication(false);
+                }
+                if (authenticatedRemoteOwnerPoseApplied &&
+                    (m_LastCiAuthenticatedOwnerPoseApplyTick == int.MinValue ||
+                     input.SourceTick - m_LastCiAuthenticatedOwnerPoseApplyTick >= 10))
+                {
+                    m_LastCiAuthenticatedOwnerPoseApplyTick = input.SourceTick;
+                    NetworkCiTrace.Log(
+                        "fusion-shared-motion",
+                        "authority-authenticated-owner-pose-applied",
+                        m_Identity != null ? m_Identity.NetworkId : 0,
+                        0,
+                        $"source={sharedInputSource} trustedTick={input.SourceTick} " +
+                        $"payloadTick={sharedPayloadTick} " +
+                        $"continuous={input.HasContinuousOwnerPose} " +
+                        $"target={input.OwnerPosition:F3}",
+                        this);
+                }
                 if (updateProcessedInputTick)
                 {
                     NativeState.LastProcessedInputTick = remoteSharedInput
@@ -1128,6 +1655,29 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             return (int)Math.Min(
                 int.MaxValue,
                 Math.Max((long)latestPayloadTick, projectedTick));
+        }
+
+        private bool CanApplyAuthenticatedSharedRemoteOwnerPose(
+            PlayerRef source,
+            FusionNativeCharacterInput input)
+        {
+            return input.HasOwnerPose &&
+                   Runner != null &&
+                   Runner.GameMode == GameMode.Shared &&
+                   HasStateAuthority &&
+                   !IsLocalLogicalOwner &&
+                   source.IsRealPlayer &&
+                   m_Identity != null &&
+                   m_Identity.IsSpawned &&
+                   m_Identity.TransportAdmitted &&
+                   m_Identity.HasAuthorityAdmission &&
+                   m_Identity.LogicalOwner.IsRealPlayer &&
+                   source == m_Identity.LogicalOwner &&
+                   m_NetworkCharacter != null &&
+                   m_NetworkCharacter.IsServerInstance &&
+                   !m_NetworkCharacter.IsOwnerInstance &&
+                   m_NetworkCharacter.HasAuthenticatedPlayerOwner &&
+                   m_NetworkCharacter.IsPlayerOwnedActor;
         }
 
         /// <summary>
@@ -1191,6 +1741,20 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             CaptureSharedPredictedPreviousPose(tick);
             FusionNativeCharacterInput localInput = m_Driver.CaptureInput(tick);
             PrepareSharedLocalExternalPose(ref localInput);
+            if (localInput.HasOwnerPose &&
+                (m_LastCiOwnerPoseSubmitTick == int.MinValue ||
+                 tick - m_LastCiOwnerPoseSubmitTick >= 10))
+            {
+                m_LastCiOwnerPoseSubmitTick = tick;
+                NetworkCiTrace.Log(
+                    "fusion-shared-motion",
+                    "owner-pose-simulated",
+                    m_Identity != null ? m_Identity.NetworkId : 0,
+                    0,
+                    $"tick={tick} continuous={localInput.HasContinuousOwnerPose} " +
+                    $"target={localInput.OwnerPosition:F3} engine={transform.position:F3}",
+                    this);
+            }
             m_Driver.Simulate(localInput, Runner.DeltaTime, authoritative: false,
                 invokeGameplayEvents: !Runner.IsResimulation);
             AppendSharedPrediction(localInput);
@@ -1284,6 +1848,21 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             Quaternion predictedRotation = transform.rotation;
             m_LastSharedReconciledStateTick = authoritativeStateTick;
             CopyToEngine(restoreMotion: true);
+
+            if (m_LastCiReconcileStateTick == int.MinValue ||
+                authoritativeStateTick - m_LastCiReconcileStateTick >= 10)
+            {
+                m_LastCiReconcileStateTick = authoritativeStateTick;
+                NetworkCiTrace.Log(
+                    "fusion-shared-motion",
+                    "owner-reconciled",
+                    m_Identity != null ? m_Identity.NetworkId : 0,
+                    0,
+                    $"stateTick={authoritativeStateTick} processed={NativeState.LastProcessedInputTick} " +
+                    $"transientAck={NativeState.LastAppliedSharedSourceTick} " +
+                    $"history={m_SharedPredictionCount} before={predictedPosition:F3} after={transform.position:F3}",
+                    this);
+            }
 
             if (authoritativeTeleport)
             {
@@ -1438,6 +2017,8 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             }
 
             if (m_Identity == null || !m_Identity.IsSpawned ||
+                !m_Identity.TransportAdmitted ||
+                !m_Identity.HasAuthorityAdmission ||
                 source != m_Identity.LogicalOwner)
             {
                 Log($"rejected Shared input source={source} owner={m_Identity?.LogicalOwner}");
@@ -1491,8 +2072,23 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                 JumpForce = 0f
             };
             m_LatestSharedTrustedTick = trustedSourceTick;
+            m_LatestSharedInputSource = source;
             m_LastSharedPayloadTick = sourceTick;
             m_HasSharedInput = true;
+            if (hasContinuousOwnerPose &&
+                (m_LastCiOwnerPoseAcceptTick == int.MinValue ||
+                 sourceTick - m_LastCiOwnerPoseAcceptTick >= 10))
+            {
+                m_LastCiOwnerPoseAcceptTick = sourceTick;
+                NetworkCiTrace.Log(
+                    "fusion-shared-motion",
+                    "authority-owner-pose-accepted",
+                    m_Identity != null ? m_Identity.NetworkId : 0,
+                    0,
+                    $"source={source} payloadTick={sourceTick} trustedTick={trustedSourceTick} " +
+                    $"target={ownerPosition:F3}",
+                    this);
+            }
             if (firstAcceptedInput)
             {
                 Log($"accepted first Shared input source={source} payloadTick={sourceTick} " +
@@ -1519,6 +2115,8 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             }
 
             if (m_Identity == null || !m_Identity.IsSpawned ||
+                !m_Identity.TransportAdmitted ||
+                !m_Identity.HasAuthorityAdmission ||
                 source != m_Identity.LogicalOwner)
             {
                 LogSharedTransientRejection(
@@ -1631,7 +2229,8 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             m_SharedTransientQueue.Enqueue(new SharedCharacterTransient
             {
                 Input = input,
-                TrustedTick = trustedSourceTick
+                TrustedTick = trustedSourceTick,
+                Source = source
             });
             m_LastQueuedSharedTransientTick = sourceTick;
             LogSharedTransient(
@@ -1926,6 +2525,42 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                     NativeState.LastAcceptedOwnerPoseTick,
                     grounded);
             }
+        }
+
+        /// <summary>
+        /// Ordinary proxies can be outside Fusion's local simulation set, so their
+        /// <see cref="IBeforeAllTicks"/> callback is not guaranteed to restore the engine root.
+        /// Once visuals are rendered through a child, explicitly keep the non-visible
+        /// CharacterController root on the newest trusted state instead of leaving it at its
+        /// spawn pose. The child is subsequently placed on Fusion's interpolated render timeline.
+        /// </summary>
+        private void RestoreRemoteProxySimulationRootForPresentation()
+        {
+            if (transform == null || IsLocalLogicalOwner || HasStateAuthority ||
+                Object == null || !Object.IsValid)
+            {
+                return;
+            }
+
+            NetworkTRSPData trsp = NativeState.TRSPData;
+            if (!HasUsableRootPose(trsp.Position, trsp.Rotation, trsp.Scale)) return;
+
+            bool positionChanged =
+                (transform.position - trsp.Position).sqrMagnitude >
+                RemoteSnapshotPositionEpsilon * RemoteSnapshotPositionEpsilon;
+            bool rotationChanged =
+                Quaternion.Angle(transform.rotation, trsp.Rotation) >
+                RemoteSnapshotRotationEpsilon;
+            bool scaleChanged =
+                (transform.localScale - trsp.Scale).sqrMagnitude >
+                RemoteSnapshotPositionEpsilon * RemoteSnapshotPositionEpsilon;
+            if (!positionChanged && !rotationChanged && !scaleChanged) return;
+
+            transform.SetPositionAndRotation(trsp.Position, trsp.Rotation);
+            transform.localScale = trsp.Scale;
+            Physics.SyncTransforms();
+            m_RootHasRenderPose = false;
+            RememberCurrentRootPose();
         }
 
         private bool RecoverInvalidEnginePose(string context)
@@ -2572,6 +3207,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         private void ResetSharedRuntimeState()
         {
             m_HasSharedInput = false;
+            m_LatestSharedInputSource = PlayerRef.Invalid;
             m_LatestSharedTrustedTick = int.MinValue;
             m_LastSharedPayloadTick = int.MinValue;
             m_LastQueuedSharedTransientTick = int.MinValue;
@@ -2591,6 +3227,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             m_NextSharedTransientApplyDiagnosticTime = 0f;
             m_NextSharedTransientRejectionDiagnosticTime = 0f;
             m_NextSharedReconcileDiagnosticTime = 0f;
+            m_LastCiAuthenticatedOwnerPoseApplyTick = int.MinValue;
             ResetSharedPredictedPresentation();
         }
 
@@ -2879,7 +3516,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             float kineticDistance,
             float authorityDistance)
         {
-            if (!m_LogDiagnostics) return;
+            if (!DiagnosticsEnabled) return;
 
             bool requiresAuthorizedCatchUp = distance > kineticDistance + 0.001f;
             if (accepted && !requiresAuthorizedCatchUp) return;
@@ -2909,7 +3546,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             float residualDistance,
             float applicationTolerance)
         {
-            if (!m_LogDiagnostics) return;
+            if (!DiagnosticsEnabled) return;
 
             float now = Time.unscaledTime;
             if (now < m_NextOwnerPoseCollisionDiagnosticTime) return;
@@ -2933,7 +3570,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             Vector3 rootMotionDelta,
             float rootMotionWeight)
         {
-            if (!m_LogDiagnostics || !ownerMotionActive) return;
+            if (!DiagnosticsEnabled || !ownerMotionActive) return;
 
             float now = Time.unscaledTime;
             if (now < m_NextOwnerMotionCaptureDiagnosticTime) return;
@@ -2957,7 +3594,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             Vector3 requestedDelta,
             float weight)
         {
-            if (!m_LogDiagnostics) return;
+            if (!DiagnosticsEnabled) return;
 
             float now = Time.unscaledTime;
             if (now < m_NextOwnerMotionRejectionDiagnosticTime) return;
@@ -2978,7 +3615,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             int fromTick,
             int untilTick)
         {
-            if (!m_LogDiagnostics) return;
+            if (!DiagnosticsEnabled) return;
 
             float now = Time.unscaledTime;
             bool terminal = string.Equals(action, "closed", StringComparison.Ordinal);
@@ -2997,7 +3634,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             int trustedTick,
             int queuedCount)
         {
-            if (!m_LogDiagnostics) return;
+            if (!DiagnosticsEnabled) return;
 
             float now = Time.unscaledTime;
             float nextDiagnosticTime;
@@ -3044,7 +3681,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             Vector3 predictedAfter,
             string presentationMode)
         {
-            if (!m_LogDiagnostics) return;
+            if (!DiagnosticsEnabled) return;
 
             float correctionDistance =
                 IsFinite(predictedBefore) && IsFinite(predictedAfter)
@@ -3082,7 +3719,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             float rootMotionWeight,
             float jumpForce)
         {
-            if (!m_LogDiagnostics) return;
+            if (!DiagnosticsEnabled) return;
 
             float now = Time.unscaledTime;
             if (now < m_NextSharedTransientRejectionDiagnosticTime) return;
@@ -3103,7 +3740,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             bool hadPendingExternalPosition,
             Vector3 restoredTickPosition)
         {
-            if (!m_LogDiagnostics || !IsLocalLogicalOwner ||
+            if (!DiagnosticsEnabled || !IsLocalLogicalOwner ||
                 (!input.HasOwnerPose && !hadPendingExternalPosition))
             {
                 return;
@@ -3146,6 +3783,128 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                 $"liveTarget={(m_HasLiveExternalPresentationPose ? m_LiveExternalPresentationPosition.ToString("F3") : "<none>")}");
         }
 
+        [System.Diagnostics.Conditional("UNITY_EDITOR")]
+        [System.Diagnostics.Conditional("DEVELOPMENT_BUILD")]
+        private void BeginCiTraversalRenderTrace()
+        {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            if (!NetworkCiTrace.TraversalTraceWindowActive || transform == null) return;
+
+            m_CiRenderFrame = Time.frameCount;
+            m_CiRenderBeginPosition = transform.position;
+#endif
+        }
+
+        [System.Diagnostics.Conditional("UNITY_EDITOR")]
+        [System.Diagnostics.Conditional("DEVELOPMENT_BUILD")]
+        private void EndCiTraversalRenderTrace()
+        {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            if (!NetworkCiTrace.TraversalTraceWindowActive || transform == null ||
+                m_CiRenderFrame != Time.frameCount)
+            {
+                return;
+            }
+
+            m_CiRenderEndPosition = transform.position;
+            Vector3 frameDelta = m_CiLastFrame >= 0
+                ? m_CiRenderEndPosition - m_CiLastFramePosition
+                : Vector3.zero;
+            Vector3 renderWriterDelta = m_CiRenderEndPosition - m_CiRenderBeginPosition;
+            m_CiLastFramePosition = m_CiRenderEndPosition;
+            m_CiLastFrame = Time.frameCount;
+
+            float now = Time.unscaledTime;
+            if (now < m_CiNextRenderTraceTime) return;
+            m_CiNextRenderTraceTime = now + 0.25f;
+
+            bool selfTraversal =
+                NetworkOwnerMotionAuthorityHooks.IsContinuousOwnerPose(
+                    m_NetworkCharacter?.Character);
+            Vector3 fromPosition = NativeState.TRSPData.Position;
+            Vector3 toPosition = NativeState.TRSPData.Position;
+            int fromTeleportKey = NativeState.TRSPData.TeleportKey;
+            int toTeleportKey = NativeState.TRSPData.TeleportKey;
+            float alpha = -1f;
+            if (TryGetSnapshotsBuffers(
+                    out NetworkBehaviourBuffer fromBuffer,
+                    out NetworkBehaviourBuffer toBuffer,
+                    out float snapshotAlpha))
+            {
+                FusionNativeCharacterState fromState =
+                    fromBuffer.ReinterpretState<FusionNativeCharacterState>();
+                FusionNativeCharacterState toState =
+                    toBuffer.ReinterpretState<FusionNativeCharacterState>();
+                fromPosition = fromState.TRSPData.Position;
+                toPosition = toState.TRSPData.Position;
+                fromTeleportKey = fromState.TRSPData.TeleportKey;
+                toTeleportKey = toState.TRSPData.TeleportKey;
+                alpha = snapshotAlpha;
+            }
+
+            string presentation = m_PresentationRoot != null
+                ? m_PresentationRoot.position.ToString("F3")
+                : "<none>";
+            string visual = m_ListenHostPresentationVisualRoot != null
+                ? m_ListenHostPresentationVisualRoot.position.ToString("F3")
+                : "<none>";
+            string lastReceive = Object != null && Object.IsValid
+                ? Object.LastReceiveTick.ToString()
+                : "invalid";
+
+            NetworkCiTrace.Log(
+                "fusion-native-pose",
+                "render-sample",
+                m_Identity != null ? m_Identity.NetworkId : 0,
+                0,
+                $"motorRole={m_Role} topology={Runner?.GameMode.ToString() ?? "none"} " +
+                $"stateAuthority={HasStateAuthority} inputAuthority={HasInputAuthority} " +
+                $"localLogicalOwner={IsLocalLogicalOwner} selfTraversal={selfTraversal} " +
+                $"lastReceive={lastReceive} frameDelta={frameDelta:F4} " +
+                $"renderWriterDelta={renderWriterDelta:F4} " +
+                $"engineBefore={m_CiRenderBeginPosition:F3} rendered={m_CiRenderEndPosition:F3} " +
+                $"native={NativeState.TRSPData.Position:F3} snapshots={fromPosition:F3}->{toPosition:F3} " +
+                $"alpha={alpha:F3} teleportKeys={fromTeleportKey}->{toTeleportKey} " +
+                $"pendingPosition={m_HasPendingExternalPosition} " +
+                $"pendingCaptured={m_PendingExternalPositionCapturedByInput} " +
+                $"rootHasRenderPose={m_RootHasRenderPose} presentation={presentation} visual={visual} " +
+                $"updateKinematics={m_Driver?.UpdateKinematics ?? true} " +
+                $"driverVelocity={m_Driver?.SimulationVelocity ?? Vector3.zero:F3}",
+                this);
+#endif
+        }
+
+        [System.Diagnostics.Conditional("UNITY_EDITOR")]
+        [System.Diagnostics.Conditional("DEVELOPMENT_BUILD")]
+        private void TraceCiPostRenderWrite()
+        {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            if (!NetworkCiTrace.TraversalTraceWindowActive || transform == null ||
+                m_CiRenderFrame != Time.frameCount)
+            {
+                return;
+            }
+
+            Vector3 postRenderDelta = transform.position - m_CiRenderEndPosition;
+            if (postRenderDelta.sqrMagnitude <= 0.000001f) return;
+
+            float now = Time.unscaledTime;
+            if (now < m_CiNextPostRenderTraceTime) return;
+            m_CiNextPostRenderTraceTime = now + 0.1f;
+            NetworkCiTrace.Log(
+                "fusion-native-pose",
+                "post-render-root-write",
+                m_Identity != null ? m_Identity.NetworkId : 0,
+                0,
+                $"motorRole={m_Role} stateAuthority={HasStateAuthority} " +
+                $"inputAuthority={HasInputAuthority} localLogicalOwner={IsLocalLogicalOwner} " +
+                $"rendered={m_CiRenderEndPosition:F3} late={transform.position:F3} " +
+                $"delta={postRenderDelta:F4} pendingPosition={m_HasPendingExternalPosition} " +
+                $"updateKinematics={m_Driver?.UpdateKinematics ?? true}",
+                this);
+#endif
+        }
+
         /// <summary>
         /// Called by the runner's single input collector. Returns false for non-owners,
         /// Shared mode, and characters that have not completed backend initialization.
@@ -3162,6 +3921,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             FusionNativeCharacterInput characterInput =
                 m_Driver.CaptureInput(runner.InputTick.Raw);
             input.Set(characterInput);
+            TraceCiOwnerInputPayload(characterInput);
             return true;
         }
 
@@ -3182,19 +3942,117 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             }
 
             characterInput = m_Driver.CaptureInput(runner.InputTick.Raw);
+            TraceCiOwnerInputPayload(characterInput);
             return true;
+        }
+
+        [System.Diagnostics.Conditional("UNITY_EDITOR")]
+        [System.Diagnostics.Conditional("DEVELOPMENT_BUILD")]
+        private void TraceCiFixedTick(
+            bool hasInput,
+            FusionNativeCharacterInput input)
+        {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            if (!NetworkCiTrace.TraversalTraceWindowActive || Runner == null ||
+                transform == null)
+            {
+                return;
+            }
+
+            uint actorId = m_Identity != null ? m_Identity.NetworkId : 0;
+            string signature =
+                $"{m_Role}:{HasStateAuthority}:{HasInputAuthority}:" +
+                $"{IsLocalLogicalOwner}:{hasInput}:{input.HasOwnerPose}:" +
+                $"{m_Driver?.UpdateKinematics ?? false}:" +
+                $"{m_Driver?.GetType().Name ?? "<none>"}";
+            string stateKey = $"fusion-native-fixed-state:{actorId}";
+            string sampleKey = $"fusion-native-fixed-sample:{actorId}";
+            if (!NetworkCiTrace.HasChanged(stateKey, signature) &&
+                !NetworkCiTrace.ShouldSample(sampleKey, 0.5f))
+            {
+                return;
+            }
+
+            string lastReceive = Object != null && Object.IsValid
+                ? Object.LastReceiveTick.ToString()
+                : "invalid";
+            NetworkCiTrace.Log(
+                "fusion-native-tick",
+                "simulation-sample",
+                actorId,
+                0,
+                $"motorRole={m_Role} tick={Runner.Tick.Raw} inputTick={Runner.InputTick.Raw} " +
+                $"stage={Runner.Stage} forward={Runner.IsForward} resimulation={Runner.IsResimulation} " +
+                $"stateAuthority={HasStateAuthority} inputAuthority={HasInputAuthority} " +
+                $"localLogicalOwner={IsLocalLogicalOwner} inSimulation={Object?.IsInSimulation ?? false} " +
+                $"lastReceive={lastReceive} hasInput={hasInput} sourceTick={input.SourceTick} " +
+                $"move={input.Move} yaw={input.Yaw:F2} flags={input.Flags} " +
+                $"ownerPose={input.HasOwnerPose} continuousPose={input.HasContinuousOwnerPose} " +
+                $"ownerTarget={(input.HasOwnerPose ? input.OwnerPosition.ToString("F3") : "<none>")} " +
+                $"engine={transform.position:F3} native={NativeState.TRSPData.Position:F3} " +
+                $"velocity={NativeState.Velocity:F3} processed={NativeState.LastProcessedInputTick} " +
+                $"driver={m_Driver?.GetType().Name ?? "<none>"} " +
+                $"updateKinematics={m_Driver?.UpdateKinematics ?? false} " +
+                $"pendingPosition={m_HasPendingExternalPosition} " +
+                $"pendingCaptured={m_PendingExternalPositionCapturedByInput} " +
+                $"pendingApplied={m_PendingExternalPositionApplied}",
+                this);
+#endif
+        }
+
+        [System.Diagnostics.Conditional("UNITY_EDITOR")]
+        [System.Diagnostics.Conditional("DEVELOPMENT_BUILD")]
+        private void TraceCiOwnerInputPayload(FusionNativeCharacterInput input)
+        {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            if (!NetworkCiTrace.TraversalTraceWindowActive) return;
+
+            uint actorId = m_Identity != null ? m_Identity.NetworkId : 0;
+            string signature =
+                $"{input.HasOwnerPose}:{input.HasContinuousOwnerPose}:" +
+                $"{Mathf.Abs(input.Move.x) > 0.01f}:{Mathf.Abs(input.Move.y) > 0.01f}:" +
+                $"{input.HasJump}:{m_Driver?.UpdateKinematics ?? false}";
+            string stateKey = $"fusion-owner-input-state:{actorId}";
+            string sampleKey = $"fusion-owner-input-sample:{actorId}";
+            if (!NetworkCiTrace.HasChanged(stateKey, signature) &&
+                !NetworkCiTrace.ShouldSample(sampleKey, 0.5f))
+            {
+                return;
+            }
+
+            NetworkCiTrace.Log(
+                "fusion-input",
+                "owner-payload",
+                actorId,
+                0,
+                $"inputTick={Runner?.InputTick.Raw ?? 0} sourceTick={input.SourceTick} " +
+                $"move={input.Move} yaw={input.Yaw:F2} flags={input.Flags} " +
+                $"jump={input.HasJump} ownerPose={input.HasOwnerPose} " +
+                $"continuousPose={input.HasContinuousOwnerPose} " +
+                $"ownerTarget={(input.HasOwnerPose ? input.OwnerPosition.ToString("F3") : "<none>")} " +
+                $"driver={m_Driver?.GetType().Name ?? "<none>"} " +
+                $"updateKinematics={m_Driver?.UpdateKinematics ?? false}",
+                this);
+#endif
         }
 
         private void Log(string message)
         {
-            if (!m_LogDiagnostics) return;
-            Debug.Log($"[FusionNativeCharacter] {name}: {message}", this);
+            if (!DiagnosticsEnabled) return;
+            Debug.LogFormat(
+                UnityEngine.LogType.Log,
+                LogOption.NoStacktrace,
+                this,
+                "{0}",
+                $"[FusionNativeCharacter] actor={m_Identity?.NetworkId ?? 0} " +
+                $"role={m_Role} tick={CurrentSimulationTick} {name}: {message}");
         }
 
         private struct SharedCharacterTransient
         {
             public FusionNativeCharacterInput Input;
             public int TrustedTick;
+            public PlayerRef Source;
         }
 
         private static bool IsFinite(float value) =>

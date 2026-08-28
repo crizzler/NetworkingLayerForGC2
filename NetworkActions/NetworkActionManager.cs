@@ -148,7 +148,7 @@ namespace Arawn.GameCreator2.Networking
             {
                 if (s_Instance == null)
                 {
-                    s_Instance = FindFirstObjectByType<NetworkActionManager>(
+                    s_Instance = UnityObjectSearch.FindAny<NetworkActionManager>(
                         FindObjectsInactive.Include);
                 }
 

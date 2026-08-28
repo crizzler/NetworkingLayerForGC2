@@ -9,7 +9,7 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
     public class StatsPatcher : GC2PatcherBase
     {
         public override string ModuleName => "Stats";
-        public override string PatchVersion => "2.1.0-stats";
+        public override string PatchVersion => "2.2.0-stats";
         public override string DisplayName => "Stats (Game Creator 2)";
 
         public override string PatchDescription =>
@@ -29,7 +29,10 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
         {
             return new[]
             {
-                VersionRequirement("Plugins/GameCreator/Packages/Stats/Editor/Version.txt", "2.6.*")
+                VersionRequirement(
+                    "Plugins/GameCreator/Packages/Stats/Editor/Version.txt",
+                    "2.6.*",
+                    "2.7.*")
             };
         }
 

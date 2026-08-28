@@ -4,6 +4,25 @@ using UnityEngine;
 namespace Arawn.GameCreator2.Networking
 {
     /// <summary>
+    /// Declares whether a network character represents an authenticated player actor or an NPC.
+    /// GC2's Character.IsPlayer remains a local input/UI flag and is never an authority grant.
+    /// </summary>
+    public enum NetworkCharacterActorType
+    {
+        /// <summary>
+        /// Preserves existing assets. A transport-authenticated logical owner identifies a player;
+        /// an unowned character is treated as an NPC.
+        /// </summary>
+        LegacyAutomatic = 0,
+
+        /// <summary>An authenticated transport owner controls this actor.</summary>
+        PlayerOwned = 1,
+
+        /// <summary>The actor has no client owner and is simulated according to its NPC mode.</summary>
+        NPC = 2
+    }
+
+    /// <summary>
     /// Compressed input state for network transmission.
     /// Uses fixed-point encoding to minimize bandwidth.
     /// Total size: 11 bytes normally, 23 bytes with an owner-authority pose, and 29 bytes

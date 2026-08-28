@@ -137,6 +137,11 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
             "Arawn.GameCreator2.Networking.Melee.NetworkMeleeManager, Arawn.GameCreator2.Networking.Melee";
         private const string NetworkMeleeControllerType =
             "Arawn.GameCreator2.Networking.Melee.NetworkMeleeController, Arawn.GameCreator2.Networking.Melee";
+        private const string NetworkFreeFlowCombatAdapterType =
+            "Arawn.GameCreator2.Networking.Melee.NetworkFreeFlowCombatAdapter, " +
+            "Arawn.GameCreator2.Networking.Melee";
+        private const string FreeFlowNetworkIntegrationType =
+            "Arawn.FreeFlowCombat.FreeFlowNetworkIntegration, Assembly-CSharp";
         private const string FusionMeleeBridgeType =
             "Arawn.GameCreator2.Networking.Melee.Transport.Fusion.FusionMeleeTransportBridge, " +
             "Arawn.GameCreator2.Networking.Melee.Transport.Fusion";
@@ -200,6 +205,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
         private bool m_RegisterInstalledDemoAssets = true;
         private bool m_CreateMeleeStatsDamageBridge = true;
         private bool m_CreateShooterStatsDamageBridge = true;
+        private bool m_EnableFreeFlowCombat;
 
         private RunnerSetup m_RunnerSetup = RunnerSetup.CreateOrReuseArawnBootstrap;
         private DefaultLaunchMode m_DefaultLaunchMode = DefaultLaunchMode.Shared;
@@ -220,6 +226,13 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
         private bool m_ConfigurePlayerPrefab = true;
         private bool m_ConfigurePlayerKernel = true;
         private bool m_PlayerUsesLocalVariables;
+        private GameObject m_NpcPrefab;
+        private bool m_ConfigureNpcPrefab;
+        private NetworkPredictionBackend m_NpcPredictionBackend =
+            NetworkPredictionBackend.BuiltIn;
+        private readonly List<string> m_NpcAuthorityRootPaths = new();
+        private bool m_CreateBotSlots;
+        private int m_BotSlotCount = 3;
         private bool m_CreatePlayerSpawner = true;
         private bool m_CreateDemoUI = true;
         private bool m_CreateLobbyUI;
@@ -530,6 +543,25 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
             m_ModuleStats = DrawModuleToggle("Stats", NetworkStatsManagerType, m_ModuleStats);
             m_ModuleInventory = DrawInventoryModuleToggle(m_ModuleInventory);
             m_ModuleMelee = DrawModuleToggle("Melee", NetworkMeleeManagerType, m_ModuleMelee);
+            bool freeFlowAvailable = IsFreeFlowCombatAvailable();
+            using (new EditorGUI.DisabledScope(!m_ModuleMelee || !freeFlowAvailable))
+            {
+                m_EnableFreeFlowCombat = EditorGUILayout.ToggleLeft(
+                    new GUIContent(
+                        "Server-authoritative Free Flow Combat",
+                        "Adds the transport-neutral Free Flow adapter to prepared player and NPC " +
+                        "prefabs. Free Flow remains an explicit opt-in so ordinary Melee prefabs " +
+                        "are not changed."),
+                    m_EnableFreeFlowCombat);
+            }
+            if (!m_ModuleMelee) m_EnableFreeFlowCombat = false;
+            if (m_ModuleMelee && !freeFlowAvailable)
+            {
+                EditorGUILayout.HelpBox(
+                    "Install and compile Arawn FreeFlowCombat to enable its authoritative " +
+                    "network adapter.",
+                    MessageType.None);
+            }
             m_ModuleShooter =
                 DrawModuleToggle("Shooter", NetworkShooterManagerType, m_ModuleShooter);
             m_ModuleQuests = DrawModuleToggle("Quests", NetworkQuestsManagerType, m_ModuleQuests);
@@ -700,6 +732,46 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                     EditorGUILayout.ToggleLeft("Add NetworkVariableController", m_PlayerUsesLocalVariables);
             }
 
+            EditorGUILayout.Space(10);
+            EditorGUILayout.LabelField("Server-Owned NPCs and Bot Slots", EditorStyles.boldLabel);
+            m_NpcPrefab = (GameObject)EditorGUILayout.ObjectField(
+                new GUIContent(
+                    "NPC / Bot Prefab",
+                    "A root GC2 Character prefab used for authority-only enemies and optional bot-backed player slots."),
+                m_NpcPrefab,
+                typeof(GameObject),
+                false);
+            using (new EditorGUI.DisabledScope(m_NpcPrefab == null))
+            {
+                m_ConfigureNpcPrefab = EditorGUILayout.ToggleLeft(
+                    "Prepare as an explicit server-owned NPC",
+                    m_ConfigureNpcPrefab);
+                using (new EditorGUI.DisabledScope(!m_ConfigureNpcPrefab))
+                {
+                    m_NpcPredictionBackend = (NetworkPredictionBackend)EditorGUILayout.EnumPopup(
+                        "NPC Movement Backend",
+                        NormalizeFusionNpcBackend(m_NpcPredictionBackend));
+                    DrawNpcAuthorityRootPaths();
+                }
+                m_CreateBotSlots = EditorGUILayout.ToggleLeft(
+                    "Create bot-backed player slots",
+                    m_CreateBotSlots);
+                using (new EditorGUI.DisabledScope(!m_CreateBotSlots))
+                {
+                    m_BotSlotCount = EditorGUILayout.IntSlider(
+                        "Bot Slot Count",
+                        Mathf.Clamp(m_BotSlotCount, 1, FusionBotSlotStateReplicator.MaxSlots),
+                        1,
+                        FusionBotSlotStateReplicator.MaxSlots);
+                }
+            }
+            EditorGUILayout.HelpBox(
+                "NPC authority is independent from Character.IsPlayer. The prepared prefab keeps " +
+                "IsPlayer false, receives no logical client owner, gates the explicitly selected " +
+                "GC2 AI roots, and targets only authenticated PlayerOwned characters. Bot slots " +
+                "replace a bot atomically when a human joins and transfer only position/rotation.",
+                MessageType.Info);
+
             m_CreatePlayerSpawner = true;
             using (new EditorGUI.DisabledScope(true))
             {
@@ -808,6 +880,8 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                 EditorGUILayout.HelpBox(runnerConflict, MessageType.Error);
             }
 
+            DrawNpcReviewValidation();
+
             if (HasSelectedModulePreflightErrors(out string modulePreflight))
             {
                 EditorGUILayout.HelpBox(modulePreflight, MessageType.Error);
@@ -833,7 +907,8 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
 
             if (report.HasErrors ||
                 runnerSetupConflict ||
-                HasSelectedModulePreflightErrors(out _))
+                HasSelectedModulePreflightErrors(out _) ||
+                HasNpcPreflightErrors(out _, out _))
             {
                 EditorGUILayout.HelpBox(
                     "Resolve blocking errors before applying. Selecting a different Arawn " +
@@ -842,6 +917,101 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                     "silently removed.",
                     MessageType.Error);
             }
+        }
+
+        private void DrawNpcAuthorityRootPaths()
+        {
+            EditorGUILayout.LabelField("Authority-Only AI Trigger Roots", EditorStyles.miniBoldLabel);
+            EditorGUILayout.HelpBox(
+                "Enter prefab-relative child paths (for example 'AI' or 'Logic/Enemy AI'). " +
+                "Only these roots are enabled while this peer is the server or Shared master.",
+                MessageType.None);
+
+            for (int i = 0; i < m_NpcAuthorityRootPaths.Count; i++)
+            {
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    m_NpcAuthorityRootPaths[i] = EditorGUILayout.TextField(
+                        $"AI Root {i + 1}",
+                        m_NpcAuthorityRootPaths[i]);
+                    if (GUILayout.Button("Remove", GUILayout.Width(72f)))
+                    {
+                        m_NpcAuthorityRootPaths.RemoveAt(i--);
+                    }
+                }
+            }
+            if (GUILayout.Button("Add AI Root Path", GUILayout.Width(150f)))
+            {
+                m_NpcAuthorityRootPaths.Add(string.Empty);
+            }
+        }
+
+        private void DrawNpcReviewValidation()
+        {
+            if (!m_ConfigureNpcPrefab && !m_CreateBotSlots) return;
+            HasNpcPreflightErrors(out List<string> errors, out List<string> warnings);
+            for (int i = 0; i < errors.Count; i++)
+                EditorGUILayout.HelpBox(errors[i], MessageType.Error);
+            for (int i = 0; i < warnings.Count; i++)
+                EditorGUILayout.HelpBox(warnings[i], MessageType.Warning);
+        }
+
+        private bool HasNpcPreflightErrors(
+            out List<string> errors,
+            out List<string> warnings)
+        {
+            errors = new List<string>();
+            warnings = new List<string>();
+            if (!m_ConfigureNpcPrefab && !m_CreateBotSlots) return false;
+            if (m_NpcPrefab == null)
+            {
+                errors.Add("Assign an NPC prefab before preparing NPCs or creating bot slots.");
+                return true;
+            }
+
+            string prefabPath = AssetDatabase.GetAssetPath(m_NpcPrefab);
+            if (string.IsNullOrEmpty(prefabPath) ||
+                !prefabPath.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase))
+            {
+                errors.Add("The NPC / Bot Prefab must be a prefab asset from the Project window.");
+            }
+
+            if (m_ConfigureNpcPrefab)
+            {
+                if (NetworkNpcSetupEditorUtility.HasGc2Triggers(m_NpcPrefab) &&
+                    m_NpcAuthorityRootPaths.Count == 0)
+                {
+                    errors.Add("Select at least one explicit authority-only AI root for this prefab's GC2 Triggers.");
+                }
+                for (int i = 0; i < m_NpcAuthorityRootPaths.Count; i++)
+                {
+                    string path = m_NpcAuthorityRootPaths[i]?.Trim();
+                    if (string.IsNullOrEmpty(path) || m_NpcPrefab.transform.Find(path) == null)
+                        errors.Add($"NPC authority root path '{m_NpcAuthorityRootPaths[i]}' does not exist in the prefab.");
+                }
+            }
+            else
+            {
+                NetworkNpcSetupEditorUtility.ValidateServerNpc(
+                    m_NpcPrefab,
+                    typeof(NetworkObject),
+                    m_NpcAuthorityRootPaths,
+                    errors,
+                    warnings);
+            }
+            if (m_CreateBotSlots && !m_CreatePlayerSpawner)
+                errors.Add("Bot-backed slots require the authority-only Fusion player spawner.");
+            if (m_NpcPredictionBackend == NetworkPredictionBackend.FusionKCC)
+                errors.Add("Fusion Advanced KCC is not a supported NPC default. Use Built-in NavMesh or Fusion Native.");
+            return errors.Count > 0;
+        }
+
+        private static NetworkPredictionBackend NormalizeFusionNpcBackend(
+            NetworkPredictionBackend backend)
+        {
+            return backend == NetworkPredictionBackend.FusionNative
+                ? NetworkPredictionBackend.FusionNative
+                : NetworkPredictionBackend.BuiltIn;
         }
 
         internal void ConfigureForDemoGeneration(
@@ -960,13 +1130,17 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                 TryGetRunnerSetupConflict(out string runnerConflict);
             bool modulePreflightError =
                 HasSelectedModulePreflightErrors(out string modulePreflight);
-            if (preflight.HasErrors || runnerSetupConflict || modulePreflightError)
+            bool npcPreflightError =
+                HasNpcPreflightErrors(out List<string> npcErrors, out _);
+            if (preflight.HasErrors || runnerSetupConflict || modulePreflightError || npcPreflightError)
             {
                 string message = !string.IsNullOrEmpty(runnerConflict)
                     ? runnerConflict
                     : !string.IsNullOrEmpty(modulePreflight)
                         ? modulePreflight
-                        : "Resolve the blocking validation errors shown on the Review page.";
+                        : npcErrors.Count > 0
+                            ? string.Join("\n", npcErrors)
+                            : "Resolve the blocking validation errors shown on the Review page.";
                 if (showDialogs)
                 {
                     EditorUtility.DisplayDialog("Fusion Scene Setup", message, "OK");
@@ -1021,6 +1195,12 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                     }
                 }
 
+                if (m_ConfigureNpcPrefab)
+                {
+                    string npcReport = PrepareNpcPrefab(m_NpcPrefab);
+                    if (!string.IsNullOrEmpty(npcReport)) Debug.Log(npcReport);
+                }
+
                 FusionTransportBridge transport =
                     FindOrCreateComponent<FusionTransportBridge>("Fusion Transport Bridge", root);
                 FusionRpcRouter router =
@@ -1060,6 +1240,11 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                     spawner = EnsurePlayerSpawner(root, transport);
                 }
 
+                if (m_CreateBotSlots)
+                {
+                    EnsureBotSlots(root, transport, spawner);
+                }
+
                 EnsureOptionalSceneHelpers(root, bootstrap, spawner);
 
                 bool weaveRegistrationChanged = ApplyFusionProjectConfiguration();
@@ -1077,7 +1262,19 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                         m_KccSharedAuthorityMode);
                 bool postModuleError =
                     HasSelectedModulePreflightErrors(out string postModuleReport);
-                bool postflightFailed = postflight.HasErrors || postModuleError;
+                var postNpcErrors = new List<string>();
+                var postNpcWarnings = new List<string>();
+                if (m_ConfigureNpcPrefab || m_CreateBotSlots)
+                {
+                    NetworkNpcSetupEditorUtility.ValidateServerNpc(
+                        m_NpcPrefab,
+                        typeof(NetworkObject),
+                        m_NpcAuthorityRootPaths,
+                        postNpcErrors,
+                        postNpcWarnings);
+                }
+                bool postflightFailed =
+                    postflight.HasErrors || postModuleError || postNpcErrors.Count > 0;
                 if (postflightFailed)
                 {
                     string validationErrors = string.Join(
@@ -1092,7 +1289,10 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                             : "\n" + validationErrors) +
                         (string.IsNullOrEmpty(postModuleReport)
                             ? string.Empty
-                            : "\n" + postModuleReport));
+                            : "\n" + postModuleReport) +
+                        (postNpcErrors.Count == 0
+                            ? string.Empty
+                            : "\n" + string.Join("\n", postNpcErrors)));
                 }
                 assetTransaction.Commit();
                 Undo.CollapseUndoOperations(undoGroup);
@@ -1176,6 +1376,15 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                 if (string.IsNullOrEmpty(path)) continue;
                 paths.Add(path);
                 paths.Add(path + ".meta");
+            }
+            if (m_NpcPrefab != null)
+            {
+                string npcPath = AssetDatabase.GetAssetPath(m_NpcPrefab);
+                if (!string.IsNullOrEmpty(npcPath))
+                {
+                    paths.Add(npcPath);
+                    paths.Add(npcPath + ".meta");
+                }
             }
 
             // Fusion's prefab-table rebuild normalizes labels on every prefab, not only the
@@ -1471,6 +1680,99 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
             return spawner;
         }
 
+        private void EnsureBotSlots(
+            GameObject root,
+            FusionTransportBridge transport,
+            FusionPlayerSpawner spawner)
+        {
+            if (m_NpcPrefab == null || spawner == null)
+                throw new InvalidOperationException(
+                    "Fusion bot slots require both an NPC prefab and the Fusion player spawner.");
+
+            FusionBotSlotCoordinator coordinator =
+                FindOrCreateComponent<FusionBotSlotCoordinator>("Fusion Bot Slots", root);
+            NetworkObject networkObject = coordinator.GetComponent<NetworkObject>();
+            if (networkObject == null)
+                networkObject = Undo.AddComponent<NetworkObject>(coordinator.gameObject);
+            NetworkObjectFlags flags = networkObject.Flags |
+                                       NetworkObjectFlags.MasterClientObject;
+            flags &= ~NetworkObjectFlags.AllowStateAuthorityOverride;
+            flags &= ~NetworkObjectFlags.DestroyWhenStateAuthorityLeaves;
+            networkObject.Flags = flags;
+
+            FusionBotSlotStateReplicator replicator =
+                coordinator.GetComponent<FusionBotSlotStateReplicator>();
+            if (replicator == null)
+                replicator = Undo.AddComponent<FusionBotSlotStateReplicator>(coordinator.gameObject);
+            FusionAuthoritySpawnRegistry registry =
+                FusionSceneSetupValidation.FindSceneComponents<FusionAuthoritySpawnRegistry>()
+                    .FirstOrDefault();
+            if (registry == null)
+                throw new InvalidOperationException(
+                    "Fusion bot slots require FusionAuthoritySpawnRegistry.");
+
+            Transform anchorRoot = coordinator.transform.Find("Slot Anchors");
+            if (anchorRoot == null)
+                anchorRoot = CreateChild("Slot Anchors", coordinator.gameObject).transform;
+            int count = Mathf.Clamp(
+                m_BotSlotCount,
+                1,
+                FusionBotSlotStateReplicator.MaxSlots);
+            var anchors = new List<Transform>(count);
+            for (int i = 0; i < count; i++)
+            {
+                string name = $"Combatant Slot {i + 1}";
+                Transform anchor = anchorRoot.Find(name);
+                if (anchor == null) anchor = CreateChild(name, anchorRoot.gameObject).transform;
+                float angle = (Mathf.PI * 2f * i) / count;
+                anchor.localPosition = new Vector3(Mathf.Cos(angle), 0f, Mathf.Sin(angle)) * 4f;
+                anchor.localRotation = Quaternion.LookRotation(-anchor.localPosition.normalized, Vector3.up);
+                anchors.Add(anchor);
+            }
+
+            var coordinatorObject = new SerializedObject(coordinator);
+            SetObject(coordinatorObject, "m_TransportBridge", transport);
+            SetObject(coordinatorObject, "m_SpawnRegistry", registry);
+            SetObject(coordinatorObject, "m_StateReplicator", replicator);
+            SetBool(coordinatorObject, "m_FillVacantSlotsWithBots", true);
+            ConfigureBotSlotDefinitions(
+                coordinatorObject,
+                anchors,
+                m_NpcPrefab,
+                "fusion-combatant-slot");
+            coordinatorObject.ApplyModifiedProperties();
+            EditorUtility.SetDirty(coordinator);
+
+            var replicatorObject = new SerializedObject(replicator);
+            SetObject(replicatorObject, "m_Coordinator", coordinator);
+            replicatorObject.ApplyModifiedProperties();
+            EditorUtility.SetDirty(replicator);
+
+            var spawnerObject = new SerializedObject(spawner);
+            SetObject(spawnerObject, "m_BotSlotCoordinator", coordinator);
+            spawnerObject.ApplyModifiedProperties();
+            EditorUtility.SetDirty(spawner);
+        }
+
+        private static void ConfigureBotSlotDefinitions(
+            SerializedObject coordinator,
+            IReadOnlyList<Transform> anchors,
+            GameObject botPrefab,
+            string idPrefix)
+        {
+            SerializedProperty slots = coordinator.FindProperty("m_Slots");
+            if (slots == null || !slots.isArray)
+                throw new InvalidOperationException("Network bot slot definitions are unavailable.");
+            slots.arraySize = anchors.Count;
+            for (int i = 0; i < anchors.Count; i++)
+            {
+                SerializedProperty slot = slots.GetArrayElementAtIndex(i);
+                slot.FindPropertyRelative("m_StableSlotId").stringValue = $"{idPrefix}-{i + 1}";
+                slot.FindPropertyRelative("m_Anchor").objectReferenceValue = anchors[i];
+                slot.FindPropertyRelative("m_BotPrefab").objectReferenceValue = botPrefab;
+            }
+        }
+
         private void EnsureOptionalSceneHelpers(
             GameObject root,
             FusionSessionBootstrap bootstrap,
@@ -1523,7 +1825,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                 }
 
 #if UNITY_2023_1_OR_NEWER
-                FusionDemoSessionUI directUi = UnityEngine.Object.FindFirstObjectByType<
+                FusionDemoSessionUI directUi = UnityObjectSearch.FindAny<
                     FusionDemoSessionUI>(FindObjectsInactive.Include);
 #else
                 FusionDemoSessionUI directUi = UnityEngine.Object.FindObjectOfType<
@@ -1776,6 +2078,109 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                 : $"[FusionSceneSetupWizard] Prepared '{path}': {string.Join(", ", changes)}.";
         }
 
+        private string PrepareNpcPrefab(GameObject prefab)
+        {
+            string path = prefab != null ? AssetDatabase.GetAssetPath(prefab) : string.Empty;
+            if (string.IsNullOrEmpty(path) ||
+                !path.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(
+                    "Assign a prefab asset before preparing a Fusion server-owned NPC.");
+            }
+
+            GameObject root = PrefabUtility.LoadPrefabContents(path);
+            var changes = new List<string>();
+            var errors = new List<string>();
+            try
+            {
+                NetworkObject networkObject = root.GetComponent<NetworkObject>();
+                if (networkObject == null)
+                {
+                    networkObject = root.AddComponent<NetworkObject>();
+                    changes.Add("NetworkObject");
+                }
+                NetworkObjectFlags flags = networkObject.Flags |
+                                           NetworkObjectFlags.MasterClientObject;
+                flags &= ~NetworkObjectFlags.AllowStateAuthorityOverride;
+                flags &= ~NetworkObjectFlags.DestroyWhenStateAuthorityLeaves;
+                if (NormalizeFusionNpcBackend(m_NpcPredictionBackend) ==
+                    NetworkPredictionBackend.FusionNative)
+                    flags |= NetworkObjectFlags.HasMainNetworkTRSP;
+                else
+                    flags &= ~NetworkObjectFlags.HasMainNetworkTRSP;
+                if (networkObject.Flags != flags)
+                {
+                    networkObject.Flags = flags;
+                    changes.Add("master-owned authority flags");
+                }
+                networkObject.EnableInterpolation = true;
+
+                if (EnsurePrefabComponent<FusionNetworkIdentity>(root, out _))
+                    changes.Add("FusionNetworkIdentity");
+                if (EnsurePrefabComponent<FusionNetworkCharacterAuto>(root, out _))
+                    changes.Add("FusionNetworkCharacterAuto");
+
+                NetworkPredictionBackend backend =
+                    NormalizeFusionNpcBackend(m_NpcPredictionBackend);
+                if (backend == NetworkPredictionBackend.FusionNative)
+                {
+                    if (EnsurePrefabComponent<FusionNativeNetworkCharacterMotor>(root, out _))
+                        changes.Add("FusionNativeNetworkCharacterMotor");
+                }
+                else
+                {
+                    FusionNativeNetworkCharacterMotor[] nativeMotors =
+                        root.GetComponentsInChildren<FusionNativeNetworkCharacterMotor>(true);
+                    for (int i = 0; i < nativeMotors.Length; i++)
+                    {
+                        if (nativeMotors[i] != null) DestroyImmediate(nativeMotors[i], true);
+                    }
+                    if (nativeMotors.Length > 0)
+                        changes.Add($"removed {nativeMotors.Length} Fusion Native motor(s)");
+                }
+
+                var requiredControllers = new List<Type>();
+                AddAvailableType(requiredControllers, m_ModuleStats, NetworkStatsControllerType);
+                AddAvailableType(requiredControllers, m_ModuleShooter, NetworkShooterControllerType);
+                AddAvailableType(requiredControllers, m_ModuleMelee, NetworkMeleeControllerType);
+                AddAvailableType(
+                    requiredControllers,
+                    m_ModuleMelee && m_EnableFreeFlowCombat,
+                    NetworkFreeFlowCombatAdapterType);
+                NetworkNpcSetupEditorUtility.ConfigureServerNpc(
+                    root,
+                    backend,
+                    m_NpcAuthorityRootPaths,
+                    requiredControllers,
+                    changes,
+                    errors);
+                if (errors.Count > 0)
+                    throw new InvalidOperationException(string.Join("\n", errors));
+
+                PrefabUtility.SaveAsPrefabAsset(root, path);
+                AssetDatabase.ImportAsset(path);
+            }
+            finally
+            {
+                PrefabUtility.UnloadPrefabContents(root);
+            }
+
+            EnsureFusionPrefabLabel(prefab);
+            return changes.Count == 0
+                ? $"[FusionSceneSetupWizard] NPC prefab '{path}' already has the selected setup."
+                : $"[FusionSceneSetupWizard] Prepared NPC prefab '{path}': {string.Join(", ", changes)}.";
+        }
+
+        private static void AddAvailableType(
+            ICollection<Type> destination,
+            bool enabled,
+            string assemblyQualifiedType)
+        {
+            if (!enabled) return;
+            Type type = Type.GetType(assemblyQualifiedType);
+            if (type != null) destination.Add(type);
+        }
+
         private void RemoveOptionalKccSetup(
             GameObject root,
             IFusionKccEditorSetupExtension extension,
@@ -2007,6 +2412,14 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                     changes);
             if (m_ModuleMelee)
                 EnsurePrefabComponentByType(root, NetworkMeleeControllerType, "NetworkMeleeController", changes);
+            if (m_ModuleMelee && m_EnableFreeFlowCombat)
+            {
+                EnsurePrefabComponentByType(
+                    root,
+                    NetworkFreeFlowCombatAdapterType,
+                    "NetworkFreeFlowCombatAdapter",
+                    changes);
+            }
             if (m_ModuleShooter)
                 EnsurePrefabComponentByType(
                     root,
@@ -2042,6 +2455,10 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
 
             var serialized = new SerializedObject(character);
             bool changed = false;
+            changed |= SetEnum(
+                serialized,
+                "m_ActorType",
+                (int)NetworkCharacterActorType.PlayerOwned);
             changed |= SetEnum(serialized, "m_NPCMode", (int)NetworkCharacter.NPCSyncMode.ServerAuthoritative);
             changed |= SetBool(serialized, "m_UseNetworkMotion", true);
             changed |= SetBool(serialized, "m_UseAnimationSync", true);
@@ -2102,6 +2519,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
             {
                 EnsureFusionPrefabLabel(prefab);
             }
+            if (m_NpcPrefab != null) EnsureFusionPrefabLabel(m_NpcPrefab);
             NetworkProjectConfigUtilities.RebuildPrefabTable();
             return weaveRegistrationChanged;
         }
@@ -2452,10 +2870,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
         private static Component FindSceneComponent(Type type)
         {
 #if UNITY_2023_1_OR_NEWER
-            UnityEngine.Object[] objects = UnityEngine.Object.FindObjectsByType(
-                type,
-                FindObjectsInactive.Include,
-                FindObjectsSortMode.None);
+            UnityEngine.Object[] objects = UnityObjectSearch.FindAll(type, FindObjectsInactive.Include);
 #else
             UnityEngine.Object[] objects = UnityEngine.Object.FindObjectsOfType(type, true);
 #endif
@@ -2469,9 +2884,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
         private static GameObject FindSceneGameObject(string name)
         {
 #if UNITY_2023_1_OR_NEWER
-            GameObject[] objects = UnityEngine.Object.FindObjectsByType<GameObject>(
-                FindObjectsInactive.Include,
-                FindObjectsSortMode.None);
+            GameObject[] objects = UnityObjectSearch.FindAll<GameObject>(FindObjectsInactive.Include);
 #else
             GameObject[] objects = Resources.FindObjectsOfTypeAll<GameObject>();
 #endif
@@ -2632,6 +3045,12 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                 errors,
                 canBootstrapInventoryPatch);
             RequireSelectedBridge(m_ModuleMelee, FusionMeleeBridgeType, "Melee", errors);
+            if (m_EnableFreeFlowCombat && !IsFreeFlowCombatAvailable())
+            {
+                errors.Add(
+                    "Server-authoritative Free Flow Combat was selected, but its runtime " +
+                    "integration or Networking Layer adapter is unavailable.");
+            }
             RequireSelectedBridge(m_ModuleShooter, FusionShooterBridgeType, "Shooter", errors);
             RequireSelectedBridge(m_ModuleQuests, FusionQuestsBridgeType, "Quests", errors);
             RequireSelectedBridge(m_ModuleDialogue, FusionDialogueBridgeType, "Dialogue", errors);
@@ -2703,10 +3122,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
             }
 
 #if UNITY_2023_1_OR_NEWER
-            UnityEngine.Object[] objects = UnityEngine.Object.FindObjectsByType(
-                type,
-                FindObjectsInactive.Include,
-                FindObjectsSortMode.None);
+            UnityEngine.Object[] objects = UnityObjectSearch.FindAll(type, FindObjectsInactive.Include);
 #else
             UnityEngine.Object[] objects = UnityEngine.Object.FindObjectsOfType(type, true);
 #endif
@@ -3078,6 +3494,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
             m_ModuleDialogue = false;
             m_ModuleTraversal = false;
             m_ModuleAbilities = false;
+            m_EnableFreeFlowCombat = false;
 
             switch (template)
             {
@@ -3160,6 +3577,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                 $"{SelectedModulesSummary()}\n" +
                 $"Append installed example registrations: {YesNo(m_RegisterInstalledDemoAssets)}\n" +
                 $"Melee -> Stats damage bridge: {YesNo(m_ModuleMelee && m_ModuleStats && m_CreateMeleeStatsDamageBridge)}\n" +
+                $"Server-authoritative Free Flow Combat: {YesNo(m_ModuleMelee && m_EnableFreeFlowCombat)}\n" +
                 $"Shooter -> Stats damage bridge: {YesNo(m_ModuleShooter && m_ModuleStats && m_CreateShooterStatsDamageBridge)}\n" +
                 "Core managers/bridges + security: Yes\n" +
                 "Project config: PeerMode.Single, required reliable modes, weave list, " +
@@ -3187,6 +3605,12 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
             if (m_ModuleTraversal) modules.Add("Traversal");
             if (m_ModuleAbilities) modules.Add("Abilities");
             return modules.Count == 0 ? string.Empty : ", " + string.Join(", ", modules);
+        }
+
+        private static bool IsFreeFlowCombatAvailable()
+        {
+            return Type.GetType(NetworkFreeFlowCombatAdapterType) != null &&
+                   Type.GetType(FreeFlowNetworkIntegrationType) != null;
         }
 
         private static string YesNo(bool value) => value ? "Yes" : "No";

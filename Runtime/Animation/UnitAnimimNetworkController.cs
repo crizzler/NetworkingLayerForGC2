@@ -900,9 +900,8 @@ namespace Arawn.GameCreator2.Networking
             var visited = new HashSet<object>(ReferenceComparer.Instance);
             int registered = 0;
 
-            Component[] components = FindObjectsByType<Component>(
-                FindObjectsInactive.Include,
-                FindObjectsSortMode.None);
+            Component[] components = UnityObjectSearch.FindAll<Component>(
+                FindObjectsInactive.Include);
 
             for (int i = 0; i < components.Length; i++)
             {

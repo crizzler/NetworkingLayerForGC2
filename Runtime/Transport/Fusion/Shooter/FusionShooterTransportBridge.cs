@@ -175,7 +175,7 @@ namespace Arawn.GameCreator2.Networking.Shooter.Transport.Fusion
         {
             FusionTransportBridge candidate = m_TransportBridge;
             if (candidate == null) candidate = NetworkTransportBridge.Active as FusionTransportBridge;
-            if (candidate == null) candidate = FindFirstObjectByType<FusionTransportBridge>();
+            if (candidate == null) candidate = UnityObjectSearch.FindAny<FusionTransportBridge>();
             if (!force && candidate == m_BoundBridge) return;
             if (candidate == m_BoundBridge) return;
 
@@ -251,8 +251,7 @@ namespace Arawn.GameCreator2.Networking.Shooter.Transport.Fusion
                 }
             }
 
-            NetworkShooterImpactProp[] props = FindObjectsByType<NetworkShooterImpactProp>(
-                FindObjectsInactive.Exclude, FindObjectsSortMode.None);
+            NetworkShooterImpactProp[] props = UnityObjectSearch.FindAll<NetworkShooterImpactProp>(FindObjectsInactive.Exclude);
             for (int i = 0; i < props.Length; i++)
             {
                 if (props[i] == null || props[i].NetworkId == 0) continue;
@@ -413,8 +412,7 @@ namespace Arawn.GameCreator2.Networking.Shooter.Transport.Fusion
             PruneControllerRegistry(manager);
             if (!m_AutoRegisterSceneControllers && !force) return;
 
-            NetworkShooterController[] controllers = FindObjectsByType<NetworkShooterController>(
-                FindObjectsInactive.Exclude, FindObjectsSortMode.None);
+            NetworkShooterController[] controllers = UnityObjectSearch.FindAll<NetworkShooterController>(FindObjectsInactive.Exclude);
             for (int i = 0; i < controllers.Length; i++) RegisterController(manager, controllers[i]);
         }
 
@@ -929,7 +927,7 @@ namespace Arawn.GameCreator2.Networking.Shooter.Transport.Fusion
         {
             return NetworkShooterManager.Instance != null
                 ? NetworkShooterManager.Instance
-                : FindFirstObjectByType<NetworkShooterManager>();
+                : UnityObjectSearch.FindAny<NetworkShooterManager>();
         }
     }
 

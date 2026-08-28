@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using Fusion;
 using Fusion.Sockets;
+using GameCreator.Runtime.Characters;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 using Arawn.GameCreator2.Networking.Security;
@@ -106,6 +107,12 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         private float m_NextGameplayReadyRetryAt;
         private uint m_GameplayReadySendEpoch;
         private int m_GameplayReadySendCount;
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+        private float m_CiNextRunnerHealthTraceAt;
+        private float m_CiLastTickAdvanceAt;
+        private int m_CiLastObservedTick = int.MinValue;
+        private bool m_CiRunnerTickStalled;
+#endif
 
         public event Action<uint> ClientSceneReady;
         public event Action<uint> ClientSnapshotAcknowledged;
@@ -191,8 +198,27 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                     : string.Empty;
             }
         }
-        public override float ServerTime =>
-            IsRunnerTimeReady ? m_Runner.SimulationTime : Time.time;
+        public override float ServerTime
+        {
+            get
+            {
+                if (!IsRunnerTimeReady) return Time.time;
+
+                // Client/Server clients simulate predicted objects ahead of the latest
+                // confirmed server state. Using that prediction-ahead SimulationTime for
+                // security timestamps makes an honest request appear to come from the
+                // future when authority receives it. Host/dedicated authority owns the
+                // simulation clock; every non-server peer uses Fusion's confirmed server
+                // timeline instead. The fallback is only reachable before Fusion has
+                // exposed its first confirmed server time, before gameplay readiness.
+                if (IsServer) return m_Runner.SimulationTime;
+
+                float latestServerTime = m_Runner.LatestServerTick.Raw * m_Runner.DeltaTime;
+                return latestServerTime > 0f
+                    ? latestServerTime
+                    : m_Runner.SimulationTime;
+            }
+        }
 
         private bool IsRunnerUsable => m_Runner != null && m_Runner.IsRunning && !m_Runner.IsShutdown;
 
@@ -245,6 +271,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                 TryAutoBind();
             }
 
+            TraceCiRunnerHealth();
             if (!IsRunnerUsable) return;
 
             PollAuthority();
@@ -306,6 +333,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             m_AuthorityEpoch = 1;
             m_NextSnapshotToken = 0;
             m_Runner = runner;
+            ResetCiDiagnostics();
             s_Bridges[runner] = this;
             runner.RemoveCallbacks(this);
             runner.AddCallbacks(this);
@@ -351,6 +379,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                 SetLagCompensationAuthority(false);
             }
             m_Runner = null;
+            ResetCiDiagnostics();
             m_LastMaster = PlayerRef.Invalid;
             m_WasAuthority = false;
             m_LocalSceneReady = false;
@@ -371,7 +400,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             if (m_LagCompensationBootstrap == null)
             {
 #if UNITY_2023_1_OR_NEWER
-                m_LagCompensationBootstrap = FindFirstObjectByType<LagCompensationBootstrap>(
+                m_LagCompensationBootstrap = UnityObjectSearch.FindAny<LagCompensationBootstrap>(
                     FindObjectsInactive.Include);
 #else
                 m_LagCompensationBootstrap = FindObjectOfType<LagCompensationBootstrap>(true);
@@ -406,9 +435,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             // manager. Re-register authoritative characters that already spawned before
             // this bridge observed the new authority role.
 #if UNITY_2023_1_OR_NEWER
-            CharacterLagCompensation[] adapters = FindObjectsByType<CharacterLagCompensation>(
-                FindObjectsInactive.Exclude,
-                FindObjectsSortMode.None);
+            CharacterLagCompensation[] adapters = UnityObjectSearch.FindAll<CharacterLagCompensation>(FindObjectsInactive.Exclude);
 #else
             CharacterLagCompensation[] adapters = FindObjectsOfType<CharacterLagCompensation>();
 #endif
@@ -665,7 +692,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                 if (bootstrap == null)
                 {
                     bootstrap = GetComponentInParent<FusionSessionBootstrap>() ??
-                                FindFirstObjectByType<FusionSessionBootstrap>();
+                                UnityObjectSearch.FindAny<FusionSessionBootstrap>();
                 }
 
                 if (bootstrap != null && bootstrap.Runner == runner)
@@ -785,6 +812,13 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             ownerClientId = InvalidClientId;
             if (TryResolveNetworkCharacter(actorNetworkId, out NetworkCharacter character))
             {
+                // Runtime role initialization is deliberately reset while Fusion re-admits
+                // identities and during Shared-master migration. Do not make authenticated
+                // transport ownership depend on that transient state: the admitted Fusion
+                // identity and its replicated logical owner are the durable trust boundary.
+                // Explicit NPCs remain permanently ineligible for client ownership.
+                if (character.ActorType == NetworkCharacterActorType.NPC) return false;
+
                 FusionNetworkIdentity identity = character.GetComponentInParent<FusionNetworkIdentity>();
                 if (identity != null &&
                     identity.TransportAdmitted &&
@@ -806,7 +840,11 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         protected override bool TryResolveOwnerClientId(NetworkCharacter networkCharacter, out uint ownerClientId)
         {
             ownerClientId = InvalidClientId;
-            if (networkCharacter == null) return false;
+            if (networkCharacter == null ||
+                networkCharacter.ActorType == NetworkCharacterActorType.NPC)
+            {
+                return false;
+            }
 
             FusionNetworkIdentity identity = networkCharacter.GetComponentInParent<FusionNetworkIdentity>();
             return identity != null &&
@@ -1902,9 +1940,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
 
         private void RefreshNetworkIdentities()
         {
-            FusionNetworkIdentity[] identities = FindObjectsByType<FusionNetworkIdentity>(
-                FindObjectsInactive.Include,
-                FindObjectsSortMode.None);
+            FusionNetworkIdentity[] identities = UnityObjectSearch.FindAll<FusionNetworkIdentity>(FindObjectsInactive.Include);
             int refreshed = 0;
             int deferred = 0;
             int otherRunner = 0;
@@ -2680,10 +2716,26 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         public void OnObjectEnterAOI(NetworkRunner runner, NetworkObject obj, PlayerRef player) { }
         public void OnInput(NetworkRunner runner, NetworkInput input)
         {
-            if (runner != m_Runner || !IsRunnerUsable ||
-                runner.GameMode == GameMode.Shared ||
-                !runner.LocalPlayer.IsRealPlayer)
+            if (runner != m_Runner)
             {
+                return;
+            }
+
+            if (!IsRunnerUsable)
+            {
+                TraceCiInputCallback(runner, "skipped", "runner-not-usable", null, false);
+                return;
+            }
+
+            if (runner.GameMode == GameMode.Shared)
+            {
+                TraceCiInputCallback(runner, "skipped", "shared-mode", null, false);
+                return;
+            }
+
+            if (!runner.LocalPlayer.IsRealPlayer)
+            {
+                TraceCiInputCallback(runner, "skipped", "local-player-invalid", null, false);
                 return;
             }
 
@@ -2693,6 +2745,12 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             if (!runner.TryGetPlayerObject(runner.LocalPlayer, out NetworkObject playerObject) ||
                 playerObject == null)
             {
+                TraceCiInputCallback(
+                    runner,
+                    "missing-player-object",
+                    "TryGetPlayerObject-failed",
+                    null,
+                    false);
                 return;
             }
 
@@ -2700,10 +2758,42 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                     playerObject,
                     out IFusionCharacterInputEndpoint endpoint))
             {
-                endpoint.TryConsumeNetworkInput(runner, input);
+                bool consumed = endpoint.TryConsumeNetworkInput(runner, input);
+                TraceCiInputCallback(
+                    runner,
+                    consumed ? "collected" : "endpoint-rejected",
+                    consumed ? "ok" : "TryConsumeNetworkInput-returned-false",
+                    playerObject,
+                    consumed);
+                return;
             }
+
+            TraceCiInputCallback(
+                runner,
+                "missing-endpoint",
+                "player-object-has-no-character-input-endpoint",
+                playerObject,
+                false);
         }
-        public void OnInputMissing(NetworkRunner runner, PlayerRef player, NetworkInput input) { }
+        public void OnInputMissing(NetworkRunner runner, PlayerRef player, NetworkInput input)
+        {
+            if (runner != m_Runner ||
+                !NetworkCiTrace.ShouldSample($"fusion-input-missing:{player.RawEncoded}", 0.25f))
+            {
+                return;
+            }
+
+            NetworkCiTrace.Log(
+                "fusion-input",
+                "authority-input-missing",
+                0,
+                0,
+                $"tick={runner.Tick.Raw} inputTick={runner.InputTick.Raw} player={player} " +
+                $"localPlayer={runner.LocalPlayer} mode={runner.GameMode} " +
+                $"stage={runner.Stage} forward={runner.IsForward} " +
+                $"resimulation={runner.IsResimulation}",
+                this);
+        }
         public void OnConnectRequest(
             NetworkRunner runner,
             NetworkRunnerCallbackArgs.ConnectRequest request,
@@ -2727,5 +2817,160 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             PlayerRef player,
             ReliableKey key,
             float progress) { }
+
+        [System.Diagnostics.Conditional("UNITY_EDITOR")]
+        [System.Diagnostics.Conditional("DEVELOPMENT_BUILD")]
+        private void ResetCiDiagnostics()
+        {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            m_CiNextRunnerHealthTraceAt = 0f;
+            m_CiLastTickAdvanceAt = Time.realtimeSinceStartup;
+            m_CiLastObservedTick = int.MinValue;
+            m_CiRunnerTickStalled = false;
+#endif
+        }
+
+        [System.Diagnostics.Conditional("UNITY_EDITOR")]
+        [System.Diagnostics.Conditional("DEVELOPMENT_BUILD")]
+        private void TraceCiRunnerHealth()
+        {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            if (!NetworkCiTrace.TraversalTraceWindowActive) return;
+
+            float now = Time.realtimeSinceStartup;
+            bool usable = IsRunnerUsable;
+            int tick = usable ? m_Runner.Tick.Raw : int.MinValue;
+            if (tick != m_CiLastObservedTick)
+            {
+                bool recovered = m_CiRunnerTickStalled;
+                int previousTick = m_CiLastObservedTick;
+                m_CiLastObservedTick = tick;
+                m_CiLastTickAdvanceAt = now;
+                m_CiRunnerTickStalled = false;
+                if (recovered)
+                {
+                    NetworkCiTrace.Log(
+                        "fusion-runner",
+                        "tick-recovered",
+                        0,
+                        0,
+                        $"previousTick={previousTick} tick={tick}",
+                        this);
+                }
+            }
+            else if (usable && tick > 0 && now - m_CiLastTickAdvanceAt >= 0.75f)
+            {
+                m_CiRunnerTickStalled = true;
+                if (NetworkCiTrace.ShouldSample("fusion-runner-tick-stalled", 1f))
+                {
+                    NetworkCiTrace.Log(
+                        "fusion-runner",
+                        "tick-stalled",
+                        0,
+                        0,
+                        $"tick={tick} stalledFor={now - m_CiLastTickAdvanceAt:F3}s " +
+                        $"focused={Application.isFocused} timeScale={Time.timeScale:F2}",
+                        this);
+                }
+            }
+
+            if (now < m_CiNextRunnerHealthTraceAt) return;
+            m_CiNextRunnerHealthTraceAt = now + 0.5f;
+
+            string localObject = "<none>";
+            uint localActorId = 0;
+            if (usable && m_Runner.LocalPlayer.IsRealPlayer &&
+                m_Runner.TryGetPlayerObject(
+                    m_Runner.LocalPlayer,
+                    out NetworkObject playerObject) &&
+                playerObject != null)
+            {
+                FusionNetworkIdentity identity =
+                    playerObject.GetComponent<FusionNetworkIdentity>();
+                NetworkCharacter networkCharacter =
+                    playerObject.GetComponent<NetworkCharacter>() ??
+                    playerObject.GetComponentInChildren<NetworkCharacter>(true);
+                Character character = networkCharacter?.Character;
+                localActorId = identity != null ? identity.NetworkId : playerObject.Id.Raw;
+                string shortcut = GameCreator.Runtime.Common.ShortcutPlayer.Instance != null
+                    ? GameCreator.Runtime.Common.ShortcutPlayer.Instance.name
+                    : "<none>";
+                localObject =
+                    $"id={playerObject.Id.Raw} stateAuthority={playerObject.HasStateAuthority} " +
+                    $"inputAuthority={playerObject.HasInputAuthority} " +
+                    $"inSimulation={playerObject.IsInSimulation} " +
+                    $"lastReceive={playerObject.LastReceiveTick} " +
+                    $"logicalOwner={identity?.LogicalOwner.ToString() ?? "<none>"} " +
+                    $"admitted={identity?.TransportAdmitted ?? false} " +
+                    $"role={networkCharacter?.CurrentRole.ToString() ?? "<none>"} " +
+                    $"owner={networkCharacter?.IsOwnerInstance ?? false} " +
+                    $"authenticated={networkCharacter?.HasAuthenticatedPlayerOwner ?? false} " +
+                    $"isPlayer={character?.IsPlayer ?? false} " +
+                    $"controllable={character?.Player?.IsControllable ?? false} " +
+                    $"shortcut='{shortcut}' shortcutMatches=" +
+                    $"{(character != null && GameCreator.Runtime.Common.ShortcutPlayer.Instance == character.gameObject)} " +
+                    $"driver={character?.Driver?.GetType().Name ?? "<none>"} " +
+                    $"updateKinematics={character?.Driver?.UpdateKinematics ?? false} " +
+                    $"position={(character != null ? character.transform.position.ToString("F3") : "<none>")}";
+            }
+
+            string runnerState = usable
+                ? $"running={m_Runner.IsRunning} shutdown={m_Runner.IsShutdown} " +
+                  $"mode={m_Runner.GameMode} topology={m_Runner.Topology} " +
+                  $"tick={m_Runner.Tick.Raw} inputTick={m_Runner.InputTick.Raw} " +
+                  $"stage={m_Runner.Stage} forward={m_Runner.IsForward} " +
+                  $"resimulation={m_Runner.IsResimulation} delta={m_Runner.DeltaTime:F4} " +
+                  $"localPlayer={m_Runner.LocalPlayer} server={IsServer} client={IsClient}"
+                : $"running={m_Runner?.IsRunning ?? false} " +
+                  $"shutdown={m_Runner?.IsShutdown ?? false}";
+
+            NetworkCiTrace.Log(
+                "fusion-runner",
+                "unity-heartbeat",
+                localActorId,
+                0,
+                $"{runnerState} authorityEpoch={m_AuthorityEpoch} " +
+                $"connected={m_ConnectedClientIds.Count} sceneReady={m_SceneReadyClients.Count} " +
+                $"gameplayReady={m_GameplayReadyClients.Count} " +
+                $"focused={Application.isFocused} timeScale={Time.timeScale:F2} " +
+                $"localObject=[{localObject}]",
+                this);
+#endif
+        }
+
+        [System.Diagnostics.Conditional("UNITY_EDITOR")]
+        [System.Diagnostics.Conditional("DEVELOPMENT_BUILD")]
+        private void TraceCiInputCallback(
+            NetworkRunner runner,
+            string stage,
+            string reason,
+            NetworkObject playerObject,
+            bool consumed)
+        {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            if (!NetworkCiTrace.TraversalTraceWindowActive) return;
+
+            string signature = $"{stage}:{reason}:{consumed}:" +
+                               $"{(playerObject != null ? playerObject.Id.Raw : 0)}";
+            if (!NetworkCiTrace.HasChanged("fusion-input-callback-state", signature) &&
+                !NetworkCiTrace.ShouldSample("fusion-input-callback", 0.5f))
+            {
+                return;
+            }
+
+            NetworkCiTrace.Log(
+                "fusion-input",
+                stage,
+                playerObject != null ? playerObject.Id.Raw : 0,
+                0,
+                $"reason={reason} consumed={consumed} tick={runner?.Tick.Raw ?? 0} " +
+                $"inputTick={runner?.InputTick.Raw ?? 0} localPlayer={runner?.LocalPlayer.ToString() ?? "<none>"} " +
+                $"objectValid={playerObject?.IsValid ?? false} " +
+                $"stateAuthority={playerObject?.HasStateAuthority ?? false} " +
+                $"inputAuthority={playerObject?.HasInputAuthority ?? false} " +
+                $"inSimulation={playerObject?.IsInSimulation ?? false}",
+                this);
+#endif
+        }
     }
 }

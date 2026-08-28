@@ -5,6 +5,8 @@
         "Arawn.GameCreator2.Networking",
         "Arawn.GameCreator2.Networking.Traversal",
         "Arawn.GameCreator2.Networking.Transport.Fusion",
+        "Photon.Realtime",
+        "Unity.InputSystem",
         "GameCreator.Runtime.Core",
         "GameCreator.Runtime.Characters",
         "GameCreator.Runtime.Traversal"

@@ -5,6 +5,8 @@ Server-authoritative shooter combat networking for Game Creator 2.
 For weapon model registration, local projectile/VFX playback, impact props, and
 the multiplayer prefab decision guide, see the
 [online documentation](../Documentation/Online%20Documentation.md).
+For server-owned enemy AI and bot-backed player slots, see
+[Server-Authoritative NPCs and Bot Slots](../Documentation/Server%20Authoritative%20NPCs%20and%20Bot%20Slots.md).
 
 ## Overview
 
@@ -34,6 +36,22 @@ The GC2 Shooter and Shooter Sight patches are mandatory for PurrNet Shooter netw
 When Shooter and Stats are selected together, the wizard can also add `NetworkShooterStatsDamageBridge`. It modifies authoritative health once; Shooter reactions remain a separate manager responsibility, so a handled Stats damage callback never suppresses the target animation/root motion.
 
 Custom health integrations can use `TryApplyDamageFunc` (or the legacy damage-only `ApplyDamageFunc`). Custom reaction systems can use `TryApplyAuthoritativeReactionFunc` and the transport-independent `NetworkShooterReactionContext`. The manager starts an accepted normal or block-broken reaction before it invokes damage, so a lethal health change cannot erase the authored response.
+
+## Server-owned enemy Shooter demo
+
+Shooter Examples `1.1.0` includes separate Fusion and PurrNet Enemy Shooter
+scenes while preserving the existing PvP Shooter + Stats scenes. The enemy is an
+explicit server-authoritative `NPC`, keeps `Character.IsPlayer=false`, runs its
+selected GC2 AI Trigger roots only behind `NetworkCharacterAuthorityGate`, and
+uses `NetworkNpcTargetSelector` to retarget the nearest living authenticated
+player. The demo-owned AK uses a collider-free hit effect and deterministic
+damage configuration. Three bot-backed combatant slots demonstrate join,
+disconnect, late-join, and Fusion Shared-master membership recovery.
+
+Client-deterministic NPCs are presentation-only and cannot use the trusted
+Shooter origin or author Stats/durable gameplay. A client also cannot impersonate
+an NPC by changing `Character.IsPlayer`; actor classification and logical owner
+come from the transport-authenticated `NetworkCharacter` role.
 
 GC2 bullets configured to use rigidbody impacts can broadcast the impact event and let clients apply the push locally. Add `NetworkShooterImpactProp` only to important props that need a stable network prop id and more controlled impact routing; lightweight crates and debris can use the default local impact path.
 

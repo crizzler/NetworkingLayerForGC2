@@ -1328,7 +1328,7 @@ namespace Arawn.GameCreator2.Networking.Lobby
         private static void EnsureEventSystem()
         {
 #if UNITY_2023_1_OR_NEWER || UNITY_6000_0_OR_NEWER || UNITY_6000
-            EventSystem eventSystem = UnityEngine.Object.FindFirstObjectByType<EventSystem>();
+            EventSystem eventSystem = UnityObjectSearch.FindAny<EventSystem>();
 #else
             EventSystem eventSystem = UnityEngine.Object.FindObjectOfType<EventSystem>();
 #endif

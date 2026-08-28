@@ -22,6 +22,9 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
         private const string InstallRoot =
             "Assets/Plugins/GameCreator/Installs/" +
             "GC2NetworkingLayerFusionTransport.ShooterExamples@1.0.2";
+        private const string PackageInstallRoot =
+            "Assets/Plugins/GameCreator/Installs/" +
+            "GC2NetworkingLayerFusionTransport.ShooterExamples@1.1.0";
 
         private const string ScenePath = InstallRoot +
             "/Requires Shooter Demos - FusionShooterStatsDemo.unity";
@@ -387,36 +390,85 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
         {
             string descriptor = ReadAsset(InstallerDescriptorPath).Replace("\r\n", "\n");
             StringAssert.IsMatch(
-                @"(?m)^    m_Version:\n      major: 1\n      minor: 0\n      patch: 2$",
+                @"(?m)^    m_Version:\n      major: 1\n      minor: 1\n      patch: 0$",
                 descriptor,
-                "Existing 1.0.1 installs need version 1.0.2 so Game Creator offers the " +
-                "collider-free impact fix.");
+                "The enemy-shooter demo is a feature release and must install as 1.1.0.");
 
             string packageFile = ProjectPath(PackagePath);
             Assert.That(File.Exists(packageFile), Is.True,
                 "The Shooter demo Game Creator install package is missing.");
 
             string[] pathnames = ReadUnityPackagePathnames(packageFile);
+            string packageScene = PackageInstallRoot +
+                "/Requires Shooter Demos - FusionShooterStatsDemo.unity";
+            string packagePlayer = PackageInstallRoot +
+                "/FusionDemoPlayer-ShooterAndStats.prefab";
+            string packageMonitor = PackageInstallRoot +
+                "/FusionShooterStatsDemoMonitor.cs";
+            string packageWeapons = PackageInstallRoot + "/Weapons";
+            string packageWeapon = packageWeapons + "/FusionDemo_AK_Weapon.asset";
+            string enemyPrefab = PackageInstallRoot +
+                "/FusionDemoEnemy-ShooterAndStats.prefab";
+            string enemyFolder = PackageInstallRoot +
+                "/Requires Shooter Demos - FusionEnemyShooterDemo";
+            string enemyScene = PackageInstallRoot +
+                "/Requires Shooter Demos - FusionEnemyShooterDemo.unity";
+            string navMesh = enemyFolder + "/NavMesh-EnemyDemo.asset";
             CollectionAssert.AreEquivalent(
                 new[]
                 {
-                    InstallRoot,
-                    ScenePath,
-                    PlayerPrefabPath,
-                    MonitorPath,
-                    WeaponFolderPath,
-                    CustomWeaponPath
+                    PackageInstallRoot,
+                    packageScene,
+                    packagePlayer,
+                    packageMonitor,
+                    packageWeapons,
+                    packageWeapon,
+                    enemyPrefab,
+                    enemyFolder,
+                    enemyScene,
+                    navMesh
                 },
                 pathnames,
-                "The repacked demo must contain its scene, player, monitor, custom weapon, " +
-                "and both install folders—and no stale or unrelated assets.");
-            Assert.That(pathnames.Length, Is.EqualTo(6));
+                "The package must contain the existing PvP fixture plus the enemy prefab, " +
+                "enemy scene, and persisted NavMesh—and no stale or unrelated assets.");
+            Assert.That(pathnames.Length, Is.EqualTo(10));
 
             Dictionary<string, byte[]> packagedAssets =
                 ReadUnityPackageAssetPayloads(packageFile);
-            AssertPackageAssetMatchesCurrentSource(packagedAssets, ScenePath);
-            AssertPackageAssetMatchesCurrentSource(packagedAssets, MonitorPath);
-            AssertPackageAssetMatchesCurrentSource(packagedAssets, CustomWeaponPath);
+            AssertPackageAssetMatchesCurrentSource(packagedAssets, packageScene, ScenePath);
+            AssertPackageAssetMatchesCurrentSource(packagedAssets, packagePlayer, PlayerPrefabPath);
+            AssertPackageAssetMatchesCurrentSource(packagedAssets, packageMonitor, MonitorPath);
+            AssertPackageAssetMatchesCurrentSource(packagedAssets, packageWeapon, CustomWeaponPath);
+
+            string enemyPrefabYaml = Encoding.UTF8.GetString(packagedAssets[enemyPrefab]);
+            StringAssert.Contains("m_ActorType: 2", enemyPrefabYaml);
+            StringAssert.Contains("m_NPCMode: 0", enemyPrefabYaml);
+            StringAssert.Contains("Authority Only AI", enemyPrefabYaml);
+            StringAssert.Contains("Trigger_Start", enemyPrefabYaml);
+            StringAssert.Contains("Trigger_AI", enemyPrefabYaml);
+            StringAssert.Contains("NetworkCharacterAuthorityGate", enemyPrefabYaml);
+            StringAssert.Contains("NetworkNpcTargetSelector", enemyPrefabYaml);
+            StringAssert.Contains("GetGameObjectCharacterTarget", enemyPrefabYaml);
+            StringAssert.IsMatch(
+                @"(?s)m_Name: Authority Only AI.*?m_IsActive: 1",
+                enemyPrefabYaml,
+                "The AI root must be authored enabled so the authority gate can restore it.");
+            Assert.That(
+                CountOccurrences(enemyPrefabYaml, "GetGameObjectPlayer"),
+                Is.EqualTo(CountOccurrences(
+                    Encoding.UTF8.GetString(packagedAssets[packagePlayer]),
+                    "GetGameObjectPlayer")),
+                "Cloned authority AI must add no ShortcutPlayer getters; inherited player " +
+                "controller defaults may remain dormant while Character.IsPlayer is false.");
+            StringAssert.DoesNotContain("28cd7c621507645ab8d9eda7f9b350da", enemyPrefabYaml,
+                "The copied GC2 AI must use the demo-owned deterministic weapon.");
+
+            string enemySceneYaml = Encoding.UTF8.GetString(packagedAssets[enemyScene]);
+            Assert.That(CountOccurrences(enemySceneYaml, "fusion-enemy-slot-"), Is.EqualTo(3));
+            Assert.That(CountOccurrences(enemySceneYaml, "m_BotPrefab:"), Is.EqualTo(3));
+            StringAssert.Contains("FusionBotSlotCoordinator", enemySceneYaml);
+            StringAssert.Contains("FusionBotSlotStateReplicator", enemySceneYaml);
+            Assert.That(packagedAssets[navMesh].Length, Is.GreaterThan(0));
         }
 
         [Test]
@@ -751,23 +803,25 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
 
         private static void AssertPackageAssetMatchesCurrentSource(
             IReadOnlyDictionary<string, byte[]> packagedAssets,
-            string assetPath)
+            string packagedAssetPath,
+            string sourceAssetPath)
         {
             Assert.That(
-                packagedAssets.TryGetValue(assetPath, out byte[] packaged),
+                packagedAssets.TryGetValue(packagedAssetPath, out byte[] packaged),
                 Is.True,
-                $"The Unity package has no asset payload for '{assetPath}'.");
+                $"The Unity package has no asset payload for '{packagedAssetPath}'.");
 
-            byte[] current = File.ReadAllBytes(ProjectPath(assetPath));
+            byte[] current = File.ReadAllBytes(ProjectPath(sourceAssetPath));
             Assert.That(
                 packaged.Length,
                 Is.EqualTo(current.Length),
-                $"The packaged '{assetPath}' is stale (byte length differs from its source).");
+                $"The packaged '{packagedAssetPath}' is stale (byte length differs from " +
+                $"'{sourceAssetPath}').");
             Assert.That(
                 packaged.SequenceEqual(current),
                 Is.True,
-                $"The packaged '{assetPath}' is stale (its bytes differ from its source). " +
-                "Rebuild Package.unitypackage with the Game Creator InstallManager.");
+                $"The packaged '{packagedAssetPath}' is stale (its bytes differ from " +
+                $"'{sourceAssetPath}'). Rebuild Package.unitypackage.");
         }
 
         private static int ReadFully(Stream stream, byte[] buffer, int offset, int count)

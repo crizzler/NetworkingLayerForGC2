@@ -9,14 +9,21 @@ see the [online documentation](../Documentation/Online%20Documentation.md).
 
 This module provides network-aware melee combat for GC2, enabling server-authoritative hit validation with lag compensation. It integrates seamlessly with the base GC2 Network Integration and requires it as a dependency.
 
+The optional Free Flow Combat adapter adds authority-owned PvE target, enemy,
+counter-window, and late-join state without introducing a concrete Free Flow
+dependency into this assembly. See
+[Server-Authoritative Free Flow Combat](../Documentation/Server%20Authoritative%20Free%20Flow%20Combat.md)
+for its supported scope and complete setup.
+
 ## Requirements
 
 - Game Creator 2 Core
 - Game Creator 2 Melee Module
 - GC2 Network Integration (base module)
-- PurrNet integration or a configured custom transport adapter (NGO/FishNet/Mirror/custom)
-- Game Creator 2 Melee `2.2.x`
-- The required GC2 Melee source patch (`3.5.0-melee`)
+- Fusion or PurrNet integration, or a custom transport adapter updated for the
+  current Melee and optional Free Flow payloads
+- Game Creator 2 Melee `2.2.x` or `2.3.x`
+- The required GC2 Melee source patch (`3.7.0-melee`)
 
 ## Installation
 
@@ -35,6 +42,149 @@ but networked Melee fails closed until patch validation succeeds.
 When a Player Prefab is assigned on the Scene page and prefab preparation is enabled, selecting Melee adds `NetworkMeleeController` to that prefab. If Stats is also selected, the Core page can add the optional Melee -> Stats damage bridge.
 
 The PurrNet path synchronizes skill input, skill validation/broadcasts, hit validation, hit responses, hit reactions, and reaction root motion. Hit reactions that launch characters upward, such as air-launch clips driven by root motion, should run through the networked reaction path so the authoritative motion driver accepts the vertical displacement instead of correcting it away.
+
+## Optional Free Flow Combat Setup
+
+Free Flow networking currently supports authenticated players fighting
+server-authoritative NPCs. It does not authorize PvP Free Flow targeting or
+combat-capable client-deterministic NPCs.
+
+For each participating character:
+
+1. Use an explicit actor classification: `PlayerOwned` for a human prefab, or
+   `NPC` with `ServerAuthoritative` sync for an enemy.
+2. Put `NetworkMeleeController` and `NetworkFreeFlowCombatAdapter` on the same
+   Character root. On an enemy, keep one replica-safe On Start Trigger outside
+   `NetworkCharacterAuthorityGate`; it must run on every admitted replica,
+   resolve Self to that exact Character, and equip the registered canonical
+   `FreeFlowMeleeWeapon`.
+3. Add `NetworkNpcTargetSelector` to each enemy. Keep enemy Behavior processing
+   and any additional, non-initialization GC2 AI Trigger roots authority-only.
+4. Configure the existing Melee transport bridge and optional Melee-to-Stats
+   damage bridge normally.
+5. Set each directly executed targeted Skill to GC2 **Motion Warp** mode and
+   retain its target-relative motion-warp track. The canonical Brawl fixture
+   requires `FreeFlow_Brawl_Combo1`, `FreeFlow_Brawl_Combo2`, and
+   `FreeFlow_Brawl_Combo3` to satisfy this contract; a serialized warp track is
+   inactive while the Skill remains in ordinary Root Motion mode.
+
+The replica-safe equip/bootstrap creates the receiver, target, enemy-agent,
+Behavior `Processor`, indicator, and motion-warp candidate components wherever
+the NPC is admitted. The local player runtime still runs only for the
+authenticated owner, while the enemy agent, director, and `Processor` execute
+only on server, dedicated-server, or Fusion Shared-master authority. Observer
+replicas keep their bootstrap components present but disabled and receive
+revisioned attackable/counterable/token, score, and selected-target state for
+presentation and late joining.
+
+PurrNet scene NPCs that have a `NetworkIdentity` defer Networking Layer role
+registration until that identity is spawned. This ensures authority and every
+observer register the same server-assigned character ID. The wait remains
+fail-closed after its warning timeout; falling back to a peer-local scene hash
+would make targeted Skill validation inconsistent across peers.
+
+When PurrNet deactivates a pooled remote Character, presentation cleanup defers
+restoring the authored Mannequin hierarchy until Unity's activation callback
+stack has unwound. A persistent restore queue reparents the visual root before
+destroying the empty temporary wrapper, avoiding the prohibited hierarchy write
+and the missing-Animator cascade that follows if the pooled Mannequin is lost.
+Focused semantic smoke diagnostics keep packet-wide logging gated off while
+retaining the Skill/input evidence needed for authority tracing.
+
+A held Free Flow movement lock may invoke GC2 `StopToDirection` every rendered
+frame. The network motion controller still applies the stop locally on every
+call, but sends only the first reliable `StopDirection` for an unchanged stopped
+state. Priority/context transitions and the first nonzero direction after a
+stop send immediately. The multi-process Free Flow smoke fails on any Core
+`RateLimitExceeded` violation, so this traffic is fixed by coalescing rather
+than by weakening the normal security budget.
+
+Fusion non-authority peers timestamp semantic requests from
+`LatestServerTick.Raw * DeltaTime`, the latest confirmed server timeline, rather
+than their prediction-ahead `SimulationTime`. Host, dedicated-server, and
+Shared-master authority retain the simulation clock; the existing future-time
+security tolerance is unchanged.
+
+A normal counter carries the authority-published window revision in its Melee
+Skill request. Authority checks the assigned player, Skill allow-list, target,
+range, line of sight, cooldown, and current revision before atomically consuming
+the window once. Shield-forced local counters currently fail closed because
+they do not yet carry a server-validated parry lease.
+
+Free Flow changes the Melee Skill request and persistent snapshot wire shape.
+Fusion and PurrNet peers must all use the same Networking Layer 2.3.0 version
+and matching registered weapon/Skill assets.
+
+Dedicated `GC2NetworkingLayerFusionTransport.FreeFlowCombatExamples@1.0.0`
+and `GC2NetworkingLayerPurrNetTransport.FreeFlowCombatExamples@1.0.0`
+installers provide a PlayerOwned prefab, a server-authoritative enemy prefab,
+five persistent network enemies, Free Flow attack/counter inputs, and baked
+NavMesh fixtures. See the complete
+[server-authoritative Free Flow guide](../Documentation/Server%20Authoritative%20Free%20Flow%20Combat.md)
+for exact scene paths, rebuild commands, limitations, and validation.
+
+The current example archives have these SHA-256 values:
+
+- Fusion: `0a9f98fd1578ff6fd5edbc1e579ab7e2f42ef81a9a1be1c8d7899dfea2ecb864`
+- PurrNet: `34aa4f83f95316ed4f65b28fa914f164a3b052ca4d906b331e62c44ca064bdae`
+
+The 2026-08-27 isolated Unity `6000.5.9f1` Free Flow category passed 56/56
+tests with zero failed, inconclusive, or skipped tests across all nine required
+suites. The retained XML is
+`.unity-ci/editmode.qT3OMh/TestResults/editmode-results.xml`. The same run's
+non-development player build completed with process exit `0` and
+`Build Finished, Result: Success`. Its PurrNet
+`VisualPresentation_PooledDeactivationDefersHierarchyMutation` test deactivates
+the Character while its temporary presentation wrapper owns the Mannequin,
+verifies cleanup is queued, then proves the Mannequin is restored and the
+wrapper retired. The semantic-smoke regression primes an eligible target only
+to activate the real Free Flow candidate path, snapshots the explicit-NPC set,
+then adopts the actual first post-`Attack()` authority broadcast from the
+authenticated actor to an attack-time or currently registered
+server-authoritative NPC. Complete role, presentation, indicator, and admission
+readiness is required before the invocation; the harness retains that ready
+result afterward because entering `AttackRadius` may legitimately clear both
+indicators. It rejects stale pre-invocation events, wrong actors, unknown
+targets, and zero-Skill broadcasts, so an authored directional/fallback
+selection may differ safely from the primed candidate.
+
+Final paired PurrNet smoke also passed on both peers in both supported
+topologies. Host + Client agreed on actor `9`, target `4`, and
+`FreeFlow_Brawl_Kick` Skill hash `-342895613`, with two authenticated humans and
+five explicit NPCs. The client retained five NPC presentations and ran zero
+enemy Processors; the Host enabled and iterated all five. An indicator path was
+active, and the client recorded `7.428 m` of actor displacement and `4.568 m` of
+relative approach progress. Results are under
+`.unity-ci/network-smoke.qoKLXZ/NetworkSmoke/purrnet-freeflow-host-client/Results`.
+
+Dedicated Server + Client agreed on actor `7`, target `2`, and the same Skill
+hash, with one authenticated human and five explicit NPCs. The client retained
+five presentations, ran zero enemy Processors, displayed its fallback indicator,
+and recorded `2.454 m` of actor displacement plus `3.172 m` of relative approach
+progress; the server enabled and iterated all five authority Processors. Results
+are under
+`.unity-ci/network-smoke.rtNdH4/NetworkSmoke/purrnet-freeflow-dedicated-client/Results`.
+Both PurrNet topologies recorded zero validated hits and neither guarded teardown
+error pattern.
+
+Final paired Fusion smoke also passed in Host + Client and Shared two-peer modes.
+Host + Client agreed on actor `1033`, target `1026`, and Skill `-342895613`, with
+two authenticated humans and `5/5` spawned/admitted explicit NPCs. Authority
+alone enabled and iterated all five NPC Processors; the Client recorded `4.213 m`
+of actor motion and `4.956 m` of relative progress. Results are under
+`.unity-ci/network-smoke.sjtTkp/NetworkSmoke/fusion-freeflow-host-client/Results`.
+
+Shared master and observer agreed on actor `525319`, target `525313`, and the
+same Skill, again with two authenticated humans, `5/5` spawned/admitted NPCs,
+and five versus zero enabled/iterated Processors. The observer recorded
+`4.432 m` of actor motion and `4.441 m` of relative progress. Results are under
+`.unity-ci/network-smoke.Zl04uJ/NetworkSmoke/fusion-freeflow-shared-two-peer/Results`.
+Both Fusion topologies recorded zero validated hits and no Core rate-limit,
+future-timestamp, Mannequin-parenting, or missing-Animator violation. The current
+live smokes prove semantic delivery, authority-role separation, admission,
+presentation, and locally observed approach motion—not Melee hits or damage,
+counters, late joining, disconnect recovery, cross-peer Motion Warp convergence,
+or Shared-master departure/migration.
 
 ## Architecture
 
@@ -301,6 +451,14 @@ public class MyNetworkMeleeController : NetworkMeleeController
 Configure per-character via `NetworkMeleeController.OptimisticEffects`.
 
 ## Troubleshooting
+
+### Patch retry still reports an older matcher error
+1. Resolve every Unity script compilation error first. The patch menu blocks
+   source changes while Unity is compiling or reports a failed compilation.
+2. Close and reopen Unity after resolving the errors, then wait for a successful
+   script compilation and domain reload.
+3. Confirm that the patch confirmation title and body show `3.7.0-melee` before
+   applying the patch.
 
 ### Hits not being intercepted
 1. Check the wizard reports the required Melee patch as applied

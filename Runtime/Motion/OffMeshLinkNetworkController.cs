@@ -300,7 +300,7 @@ namespace Arawn.GameCreator2.Networking
             // Use link owner's instance ID as unique identifier
             if (linkData.owner != null)
             {
-                return linkData.owner.GetInstanceID();
+                return linkData.owner.GetLegacyInstanceId();
             }
 
             // Fallback: hash start and end positions
