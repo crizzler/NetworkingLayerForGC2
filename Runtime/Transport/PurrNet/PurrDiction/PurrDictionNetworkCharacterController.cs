@@ -138,9 +138,6 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction
         [NonSerialized] private bool m_TeleportRotationPending;
         [NonSerialized] private int m_TeleportRotationPendingFrame = -1;
         [NonSerialized] private IPurrDictionNativeMovementBackend m_Backend;
-        [NonSerialized] private bool m_ControllerEnabledBeforeRagdoll;
-        [NonSerialized] private bool m_CollisionBeforeRagdoll;
-        [NonSerialized] private bool m_RagdollControllerSuspended;
         [NonSerialized] private bool m_HasOwnerPoseTarget;
         [NonSerialized] private Vector3 m_OwnerPoseTarget;
 
@@ -174,20 +171,25 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction
             m_Controller = EnsureController(character);
             m_SampledYaw = Transform != null ? Transform.eulerAngles.y : 0f;
             m_LastRootMotionSampleFrame = -1;
-            character.Ragdoll.EventBeforeStartRagdoll -= HandleStartRagdoll;
-            character.Ragdoll.EventAfterStartRecover -= HandleEndRagdoll;
-            character.Ragdoll.EventBeforeStartRagdoll += HandleStartRagdoll;
-            character.Ragdoll.EventAfterStartRecover += HandleEndRagdoll;
+            if (character.Ragdoll?.IsRagdoll == true)
+            {
+                NetworkRagdollPhysicsGuard.Adopt(
+                    character,
+                    m_Controller,
+                    intendedEnabled: true,
+                    intendedDetectCollisions: true);
+            }
+            else
+            {
+                if (!m_Controller.enabled) m_Controller.enabled = true;
+                NetworkRagdollPhysicsGuard.Register(character, m_Controller);
+            }
         }
 
         public override void OnDispose(Character character)
         {
-            if (character?.Ragdoll != null)
-            {
-                character.Ragdoll.EventBeforeStartRagdoll -= HandleStartRagdoll;
-                character.Ragdoll.EventAfterStartRecover -= HandleEndRagdoll;
-            }
-            if (m_RagdollControllerSuspended) HandleEndRagdoll();
+            // The Character-scoped ragdoll guard deliberately retains this shared controller
+            // registration across backend and authority-role changes.
             base.OnDispose(character);
             m_Controller = null;
             m_Backend = null;
@@ -434,27 +436,6 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction
                 m_OwnerPoseTarget,
                 absolute: true,
                 teleport: false);
-        }
-
-        private void HandleStartRagdoll()
-        {
-            if (m_Controller == null) return;
-            m_ControllerEnabledBeforeRagdoll = m_Controller.enabled;
-            m_CollisionBeforeRagdoll = m_Controller.detectCollisions;
-            m_RagdollControllerSuspended = true;
-            m_Controller.enabled = false;
-            m_Controller.detectCollisions = false;
-        }
-
-        private void HandleEndRagdoll()
-        {
-            if (m_Controller == null) return;
-            m_Controller.detectCollisions = m_CollisionBeforeRagdoll;
-            m_Controller.enabled = m_ControllerEnabledBeforeRagdoll;
-            if (m_Controller.enabled) m_Controller.Move(Vector3.zero);
-            m_MoveDirection = Vector3.zero;
-            m_VerticalSpeed = 0f;
-            m_RagdollControllerSuspended = false;
         }
 
         private static bool IsFinite(Vector3 value)

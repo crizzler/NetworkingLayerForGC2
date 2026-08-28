@@ -166,8 +166,8 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction
         [NonSerialized] private bool m_TeleportRotationPending;
         [NonSerialized] private int m_TeleportRotationPendingFrame = -1;
         [NonSerialized] private IPurrDictionNativeMovementBackend m_Backend;
-        [NonSerialized] private bool m_CapsuleEnabledBeforeRagdoll;
-        [NonSerialized] private bool m_RagdollColliderSuspended;
+        [NonSerialized] private Character m_RagdollEventCharacter;
+        [NonSerialized] private bool m_RagdollMovementSuspended;
         [NonSerialized] private bool m_HasOwnerPoseTarget;
         [NonSerialized] private Vector3 m_OwnerPoseTarget;
 
@@ -197,6 +197,8 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction
 
         public byte PathStatus => m_PathStatus;
         public ushort CurrentSequence => m_CurrentSequence;
+        private bool IsRagdollMovementSuspended =>
+            m_RagdollMovementSuspended || Character?.Ragdoll?.IsRagdoll == true;
 
         public override void OnStartup(Character character)
         {
@@ -204,20 +206,27 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction
             m_Agent = EnsureAgent(character);
             m_Capsule = EnsureCapsule(character);
             m_LastRootMotionSampleFrame = -1;
-            character.Ragdoll.EventBeforeStartRagdoll -= HandleStartRagdoll;
-            character.Ragdoll.EventAfterStartRecover -= HandleEndRagdoll;
-            character.Ragdoll.EventBeforeStartRagdoll += HandleStartRagdoll;
-            character.Ragdoll.EventAfterStartRecover += HandleEndRagdoll;
+
+            CharacterController rootController =
+                character.GetComponent<CharacterController>();
+            if (rootController != null && rootController.enabled)
+            {
+                rootController.enabled = false;
+            }
+            NetworkRagdollPhysicsGuard.Unregister(character, rootController);
+            NetworkRagdollPhysicsGuard.Register(character, m_Agent);
+            NetworkRagdollPhysicsGuard.Register(character, m_Capsule);
+
+            SubscribeRagdollLifecycle(character);
+            m_RagdollMovementSuspended = character.Ragdoll?.IsRagdoll == true;
+            if (m_RagdollMovementSuspended) HandleStartRagdoll();
         }
 
         public override void OnDispose(Character character)
         {
-            if (character?.Ragdoll != null)
-            {
-                character.Ragdoll.EventBeforeStartRagdoll -= HandleStartRagdoll;
-                character.Ragdoll.EventAfterStartRecover -= HandleEndRagdoll;
-            }
-            if (m_RagdollColliderSuspended) HandleEndRagdoll();
+            UnsubscribeRagdollLifecycle();
+            NetworkRagdollPhysicsGuard.Unregister(character, m_Agent);
+            NetworkRagdollPhysicsGuard.Unregister(character, m_Capsule);
             base.OnDispose(character);
             m_Agent = null;
             m_Capsule = null;
@@ -227,6 +236,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction
             m_TeleportRotationPending = false;
             m_TeleportRotationPendingFrame = -1;
             m_HasOwnerPoseTarget = false;
+            m_RagdollMovementSuspended = false;
         }
 
         internal void AttachBackend(IPurrDictionNativeMovementBackend backend)
@@ -236,6 +246,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction
 
         public void RequestMoveToPosition(Vector3 target)
         {
+            if (IsRagdollMovementSuspended) return;
             AdvanceSequence();
             QueueInput(GC2PurrDictionNavMeshInput.Create(
                 NetworkNavMeshCommand.CMD_MOVE_TO_POSITION,
@@ -245,6 +256,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction
 
         public void RequestMoveToDirection(Vector3 direction)
         {
+            if (IsRagdollMovementSuspended) return;
             AdvanceSequence();
             QueueInput(GC2PurrDictionNavMeshInput.Create(
                 NetworkNavMeshCommand.CMD_MOVE_TO_DIRECTION,
@@ -254,6 +266,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction
 
         public void RequestStop(bool immediate = false)
         {
+            if (IsRagdollMovementSuspended) return;
             AdvanceSequence();
             QueueInput(GC2PurrDictionNavMeshInput.Create(
                 NetworkNavMeshCommand.CMD_STOP,
@@ -264,6 +277,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction
 
         public void RequestWarp(Vector3 position)
         {
+            if (IsRagdollMovementSuspended) return;
             AdvanceSequence();
             QueueInput(GC2PurrDictionNavMeshInput.Create(
                 NetworkNavMeshCommand.CMD_WARP,
@@ -273,6 +287,12 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction
 
         public bool ConsumeInput(ref GC2PurrDictionNavMeshInput input)
         {
+            if (IsRagdollMovementSuspended)
+            {
+                m_PendingInput = default;
+                m_HasPendingInput = false;
+                return false;
+            }
             if (!m_HasPendingInput) return false;
 
             input = m_PendingInput;
@@ -313,6 +333,12 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction
 
         internal void SampleFrameIntent()
         {
+            if (IsRagdollMovementSuspended)
+            {
+                m_SampledRootMotionVelocity = Vector3.zero;
+                m_SampledRootMotionWeight = 0f;
+                return;
+            }
             SampleRootMotionForCurrentFrame();
         }
 
@@ -321,6 +347,12 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction
             out Vector3 delta,
             out float weight)
         {
+            if (IsRagdollMovementSuspended)
+            {
+                delta = Vector3.zero;
+                weight = 0f;
+                return;
+            }
             SampleRootMotionForCurrentFrame();
             delta = m_SampledRootMotionVelocity * Mathf.Max(0f, tickDelta);
             weight = m_SampledRootMotionWeight;
@@ -372,7 +404,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction
 
         public override void AddPosition(Vector3 amount)
         {
-            if (!IsFinite(amount)) return;
+            if (!IsFinite(amount) || IsRagdollMovementSuspended) return;
             if (m_Backend?.IsOwnerMotionWindowActive == true)
             {
                 if (!m_HasOwnerPoseTarget)
@@ -478,6 +510,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction
 
         private void QueueInput(GC2PurrDictionNavMeshInput input)
         {
+            if (IsRagdollMovementSuspended) return;
             m_PendingInput = input;
             m_HasPendingInput = true;
         }
@@ -535,22 +568,49 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.PurrDiction
                 teleport: false);
         }
 
-        private void HandleStartRagdoll()
+        private void SubscribeRagdollLifecycle(Character character)
         {
-            if (m_Capsule == null) return;
-            m_CapsuleEnabledBeforeRagdoll = m_Capsule.enabled;
-            m_RagdollColliderSuspended = true;
-            m_Capsule.enabled = false;
+            UnsubscribeRagdollLifecycle();
+            m_RagdollEventCharacter = character;
+            if (m_RagdollEventCharacter?.Ragdoll == null) return;
+
+            m_RagdollEventCharacter.Ragdoll.EventBeforeStartRagdoll +=
+                HandleStartRagdoll;
+            m_RagdollEventCharacter.Ragdoll.EventAfterFinishRecover +=
+                HandleFinishRagdollRecover;
         }
 
-        private void HandleEndRagdoll()
+        private void UnsubscribeRagdollLifecycle()
         {
-            if (m_Capsule != null)
+            if (m_RagdollEventCharacter?.Ragdoll != null)
             {
-                m_Capsule.enabled = m_CapsuleEnabledBeforeRagdoll;
+                m_RagdollEventCharacter.Ragdoll.EventBeforeStartRagdoll -=
+                    HandleStartRagdoll;
+                m_RagdollEventCharacter.Ragdoll.EventAfterFinishRecover -=
+                    HandleFinishRagdollRecover;
             }
+
+            m_RagdollEventCharacter = null;
+        }
+
+        private void HandleStartRagdoll()
+        {
+            m_RagdollMovementSuspended = true;
+            m_PendingInput = default;
+            m_HasPendingInput = false;
             m_Velocity = Vector3.zero;
-            m_RagdollColliderSuspended = false;
+            m_SampledRootMotionVelocity = Vector3.zero;
+            m_SampledRootMotionWeight = 0f;
+            m_HasOwnerPoseTarget = false;
+        }
+
+        private void HandleFinishRagdollRecover()
+        {
+            m_Velocity = Vector3.zero;
+            m_SampledRootMotionVelocity = Vector3.zero;
+            m_SampledRootMotionWeight = 0f;
+            m_LastRootMotionSampleFrame = -1;
+            m_RagdollMovementSuspended = false;
         }
 
         private static bool IsFinite(Vector3 value)

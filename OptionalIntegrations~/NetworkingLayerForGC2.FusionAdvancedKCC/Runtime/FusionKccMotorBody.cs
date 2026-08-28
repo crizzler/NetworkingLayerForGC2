@@ -70,6 +70,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.KCC
         private bool m_SharedOverflowLatched;
 
         private bool m_CollisionEnabled = true;
+        private bool m_RagdollCollisionSuspended;
         private bool m_NotifyAcceptedOwnerPoseAfterSimulation;
 
         private Func<global::Fusion.Addons.KCC.KCC, Collider, bool>
@@ -99,6 +100,10 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.KCC
             ? Mathf.Max(0f, m_Kcc.Settings.Extent)
             : 0.035f;
         public bool CollisionEnabled => m_CollisionEnabled;
+        internal bool RagdollCollisionSuspended => m_RagdollCollisionSuspended;
+        private bool IsRagdollActive =>
+            m_RagdollCollisionSuspended ||
+            m_Character?.Ragdoll?.IsRagdoll == true;
         public bool IsRemoteProxyRole =>
             m_Role == NetworkCharacter.NetworkRole.RemoteClient;
         public bool CanApplyAuthoritativeTeleport =>
@@ -194,6 +199,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.KCC
                 m_CollisionEnabled = ReplicatedCollisionEnabled;
             }
 
+            SynchronizeSimulationCapsule();
             ApplyReplicatedScale();
             HandleSharedAuthorityHandoff(force: true);
             LogDiagnostic("spawned", default, false, 0f);
@@ -201,6 +207,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.KCC
 
         public override void Despawned(NetworkRunner runner, bool hasState)
         {
+            SetRagdollCollisionSuspended(false);
             ResetNetworkState();
             RestoreSelfCollisionFilter();
             // Keep manual update enabled while this companion exists. Switching KCC back to its
@@ -212,6 +219,18 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.KCC
         {
             if (!EnsureRuntimeReady()) return;
             HandleSharedAuthorityHandoff(force: false);
+
+            // GC2 owns the visible physics hierarchy throughout both the dynamic ragdoll and
+            // get-up phases. Keep KCC state frozen and retain queued recovery teleports until
+            // EventAfterFinishRecover clears IsRagdoll; otherwise ManualFixedUpdate can pull the
+            // Character root away from the recovering mannequin.
+            if (IsRagdollActive)
+            {
+                SynchronizeSimulationCapsule();
+                m_NotifyAcceptedOwnerPoseAfterSimulation = false;
+                m_Driver?.ApplySimulationVelocity(Vector3.zero);
+                return;
+            }
 
             int tick = Runner.Tick.Raw;
             bool hasInput = TryResolveSimulationInput(
@@ -269,6 +288,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.KCC
             {
                 m_CollisionEnabled = ReplicatedCollisionEnabled;
             }
+            SynchronizeSimulationCapsule();
             ConfigureKccAuthorityBehaviour();
             LogDiagnostic("state-authority-changed", default, false, 0f);
         }
@@ -308,6 +328,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.KCC
 
         public void Shutdown()
         {
+            SetRagdollCollisionSuspended(false);
             m_AdapterInitialized = false;
             m_LastContinuousInput = default;
             m_HasLastContinuousInput = false;
@@ -473,6 +494,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.KCC
             bool restorePredictedPose)
         {
             if (!RequiresSharedLogicalOwnerProxyPump ||
+                IsRagdollActive ||
                 Runner == null || !Runner.IsRunning ||
                 Runner.GameMode != GameMode.Shared ||
                 !IsLocalLogicalOwner || m_Driver == null ||
@@ -567,11 +589,38 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.KCC
             m_Backend?.QueueAuthoritativeCollision(enabled);
         }
 
+        /// <summary>
+        /// Immediately removes/restores the local KCC collision shape for GC2 ragdoll physics.
+        /// This deliberately does not mutate the semantic or replicated collision values: they
+        /// remain the authored gameplay collision state restored after GC2 has disabled the
+        /// dynamic bone colliders.
+        /// </summary>
+        internal void SetRagdollCollisionSuspended(bool suspended)
+        {
+            if (m_RagdollCollisionSuspended == suspended)
+            {
+                // Reassert the override after a spawn/authority lifecycle even when the semantic
+                // flag did not change.
+                SynchronizeSimulationCapsule();
+                return;
+            }
+
+            m_RagdollCollisionSuspended = suspended;
+            SynchronizeSimulationCapsule();
+        }
+
         private void RenderInternal()
         {
             if (m_LastRenderFrame == Time.frameCount || !EnsureRuntimeReady()) return;
             m_LastRenderFrame = Time.frameCount;
             HandleSharedAuthorityHandoff(force: false);
+
+            if (IsRagdollActive)
+            {
+                SynchronizeSimulationCapsule();
+                m_Driver?.ApplySimulationVelocity(Vector3.zero);
+                return;
+            }
 
             if (IsLocalLogicalOwner && m_Driver != null &&
                 m_Kcc.IsPredictingInRenderUpdate)
@@ -800,6 +849,10 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.KCC
             {
                 m_CollisionEnabled = collisionEnabled;
             }
+            bool effectiveCollisionEnabled =
+                collisionEnabled && !m_RagdollCollisionSuspended;
+            bool enforceCollisionShape =
+                collisionChanged || m_RagdollCollisionSuspended;
 
             input.Move = move;
             input.Yaw = yaw;
@@ -814,8 +867,8 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.KCC
                 rootMotionWeight,
                 jumpImpulse,
                 resetVerticalVelocity,
-                collisionChanged,
-                collisionEnabled);
+                enforceCollisionShape,
+                effectiveCollisionEnabled);
         }
 
         private void SetContinuousKccIntent(
@@ -1109,13 +1162,15 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.KCC
             {
                 m_CollisionEnabled = ReplicatedCollisionEnabled;
             }
+            bool effectiveCollisionEnabled =
+                m_CollisionEnabled && !m_RagdollCollisionSuspended;
             if (!Mathf.Approximately(m_Kcc.Settings.Height, height) ||
                 !Mathf.Approximately(m_Kcc.Settings.Radius, radius) ||
-                (m_CollisionEnabled
+                (effectiveCollisionEnabled
                     ? m_Kcc.Settings.Shape != EKCCShape.Capsule
                     : m_Kcc.Settings.Shape != EKCCShape.None))
             {
-                EKCCShape shape = m_CollisionEnabled
+                EKCCShape shape = effectiveCollisionEnabled
                     ? EKCCShape.Capsule
                     : EKCCShape.None;
                 m_Kcc.SetShape(shape, radius, height);

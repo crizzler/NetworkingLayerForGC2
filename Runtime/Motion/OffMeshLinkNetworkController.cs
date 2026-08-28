@@ -119,6 +119,31 @@ namespace Arawn.GameCreator2.Networking
         }
 
         /// <summary>
+        /// Abandons an active traversal without touching the NavMeshAgent. Ragdoll calls this
+        /// after the shared physics guard may already have disabled the agent, so the ordinary
+        /// completion path is not safe. Observers still receive an interrupted completion and
+        /// cannot resume a stale time-based link after recovery.
+        /// </summary>
+        internal void InterruptForRagdoll()
+        {
+            if (!m_IsTraversing) return;
+
+            m_IsTraversing = false;
+            Vector3 finalPosition = m_Character != null
+                ? m_Character.transform.position
+                : transform.position;
+
+            OnLinkCompleteReady?.Invoke(NetworkOffMeshLinkComplete.Create(
+                m_CurrentLinkId,
+                m_Sequence,
+                finalPosition,
+                NetworkOffMeshLinkComplete.STATUS_INTERRUPTED));
+
+            m_CustomLink = null;
+            m_CurrentLinkType = null;
+        }
+
+        /// <summary>
         /// Get the current traversal progress (0-1).
         /// </summary>
         public float GetProgress()
@@ -644,6 +669,21 @@ namespace Arawn.GameCreator2.Networking
         /// Check if currently traversing a link.
         /// </summary>
         public bool IsTraversing => m_CurrentTraversal != null && !m_CurrentTraversal.IsComplete;
+
+        /// <summary>
+        /// Drops traversal interpolation when ragdoll takes ownership of the character root.
+        /// Keeping the old time-based traversal would snap the recovered character to its stale
+        /// link destination as soon as network movement resumes.
+        /// </summary>
+        internal void InterruptForRagdoll()
+        {
+            bool wasTraversing = IsTraversing;
+            m_ActiveTraversals.Clear();
+            m_CurrentTraversal = null;
+            m_PendingAnimation = null;
+
+            if (wasTraversing) OnTraversalCompleted?.Invoke(false);
+        }
 
         /// <summary>
         /// Get current traversal progress (0-1).

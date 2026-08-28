@@ -5,9 +5,11 @@ using System.IO.Compression;
 using System.Linq;
 using System.Reflection;
 using System.Text;
+using GameCreator.Runtime.Characters;
 using GameCreator.Runtime.Common;
 using GameCreator.Runtime.VisualScripting;
 using NUnit.Framework;
+using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
 using UnityEngine.SceneManagement;
@@ -25,6 +27,8 @@ namespace Arawn.GameCreator2.Networking.Tests
                 "Fusion",
                 "GC2NetworkingLayerFusionTransport.CoreExamples",
                 "Requires GC2 Core Demos - FusionCoreVariablesDemo.unity",
+                "Requires GC2 Core Demos - FusionRagdollDemo.unity",
+                "FusionDemoPlayer-CoreAndVariables 3.prefab",
                 "FusionDemo_DoorOpenState.asset",
                 "Assets/Arawn/NetworkingLayerForGC2/Demo/Fusion/Packages/Core/" +
                 "Package.unitypackage",
@@ -34,11 +38,16 @@ namespace Arawn.GameCreator2.Networking.Tests
                 "Arawn.GameCreator2.Networking.Transport.Fusion",
                 "Arawn.GameCreator2.Networking.Transport.Fusion." +
                 "FusionNetworkActionTransportBridge, " +
-                "Arawn.GameCreator2.Networking.Transport.Fusion"),
+                "Arawn.GameCreator2.Networking.Transport.Fusion",
+                "Arawn.GameCreator2.Networking.Transport.Fusion.FusionPlayerSpawner, " +
+                "Arawn.GameCreator2.Networking.Transport.Fusion",
+                5),
             new(
                 "PurrNet",
                 "GC2NetworkingLayerPurrNetTransport.CoreExamples",
                 "Requires GC2 Core Demos - PurrNetCoreVariablesDemo.unity",
+                "Requires GC2 Core Demos - PurrNetRagdollDemo.unity",
+                "PurrNetDemoPlayer-CoreAndVariables 3.prefab",
                 "PurrNetDemo_DoorOpenState.asset",
                 "Assets/Arawn/NetworkingLayerForGC2/Demo/PurrNet/Packages/Core/" +
                 "Package.unitypackage",
@@ -47,18 +56,22 @@ namespace Arawn.GameCreator2.Networking.Tests
                 "PurrNet.NetworkIdentity, PurrNet.Runtime",
                 "Arawn.GameCreator2.Networking.Transport.PurrNet." +
                 "PurrNetNetworkActionTransportBridge, " +
-                "Arawn.GameCreator2.Networking.Transport.PurrNet")
+                "Arawn.GameCreator2.Networking.Transport.PurrNet",
+                "Arawn.GameCreator2.Networking.Transport.PurrNet.PurrNetDemoPlayerSpawner, " +
+                "Arawn.GameCreator2.Networking.Transport.PurrNet",
+                8)
         };
 
         public static IEnumerable<InstallerSpec> InstallerCases => Cases;
 
         [TestCaseSource(nameof(InstallerCases))]
-        public void CoreInstaller_IsVersion102AndContainsNoStaleRoot(InstallerSpec spec)
+        [NUnit.Framework.Category("GC2Networking.Ragdoll")]
+        public void CoreInstaller_IsVersion110AndContainsNoStaleRoot(InstallerSpec spec)
         {
             string descriptor = File.ReadAllText(ProjectPath(spec.DescriptorPath))
                 .Replace("\r\n", "\n");
             StringAssert.Contains(
-                "m_Version:\n      major: 1\n      minor: 0\n      patch: 2",
+                "m_Version:\n      major: 1\n      minor: 1\n      patch: 0",
                 descriptor);
 
             string installs = ProjectPath("Assets/Plugins/GameCreator/Installs");
@@ -67,7 +80,7 @@ namespace Arawn.GameCreator2.Networking.Tests
                 .OrderBy(name => name, StringComparer.Ordinal)
                 .ToArray();
             CollectionAssert.AreEqual(
-                new[] { spec.InstallId + "@1.0.2" },
+                new[] { spec.InstallId + "@1.1.0" },
                 roots,
                 $"{spec.Transport} Core Examples contains a stale installed version.");
         }
@@ -154,6 +167,122 @@ namespace Arawn.GameCreator2.Networking.Tests
                     StringComparison.Ordinal)),
                 Is.False,
                 "The rebuilt package must not preserve 1.0.1 pathnames.");
+        }
+
+        [TestCaseSource(nameof(InstallerCases))]
+        [NUnit.Framework.Category("GC2Networking.Ragdoll")]
+        public void CoreRagdollScene_UsesAuthoritativeGc2ActionsAndConfiguredPlayer(
+            InstallerSpec spec)
+        {
+            Scene scene = EditorSceneManager.OpenScene(
+                spec.RagdollScenePath,
+                OpenSceneMode.Additive);
+            try
+            {
+                NetworkRagdollDemoUI[] demoUis = Find<NetworkRagdollDemoUI>(scene);
+                Assert.That(demoUis, Has.Length.EqualTo(1));
+                NetworkRagdollDemoUI demoUi = demoUis[0];
+
+                Actions start = ReadField<Actions>(demoUi, "m_StartActions");
+                Actions recover = ReadField<Actions>(demoUi, "m_RecoverActions");
+                AssertNetworkRagdollAction<InstructionNetworkCoreStartRagdoll>(start);
+                AssertNetworkRagdollAction<InstructionNetworkCoreRecoverRagdoll>(recover);
+
+                Type spawnerType = ResolveType(spec.SpawnerType);
+                Component[] spawners = Find(scene, spawnerType);
+                Assert.That(spawners, Has.Length.EqualTo(1));
+                object configuredPrefab = ReadField<object>(spawners[0], "m_PlayerPrefab");
+                GameObject configuredPlayer = configuredPrefab switch
+                {
+                    GameObject gameObject => gameObject,
+                    Component component => component.gameObject,
+                    _ => null
+                };
+                Assert.That(configuredPlayer, Is.Not.Null);
+                Assert.That(
+                    AssetDatabase.GetAssetPath(configuredPlayer),
+                    Is.EqualTo(spec.PlayerPrefabPath));
+
+                foreach (string removedName in new[]
+                         {
+                             "Scene Network Variables",
+                             "Variable Values UI",
+                             "Network Actions Door Demo",
+                             "Network Actions Door Demo UI",
+                             "Network Action Manager",
+                             "Network Variable Manager"
+                         })
+                {
+                    Assert.That(
+                        FindOptionalGameObject(scene, removedName),
+                        Is.Null,
+                        $"The focused ragdoll scene retained '{removedName}'.");
+                }
+            }
+            finally
+            {
+                EditorSceneManager.CloseScene(scene, true);
+            }
+
+            GameObject player = AssetDatabase.LoadAssetAtPath<GameObject>(
+                spec.PlayerPrefabPath);
+            Assert.That(player, Is.Not.Null);
+            Character character = player.GetComponent<Character>();
+            NetworkCharacter networkCharacter = player.GetComponent<NetworkCharacter>();
+            Assert.That(character, Is.Not.Null);
+            Assert.That(networkCharacter, Is.Not.Null);
+            Assert.That(networkCharacter.ActorType,
+                Is.EqualTo(NetworkCharacterActorType.PlayerOwned));
+            Assert.That(networkCharacter.RagdollMode,
+                Is.EqualTo(NetworkCharacter.RemoteSystemMode.Synchronized));
+            Assert.That(ReadField<bool>(networkCharacter, "m_UseCoreNetworking"), Is.True);
+
+            RagdollDefault ragdoll = character.Ragdoll.Get<RagdollDefault>();
+            Assert.That(ragdoll, Is.Not.Null,
+                "The demo player must use GC2's physical RagdollDefault strategy.");
+            BoneRack rack = ReadField<BoneRack>(ragdoll, "m_BoneRack");
+            Assert.That(rack, Is.Not.Null);
+            Assert.That(rack.Skeleton, Is.Not.Null);
+            Assert.That(ReadField<AnimationClip>(ragdoll, "m_RecoverFaceDown"), Is.Not.Null);
+            Assert.That(ReadField<AnimationClip>(ragdoll, "m_RecoverFaceUp"), Is.Not.Null);
+        }
+
+        [TestCaseSource(nameof(InstallerCases))]
+        [NUnit.Framework.Category("GC2Networking.Ragdoll")]
+        public void CorePackage_ContainsExactCurrentRagdollPayload(InstallerSpec spec)
+        {
+            Dictionary<string, byte[]> payloads = ReadUnityPackageAssetPayloads(
+                ProjectPath(spec.PackagePath));
+            AssertCurrentPayload(payloads, spec.RagdollScenePath);
+            AssertCurrentPayload(payloads, spec.PlayerPrefabPath);
+            Assert.That(payloads, Has.Count.EqualTo(spec.ExpectedAssetPayloadCount));
+            Assert.That(payloads.Keys.All(path => path.StartsWith(
+                    spec.Root + "/",
+                    StringComparison.Ordinal)),
+                Is.True,
+                "The Core Examples archive must contain only its exact install-root assets.");
+            Assert.That(payloads.Keys.Any(path => path.Contains(
+                    spec.InstallId + "@1.0.2",
+                    StringComparison.Ordinal)),
+                Is.False);
+        }
+
+        private static void AssertNetworkRagdollAction<TInstruction>(Actions actions)
+            where TInstruction : TInstructionNetworkCoreRequest
+        {
+            Assert.That(actions, Is.Not.Null);
+            InstructionList instructions = ReadField<InstructionList>(actions, "m_Instructions");
+            Assert.That(instructions.Length, Is.EqualTo(1));
+            Assert.That(instructions.Get(0), Is.TypeOf<TInstruction>());
+            TInstruction instruction = (TInstruction)instructions.Get(0);
+            Assert.That(ReadField<bool>(instruction, "m_WaitForResponse"), Is.True);
+
+            PropertyGetGameObject target = ReadField<PropertyGetGameObject>(
+                instruction,
+                "m_Character");
+            object property = ReadField<object>(target, "m_Property");
+            Assert.That(property, Is.TypeOf<GetGameObjectLocalNetworkPlayer>(),
+                "The demo Actions must target the authenticated local Network Character.");
         }
 
         private static void AssertDoorDefinition(NetworkActionDefinition action)
@@ -249,12 +378,17 @@ namespace Arawn.GameCreator2.Networking.Tests
 
         private static GameObject FindGameObject(Scene scene, string name)
         {
-            GameObject result = scene.GetRootGameObjects()
+            GameObject result = FindOptionalGameObject(scene, name);
+            Assert.That(result, Is.Not.Null, $"Missing generated object '{name}'.");
+            return result;
+        }
+
+        private static GameObject FindOptionalGameObject(Scene scene, string name)
+        {
+            return scene.GetRootGameObjects()
                 .SelectMany(root => root.GetComponentsInChildren<Transform>(true))
                 .FirstOrDefault(candidate => candidate.name == name)
                 ?.gameObject;
-            Assert.That(result, Is.Not.Null, $"Missing generated object '{name}'.");
-            return result;
         }
 
         private static Type ResolveType(string name) => Type.GetType(name, false) ??
@@ -351,34 +485,48 @@ namespace Arawn.GameCreator2.Networking.Tests
             public string Transport { get; }
             public string InstallId { get; }
             public string SceneName { get; }
+            public string RagdollSceneName { get; }
+            public string PlayerPrefabName { get; }
             public string ActionName { get; }
             public string PackagePath { get; }
             public string DescriptorPath { get; }
             public string IdentityType { get; }
             public string ActionBridgeType { get; }
+            public string SpawnerType { get; }
+            public int ExpectedAssetPayloadCount { get; }
             public string Root =>
-                "Assets/Plugins/GameCreator/Installs/" + InstallId + "@1.0.2";
+                "Assets/Plugins/GameCreator/Installs/" + InstallId + "@1.1.0";
             public string ScenePath => Root + "/" + SceneName;
+            public string RagdollScenePath => Root + "/" + RagdollSceneName;
+            public string PlayerPrefabPath => Root + "/" + PlayerPrefabName;
             public string ActionPath => Root + "/" + ActionName;
 
             public InstallerSpec(
                 string transport,
                 string installId,
                 string sceneName,
+                string ragdollSceneName,
+                string playerPrefabName,
                 string actionName,
                 string packagePath,
                 string descriptorPath,
                 string identityType,
-                string actionBridgeType)
+                string actionBridgeType,
+                string spawnerType,
+                int expectedAssetPayloadCount)
             {
                 Transport = transport;
                 InstallId = installId;
                 SceneName = sceneName;
+                RagdollSceneName = ragdollSceneName;
+                PlayerPrefabName = playerPrefabName;
                 ActionName = actionName;
                 PackagePath = packagePath;
                 DescriptorPath = descriptorPath;
                 IdentityType = identityType;
                 ActionBridgeType = actionBridgeType;
+                SpawnerType = spawnerType;
+                ExpectedAssetPayloadCount = expectedAssetPayloadCount;
             }
 
             public override string ToString() => Transport;

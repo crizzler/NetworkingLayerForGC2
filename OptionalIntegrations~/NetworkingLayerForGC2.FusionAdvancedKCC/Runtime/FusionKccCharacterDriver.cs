@@ -57,6 +57,12 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.KCC
         [NonSerialized] private float m_NavigationYaw;
         [NonSerialized] private bool m_WarpRejectionReported;
 
+        // Ragdoll collision suspension is a local physical override. It must never become a
+        // delayed semantic collision request because GC2 enables the bone colliders immediately
+        // after EventBeforeStartRagdoll returns.
+        [NonSerialized] private Character m_RagdollSubscribedCharacter;
+        [NonSerialized] private bool m_RagdollCollisionSuspended;
+
         public override Vector3 WorldMoveDirection => m_HasExplicitPresentationVelocity
             ? m_ExplicitPresentationVelocity
             : m_PresentationVelocity;
@@ -95,6 +101,18 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.KCC
         internal void AttachMotor(FusionKccMotorBody motor)
         {
             m_Motor = motor;
+            if (m_RagdollCollisionSuspended)
+            {
+                m_Motor?.SetRagdollCollisionSuspended(true);
+            }
+            else if (Character != null && Character.Ragdoll?.IsRagdoll != true)
+            {
+                // OnStartup may have cleared a pooled driver's stale flag before the adapter
+                // reattached. Reassert the normal local shape only when GC2 is no longer in a
+                // ragdoll epoch; an adapter attached before OnStartup must never briefly revive
+                // its capsule beside active bone colliders.
+                m_Motor?.SetRagdollCollisionSuspended(false);
+            }
         }
 
         public override void OnStartup(Character character)
@@ -117,10 +135,26 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.KCC
             m_NavigationPath = new NavMeshPath();
             ClearNavigationIntent(NavigationMode.Inactive);
             m_WarpRejectionReported = false;
+
+            SubscribeRagdollCollisionSafety(character);
+            if (character.Ragdoll?.IsRagdoll == true)
+            {
+                HandleBeforeStartRagdoll();
+            }
+            else
+            {
+                // A pooled driver may have missed recovery while it was disposed. The adapter's
+                // semantic collision state is still intact, so clearing the stale local override
+                // safely restores that exact state.
+                RestoreCollisionAfterRagdoll();
+            }
         }
 
         public override void OnDispose(Character character)
         {
+            UnsubscribeRagdollCollisionSafety();
+            // Do not clear an active physical override during a role swap. The next KCC driver
+            // adopts it in AttachMotor; permanent adapter shutdown/despawn clears it explicitly.
             m_Motor = null;
             m_NavigationPath = null;
             m_NavigationCorners = null;
@@ -130,9 +164,69 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.KCC
             base.OnDispose(character);
         }
 
+        private void SubscribeRagdollCollisionSafety(Character character)
+        {
+            if (ReferenceEquals(m_RagdollSubscribedCharacter, character)) return;
+
+            UnsubscribeRagdollCollisionSafety();
+            if (character?.Ragdoll == null) return;
+
+            m_RagdollSubscribedCharacter = character;
+            character.Ragdoll.EventBeforeStartRagdoll += HandleBeforeStartRagdoll;
+            character.Ragdoll.EventAfterStartRecover += HandleAfterStartRecover;
+        }
+
+        private void UnsubscribeRagdollCollisionSafety()
+        {
+            if (m_RagdollSubscribedCharacter?.Ragdoll != null)
+            {
+                m_RagdollSubscribedCharacter.Ragdoll.EventBeforeStartRagdoll -=
+                    HandleBeforeStartRagdoll;
+                m_RagdollSubscribedCharacter.Ragdoll.EventAfterStartRecover -=
+                    HandleAfterStartRecover;
+            }
+
+            m_RagdollSubscribedCharacter = null;
+        }
+
+        private void HandleBeforeStartRagdoll()
+        {
+            if (m_RagdollCollisionSuspended) return;
+
+            m_RagdollCollisionSuspended = true;
+            m_Motor?.SetRagdollCollisionSuspended(true);
+            m_PresentationVelocity = Vector3.zero;
+            m_HasExplicitPresentationVelocity = false;
+            ClearNavigationIntent(NavigationMode.Inactive);
+        }
+
+        private void HandleAfterStartRecover()
+        {
+            // GC2 has already disabled its dynamic bone colliders at this point. Clear only the
+            // local KCC override; the motor's authored/replicated collision value was untouched.
+            RestoreCollisionAfterRagdoll();
+        }
+
+        private void RestoreCollisionAfterRagdoll()
+        {
+            // Reassert false even for an already-cleared pooled driver flag. The motor can
+            // outlive a driver role and therefore retain the previous role's local override.
+            m_Motor?.SetRagdollCollisionSuspended(false);
+            m_RagdollCollisionSuspended = false;
+        }
+
         public override void OnUpdate()
         {
             if (Character == null) return;
+            if (Character.Ragdoll?.IsRagdoll == true)
+            {
+                m_PresentationVelocity = Vector3.zero;
+                m_HasExplicitPresentationVelocity = false;
+                m_SampledRootMotionVelocity = Vector3.zero;
+                m_SampledRootMotionWeight = 0f;
+                m_JumpPending = false;
+                return;
+            }
             SampleRootMotionForCurrentFrame();
             RefreshNavigationIntent();
         }

@@ -140,14 +140,6 @@ namespace Arawn.GameCreator2.Networking
                 this.Character,
                 "RemoteDriver");
 
-            if (this.Character.Ragdoll != null)
-            {
-                this.Character.Ragdoll.EventBeforeStartRagdoll -= OnBeforeStartRagdoll;
-                this.Character.Ragdoll.EventBeforeStartRagdoll += OnBeforeStartRagdoll;
-                this.Character.Ragdoll.EventAfterFinishRecover -= OnAfterFinishRagdollRecover;
-                this.Character.Ragdoll.EventAfterFinishRecover += OnAfterFinishRagdollRecover;
-            }
-
             this.m_Controller = this.Character.GetComponent<CharacterController>();
             if (this.m_Controller == null)
             {
@@ -164,10 +156,34 @@ namespace Arawn.GameCreator2.Networking
                 this.m_Controller.minMoveDistance = 0f;
             }
 
+            bool isRagdoll = this.Character.Ragdoll != null &&
+                              this.Character.Ragdoll.IsRagdoll;
+
             // A server-authoritative NavMesh role makes the CharacterController inert while its
             // NavMeshAgent/Capsule own collision. Shared-master migration can then reuse this
-            // remote driver, so explicitly reactivate the existing controller.
-            if (!this.m_Controller.enabled) this.m_Controller.enabled = true;
+            // remote driver. Adopt supplies the intended role state without ever enabling the
+            // capsule beside dynamic ragdoll bones.
+            if (isRagdoll)
+            {
+                NetworkRagdollPhysicsGuard.Adopt(
+                    this.Character,
+                    this.m_Controller,
+                    intendedEnabled: true,
+                    intendedDetectCollisions: true);
+            }
+            else
+            {
+                if (!this.m_Controller.enabled) this.m_Controller.enabled = true;
+                NetworkRagdollPhysicsGuard.Register(this.Character, this.m_Controller);
+            }
+
+            if (this.Character.Ragdoll != null)
+            {
+                this.Character.Ragdoll.EventBeforeStartRagdoll -= OnBeforeStartRagdoll;
+                this.Character.Ragdoll.EventBeforeStartRagdoll += OnBeforeStartRagdoll;
+                this.Character.Ragdoll.EventAfterFinishRecover -= OnAfterFinishRagdollRecover;
+                this.Character.Ragdoll.EventAfterFinishRecover += OnAfterFinishRagdollRecover;
+            }
         }
 
         public override void OnDispose(Character character)

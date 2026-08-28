@@ -72,6 +72,8 @@ namespace Arawn.GameCreator2.Networking
         [NonSerialized] private bool m_IsPredicting;
         [NonSerialized] private ushort m_PredictedSequence;
         [NonSerialized] private NavMeshPath m_PredictionPath;
+        [NonSerialized] private Character m_RagdollEventCharacter;
+        [NonSerialized] private bool m_RagdollMovementSuspended;
 
         // Off-mesh link handling
         [NonSerialized] private OffMeshLinkNetworkClient m_LinkController;
@@ -99,7 +101,11 @@ namespace Arawn.GameCreator2.Networking
         public override bool Collision
         {
             get => this.m_Capsule != null && this.m_Capsule.enabled;
-            set { if (this.m_Capsule != null) this.m_Capsule.enabled = value; }
+            set
+            {
+                if (this.m_Capsule == null || m_RagdollMovementSuspended) return;
+                this.m_Capsule.enabled = value;
+            }
         }
 
         public override Axonometry Axonometry
@@ -168,6 +174,9 @@ namespace Arawn.GameCreator2.Networking
             m_LastAcknowledgedSequence = 0;
             m_ServerPathCorners = null;
             m_CurrentCornerIndex = 0;
+            SubscribeRagdollLifecycle(character);
+            m_RagdollMovementSuspended = character.Ragdoll != null &&
+                                         character.Ragdoll.IsRagdoll;
 
             if (m_EnableLocalNavMesh)
             {
@@ -181,6 +190,15 @@ namespace Arawn.GameCreator2.Networking
                 this.m_Capsule = this.Character.gameObject.AddComponent<CapsuleCollider>();
                 this.m_Capsule.hideFlags = HideFlags.HideInInspector;
             }
+            NetworkRagdollPhysicsGuard.Register(this.Character, this.m_Capsule);
+
+            CharacterController rootController =
+                this.Character.GetComponent<CharacterController>();
+            if (rootController != null && rootController.enabled)
+            {
+                rootController.enabled = false;
+            }
+            NetworkRagdollPhysicsGuard.Unregister(this.Character, rootController);
 
             // Initialize off-mesh link controller
             m_LinkController = this.Character.GetComponent<OffMeshLinkNetworkClient>();
@@ -189,6 +207,12 @@ namespace Arawn.GameCreator2.Networking
                 m_LinkController = this.Character.gameObject.AddComponent<OffMeshLinkNetworkClient>();
             }
             m_LinkController.Initialize(this.Character);
+
+            if (m_RagdollMovementSuspended)
+            {
+                InterruptTraversalForRagdoll();
+                ClearMovementState();
+            }
         }
 
         private void SetupLocalNavMesh()
@@ -209,10 +233,16 @@ namespace Arawn.GameCreator2.Networking
 
             // Initialize prediction path
             m_PredictionPath = new NavMeshPath();
+            NetworkRagdollPhysicsGuard.Register(this.Character, this.m_Agent);
         }
 
         public override void OnDispose(Character character)
         {
+            UnsubscribeRagdollLifecycle();
+            NetworkRagdollPhysicsGuard.Unregister(character, this.m_Agent);
+            NetworkRagdollPhysicsGuard.Unregister(character, this.m_Capsule);
+            InterruptTraversalForRagdoll();
+            m_RagdollMovementSuspended = false;
             base.OnDispose(character);
             if (this.m_Agent != null) UnityEngine.Object.Destroy(this.m_Agent);
             if (this.m_Capsule != null) UnityEngine.Object.Destroy(this.m_Capsule);
@@ -226,6 +256,8 @@ namespace Arawn.GameCreator2.Networking
         /// </summary>
         public void RequestMoveToPosition(Vector3 target)
         {
+            if (m_RagdollMovementSuspended) return;
+
             m_DirectionInput = Vector3.zero;
             m_IsDirectionMode = false;
             m_CurrentSequence++;
@@ -254,6 +286,8 @@ namespace Arawn.GameCreator2.Networking
         /// </summary>
         public void RequestMoveToDirection(Vector3 direction)
         {
+            if (m_RagdollMovementSuspended) return;
+
             m_DirectionInput = direction.normalized;
             m_IsDirectionMode = true;
 
@@ -267,6 +301,8 @@ namespace Arawn.GameCreator2.Networking
         /// </summary>
         public void RequestStop(bool immediate = false)
         {
+            if (m_RagdollMovementSuspended) return;
+
             ClearMovementState();
 
             m_CurrentSequence++;
@@ -279,6 +315,8 @@ namespace Arawn.GameCreator2.Networking
         /// </summary>
         public void RequestWarp(Vector3 position)
         {
+            if (m_RagdollMovementSuspended) return;
+
             m_CurrentSequence++;
             var command = NetworkNavMeshCommand.CreateWarp(position, m_CurrentSequence);
             OnSendCommand?.Invoke(command);
@@ -292,6 +330,8 @@ namespace Arawn.GameCreator2.Networking
         /// </summary>
         public void ApplyPathState(NetworkNavMeshPathState pathState)
         {
+            if (m_RagdollMovementSuspended) return;
+
             m_LastAcknowledgedSequence = pathState.CommandSequence;
             m_PathStatus = pathState.PathStatus;
 
@@ -348,6 +388,8 @@ namespace Arawn.GameCreator2.Networking
         /// </summary>
         public void ApplyPositionUpdate(NetworkNavMeshPositionUpdate update)
         {
+            if (m_RagdollMovementSuspended) return;
+
             AddSnapshot(new PositionSnapshot
             {
                 timestamp = Time.time,
@@ -374,6 +416,7 @@ namespace Arawn.GameCreator2.Networking
         /// </summary>
         public void ApplyLinkStart(NetworkOffMeshLinkStart startMsg)
         {
+            if (m_RagdollMovementSuspended) return;
             m_LinkController?.ApplyLinkStart(startMsg);
         }
 
@@ -382,6 +425,7 @@ namespace Arawn.GameCreator2.Networking
         /// </summary>
         public void ApplyLinkAnimation(NetworkOffMeshLinkAnimation animData)
         {
+            if (m_RagdollMovementSuspended) return;
             m_LinkController?.ApplyLinkAnimation(animData);
         }
 
@@ -390,6 +434,7 @@ namespace Arawn.GameCreator2.Networking
         /// </summary>
         public void ApplyLinkProgress(NetworkOffMeshLinkProgress progressMsg)
         {
+            if (m_RagdollMovementSuspended) return;
             m_LinkController?.ApplyLinkProgress(progressMsg);
         }
 
@@ -398,6 +443,7 @@ namespace Arawn.GameCreator2.Networking
         /// </summary>
         public void ApplyLinkComplete(NetworkOffMeshLinkComplete completeMsg)
         {
+            if (m_RagdollMovementSuspended) return;
             m_LinkController?.ApplyLinkComplete(completeMsg);
         }
 
@@ -490,6 +536,19 @@ namespace Arawn.GameCreator2.Networking
         public override void OnUpdate()
         {
             if (this.Character.IsDead) return;
+
+            if (!m_RagdollMovementSuspended &&
+                this.Character.Ragdoll != null && this.Character.Ragdoll.IsRagdoll)
+            {
+                OnBeforeStartRagdoll();
+            }
+
+            if (m_RagdollMovementSuspended)
+            {
+                m_Velocity = Vector3.zero;
+                m_MoveDirection = Vector3.zero;
+                return;
+            }
 
             // Handle off-mesh link traversal
             if (m_LinkController != null && m_LinkController.ProcessTraversal())
@@ -751,12 +810,58 @@ namespace Arawn.GameCreator2.Networking
             m_Agent.height = motion.Height;
         }
 
+        private void SubscribeRagdollLifecycle(Character character)
+        {
+            UnsubscribeRagdollLifecycle();
+            m_RagdollEventCharacter = character;
+            if (m_RagdollEventCharacter?.Ragdoll == null) return;
+
+            m_RagdollEventCharacter.Ragdoll.EventBeforeStartRagdoll +=
+                OnBeforeStartRagdoll;
+            m_RagdollEventCharacter.Ragdoll.EventAfterFinishRecover +=
+                OnAfterFinishRagdollRecover;
+        }
+
+        private void UnsubscribeRagdollLifecycle()
+        {
+            if (m_RagdollEventCharacter?.Ragdoll != null)
+            {
+                m_RagdollEventCharacter.Ragdoll.EventBeforeStartRagdoll -=
+                    OnBeforeStartRagdoll;
+                m_RagdollEventCharacter.Ragdoll.EventAfterFinishRecover -=
+                    OnAfterFinishRagdollRecover;
+            }
+
+            m_RagdollEventCharacter = null;
+        }
+
+        private void OnBeforeStartRagdoll()
+        {
+            if (m_RagdollMovementSuspended) return;
+
+            m_RagdollMovementSuspended = true;
+            InterruptTraversalForRagdoll();
+            ClearMovementState();
+        }
+
+        private void OnAfterFinishRagdollRecover()
+        {
+            ClearMovementState();
+            m_RagdollMovementSuspended = false;
+        }
+
+        private void InterruptTraversalForRagdoll()
+        {
+            m_LinkController?.InterruptForRagdoll();
+        }
+
         private void TeleportTo(Vector3 position, float rotationY)
         {
             this.Transform.position = position;
             this.Transform.rotation = Quaternion.Euler(0f, rotationY, 0f);
 
-            if (m_EnableLocalNavMesh && m_Agent != null && m_Agent.isOnNavMesh)
+            if (m_EnableLocalNavMesh && m_Agent != null &&
+                m_Agent.enabled && m_Agent.isOnNavMesh)
             {
                 m_Agent.Warp(position);
             }
@@ -802,6 +907,7 @@ namespace Arawn.GameCreator2.Networking
 
         public override void AddPosition(Vector3 amount)
         {
+            if (m_RagdollMovementSuspended) return;
             this.Transform.position += amount;
         }
 

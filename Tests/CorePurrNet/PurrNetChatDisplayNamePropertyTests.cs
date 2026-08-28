@@ -225,9 +225,9 @@ namespace Arawn.GameCreator2.Networking.CorePurrNet.Tests
         [Test]
         public void ChatInstallers_HaveExpectedVersionsWithoutStaleInstalledRoots()
         {
-            AssertInstallerVersion(CoreInstallerDescriptorPath, 2);
-            AssertInstallerVersion(LobbyInstallerDescriptorPath, 1);
-            AssertOnlyInstalledRoot(CoreInstallPrefix + "1.0.2", CoreInstallPrefix);
+            AssertInstallerVersion(CoreInstallerDescriptorPath, 1, 0);
+            AssertInstallerVersion(LobbyInstallerDescriptorPath, 0, 1);
+            AssertOnlyInstalledRoot(CoreInstallPrefix + "1.1.0", CoreInstallPrefix);
             AssertOnlyInstalledRoot(LobbyInstallPrefix + "1.0.1", LobbyInstallPrefix);
         }
 
@@ -343,11 +343,15 @@ namespace Arawn.GameCreator2.Networking.CorePurrNet.Tests
                    "/" + sceneName;
         }
 
-        private static void AssertInstallerVersion(string descriptorPath, int patch)
+        private static void AssertInstallerVersion(
+            string descriptorPath,
+            int minor,
+            int patch)
         {
             string descriptor = ReadAsset(descriptorPath).Replace("\r\n", "\n");
             StringAssert.IsMatch(
-                @"(?m)^    m_Version:\n      major: 1\n      minor: 0\n      patch: " + patch + "$",
+                @"(?m)^    m_Version:\n      major: 1\n      minor: " + minor +
+                @"\n      patch: " + patch + "$",
                 descriptor);
         }
 

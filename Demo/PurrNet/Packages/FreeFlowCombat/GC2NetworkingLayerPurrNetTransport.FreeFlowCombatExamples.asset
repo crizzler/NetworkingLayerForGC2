@@ -15,7 +15,8 @@ MonoBehaviour:
   m_Install:
     m_Name: Free Flow Combat Examples
     m_Module: GC2 Networking Layer PurrNet Transport
-    m_Description: PurrNet server-authoritative Free Flow Combat player-versus-enemy example.
+    m_Description: PurrNet server-authoritative Free Flow Combat player-versus-enemy
+      example.
     m_Author: Arawn
     m_Version:
       major: 1

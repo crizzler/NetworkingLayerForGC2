@@ -160,10 +160,10 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
         }
 
         [Test]
-        public void CoreInstaller_IsVersion102WithoutStaleInstalledRoots()
+        public void CoreInstaller_IsVersion110WithoutStaleInstalledRoots()
         {
-            AssertInstallerVersion102(InstallerDescriptorPath);
-            AssertOnlyInstalledRoot(InstallPrefix + "1.0.2", InstallPrefix);
+            AssertInstallerVersion110(InstallerDescriptorPath);
+            AssertOnlyInstalledRoot(InstallPrefix + "1.1.0", InstallPrefix);
         }
 
         [Test]
@@ -311,11 +311,11 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
                    "/" + sceneName;
         }
 
-        private static void AssertInstallerVersion102(string descriptorPath)
+        private static void AssertInstallerVersion110(string descriptorPath)
         {
             string descriptor = ReadAsset(descriptorPath).Replace("\r\n", "\n");
             StringAssert.IsMatch(
-                @"(?m)^    m_Version:\n      major: 1\n      minor: 0\n      patch: 2$",
+                @"(?m)^    m_Version:\n      major: 1\n      minor: 1\n      patch: 0$",
                 descriptor);
         }
 
@@ -327,7 +327,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
                 .OrderBy(name => name, StringComparer.Ordinal)
                 .ToArray();
             CollectionAssert.AreEqual(new[] { expected }, roots,
-                "Remove stale installed package versions after the 1.0.2 migration.");
+                "Remove stale installed package versions after the 1.1.0 migration.");
         }
 
         private static string ProjectPath(string assetPath)

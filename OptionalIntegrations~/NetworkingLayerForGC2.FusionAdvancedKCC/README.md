@@ -14,13 +14,16 @@ Photon Advanced KCC is a separate dependency. This repository does not redistrib
 
 ## Install
 
-1. Install the main Networking Layer at `Assets/Arawn/NetworkingLayerForGC2`.
+1. Import the Fusion release Unitypackage. It installs the main Networking
+   Layer at `Assets/Arawn/NetworkingLayerForGC2` and this adapter at the required
+   `Assets/Arawn/NetworkingLayerForGC2.FusionAdvancedKCC` sibling path.
 2. Install Photon Fusion and let Unity compile it.
 3. Import Photon Advanced KCC separately and let Unity compile it.
-4. Copy this companion to `Assets/Arawn/NetworkingLayerForGC2.FusionAdvancedKCC`, beside the main Networking Layer folder. Keep its `.meta` file.
-5. Let Unity finish compiling. The Networking Layer detects the compatible KCC API and manages `ARAWN_GC2_FUSION_KCC` automatically.
-6. Open `Game Creator > Networking Layer > Fusion Scene Setup Wizard`.
-7. Select **Fusion Advanced KCC (Optional Addon)**, configure the player prefab, apply the setup, and resolve every validation error before testing.
+4. Let Unity finish compiling. The Networking Layer detects the compatible KCC
+   API and manages `ARAWN_GC2_FUSION_KCC` automatically.
+5. Open `Game Creator > Networking Layer > Fusion Scene Setup Wizard`.
+6. Select **Fusion Advanced KCC (Optional Addon)**, configure the player prefab,
+   apply the setup, and resolve every validation error before testing.
 
 When downloading the public repository source, this companion is stored below `OptionalIntegrations~` so Unity ignores it in the flattened repository layout. Move the `NetworkingLayerForGC2.FusionAdvancedKCC` child folder and its `.meta` file to the sibling Unity path described above.
 

@@ -69,6 +69,8 @@ namespace Arawn.GameCreator2.Networking
         [NonSerialized] private int m_ConsecutiveNavMeshBindFailures;
         [NonSerialized] private float m_NextNavMeshBindAttemptTime;
         [NonSerialized] private bool m_HasWarnedNavMeshBinding;
+        [NonSerialized] private Character m_RagdollEventCharacter;
+        [NonSerialized] private bool m_RagdollMovementSuspended;
 
         // Off-mesh link handling
         [NonSerialized] protected INavMeshTraverseLink m_Link;
@@ -123,7 +125,11 @@ namespace Arawn.GameCreator2.Networking
         public override bool Collision
         {
             get => this.m_Capsule != null && this.m_Capsule.enabled;
-            set { if (this.m_Capsule != null) this.m_Capsule.enabled = value; }
+            set
+            {
+                if (this.m_Capsule == null || m_RagdollMovementSuspended) return;
+                this.m_Capsule.enabled = value;
+            }
         }
 
         public override Axonometry Axonometry
@@ -155,6 +161,9 @@ namespace Arawn.GameCreator2.Networking
             m_CommandQueue = new Queue<NetworkNavMeshCommand>(16);
             m_LastProcessedSequence = 0;
             ResetTransientMotionState();
+            SubscribeRagdollLifecycle(character);
+            m_RagdollMovementSuspended = character.Ragdoll != null &&
+                                         character.Ragdoll.IsRagdoll;
 
             EnsureNavigationComponents();
 
@@ -195,6 +204,11 @@ namespace Arawn.GameCreator2.Networking
 
             m_PreviousPosition = this.Transform.position;
             m_LastSentPosition = this.Transform.position;
+
+            if (m_RagdollMovementSuspended)
+            {
+                InterruptTraversalForRagdoll();
+            }
         }
 
         /// <summary>
@@ -208,6 +222,8 @@ namespace Arawn.GameCreator2.Networking
 
         public override void OnDispose(Character character)
         {
+            UnsubscribeRagdollLifecycle();
+
             if (m_LinkController != null) m_LinkController.ForceCompleteTraversal();
             if (m_LinkController != null)
             {
@@ -216,6 +232,9 @@ namespace Arawn.GameCreator2.Networking
                 m_LinkController.OnLinkCompleteReady -= ForwardLinkComplete;
                 m_LinkController.OnLinkAnimationReady -= ForwardLinkAnimation;
             }
+
+            NetworkRagdollPhysicsGuard.Unregister(character, m_Agent);
+            NetworkRagdollPhysicsGuard.Unregister(character, m_Capsule);
 
             // NetworkCharacter preserves and reuses this authored driver across authority
             // migration. Destroying components here schedules them for end-of-frame removal, so
@@ -236,6 +255,7 @@ namespace Arawn.GameCreator2.Networking
             m_Agent = null;
             m_Capsule = null;
             m_LinkController = null;
+            m_RagdollMovementSuspended = false;
             base.OnDispose(character);
         }
 
@@ -246,6 +266,8 @@ namespace Arawn.GameCreator2.Networking
         /// </summary>
         public void QueueCommand(NetworkNavMeshCommand command)
         {
+            if (m_RagdollMovementSuspended) return;
+
             // Validate sequence (prevent replay attacks)
             if (!IsSequenceNewer(command.Sequence, m_LastProcessedSequence))
             {
@@ -291,6 +313,21 @@ namespace Arawn.GameCreator2.Networking
         public override void OnUpdate()
         {
             if (this.Character.IsDead) return;
+
+            if (!m_RagdollMovementSuspended &&
+                this.Character.Ragdoll != null && this.Character.Ragdoll.IsRagdoll)
+            {
+                OnBeforeStartRagdoll();
+            }
+
+            if (m_RagdollMovementSuspended)
+            {
+                DiscardDeferredTranslationWhileUnbound();
+                m_MoveDirection = Vector3.zero;
+                m_Velocity = Vector3.zero;
+                m_PreviousPosition = Transform.position;
+                return;
+            }
 
             if (m_Agent == null || m_Capsule == null)
             {
@@ -722,7 +759,8 @@ namespace Arawn.GameCreator2.Networking
 
         private void OnTraverseComplete()
         {
-            if (m_Agent == null || !m_Agent.enabled || !m_Agent.isOnNavMesh)
+            if (m_RagdollMovementSuspended ||
+                m_Agent == null || !m_Agent.enabled || !m_Agent.isOnNavMesh)
             {
                 m_Link = null;
                 return;
@@ -781,6 +819,68 @@ namespace Arawn.GameCreator2.Networking
             {
                 remoteController.enabled = false;
             }
+
+            // This controller belongs to the observer driver and is deliberately inactive while
+            // NavMesh authority owns the root. Do not let a baseline captured by the previous
+            // role revive it beside the authoritative agent during ragdoll recovery.
+            NetworkRagdollPhysicsGuard.Unregister(Character, remoteController);
+            NetworkRagdollPhysicsGuard.Register(Character, m_Agent);
+            NetworkRagdollPhysicsGuard.Register(Character, m_Capsule);
+        }
+
+        private void SubscribeRagdollLifecycle(Character character)
+        {
+            UnsubscribeRagdollLifecycle();
+            m_RagdollEventCharacter = character;
+            if (m_RagdollEventCharacter?.Ragdoll == null) return;
+
+            m_RagdollEventCharacter.Ragdoll.EventBeforeStartRagdoll +=
+                OnBeforeStartRagdoll;
+            m_RagdollEventCharacter.Ragdoll.EventAfterFinishRecover +=
+                OnAfterFinishRagdollRecover;
+        }
+
+        private void UnsubscribeRagdollLifecycle()
+        {
+            if (m_RagdollEventCharacter?.Ragdoll != null)
+            {
+                m_RagdollEventCharacter.Ragdoll.EventBeforeStartRagdoll -=
+                    OnBeforeStartRagdoll;
+                m_RagdollEventCharacter.Ragdoll.EventAfterFinishRecover -=
+                    OnAfterFinishRagdollRecover;
+            }
+
+            m_RagdollEventCharacter = null;
+        }
+
+        private void OnBeforeStartRagdoll()
+        {
+            if (m_RagdollMovementSuspended) return;
+
+            m_RagdollMovementSuspended = true;
+            m_CommandQueue?.Clear();
+            InterruptTraversalForRagdoll();
+            DiscardDeferredTranslationWhileUnbound();
+            m_MoveDirection = Vector3.zero;
+            m_Velocity = Vector3.zero;
+            m_PreviousPosition = Transform.position;
+        }
+
+        private void OnAfterFinishRagdollRecover()
+        {
+            m_RagdollMovementSuspended = false;
+            DiscardDeferredTranslationWhileUnbound();
+            m_MoveDirection = Vector3.zero;
+            m_Velocity = Vector3.zero;
+            m_PreviousPosition = Transform.position;
+            m_LastSentPosition = Transform.position;
+            m_NextNavMeshBindAttemptTime = 0f;
+        }
+
+        private void InterruptTraversalForRagdoll()
+        {
+            m_LinkController?.InterruptForRagdoll();
+            m_Link = null;
         }
 
         private void ResetTransientMotionState()
@@ -958,9 +1058,16 @@ namespace Arawn.GameCreator2.Networking
 
         public override void SetPosition(Vector3 position, bool teleport = false)
         {
-            if (this.m_Agent == null)
+            // GC2 Default Ragdoll calls SetPosition from StopRagdoll before
+            // EventAfterStartRecover restores the disabled NavMeshAgent. Warping an inactive
+            // agent is invalid, so place the recovery root directly and let the normal binding
+            // path resume only after EventAfterFinishRecover.
+            if (this.m_Agent == null || !this.m_Agent.enabled)
             {
                 this.Transform.position = position;
+                this.m_LastSentPosition = position;
+                this.m_PreviousPosition = position;
+                m_NextNavMeshBindAttemptTime = 0f;
                 return;
             }
 
@@ -995,6 +1102,7 @@ namespace Arawn.GameCreator2.Networking
 
         public override void AddPosition(Vector3 amount)
         {
+            if (m_RagdollMovementSuspended) return;
             this.m_AddTranslation.Add(amount);
         }
 

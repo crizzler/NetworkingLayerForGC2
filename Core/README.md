@@ -228,6 +228,54 @@ This is intentionally separate from `NetworkCoreManager` message routing and Cor
 - Cannot start ragdoll if already ragdoll
 - Cannot recover if not ragdoll
 
+#### Ragdoll physics safety
+
+The Networking Layer temporarily removes the active movement backend's root
+collision shape from physics before GC2 enables the dynamic bone colliders. It
+restores the exact previous controller, agent, capsule, or supported native
+backend collision state after GC2 has disabled the bone colliders, while normal
+network locomotion remains suspended until the get-up recovery finishes. This
+applies on owners, server/Shared authority, and observer replicas and does not
+change the ragdoll wire format.
+
+Do not use another script to re-enable the root `CharacterController`, NavMesh
+agent/capsule, or native movement shape while the character is physically
+ragdolled. Also configure the referenced GC2 Skeleton for the exact character
+model. Skeleton assets contain authored collider dimensions; reusing a default
+Skeleton made for substantially different proportions or non-uniformly scaled
+models can create intersecting bone colliders and unstable physics independently
+of networking.
+
+#### Fusion and PurrNet ragdoll examples
+
+Install **Core Examples 1.1.0** for the active transport and open one of these
+scenes:
+
+- `Requires GC2 Core Demos - FusionRagdollDemo.unity`
+- `Requires GC2 Core Demos - PurrNetRagdollDemo.unity`
+
+Start a Host and connect a second player, then use **Start Ragdoll**, **Recover**,
+or **Validate 3 Cycles** on either peer. The buttons execute authored
+GC2 `Network Start Ragdoll` and `Network Recover Ragdoll` Instructions, so the
+request uses the normal ownership/security validation, authority-apply, and
+observer-broadcast path. The proof panel lists every registered representation
+on that peer. Before each locally initiated cycle it captures the identity and
+exact enabled/collision state of every supported root physics component, checks
+that root locomotion collision is absent while dynamic bone bodies are active,
+and requires the same components and states during recovery. Actor rows report
+only that peer's current replicas; they do not correlate delivery across two
+processes. Authority approval is correlated to the exact emitted request and
+correlation IDs, including synchronous Host loopback. A completed three-cycle
+run is an in-session local-replica hang/regression check; the focused EditMode suites remain the automated
+lifecycle evidence, and a two-process smoke is still required for observer
+delivery/convergence evidence.
+
+These scenes use GC2's standard Mannequin with its matching stock Skeleton.
+Create and tune a separate GC2 Skeleton for a character with substantially
+different proportions. The Networking Layer synchronizes the durable ragdoll
+state and start/recover commands; individual bone poses remain local physics
+simulation and are not streamed as a deterministic bone-pose snapshot.
+
 ### Props
 - Maximum props per character (configurable)
 - Prop prefab must exist in registry

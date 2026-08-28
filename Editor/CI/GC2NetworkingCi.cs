@@ -28,6 +28,16 @@ namespace Arawn.GameCreator2.Networking.Editor.CI
         private const string PurrNetFreeFlowInstallRoot =
             "Assets/Plugins/GameCreator/Installs/" +
             "GC2NetworkingLayerPurrNetTransport.FreeFlowCombatExamples@1.0.0";
+        private const string FusionCoreArchive =
+            "Arawn/NetworkingLayerForGC2/Demo/Fusion/Packages/Core/Package.unitypackage";
+        private const string PurrNetCoreArchive =
+            "Arawn/NetworkingLayerForGC2/Demo/PurrNet/Packages/Core/Package.unitypackage";
+        private const string FusionCoreInstallRoot =
+            "Assets/Plugins/GameCreator/Installs/" +
+            "GC2NetworkingLayerFusionTransport.CoreExamples@1.1.0";
+        private const string PurrNetCoreInstallRoot =
+            "Assets/Plugins/GameCreator/Installs/" +
+            "GC2NetworkingLayerPurrNetTransport.CoreExamples@1.1.0";
 
         private static readonly string[] DefaultGameCreatorPatchers =
         {
@@ -167,6 +177,72 @@ namespace Arawn.GameCreator2.Networking.Editor.CI
             Debug.Log(
                 "[GC2 Networking CI] Free Flow Combat validation fixtures prepared " +
                 "without modifying installer archives.");
+        }
+
+        /// <summary>
+        /// Imports the checked-in Fusion and PurrNet Core Examples 1.1.0 archives so focused
+        /// ragdoll scene/package tests do not depend on machine-local installed-example state.
+        /// The builders are resolved by name to keep this shared editor assembly independent of
+        /// both transport SDKs, and archive hashes must remain unchanged.
+        /// </summary>
+        public static void PrepareCoreRagdollExamples()
+        {
+            string[] archives =
+            {
+                FusionCoreArchive,
+                PurrNetCoreArchive
+            };
+            Dictionary<string, string> archiveHashes = HashRequiredAssets(archives);
+
+            try
+            {
+                InvokePublicStaticMethod(
+                    "Arawn.GameCreator2.Networking.Transport.Fusion.Editor." +
+                    "FusionCoreRagdollDemoBuilder, " +
+                    "Arawn.GameCreator2.Networking.Transport.Fusion.Editor",
+                    "BuildValidationFixture");
+                InvokePublicStaticMethod(
+                    "Arawn.GameCreator2.Networking.Transport.PurrNet.Editor." +
+                    "PurrNetCoreRagdollDemoBuilder, " +
+                    "Arawn.GameCreator2.Networking.Transport.PurrNet.Editor",
+                    "BuildValidationFixture");
+            }
+            finally
+            {
+                AssertAssetHashesUnchanged(archiveHashes);
+            }
+
+            AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
+            RequireGeneratedFolder(FusionCoreInstallRoot);
+            RequireGeneratedFolder(PurrNetCoreInstallRoot);
+
+            Debug.Log(
+                "[GC2 Networking CI] Core ragdoll validation fixtures prepared " +
+                "without modifying installer archives.");
+        }
+
+        /// <summary>
+        /// Rebuilds both transport Core Examples 1.1.0 installers, migrating an installed 1.0.2
+        /// source fixture when necessary. This mutates installer archives and therefore belongs
+        /// only in a disposable isolated project; copy reviewed outputs back afterward.
+        /// </summary>
+        public static void BuildCoreRagdollExamples()
+        {
+            InvokePublicStaticMethod(
+                "Arawn.GameCreator2.Networking.Transport.Fusion.Editor." +
+                "FusionCoreRagdollDemoBuilder, " +
+                "Arawn.GameCreator2.Networking.Transport.Fusion.Editor",
+                "BuildInstaller");
+            InvokePublicStaticMethod(
+                "Arawn.GameCreator2.Networking.Transport.PurrNet.Editor." +
+                "PurrNetCoreRagdollDemoBuilder, " +
+                "Arawn.GameCreator2.Networking.Transport.PurrNet.Editor",
+                "BuildInstaller");
+
+            AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
+            RequireGeneratedFolder(FusionCoreInstallRoot);
+            RequireGeneratedFolder(PurrNetCoreInstallRoot);
+            Debug.Log("[GC2 Networking CI] Core ragdoll example installers rebuilt.");
         }
 
         private static string[] ResolvePatcherNames()
@@ -320,7 +396,7 @@ namespace Arawn.GameCreator2.Networking.Editor.CI
                 if (!File.Exists(fullPath))
                 {
                     throw new FileNotFoundException(
-                        $"Free Flow Combat fixture preparation removed installer archive " +
+                        $"Installer fixture preparation removed checked-in archive " +
                         $"Assets/{pair.Key}.",
                         fullPath);
                 }
@@ -329,7 +405,7 @@ namespace Arawn.GameCreator2.Networking.Editor.CI
                 if (!string.Equals(pair.Value, actualHash, StringComparison.Ordinal))
                 {
                     throw new InvalidOperationException(
-                        $"Free Flow Combat fixture preparation modified checked-in installer " +
+                        $"Installer fixture preparation modified checked-in installer " +
                         $"archive Assets/{pair.Key}. Validation builders must not export " +
                         "packages.");
                 }
@@ -351,7 +427,7 @@ namespace Arawn.GameCreator2.Networking.Editor.CI
             if (type == null)
             {
                 throw new InvalidOperationException(
-                    $"Could not load required Free Flow Combat builder " +
+                    $"Could not load required installer validation builder " +
                     $"'{assemblyQualifiedTypeName}'. Restore and compile its transport " +
                     "dependencies before preparing validation fixtures.");
             }
@@ -374,8 +450,8 @@ namespace Arawn.GameCreator2.Networking.Editor.CI
             catch (TargetInvocationException exception)
             {
                 throw new InvalidOperationException(
-                    $"{type.FullName}.{methodName} failed while preparing the isolated " +
-                    "Free Flow Combat validation fixture.",
+                    $"{type.FullName}.{methodName} failed while preparing an isolated " +
+                    "installer validation fixture.",
                     exception.InnerException ?? exception);
             }
         }
@@ -385,7 +461,7 @@ namespace Arawn.GameCreator2.Networking.Editor.CI
             if (!AssetDatabase.IsValidFolder(assetPath))
             {
                 throw new DirectoryNotFoundException(
-                    $"Free Flow Combat validation builder did not create '{assetPath}'.");
+                    $"Installer validation builder did not create '{assetPath}'.");
             }
         }
     }

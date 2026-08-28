@@ -16,12 +16,12 @@ MonoBehaviour:
     m_Name: Core Examples
     m_Module: GC2 Networking Layer PurrNet Transport
     m_Description: PurrNet network character, variables, character selection, chat,
-      and authority-validated replicated door state examples.
+      authority-validated replicated door state, and network ragdoll lifecycle examples.
     m_Author: Arawn
     m_Version:
       major: 1
-      minor: 0
-      patch: 2
+      minor: 1
+      patch: 0
     m_Complexity: 0
     m_Dependencies:
     - m_ID: GC2NetworkingLayerPurrNetTransport.Assets

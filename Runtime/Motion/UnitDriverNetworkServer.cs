@@ -351,6 +351,22 @@ namespace Arawn.GameCreator2.Networking
             this.m_ExpectedMaxSpeed = this.Character.Motion.LinearSpeed;
             CaptureLastKnownGoodAuthoritativePose();
 
+            bool isRagdoll = this.Character.Ragdoll != null &&
+                              this.Character.Ragdoll.IsRagdoll;
+            if (isRagdoll)
+            {
+                NetworkRagdollPhysicsGuard.Adopt(
+                    this.Character,
+                    this.m_Controller,
+                    intendedEnabled: true,
+                    intendedDetectCollisions: true);
+            }
+            else
+            {
+                if (!this.m_Controller.enabled) this.m_Controller.enabled = true;
+                NetworkRagdollPhysicsGuard.Register(this.Character, this.m_Controller);
+            }
+
             if (this.Character.Ragdoll != null)
             {
                 this.Character.Ragdoll.EventBeforeStartRagdoll -= OnBeforeStartRagdoll;

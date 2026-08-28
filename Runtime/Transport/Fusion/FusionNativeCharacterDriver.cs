@@ -232,13 +232,27 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             RefreshControllerShape();
             m_WasGrounded = IsGrounded;
             if (m_WasGrounded) m_LastGroundedTick = CurrentTick;
+            if (character.Ragdoll?.IsRagdoll == true)
+            {
+                NetworkRagdollPhysicsGuard.Adopt(
+                    character,
+                    m_Controller,
+                    intendedEnabled: true,
+                    intendedDetectCollisions: true);
+            }
+            else
+            {
+                if (!m_Controller.enabled) m_Controller.enabled = true;
+                NetworkRagdollPhysicsGuard.Register(character, m_Controller);
+            }
         }
 
         public override void OnDispose(Character character)
         {
             // The CharacterController belongs to the character prefab (or was added as the
             // same shared fallback used by the built-in drivers). Role changes must not destroy
-            // it while Fusion still owns the NetworkObject.
+            // or unregister it while Fusion still owns the NetworkObject. The Character-scoped
+            // ragdoll guard keeps the captured baseline across driver/authority role changes.
             m_Controller = null;
             m_FloorNormal = null;
             m_NavigationPath = null;
@@ -252,7 +266,14 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         {
             // Presentation and input sampling are render-frame work, but transform movement is
             // deliberately absent here. FixedUpdateNetwork is the sole locomotion clock.
-            if (Character == null || m_Controller == null) return;
+            if (Character == null || m_Controller == null ||
+                Character.Ragdoll?.IsRagdoll == true)
+            {
+                m_SampledRootMotionVelocity = Vector3.zero;
+                m_SampledRootMotionWeight = 0f;
+                m_JumpPending = false;
+                return;
+            }
             RefreshControllerShape();
 
             if (m_FloorNormal != null)
@@ -434,6 +455,22 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
 
         internal FusionNativeCharacterInput CaptureInput(int tick)
         {
+            if (Character?.Ragdoll?.IsRagdoll == true)
+            {
+                // Keep recovery animation/root motion out of the replicated input stream. GC2's
+                // explicit recovery teleport remains queued separately and is consumed after the
+                // get-up phase has finished.
+                m_JumpPending = false;
+                m_SampledRootMotionVelocity = Vector3.zero;
+                m_SampledRootMotionWeight = 0f;
+                return new FusionNativeCharacterInput
+                {
+                    Move = Vector2.zero,
+                    Yaw = Transform != null ? Transform.eulerAngles.y : m_SampledYaw,
+                    SourceTick = tick
+                };
+            }
+
             SampleRootMotionForCurrentFrame();
 
             bool navigationOverridesInput = m_NavigationMode != NavigationMode.Inactive;
@@ -524,9 +561,12 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             bool authoritative,
             bool invokeGameplayEvents)
         {
-            if (Character == null || Character.IsDead || m_Controller == null || deltaTime <= 0f)
+            if (Character == null || Character.IsDead || m_Controller == null ||
+                !m_Controller.enabled || Character.Ragdoll?.IsRagdoll == true ||
+                deltaTime <= 0f)
             {
                 m_MoveVelocity = Vector3.zero;
+                ClearExplicitPresentationVelocity();
                 return;
             }
 
