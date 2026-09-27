@@ -27,9 +27,34 @@ The Fusion integration uses Fusion/Photon connectivity. It does not replace Fusi
 
 Version 2.4.1 was validated against PurrNet 1.22.1-beta.3 and Photon Fusion 2.1.1. The optional Advanced KCC driver was validated with Photon Advanced KCC 2.1.0. The complete public source snapshot contains both transport integrations, so install the corresponding SDK assemblies before importing or compiling their transport folders.
 
+## Inventory repair in source version 2.4.2
+
+Native non-host pickup now claims the exact dropped RuntimeItem and retains its
+customized properties and socket contents. The repair also covers loaded-prefab
+pickup conversion, stable/duplicate pickup IDs, rejection retry, late join,
+disconnect and consistent world-drop cleanup. Generic unvalidated client adds
+remain denied.
+
+**Update every peer and reapply Inventory patch 3.1.1-inventory.** Hook ABI 300
+and wire fields are unchanged. Drops expire after 600 seconds of unscaled
+authority time; one manager sweeps once per second, with immediate expiry rejection
+on claims. PurrNet sends live creation/removal session-wide and targets initial
+replay to the loading peer. This shared-world policy is not loot secrecy or world
+interest management. Prefer explicit scene IDs; automatic conversion supports fixed
+Items and authored `Self[item]` defaults. See the
+[full Inventory migration notes](Inventory/README.md).
+
+Owned Inventory regression tests cover routing, authority, identity, scheduler,
+expiry, reentrancy and replay. They require GC2 Core/Inventory and the declared
+Inventory.Items examples for the loaded-prefab fixture. Native validation uses
+local Linux PurrNet host/client processes, production Trigger/BagCellUI actions,
+List/Grid and customized sockets. It does not establish Fusion gameplay,
+dedicated-server, WAN, physical-input or large-world performance guarantees.
+This source merge does not publish a new release package or Asset Store update.
+
 ## Optional Fusion Advanced KCC Driver
 
-The optional Game Creator 2 movement driver for Photon Fusion Advanced KCC, introduced in version 2.1.0, remains available in version 2.4.1. Fusion Native remains the built-in, recommended default. Choose Advanced KCC when your project specifically wants its collision, prediction, resimulation, and render-presentation workflow.
+The optional Game Creator 2 movement driver for Photon Fusion Advanced KCC, introduced in version 2.1.0, remains available in version 2.4.2. Fusion Native remains the built-in, recommended default. Choose Advanced KCC when your project specifically wants its collision, prediction, resimulation, and render-presentation workflow.
 
 - Photon Advanced KCC is a separate dependency and is not redistributed by this repository.
 - The Fusion Scene Setup Wizard detects a compatible KCC API, manages `ARAWN_GC2_FUSION_KCC`, configures the nested KCC motor and GC2 driver, and validates authority and Fusion weaving setup.
@@ -113,7 +138,7 @@ Use `Game Creator > Networking Layer > Patches` outside Play Mode. Each transpor
 
 ## Compatibility
 
-Matching Networking Layer versions are recommended for every peer. Versions 2.4.0 and 2.4.1 do not change the 2.3.0 wire protocol, but version 2.3.0 changed role initialization, trusted combat handling, Melee Skill and Free Flow state payloads, bot-slot membership replication, and persistent-state paths and must not be mixed with builds older than 2.3.0. Every peer in an Advanced KCC session must also use the compatible optional adapter and Photon addon version.
+Use the same Networking Layer version on every peer. Versions 2.4.0, 2.4.1 and 2.4.2 do not change the 2.3.0 wire protocol, but version 2.3.0 changed role initialization, trusted combat handling, Melee Skill and Free Flow state payloads, bot-slot membership replication, and persistent-state paths and must not be mixed with builds older than 2.3.0. Every peer in an Advanced KCC session must also use the compatible optional adapter and Photon addon version.
 
 ## Documentation
 

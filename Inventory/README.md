@@ -10,7 +10,7 @@ must use the same Networking Layer package version.
 ## Required setup
 
 1. Open `Game Creator > Networking Layer > Patches > Inventory > Patch (Server Authority)`.
-2. Confirm the status is **Patched**, **Backups Available**, and `3.0.0-inventory`.
+2. Confirm the status is **Patched**, **Backups Available**, and `3.1.1-inventory`.
 
    The v3 networking assembly consumes an interception ABI injected by this patch. Applying the
    patch defines `GC2_NETWORK_INVENTORY_PATCHED`; unpatching removes that symbol and conditionally
@@ -24,10 +24,69 @@ must use the same Networking Layer package version.
    The PurrNet wizard adds it to the selected player prefab.
 5. For PurrNet, keep all Inventory channels on `ReliableOrdered`.
 
-The patch installs semantic interception points in GC2 Inventory 2.8.x. Native Add, Remove,
+The patch installs semantic interception points in GC2 Inventory 2.8.x and 2.9.x. Native Add, Remove,
 Move/stack, Split, transfer, Use, Drop, Wealth, merchant, crafting, dismantling, combine, and the
 `Inventory > Bags > Add Item` instruction then enter the authoritative request flow. Do not ship a
 networked Inventory scene with an old or missing patch.
+
+## Version 2.4.2 migration and world drops
+
+Update the Networking Layer on **every peer** and reapply Inventory patch
+**3.1.1-inventory**. The interception ABI remains revision **300** and this repair
+adds no wire fields or packet types. Older peers do not implement the repaired
+pickup, lifetime and replay behavior. A Git source update is not an Asset Store
+release or a newly published installer package.
+
+Native Add Item interactions on a tracked drop now claim its exact authoritative
+RuntimeItem before considering a scene pickup source or generic add. Customized
+properties and socket contents survive transfer; generic unvalidated client adds
+remain denied. Rejected or faulted instructions stop before later grant/Destroy
+Self actions, finish the native scheduler, and allow the same pickup to retry.
+
+World drops retain the existing **600 seconds of unscaled authority time**.
+The active Inventory manager sweeps once per unscaled second, independently of
+player/controller count, including after the last bag leaves. Physical cleanup
+occurs at the first eligible manager update after expiry: at most one scheduled
+second plus frame/suspension delay while the manager is active. An expired pickup
+request is rejected immediately by checking its target, even before that sweep.
+Expiry removes both the authority record and world object and sends one removal;
+it does not turn drops into permanent objects. Session stop/teardown clears old
+world state. Unexpired drops survive the source player's disconnect.
+
+Scheduled maintenance reuses its candidate buffer. Idle frames and warmed registry
+traversal avoid managed allocations; transport serialization, object destruction,
+registration and event-driven late-join snapshots are outside that statement.
+Cleanup checks captured registration generations and tolerates reentrant callbacks
+or session replacement without deleting a newly registered item under the old key.
+
+PurrNet delivers live world-drop creation/removal to **all connected session
+clients**, independently of source-bag ownership or bag relevance. Initial-state
+replay uses the existing reliable ordered packet targeted to the loading peer;
+repeated replay coalesces live identities. Claimed/expired entries are excluded.
+A transport without the optional targeted replay delegate retains compatible
+broadcast replay and the same duplicate suppression.
+
+This policy supports a shared world with compatible scene/item catalogs. It is
+**not world interest management, hidden-loot filtering or a confidentiality
+boundary**. Separate private worlds/scenes sharing a session need a dedicated
+world-routing design; bag visibility does not filter these world payloads. Live
+traffic grows with connected clients; initial replay grows with live drop count.
+Targeted replay avoids resending all live drops to established peers on each join.
+No large-world capacity, Fusion gameplay, dedicated-server or WAN claim follows
+from the local PurrNet host/client validation.
+
+Prefer explicit, unique serialized scene pickup IDs. A zero ID caches a
+scene/hierarchy-derived fallback at first use, so subsequent reorder, deletion or
+reparenting does not change its registry key. All peers must agree on that initial
+hierarchy. Additive copies need distinct authored IDs; duplicate IDs fail closed
+and require correction. Runtime-spawned pickups need the supported transport
+identity adapter, not independently generated local IDs.
+
+The scene wizard handles fixed Item getters and authored LocalNameVariables
+`Self[item]` defaults in loaded scenes, including inactive prefab instances.
+It does not execute arbitrary dynamic expressions or rewrite prefab assets.
+Configure unsupported getters explicitly. Offline unmanaged bags retain native
+GC2 behavior and runtime identity semantics.
 
 ## Authority rules
 

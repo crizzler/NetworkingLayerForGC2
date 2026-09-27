@@ -191,12 +191,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
             if (!NetworkInventoryController.TryResolveForBag(bag, out var controller))
                 return NetworkInventoryInterceptResult.Unhandled;
 
-            NetworkInventoryPickupSource pickup = source != null
-                ? source.GetComponentInParent<NetworkInventoryPickupSource>()
-                : null;
-            return pickup != null
-                ? await pickup.RequestPickupAsync(controller)
-                : await controller.RoutePatchedInstructionAddAsync(item);
+            return await controller.RoutePatchedInstructionAddAsync(item, source);
         }
 
         private static NetworkInventoryInterceptResult InterceptCellDrop(

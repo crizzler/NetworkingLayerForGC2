@@ -394,13 +394,16 @@ namespace Arawn.GameCreator2.Networking.Editor
                 }
 
                 if (value == null || value.GetType().FullName != ADD_ITEM_INSTRUCTION_TYPE) continue;
-                item = ResolveInstructionItem(value);
+                item = ResolveInstructionItemForOwner(value, behaviour.gameObject);
                 return true;
             }
             return false;
         }
 
-        private static UnityEngine.Object ResolveInstructionItem(object instruction)
+        private static UnityEngine.Object ResolveInstructionItem(object instruction) =>
+            ResolveInstructionItemForOwner(instruction,null);
+
+        private static UnityEngine.Object ResolveInstructionItemForOwner(object instruction, GameObject owner)
         {
             try
             {
@@ -412,25 +415,51 @@ namespace Arawn.GameCreator2.Networking.Editor
                     return null;
                 }
 
-                // PropertyGetItem.EditorValue is not suitable here: GetItemInstance does not
-                // override the base editor value and therefore reports null. Unwrap only the
-                // fixed Item getter. Dynamic Item properties must remain unconverted because the
-                // server cannot derive one authoritative asset from them at edit time.
-                FieldInfo propertyField = FindInstanceField(wrapper.GetType(), "m_Property");
-                object property = propertyField?.GetValue(wrapper);
-                if (property == null ||
-                    property.GetType().FullName != GET_ITEM_INSTANCE_TYPE)
-                {
-                    return null;
-                }
+                object property=ReadRequiredField(wrapper,"m_Property");
+                if (property?.GetType().FullName==GET_ITEM_INSTANCE_TYPE)
+                    return ReadRequiredField(property,"m_Item") as UnityEngine.Object;
+                if (property?.GetType().FullName!="GameCreator.Runtime.Inventory.GetItemLocalName") return null;
 
-                FieldInfo itemField = FindInstanceField(property.GetType(), "m_Item");
-                return itemField?.GetValue(property) as UnityEngine.Object;
-            }
-            catch
-            {
+                // Stock Pickup_Item templates store their fixed asset in Self[item]. Resolve
+                // that authored template value, not a live/dynamic variable getter or Awake.
+                object variable=ReadRequiredField(property,"m_Variable");
+                object target=ReadRequiredField(variable,"m_Variable");
+                object targetGetter=ReadRequiredField(target,"m_Property");
+                if (targetGetter?.GetType().FullName!="GameCreator.Runtime.Common.GetGameObjectSelf") return null;
+                object name=ReadRequiredField(variable,"m_Name");
+                string key=name.GetType().GetProperty("String")?.GetValue(name) as string;
+                Type localType=Type.GetType("GameCreator.Runtime.Variables.LocalNameVariables, GameCreator.Runtime.Core");
+                if (localType==null) throw new TypeLoadException("LocalNameVariables is unavailable");
+                Component locals=owner!=null ? owner.GetComponent(localType) : null;
+                if (locals==null || string.IsNullOrEmpty(key)) return null;
+                object runtime=ReadRequiredField(locals,"m_Runtime");
+                object list=runtime.GetType().GetProperty("TemplateList")?.GetValue(runtime)
+                    ?? throw new MissingMemberException(runtime.GetType().FullName,"TemplateList");
+                int count=(int)(list.GetType().GetProperty("Length")?.GetValue(list)
+                    ?? throw new MissingMemberException(list.GetType().FullName,"Length"));
+                MethodInfo get=list.GetType().GetMethod("Get",new[]{typeof(int)})
+                    ?? throw new MissingMethodException(list.GetType().FullName,"Get(int)");
+                for(int i=0;i<count;i++)
+                {
+                    object entry=get.Invoke(list,new object[]{i});
+                    if ((string)entry.GetType().GetProperty("Name")?.GetValue(entry)!=key) continue;
+                    var item=entry.GetType().GetProperty("Value")?.GetValue(entry) as UnityEngine.Object;
+                    return item?.GetType().FullName=="GameCreator.Runtime.Inventory.Item" ? item : null;
+                }
                 return null;
             }
+            catch (Exception exception)
+            {
+                Debug.LogWarning($"[InventorySceneSetup] Cannot inspect Add Item on '{(owner!=null ? GetHierarchyPath(owner.transform) : "unknown owner")}': " + exception.Message,owner);
+                return null;
+            }
+        }
+
+        private static object ReadRequiredField(object value,string fieldName)
+        {
+            FieldInfo field=FindInstanceField(value?.GetType(),fieldName)
+                ?? throw new MissingFieldException(value?.GetType().FullName,fieldName);
+            return field.GetValue(value);
         }
 
         private static FieldInfo FindInstanceField(Type type, string fieldName)

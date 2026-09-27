@@ -629,7 +629,7 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
             {
                 string successTail = moduleName == "Inventory"
                     ? "Pristine GC2 Inventory remains available. Server-authoritative Networking Layer " +
-                      "Inventory assemblies are disabled until patch 3.1.0-inventory is applied again."
+                      "Inventory assemblies are disabled until patch 3.1.1-inventory is applied again."
                     : moduleName == "ShooterSight"
                     ? "Remote shooter sight transitions can again execute local Sight OnEnter/OnExit instructions until the hook is re-applied."
                     : "The networking solution will now use interception-based validation.";

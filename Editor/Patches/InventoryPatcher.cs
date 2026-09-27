@@ -10,7 +10,7 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
     public class InventoryPatcher : GC2PatcherBase
     {
         public override string ModuleName => "Inventory";
-        public override string PatchVersion => "3.1.0-inventory";
+        public override string PatchVersion => "3.1.1-inventory";
         public override string DisplayName => "Inventory (Game Creator 2)";
 
         public override string PatchDescription =>
@@ -106,7 +106,8 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                 return new[]
                 {
                     "NetworkInstructionAddItemInterceptor",
-                    "RunNetworkOrLocal"
+                    "RunNetworkOrLocal",
+                    "this.NextInstruction = int.MaxValue;"
                 };
             }
 
@@ -851,7 +852,7 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
         }
 
         // [GC2_NETWORK_PATCH] Await server authorization before the instruction list continues.
-        private static async Task RunNetworkOrLocal(Bag bag, Item item, GameObject source)
+        private async Task RunNetworkOrLocal(Bag bag, Item item, GameObject source)
         {
             var interceptor = TBagContent.NetworkInstructionAddItemInterceptor;
             if (interceptor == null)
@@ -869,15 +870,16 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                 }
                 else if (result == NetworkInventoryInterceptResult.HandledFailure)
                 {
-                    throw new InvalidOperationException(
-                        ""The server rejected the network Inventory Add Item instruction."");
+                    // Stop through GC2's scheduler so InstructionList clears IsRunning.
+                    this.NextInstruction = int.MaxValue;
+                    Debug.LogWarning(""The server rejected the network Inventory Add Item instruction."", bag);
                 }
             }
             catch (Exception exception)
             {
                 // A configured network route fails closed. Falling back to a local grant would duplicate items.
+                this.NextInstruction = int.MaxValue;
                 Debug.LogException(exception, bag);
-                throw;
             }
         }
         // [GC2_NETWORK_PATCH_END]";

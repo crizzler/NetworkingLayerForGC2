@@ -964,6 +964,148 @@ namespace Arawn.GameCreator2.Networking.Inventory
             return true;
         }
 
+        /// <summary>
+        /// Classification of an Add Item interaction source against the tracked dropped-item
+        /// registry.
+        /// </summary>
+        internal enum DroppedWorldItemMatch
+        {
+            /// <summary>No tracked drop is related to the source; the caller keeps its own route.</summary>
+            Untracked,
+
+            /// <summary>Exactly one tracked drop is unambiguously identified.</summary>
+            Resolved,
+
+            /// <summary>
+            /// A tracked drop is involved but cannot be named uniquely. The caller must fail closed
+            /// so an ambiguous interaction cannot grant an arbitrary same-type payload and cannot
+            /// quietly degrade into a generic grant.
+            /// </summary>
+            Ambiguous
+        }
+
+        /// <summary>
+        /// Resolves the authoritative dropped-world-item identity that a native pickup interaction
+        /// is touching.
+        /// Matching is by object identity only, never by item type, proximity, dictionary order or
+        /// local instance id, so the server always validates the payload the player interacted with.
+        /// The interaction source's enclosing registered root (the innermost one when registered
+        /// drops are nested) is unique because transform ancestry is a chain; a supplied wrapper is
+        /// only accepted when exactly one tracked drop lies inside it.
+        /// </summary>
+        internal static DroppedWorldItemMatch ResolveTrackedDroppedWorldItem(
+            GameObject source,
+            int requestedItemHash,
+            out long runtimeIdHash,
+            out uint sourceBagNetworkId)
+        {
+            runtimeIdHash = 0;
+            sourceBagNetworkId = 0;
+            if (source == null || s_DroppedItemInstances.Count == 0)
+            {
+                return DroppedWorldItemMatch.Untracked;
+            }
+
+            Transform sourceTransform = source.transform;
+
+            DroppedItemInstance enclosingEntry = default;
+            long enclosingHash = 0;
+            int enclosingDepth = -1;
+            bool hasEnclosing = false;
+            bool duplicateEnclosing = false;
+            var containedBySource = new List<KeyValuePair<long, DroppedItemInstance>>(
+                s_DroppedItemInstances.Count);
+
+            foreach (KeyValuePair<long, DroppedItemInstance> entry in s_DroppedItemInstances)
+            {
+                // A destroyed or stale entry is simply untracked; a later object that reuses the
+                // name must never be matched to it.
+                GameObject instance = entry.Value.Instance;
+                if (instance == null) continue;
+
+                Transform instanceTransform = instance.transform;
+                if (instanceTransform == sourceTransform || sourceTransform.IsChildOf(instanceTransform))
+                {
+                    int depth = DepthOf(instanceTransform);
+                    if (!hasEnclosing || depth > enclosingDepth)
+                    {
+                        hasEnclosing = true;
+                        enclosingDepth = depth;
+                        enclosingHash = entry.Key;
+                        enclosingEntry = entry.Value;
+                        duplicateEnclosing = false;
+                    }
+                    else if (depth == enclosingDepth) duplicateEnclosing = true;
+
+                    continue;
+                }
+
+                if (instanceTransform.IsChildOf(sourceTransform))
+                {
+                    containedBySource.Add(entry);
+                }
+            }
+
+            if (hasEnclosing)
+            {
+                if (duplicateEnclosing) return DroppedWorldItemMatch.Ambiguous;
+                return TryAcceptDroppedWorldItem(
+                    enclosingHash, enclosingEntry, requestedItemHash, out runtimeIdHash, out sourceBagNetworkId)
+                    ? DroppedWorldItemMatch.Resolved
+                    : DroppedWorldItemMatch.Untracked;
+            }
+
+            if (containedBySource.Count == 0)
+            {
+                return DroppedWorldItemMatch.Untracked;
+            }
+
+            if (containedBySource.Count > 1)
+            {
+                // Several drops are equally enclosed by the supplied source. Selecting one would be
+                // arbitrary and could grant a different same-type payload than the player touched.
+                return DroppedWorldItemMatch.Ambiguous;
+            }
+
+            KeyValuePair<long, DroppedItemInstance> only = containedBySource[0];
+            return TryAcceptDroppedWorldItem(
+                only.Key, only.Value, requestedItemHash, out runtimeIdHash, out sourceBagNetworkId)
+                ? DroppedWorldItemMatch.Resolved
+                : DroppedWorldItemMatch.Untracked;
+        }
+
+        /// <summary>
+        /// A tracked drop only answers an Add Item instruction that requests its own payload. A zero
+        /// payload hash means the tracked identity is unknown, so the drop remains the only
+        /// candidate; a mismatch means the instruction is unrelated and must keep its own route.
+        /// </summary>
+        private static bool TryAcceptDroppedWorldItem(
+            long candidateRuntimeIdHash,
+            DroppedItemInstance candidate,
+            int requestedItemHash,
+            out long runtimeIdHash,
+            out uint sourceBagNetworkId)
+        {
+            runtimeIdHash = 0;
+            sourceBagNetworkId = 0;
+            if (candidate.Item.ItemHash != 0 && requestedItemHash != 0 &&
+                candidate.Item.ItemHash != requestedItemHash)
+            {
+                return false;
+            }
+
+            runtimeIdHash = candidateRuntimeIdHash;
+            sourceBagNetworkId = candidate.SourceBagNetworkId;
+            return true;
+        }
+
+        private static int DepthOf(Transform value)
+        {
+            int depth = 0;
+            for (Transform cursor = value; cursor != null; cursor = cursor.parent) depth++;
+            return depth;
+        }
+
         private static void RememberLocalRemoval(NetworkInventoryController source, RuntimeItem item)
         {
             if (source == null || item == null) return;
@@ -1259,8 +1401,16 @@ namespace Arawn.GameCreator2.Networking.Inventory
             LogPickupDebug(
                 $"destroying tracked dropped instance runtime={runtimeIdHash} sourceBag={droppedItem.SourceBagNetworkId} instance={instance.name} remainingTrackedDrops={s_DroppedItemInstances.Count}",
                 instance);
-            UnityEngine.Object.Destroy(instance);
+            DestroyDroppedWorldObject(instance);
             return true;
+        }
+
+        private static void DestroyDroppedWorldObject(GameObject instance)
+        {
+            if (instance == null) return;
+            instance.SetActive(false);
+            if (Application.isPlaying) UnityEngine.Object.Destroy(instance);
+            else UnityEngine.Object.DestroyImmediate(instance);
         }
 
         private static bool TryDestroyDroppedItemInstance(NetworkDroppedItemRemovedBroadcast broadcast, out long destroyedRuntimeIdHash)
@@ -1272,6 +1422,9 @@ namespace Arawn.GameCreator2.Networking.Inventory
             }
 
             destroyedRuntimeIdHash = 0;
+            // Reliable removal can be replayed. A known identity must never remove another
+            // object merely because it shares a source bag or position.
+            if (broadcast.RuntimeIdHash != 0) return false;
             if (s_DroppedItemInstances.Count == 0)
             {
                 return false;

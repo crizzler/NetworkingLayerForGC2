@@ -1,1 +1,1 @@
-GC2 Networking Layer aka Multiplayer Integration for Game Creator 2 Version 2.4.1
+GC2 Networking Layer aka Multiplayer Integration for Game Creator 2 Version 2.4.2
