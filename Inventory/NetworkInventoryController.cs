@@ -252,6 +252,8 @@ namespace Arawn.GameCreator2.Networking.Inventory
 
         private struct ServerDroppedWorldItem
         {
+            // Local registration generation, never serialized. A callback may reuse the key.
+            public ulong Registration;
             public uint SourceBagNetworkId;
             public NetworkRuntimeItem Item;
             public Vector3 Position;

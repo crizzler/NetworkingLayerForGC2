@@ -48,10 +48,10 @@ Open `Game Creator > Networking Layer > PurrNet Scene Setup Wizard`. It will:
   `PurrNetAnimationMotionTransportBridge`.
 - Create or reuse selected module managers and PurrNet module bridges for
   Stats, Inventory, Melee, Shooter, Quests, Dialogue, Traversal, and Abilities.
-- When Inventory is selected, require patch `3.0.0-inventory`, warn about the
+- When Inventory is selected, require patch `3.1.1-inventory`, warn about the
   unsafe unvalidated-client-add compatibility option, validate pickup IDs and
   Items, and convert stock `_Template_Pickup_Item` scene instances that have a
-  fixed Item.
+  fixed Item or authored LocalNameVariables `Self[item]` default.
 - When Shooter is selected, require the GC2 Shooter Sight hook patch before
   setup continues. This patch can also be applied manually from
   `Game Creator > Networking Layer > Patches > Shooter Sight > Patch (Remote Camera Safety)`.
@@ -224,3 +224,20 @@ transport contract in the
 [online documentation](../../../Documentation/Online%20Documentation.md): wire
 outbound manager/controller delegates to transport sends and route inbound
 packets to the matching `Receive*` APIs.
+
+## Inventory world-drop delivery in 2.4.2
+
+World-drop creation and removal use session-wide ReliableOrdered delivery,
+independent of the source bag's relevance or continued existence. A source bag's
+owner-only/explicit-observer visibility still governs its inventory state; it is
+not a world-loot confidentiality boundary. On player scene load, live drop replay
+is targeted to that player with the existing packet route. Repeated initial sync
+coalesces live identities and cannot replay consumed/expired registry entries.
+
+Use this policy for a shared world and compatible scene/item catalogs. Separate
+independent worlds in one session, hidden-loot filtering and large-world interest
+management are outside this contract. Live payload fanout grows with session
+clients; each joining peer receives the live drop set. A 600-second unscaled
+lifetime and one-second manager sweep bound lifetime, not concurrent drop density.
+Claim-time expiry remains immediate and disconnected source bags do not prevent
+cleanup. See the [complete Inventory migration notes](../../../Inventory/README.md).

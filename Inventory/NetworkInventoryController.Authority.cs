@@ -175,8 +175,82 @@ namespace Arawn.GameCreator2.Networking.Inventory
             return NetworkInventoryInterceptResult.HandledSuccess;
         }
 
-        internal async Task<NetworkInventoryInterceptResult> RoutePatchedInstructionAddAsync(Item item)
+        internal async Task<NetworkInventoryInterceptResult> RoutePatchedInstructionAddAsync(
+            Item item, GameObject source = null)
         {
+            // A world object created by a networked inventory drop is instantiated from the
+            // item's prefab, which need not have a NetworkInventoryPickupSource. Resolve the exact
+            // tracked drop identity from the object the interaction actually touched and submit
+            // the canonical pickup request, so the server validates registry membership, world
+            // range, source bag and capacity and grants the exact authoritative payload once.
+            // Object identity is used deliberately: matching by item type, proximity or registry
+            // order could substitute a different same-type drop and would not preserve the
+            // payload's runtime properties or sockets.
+            if (source != null)
+            {
+                DroppedWorldItemMatch match = ResolveTrackedDroppedWorldItem(
+                    source,
+                    item != null ? item.ID.Hash : 0,
+                    out long runtimeIdHash,
+                    out uint sourceBagNetworkId);
+
+                if (match == DroppedWorldItemMatch.Ambiguous)
+                {
+                    // A tracked drop is involved but cannot be named uniquely. Fail closed: granting
+                    // the generic Add Item payload would silently substitute a different item for the
+                    // one the player touched, and picking an arbitrary drop would corrupt identity.
+                    OnOperationRejected?.Invoke(
+                        InventoryRejectionReason.IdentityMismatch,
+                        "Ambiguous dropped item interaction");
+                    if (m_LogRejections)
+                    {
+                        Debug.LogWarning(
+                            $"[NetworkInventoryController] Ambiguous dropped-item interaction on " +
+                            $"'{source.name}': several tracked drops are equally related, so no " +
+                            "pickup claim is submitted.",
+                            source);
+                    }
+
+                    return NetworkInventoryInterceptResult.HandledFailure;
+                }
+
+                if (match == DroppedWorldItemMatch.Resolved)
+                {
+                    if (!m_IsServer && !m_IsLocalClient)
+                    {
+                        NetworkInventoryPatchHooks.WarnProxyMutation(this, "Pickup dropped item");
+                        return NetworkInventoryInterceptResult.HandledFailure;
+                    }
+
+                    NetworkInventoryManager manager = NetworkInventoryManager.Instance;
+                    if (manager == null) return NetworkInventoryInterceptResult.HandledFailure;
+
+                    NetworkPickupResponse pickupResponse = await manager.RequestDroppedWorldItemPickupAsync(
+                        this, runtimeIdHash, sourceBagNetworkId);
+                    if (!pickupResponse.Authorized) return NetworkInventoryInterceptResult.HandledFailure;
+                    if (!m_IsServer && pickupResponse.StateVersion != 0 &&
+                        !HasAppliedStateVersion(pickupResponse.StateVersion))
+                    {
+                        // Fail closed: the grant was authorized but the local revision never arrived,
+                        // so continuing the instruction list could destroy the object without an item.
+                        return NetworkInventoryInterceptResult.HandledFailure;
+                    }
+
+                    return NetworkInventoryInterceptResult.HandledSuccess;
+                }
+            }
+
+            // A prefab may also carry a registered base-Item source. A tracked RuntimeItem
+            // must win above; otherwise this route would discard customized properties/sockets.
+            NetworkInventoryPickupSource pickup = source != null
+                ? source.GetComponentInParent<NetworkInventoryPickupSource>() : null;
+            if (pickup != null)
+            {
+                if (item == null || pickup.Item != item || (!m_IsServer && !m_IsLocalClient))
+                    return NetworkInventoryInterceptResult.HandledFailure;
+                return await pickup.RequestPickupAsync(this);
+            }
+
             NetworkContentAddResponse response = await RequestAddItemAsync(
                 item, TBagContent.INVALID, true, InventoryModificationSource.Direct, 0);
             return response.Authorized

@@ -440,6 +440,8 @@ namespace Arawn.GameCreator2.Networking.Inventory.Transport.PurrNet
             manager.OnBroadcastPickupState += BroadcastPickupStateToClients;
             manager.OnSendSnapshotToClient -= SendSnapshotToClient;
             manager.OnSendSnapshotToClient += SendSnapshotToClient;
+            manager.OnSendWorldDropToClient -= SendWorldDropToClient;
+            manager.OnSendWorldDropToClient += SendWorldDropToClient;
             manager.OnSendPickupStateSnapshotToClient -= SendPickupStateSnapshotToClient;
             manager.OnSendPickupStateSnapshotToClient += SendPickupStateSnapshotToClient;
 
@@ -505,6 +507,7 @@ namespace Arawn.GameCreator2.Networking.Inventory.Transport.PurrNet
             manager.OnBroadcastDelta -= BroadcastDeltaToClients;
             manager.OnBroadcastPickupState -= BroadcastPickupStateToClients;
             manager.OnSendSnapshotToClient -= SendSnapshotToClient;
+            manager.OnSendWorldDropToClient -= SendWorldDropToClient;
             manager.OnSendPickupStateSnapshotToClient -= SendPickupStateSnapshotToClient;
 
             m_ManagerInitialized = false;
@@ -944,14 +947,18 @@ namespace Arawn.GameCreator2.Networking.Inventory.Transport.PurrNet
         {
             LogPickupDebug(
                 $"broadcast item dropped sourceBag={broadcast.SourceBagNetworkId} runtime={broadcast.Item.RuntimeIdHash} item={broadcast.Item.ItemIdString} position={broadcast.Position}");
-            BroadcastInventoryPacket(broadcast.SourceBagNetworkId, new GC2InventoryItemDroppedBroadcastPacket { broadcast = broadcast });
+            // World drops outlive their source bag and must also reach late joiners. Bag-owner
+            // relevance cannot represent the lifetime/visibility of these local world objects.
+            NetworkManager nm = ActiveManager;
+            if (nm != null && nm.isServer) nm.SendToAll(new GC2InventoryItemDroppedBroadcastPacket { broadcast=broadcast }, m_Channel);
         }
 
         private void BroadcastDroppedItemRemovedToClients(NetworkDroppedItemRemovedBroadcast broadcast)
         {
             LogPickupDebug(
                 $"broadcast dropped item removed sourceBag={broadcast.SourceBagNetworkId} runtime={broadcast.RuntimeIdHash} position={broadcast.Position}");
-            BroadcastInventoryPacket(broadcast.SourceBagNetworkId, new GC2InventoryDroppedItemRemovedBroadcastPacket { broadcast = broadcast });
+            NetworkManager nm = ActiveManager;
+            if (nm != null && nm.isServer) nm.SendToAll(new GC2InventoryDroppedItemRemovedBroadcastPacket { broadcast=broadcast }, m_Channel);
         }
 
         private void BroadcastItemMovedToClients(NetworkItemMovedBroadcast broadcast)
@@ -1027,6 +1034,15 @@ namespace Arawn.GameCreator2.Networking.Inventory.Transport.PurrNet
             if (!TryGetPlayerId(nm, clientId, out PlayerID playerId)) return;
 
             nm.Send(playerId, new GC2InventorySnapshotPacket { snapshot = snapshot }, m_Channel);
+        }
+
+        private void SendWorldDropToClient(ulong clientId, NetworkItemDroppedBroadcast broadcast)
+        {
+            NetworkManager nm = ActiveManager;
+            if (nm == null || !nm.isServer) return;
+            if (!TryGetPlayerId(nm, clientId, out PlayerID playerId)) return;
+            // Same ReliableOrdered packet as live creation; replay only to the loading peer.
+            nm.Send(playerId, new GC2InventoryItemDroppedBroadcastPacket { broadcast = broadcast }, m_Channel);
         }
 
         private void SendPickupStateSnapshotToClient(

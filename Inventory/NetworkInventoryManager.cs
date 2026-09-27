@@ -123,6 +123,8 @@ namespace Arawn.GameCreator2.Networking.Inventory
         // ─────────────────────────────────────────────────────────────────────────────────────────
 
         public Action<ulong, NetworkInventorySnapshot> OnSendSnapshotToClient;
+        /// <summary>Optional targeted replay using the existing world-drop message.</summary>
+        public Action<ulong, NetworkItemDroppedBroadcast> OnSendWorldDropToClient;
 
         // ════════════════════════════════════════════════════════════════════════════════════════
         // INSPECTOR
@@ -159,6 +161,8 @@ namespace Arawn.GameCreator2.Networking.Inventory
         private readonly Dictionary<uint, List<PendingPersistentState>> m_PendingPersistentState = new(16);
         private readonly HashSet<uint> m_PendingPersistentOverflow = new();
         private NetworkInventoryPatchHooks m_PatchHooks;
+        private const float WORLD_DROP_MAINTENANCE_INTERVAL = 1f;
+        private float m_NextWorldDropMaintenance;
 
         private const float PENDING_TRANSIENT_USE_TTL_SECONDS = 2f;
 
@@ -209,6 +213,11 @@ namespace Arawn.GameCreator2.Networking.Inventory
             get => m_IsServer;
             set
             {
+                if (m_IsServer != value && s_Instance == this)
+                {
+                    m_NextWorldDropMaintenance = 0f;
+                    if (!value) NetworkInventoryController.ClearDroppedWorldItems();
+                }
                 m_IsServer = value;
                 SecurityIntegration.SetModuleServerContext("Inventory", m_IsServer);
                 SecurityIntegration.EnsureSecurityManagerInitialized(m_IsServer, ResolveSecurityTimeProvider);
@@ -242,6 +251,8 @@ namespace Arawn.GameCreator2.Networking.Inventory
         // ════════════════════════════════════════════════════════════════════════════════════════
         private void OnEnable()
         {
+            if (Instance != this) return;
+            m_NextWorldDropMaintenance = 0f;
             SecurityIntegration.SetModuleServerContext("Inventory", m_IsServer);
             SecurityIntegration.EnsureSecurityManagerInitialized(m_IsServer, ResolveSecurityTimeProvider);
             SyncPatchHooks();
@@ -249,14 +260,36 @@ namespace Arawn.GameCreator2.Networking.Inventory
 
         private void OnDisable()
         {
+            // A discarded duplicate/old manager must not clear its replacement's session.
+            if (s_Instance != this) return;
             SecurityIntegration.SetModuleServerContext("Inventory", false);
             CancelPendingSemanticTransactions();
+            NetworkInventoryController.ClearDroppedWorldItems();
+            m_PendingWorldDrops.Clear();
             m_PendingPersistentState.Clear();
             m_PendingPersistentOverflow.Clear();
             if (m_PatchHooks != null)
             {
                 m_PatchHooks.Shutdown();
             }
+        }
+
+        private void Update() => MaintainWorldDrops(Time.unscaledTime);
+
+        private void MaintainWorldDrops(float now)
+        {
+            if (!m_IsServer || !isActiveAndEnabled || s_Instance != this ||
+                now < m_NextWorldDropMaintenance) return;
+            // Advance before callbacks, so reentrant updates cannot schedule another sweep.
+            m_NextWorldDropMaintenance = now + WORLD_DROP_MAINTENANCE_INTERVAL;
+            NetworkInventoryController.MaintainDroppedWorldItems(this, now);
+        }
+
+        internal void SendWorldDropToClient(ulong clientId, NetworkItemDroppedBroadcast drop)
+        {
+            if (!m_IsServer) return;
+            if (OnSendWorldDropToClient != null) OnSendWorldDropToClient(clientId, drop);
+            else BroadcastItemDropped(drop); // Compatible fallback for existing transports.
         }
 
 
@@ -270,6 +303,12 @@ namespace Arawn.GameCreator2.Networking.Inventory
             m_Controllers[networkId] = controller;
             RegisterOwnedEntityMapping(networkId);
             FlushPendingPersistentState(networkId, controller);
+            if (m_PendingWorldDrops.Count > 0)
+            {
+                var pendingDrops = new List<NetworkItemDroppedBroadcast>(m_PendingWorldDrops.Values);
+                m_PendingWorldDrops.Clear();
+                foreach (NetworkItemDroppedBroadcast drop in pendingDrops) controller.ReceiveItemDroppedBroadcast(drop);
+            }
 
             if (m_LogNetworkMessages)
                 Debug.Log($"[NetworkInventoryManager] Registered inventory controller: NetworkId={networkId}");
@@ -1660,14 +1699,27 @@ namespace Arawn.GameCreator2.Networking.Inventory
             else QueuePendingPersistentState(broadcast.BagNetworkId, PendingPersistentStateKind.ItemRemoved, broadcast);
         }
 
+        private readonly Dictionary<long, NetworkItemDroppedBroadcast> m_PendingWorldDrops = new();
+
         public void ReceiveItemDroppedBroadcast(NetworkItemDroppedBroadcast broadcast)
         {
             var controller = GetControllerOrFallback(broadcast.SourceBagNetworkId, "receive dropped item broadcast");
-            controller?.ReceiveItemDroppedBroadcast(broadcast);
+            if (controller != null) controller.ReceiveItemDroppedBroadcast(broadcast);
+            else if (broadcast.Item.RuntimeIdHash != 0)
+            {
+                // Coalesce identities while the initial player shell is still spawning.
+                if (m_PendingWorldDrops.Count >= 1024 && !m_PendingWorldDrops.ContainsKey(broadcast.Item.RuntimeIdHash))
+                {
+                    Debug.LogError("[NetworkInventory] Initial world-drop queue exceeded 1024 identities.");
+                    return;
+                }
+                m_PendingWorldDrops[broadcast.Item.RuntimeIdHash] = broadcast;
+            }
         }
 
         public void ReceiveDroppedItemRemovedBroadcast(NetworkDroppedItemRemovedBroadcast broadcast)
         {
+            m_PendingWorldDrops.Remove(broadcast.RuntimeIdHash);
             var controller = GetControllerOrFallback(broadcast.SourceBagNetworkId, "receive dropped item removed broadcast");
             controller?.ReceiveDroppedItemRemovedBroadcast(broadcast);
         }
@@ -2297,6 +2349,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
             }
 
             SendPickupStateSnapshot(clientId);
+            NetworkInventoryController.ReplayDroppedWorldItems(this, clientId);
         }
 
         public void ForceFullSync()
@@ -2312,6 +2365,9 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public void ClearControllers()
         {
             CancelPendingSemanticTransactions();
+            if (s_Instance == this) NetworkInventoryController.ClearDroppedWorldItems();
+            m_NextWorldDropMaintenance = 0f;
+            m_PendingWorldDrops.Clear();
             m_Controllers.Clear();
             m_MerchantControllers.Clear();
             m_PendingPersistentState.Clear();

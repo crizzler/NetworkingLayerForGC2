@@ -613,6 +613,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
 
         internal void CancelPendingSemanticTransactions()
         {
+            CancelPendingPickupResponses();
             foreach (PendingMerchantTransaction pending in m_PendingMerchantTransactions.Values)
             {
                 pending.Completion.TrySetResult(RejectMerchant(

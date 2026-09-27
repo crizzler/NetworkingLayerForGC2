@@ -22,6 +22,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
         [SerializeField] private MonoBehaviour m_RuntimeIdentity;
         [SerializeField] private bool m_HideWhenConsumed = true;
 
+        private uint m_AutomaticPickupId;
         private bool m_Consumed;
         private uint m_ConsumedBy;
         private uint m_StateVersion;
@@ -29,7 +30,17 @@ namespace Arawn.GameCreator2.Networking.Inventory
         private Collider[] m_Colliders;
         private Renderer[] m_Renderers;
 
-        public uint PickupId => m_PickupId != 0 ? m_PickupId : ComputeStableId();
+        public uint PickupId
+        {
+            get
+            {
+                if (m_PickupId != 0) return m_PickupId;
+                // Resolve the authored scene identity once, before gameplay can reorder or
+                // destroy siblings. Runtime-spawned pickups should use their network identity.
+                if (m_AutomaticPickupId == 0) m_AutomaticPickupId = ComputeStableId();
+                return m_AutomaticPickupId;
+            }
+        }
         public Item Item => m_Item;
         public bool IsConsumed => m_Consumed;
         public uint StateVersion => m_StateVersion;
@@ -39,6 +50,7 @@ namespace Arawn.GameCreator2.Networking.Inventory
         private void Awake()
         {
             ResolveRuntimeIdentity();
+            if (RuntimeIdentity == null) _ = PickupId;
             m_Colliders = GetComponentsInChildren<Collider>(true);
             m_Renderers = GetComponentsInChildren<Renderer>(true);
         }
@@ -53,6 +65,12 @@ namespace Arawn.GameCreator2.Networking.Inventory
         {
             if (RuntimeIdentity == null)
                 NetworkInventoryManager.Instance?.RegisterPickupSource(this);
+        }
+
+        private void OnDisable()
+        {
+            if (RuntimeIdentity == null)
+                NetworkInventoryManager.Instance?.UnregisterPickupSource(this);
         }
 
         private void OnDestroy()

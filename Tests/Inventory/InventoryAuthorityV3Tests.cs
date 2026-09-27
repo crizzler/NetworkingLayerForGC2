@@ -103,8 +103,8 @@ namespace Arawn.GameCreator2.Networking.Inventory.Tests
             Assert.That(TBagContent.NetworkPatchCapabilities, Is.EqualTo(expected));
 
             var patcher = new InventoryPatcherProxy();
-            Assert.That(patcher.PatchVersion, Is.EqualTo("3.1.0-inventory"));
-            Assert.That(patcher.Marker, Is.EqualTo("// [GC2_NETWORK_PATCH_Inventory_v3_1_0_inventory]"));
+            Assert.That(patcher.PatchVersion, Is.EqualTo("3.1.1-inventory"));
+            Assert.That(patcher.Marker, Is.EqualTo("// [GC2_NETWORK_PATCH_Inventory_v3_1_1_inventory]"));
         }
 
         [Test]

@@ -946,9 +946,9 @@ namespace Arawn.GameCreator2.Networking.Inventory
         {
             if (runtimeIdHash == 0) return;
 
-            PruneServerDroppedWorldItems();
             s_ServerDroppedWorldItems[runtimeIdHash] = new ServerDroppedWorldItem
             {
+                Registration = ++s_DroppedWorldRegistration,
                 SourceBagNetworkId = sourceBagNetworkId,
                 Item = item,
                 Position = position,
@@ -961,15 +961,17 @@ namespace Arawn.GameCreator2.Networking.Inventory
 
         private static bool TryGetServerDroppedWorldItem(long runtimeIdHash, out ServerDroppedWorldItem droppedWorldItem)
         {
-            PruneServerDroppedWorldItems();
-            return s_ServerDroppedWorldItems.TryGetValue(runtimeIdHash, out droppedWorldItem);
+            if (!s_ServerDroppedWorldItems.TryGetValue(runtimeIdHash, out droppedWorldItem)) return false;
+            if (!IsDroppedWorldItemExpired(droppedWorldItem, Time.unscaledTime)) return true;
+            // Claims inspect only their target. Scheduled maintenance is not an admission gate.
+            ExpireDroppedWorldItem(runtimeIdHash, droppedWorldItem, NetworkInventoryManager.Instance);
+            droppedWorldItem = default;
+            return false;
         }
 
         private static bool TryTakeServerDroppedWorldItem(long runtimeIdHash, out ServerDroppedWorldItem droppedWorldItem)
         {
-            PruneServerDroppedWorldItems();
-
-            if (s_ServerDroppedWorldItems.TryGetValue(runtimeIdHash, out droppedWorldItem))
+            if (TryGetServerDroppedWorldItem(runtimeIdHash, out droppedWorldItem))
             {
                 s_ServerDroppedWorldItems.Remove(runtimeIdHash);
                 return true;
@@ -984,7 +986,6 @@ namespace Arawn.GameCreator2.Networking.Inventory
             out long runtimeIdHash,
             out ServerDroppedWorldItem droppedWorldItem)
         {
-            PruneServerDroppedWorldItems();
             runtimeIdHash = 0;
             droppedWorldItem = default;
 
@@ -1001,7 +1002,8 @@ namespace Arawn.GameCreator2.Networking.Inventory
             foreach (KeyValuePair<long, ServerDroppedWorldItem> entry in s_ServerDroppedWorldItems)
             {
                 ServerDroppedWorldItem candidate = entry.Value;
-                if (candidate.Item.ItemHash != itemHash) continue;
+                if (candidate.Item.ItemHash != itemHash ||
+                    IsDroppedWorldItemExpired(candidate, Time.unscaledTime)) continue;
 
                 float distance = Vector3.SqrMagnitude(candidate.Position - pickerPosition);
                 if (distance >= bestDistance) continue;
@@ -1022,22 +1024,116 @@ namespace Arawn.GameCreator2.Networking.Inventory
             return true;
         }
 
-        private static void PruneServerDroppedWorldItems()
+        private const float DROPPED_WORLD_ITEM_LIFETIME = 600f;
+        private static ulong s_DroppedWorldRegistration;
+        private static uint s_DroppedWorldSession;
+        private static bool s_MaintainingDroppedWorldItems;
+        private static bool s_ReplayingDroppedWorldItems;
+        private static long s_DroppedWorldMaintenanceScans;
+        private static readonly List<KeyValuePair<long, ServerDroppedWorldItem>> s_ExpiredWorldDrops = new(32);
+
+        private static bool IsDroppedWorldItemExpired(ServerDroppedWorldItem item, float now)
+            => now - item.Time >= DROPPED_WORLD_ITEM_LIFETIME;
+
+        private static bool IsCurrentDroppedWorldItem(long id, ServerDroppedWorldItem captured)
+            => s_ServerDroppedWorldItems.TryGetValue(id, out ServerDroppedWorldItem current) &&
+               current.Registration == captured.Registration;
+
+        private static void ExpireDroppedWorldItem(
+            long id, ServerDroppedWorldItem captured, NetworkInventoryManager manager)
         {
-            if (s_ServerDroppedWorldItems.Count == 0) return;
-
-            s_SharedRuntimeIdBuffer.Clear();
-            float now = Time.unscaledTime;
-            foreach (KeyValuePair<long, ServerDroppedWorldItem> entry in s_ServerDroppedWorldItems)
+            if (!IsCurrentDroppedWorldItem(id, captured)) return;
+            // Detach every old record before callbacks. Destruction below uses the captured
+            // object, never a dictionary lookup which could hit a replacement under this key.
+            s_ServerDroppedWorldItems.Remove(id);
+            s_DroppedItemInstances.TryGetValue(id, out DroppedItemInstance instance);
+            s_DroppedItemInstances.Remove(id);
+            s_LocalDropRuntimeIds.Remove(id);
+            try
             {
-                if (now - entry.Value.Time <= 600f) continue;
-                s_SharedRuntimeIdBuffer.Add(entry.Key);
+                manager?.BroadcastDroppedItemRemoved(new NetworkDroppedItemRemovedBroadcast
+                {
+                    RuntimeIdHash = id, SourceBagNetworkId = captured.SourceBagNetworkId,
+                    Position = captured.Position
+                });
             }
+            finally { DestroyDroppedWorldObject(instance.Instance); }
+        }
 
-            for (int i = 0; i < s_SharedRuntimeIdBuffer.Count; i++)
+        internal static void MaintainDroppedWorldItems(NetworkInventoryManager manager, float now)
+        {
+            if (s_MaintainingDroppedWorldItems || s_ServerDroppedWorldItems.Count == 0) return;
+            s_MaintainingDroppedWorldItems = true;
+            uint session = s_DroppedWorldSession;
+            try
             {
-                s_ServerDroppedWorldItems.Remove(s_SharedRuntimeIdBuffer[i]);
+                ++s_DroppedWorldMaintenanceScans;
+                // No callbacks while enumerating; capacity is reused after warm-up.
+                foreach (KeyValuePair<long, ServerDroppedWorldItem> entry in s_ServerDroppedWorldItems)
+                    if (IsDroppedWorldItemExpired(entry.Value, now)) s_ExpiredWorldDrops.Add(entry);
+
+                for (int i = 0; i < s_ExpiredWorldDrops.Count; ++i)
+                {
+                    if (session != s_DroppedWorldSession || manager == null ||
+                        manager != NetworkInventoryManager.Instance || !manager.isActiveAndEnabled || !manager.IsServer) break;
+                    KeyValuePair<long, ServerDroppedWorldItem> entry = s_ExpiredWorldDrops[i];
+                    try { ExpireDroppedWorldItem(entry.Key, entry.Value, manager); }
+                    catch (Exception exception) { Debug.LogException(exception, manager); }
+                }
             }
+            finally
+            {
+                s_ExpiredWorldDrops.Clear();
+                if (session != s_DroppedWorldSession) s_ExpiredWorldDrops.Capacity = 32;
+                s_MaintainingDroppedWorldItems = false;
+            }
+        }
+
+        internal static void ReplayDroppedWorldItems(NetworkInventoryManager manager, ulong clientId)
+        {
+            if (s_ReplayingDroppedWorldItems) return;
+            s_ReplayingDroppedWorldItems = true;
+            uint session = s_DroppedWorldSession;
+            try
+            {
+                // Replay is event-driven, not frame maintenance. Capture registrations because
+                // sending can invoke application callbacks which claim, expire or replace drops.
+                var snapshot = new List<KeyValuePair<long, ServerDroppedWorldItem>>(s_ServerDroppedWorldItems);
+                foreach (KeyValuePair<long, ServerDroppedWorldItem> entry in snapshot)
+                {
+                    if (session != s_DroppedWorldSession || manager == null ||
+                        manager != NetworkInventoryManager.Instance || !manager.isActiveAndEnabled || !manager.IsServer) break;
+                    if (!IsCurrentDroppedWorldItem(entry.Key, entry.Value)) continue;
+                    if (IsDroppedWorldItemExpired(entry.Value, Time.unscaledTime))
+                    {
+                        ExpireDroppedWorldItem(entry.Key, entry.Value, manager);
+                        continue;
+                    }
+                    manager.SendWorldDropToClient(clientId, new NetworkItemDroppedBroadcast
+                    {
+                        SourceBagNetworkId = entry.Value.SourceBagNetworkId,
+                        Item = entry.Value.Item, Position = entry.Value.Position
+                    });
+                }
+            }
+            finally { s_ReplayingDroppedWorldItems = false; }
+        }
+
+        internal static void ClearDroppedWorldItems()
+        {
+            ++s_DroppedWorldSession;
+            var instances = new List<DroppedItemInstance>(s_DroppedItemInstances.Values);
+            s_DroppedItemInstances.Clear();
+            s_ServerDroppedWorldItems.Clear();
+            s_LocalDropRuntimeIds.Clear();
+            s_PendingLocalRemovals.Clear();
+            if (!s_MaintainingDroppedWorldItems)
+            {
+                s_ExpiredWorldDrops.Clear();
+                s_ExpiredWorldDrops.Capacity = 32;
+            }
+            // Clearing first makes teardown callbacks/restarts independent of these old objects.
+            foreach (DroppedItemInstance instance in instances) DestroyDroppedWorldObject(instance.Instance);
         }
 
         private void BroadcastServerSocketAttach(RuntimeItem parent, RuntimeItem attachment, IdString socketId)
@@ -1685,6 +1781,10 @@ namespace Arawn.GameCreator2.Networking.Inventory
                     this);
                 return;
             }
+
+            if (broadcast.Item.RuntimeIdHash != 0 &&
+                s_DroppedItemInstances.TryGetValue(broadcast.Item.RuntimeIdHash, out DroppedItemInstance existing) &&
+                existing.Instance != null) return;
 
             RuntimeItem runtimeItem = ReconstructRuntimeItem(broadcast.Item);
             if (runtimeItem == null)

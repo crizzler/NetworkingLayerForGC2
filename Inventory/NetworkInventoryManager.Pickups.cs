@@ -15,10 +15,14 @@ namespace Arawn.GameCreator2.Networking.Inventory
             (bool allowed, InventoryRejectionReason reason)> CustomPickupValidator;
 
         private readonly Dictionary<uint, NetworkInventoryPickupSource> m_PickupSources = new(64);
+        private readonly Dictionary<uint, HashSet<NetworkInventoryPickupSource>> m_PickupCandidates = new();
+        private readonly Dictionary<NetworkInventoryPickupSource, uint> m_RegisteredPickupIds = new();
         private readonly Dictionary<uint, RuntimePickupRegistration> m_RuntimePickupSources = new(32);
         private readonly Dictionary<uint, NetworkPickupState> m_PendingPickupStates = new(32);
         private readonly Dictionary<ulong, TaskCompletionSource<NetworkPickupResponse>>
             m_PendingPickupResponses = new(8);
+
+        private int m_PickupGeneration;
 
         private readonly struct RuntimePickupRegistration
         {
@@ -37,33 +41,48 @@ namespace Arawn.GameCreator2.Networking.Inventory
         public void RegisterPickupSource(NetworkInventoryPickupSource source)
         {
             if (source == null || source.PickupId == 0) return;
-            if (m_PickupSources.TryGetValue(source.PickupId, out var existing) &&
-                existing != null && existing != source)
+            uint id=source.PickupId;
+            if (m_RegisteredPickupIds.TryGetValue(source,out uint oldId) && oldId!=id)
+                UnregisterPickupSource(source);
+            m_RegisteredPickupIds[source]=id;
+            if (!m_PickupCandidates.TryGetValue(id,out var candidates))
+                m_PickupCandidates[id]=candidates=new HashSet<NetworkInventoryPickupSource>();
+            candidates.RemoveWhere(candidate=>candidate==null);
+            bool added=candidates.Add(source);
+            if (!m_PickupSources.TryGetValue(id,out var existing) || existing==null)
             {
-                Debug.LogWarning(
-                    $"[NetworkInventory] Duplicate pickup id {source.PickupId} on " +
-                    $"'{existing.name}' and '{source.name}'. The duplicate source is rejected.");
-                return;
+                m_PickupSources[id]=source;
+                existing=source;
             }
-
-            m_PickupSources[source.PickupId] = source;
-            if (m_PendingPickupStates.TryGetValue(source.PickupId, out NetworkPickupState state))
-            {
-                source.ApplyState(state);
-            }
+            if (added && candidates.Count>1)
+                Debug.LogWarning($"[NetworkInventory] Duplicate pickup id {id} on '{existing.name}' and '{source.name}'. " +
+                    "The duplicate source is rejected. All sources sharing this identity are blocked until the collision is resolved.");
+            if (m_PendingPickupStates.TryGetValue(id,out NetworkPickupState state)) source.ApplyState(state);
         }
 
         public void UnregisterPickupSource(NetworkInventoryPickupSource source)
         {
-            if (source == null) return;
-            if (m_PickupSources.TryGetValue(source.PickupId, out var existing) && existing == source)
+            if (source == null || !m_RegisteredPickupIds.TryGetValue(source,out uint id)) return;
+            m_RegisteredPickupIds.Remove(source);
+            NetworkPickupState state=source.GetState();
+            state.PickupId=id;
+            if (state.StateVersion!=0) CachePickupState(state);
+            if (!m_PickupCandidates.TryGetValue(id,out var candidates)) return;
+            candidates.Remove(source);
+            candidates.RemoveWhere(candidate=>candidate==null);
+            if (candidates.Count==0)
             {
-                // Stock GC2 pickup templates commonly Destroy Self after a successful Add Item.
-                // Retain the consumed tombstone even after that scene object disappears so a
-                // late joiner cannot recreate and collect it again.
-                NetworkPickupState state = source.GetState();
-                if (state.StateVersion != 0) CachePickupState(state);
-                m_PickupSources.Remove(source.PickupId);
+                m_PickupCandidates.Remove(id);
+                m_PickupSources.Remove(id);
+            }
+            else
+            {
+                foreach (var candidate in candidates)
+                {
+                    m_PickupSources[id]=candidate;
+                    if (m_PendingPickupStates.TryGetValue(id,out state)) candidate.ApplyState(state);
+                    break;
+                }
             }
         }
 
@@ -129,41 +148,115 @@ namespace Arawn.GameCreator2.Networking.Inventory
             if (OnSendPickupRequest == null)
                 return RejectPickup(request, InventoryRejectionReason.NotAuthorized);
 
+            return await SendAndAwaitPickupResponseAsync(request, picker);
+        }
+
+        /// <summary>
+        /// Claims the exact authoritative payload of a world object created by a networked
+        /// inventory drop.
+        /// A dropped object is instantiated from the item's prefab on every peer, so it carries
+        /// no registered <see cref="NetworkInventoryPickupSource"/> and the native Add Item
+        /// instruction cannot use the registered-source route. This request submits the tracked
+        /// runtime identity of the object the player actually interacted with instead, which the
+        /// server validates against its own drop registry (membership, world range, source bag
+        /// and capacity) before granting it exactly once.
+        /// A zero <see cref="NetworkPickupRequest.PropNetworkId"/> deliberately skips the
+        /// registered-source lookup so the runtime-drop route is reached.
+        /// </summary>
+        public async Task<NetworkPickupResponse> RequestDroppedWorldItemPickupAsync(
+            NetworkInventoryController picker,
+            long runtimeIdHash,
+            uint sourceBagNetworkId)
+        {
+            if (picker == null || runtimeIdHash == 0)
+                return RejectPickup(default, InventoryRejectionReason.InvalidOperation);
+
+            ushort requestId = NextSemanticRequestId();
+            var request = new NetworkPickupRequest
+            {
+                RequestId = requestId,
+                ActorNetworkId = picker.NetworkId,
+                CorrelationId = NetworkCorrelation.Compose(picker.NetworkId, requestId),
+                PickerBagNetworkId = picker.NetworkId,
+                PropNetworkId = 0,
+                SourceBagNetworkId = sourceBagNetworkId,
+                RuntimeIdHash = runtimeIdHash,
+                DestinationPosition = GameCreator.Runtime.Inventory.TBagContent.INVALID
+            };
+
+            if (m_IsServer)
+            {
+                // Registered-source picks are resolved first by ReceivePickupRequest, but a zero
+                // PropNetworkId always misses that lookup, so the runtime-drop handler is the
+                // correct and only server-side destination. Host loopback intentionally takes the
+                // same validated path as a remote peer without re-entering the security budget.
+                NetworkPickupResponse response = picker.ProcessPickupRequest(request, picker.NetworkId);
+                response.ActorNetworkId = request.ActorNetworkId;
+                response.CorrelationId = request.CorrelationId;
+                return response;
+            }
+
+            if (OnSendPickupRequest == null)
+                return RejectPickup(request, InventoryRejectionReason.NotAuthorized);
+
+            return await SendAndAwaitPickupResponseAsync(request, picker);
+        }
+
+        /// <summary>
+        /// Sends a pickup request, awaits the authoritative response and then waits for the
+        /// referenced revision to converge locally.
+        /// The response and mutation use the same reliable ordered channel, but transport
+        /// dispatch can still complete the response continuation before the controller has
+        /// converged its authoritative add. A visual-scripting instruction must not move on to
+        /// Destroy Self until the referenced revision is actually present locally.
+        /// </summary>
+        private async Task<NetworkPickupResponse> SendAndAwaitPickupResponseAsync(
+            NetworkPickupRequest request, NetworkInventoryController picker)
+        {
             ulong key = PickupPendingKey(request.ActorNetworkId, request.CorrelationId);
+            int generation = m_PickupGeneration;
             var completion = new TaskCompletionSource<NetworkPickupResponse>(
                 TaskCreationOptions.RunContinuationsAsynchronously);
             m_PendingPickupResponses[key] = completion;
-            SendPickupRequest(request);
-
-            float timeoutSeconds = Mathf.Max(0.25f, m_RequestTimeout);
-            DateTime deadline = DateTime.UtcNow.AddSeconds(timeoutSeconds);
-            Task timeout = Task.Delay(TimeSpan.FromSeconds(timeoutSeconds));
-            if (await Task.WhenAny(completion.Task, timeout) == completion.Task)
+            try
             {
+                float timeoutSeconds = Mathf.Max(0.25f, m_RequestTimeout);
+                DateTime deadline = DateTime.UtcNow.AddSeconds(timeoutSeconds);
+                SendPickupRequest(request);
+                Task timeout = Task.Delay(TimeSpan.FromSeconds(timeoutSeconds));
+                if (await Task.WhenAny(completion.Task, timeout) != completion.Task)
+                    return RejectPickup(request, InventoryRejectionReason.RequestTimeout);
                 NetworkPickupResponse response = await completion.Task;
-                if (!response.Authorized || response.StateVersion == 0 ||
-                    picker.HasAppliedStateVersion(response.StateVersion))
-                {
-                    return response;
-                }
+                if (!response.Authorized) return response;
 
-                // The response and mutation use the same ReliableOrdered channel, but transport
-                // dispatch can still complete the response continuation before the controller has
-                // converged its authoritative add. Do not let a visual-scripting instruction move
-                // on to Destroy Self until the referenced revision is actually present locally.
                 while (DateTime.UtcNow < deadline)
                 {
-                    await Task.Yield();
-                    if (picker == null)
+                    if (this == null || generation != m_PickupGeneration || picker == null)
                         return RejectPickup(request, InventoryRejectionReason.BagNotFound);
-                    if (picker.HasAppliedStateVersion(response.StateVersion)) return response;
+                    // Authorization/revision alone is not application. Observe the exact runtime
+                    // identity named by the server in the destination bag before continuing GC2.
+                    RuntimeItem applied = response.PickedUpItem.RuntimeIdHash != 0
+                        ? picker.FindRuntimeItem(response.PickedUpItem.RuntimeIdHash) : null;
+                    if (applied != null && applied.RuntimeID.String == response.PickedUpItem.RuntimeIdString &&
+                        (response.StateVersion == 0 || picker.HasAppliedStateVersion(response.StateVersion)))
+                        return response;
+                    await Task.Yield();
                 }
-
                 return RejectPickup(request, InventoryRejectionReason.RequestTimeout);
             }
+            finally
+            {
+                if (m_PendingPickupResponses.TryGetValue(key, out var pending) && ReferenceEquals(pending, completion))
+                    m_PendingPickupResponses.Remove(key);
+            }
+        }
 
-            m_PendingPickupResponses.Remove(key);
-            return RejectPickup(request, InventoryRejectionReason.RequestTimeout);
+        private void CancelPendingPickupResponses()
+        {
+            m_PickupGeneration++;
+            foreach (var completion in m_PendingPickupResponses.Values)
+                completion.TrySetResult(RejectPickup(default, InventoryRejectionReason.RequestTimeout));
+            m_PendingPickupResponses.Clear();
         }
 
         internal bool TryProcessRegisteredPickup(
@@ -175,6 +268,11 @@ namespace Arawn.GameCreator2.Networking.Inventory
             if (request.PropNetworkId == 0) return false;
             bool isRuntime = m_RuntimePickupSources.TryGetValue(
                 request.PropNetworkId, out RuntimePickupRegistration runtimeRegistration);
+            if (!isRuntime && m_PickupCandidates.TryGetValue(request.PropNetworkId,out var candidates) && candidates.Count>1)
+            {
+                response.RejectionReason=InventoryRejectionReason.IdentityMismatch;
+                return true;
+            }
             NetworkInventoryPickupSource source = isRuntime
                 ? runtimeRegistration.Source
                 : (m_PickupSources.TryGetValue(request.PropNetworkId, out var staticSource)
