@@ -103,10 +103,10 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             }
 
             bool forcePhotonRelay = ResolveForcePhotonRelay(bootstrap);
-            var options = new FusionSessionStartOptions(
+            FusionSessionStartOptions options = CreateStartOptions(
+                bootstrap,
                 sessionName,
                 region,
-                null,
                 forcePhotonRelay);
 
             Task<StartGameResult> startTask;
@@ -150,6 +150,25 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                 m_WaitUntilComplete,
                 context,
                 GetOperationTitle(m_Operation));
+        }
+
+        /// <summary>
+        /// Builds the per-start options for this instruction. The resolved bootstrap's custom
+        /// Photon lobby is carried through so instruction-hosted sessions land in the same
+        /// lobby partition the shared lobby browser discovers.
+        /// </summary>
+        private static FusionSessionStartOptions CreateStartOptions(
+            FusionSessionBootstrap bootstrap,
+            string sessionName,
+            string region,
+            bool forcePhotonRelay)
+        {
+            return new FusionSessionStartOptions(
+                sessionName,
+                region,
+                null,
+                forcePhotonRelay,
+                customLobbyName: bootstrap != null ? bootstrap.CustomLobbyName : null);
         }
 
         private async Task SaveResolvedSessionIdAsync(

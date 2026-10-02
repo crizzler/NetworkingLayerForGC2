@@ -25,8 +25,9 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         [SerializeField] private NetworkRunner m_DiscoveryRunnerPrefab;
         [SerializeField] private NetworkLobbyCompatibilityProfile m_Compatibility =
             new NetworkLobbyCompatibilityProfile();
-        [Tooltip("Optional Photon custom lobby shared by discovery and gameplay sessions.")]
-        [SerializeField] private string m_CustomLobbyName = "gc2-networking";
+        [Tooltip("Photon custom lobby shared by discovery and gameplay sessions. Keep it identical to the Fusion Session Bootstrap's Custom Lobby Name; empty uses Photon's default lobby.")]
+        [SerializeField] private string m_CustomLobbyName =
+            FusionSessionStartOptions.DefaultCustomLobbyName;
         [Tooltip("How long Refresh waits for Photon's first session-list snapshot after connecting.")]
         [Min(1f)]
         [SerializeField] private float m_SessionListTimeoutSeconds = 8f;
@@ -59,7 +60,8 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
 
         public NetworkRunner DiscoveryRunner => m_DiscoveryRunner;
         public FusionSessionBootstrap SessionBootstrap => m_SessionBootstrap;
-        public string CustomLobbyName => NormalizeLobbyName(m_CustomLobbyName);
+        public string CustomLobbyName =>
+            FusionSessionStartOptions.NormalizeCustomLobbyName(m_CustomLobbyName);
 
         private void Awake()
         {
@@ -413,9 +415,9 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             try
             {
                 FusionAppSettings appSettings = CreatePhotonAppSettings(m_ActiveQuery.Region);
-                SessionLobby lobby = m_ActiveQuery.Topology == NetworkLobbyTopology.Shared
-                    ? SessionLobby.Shared
-                    : SessionLobby.ClientServer;
+                SessionLobby lobby = ResolveSessionLobby(
+                    m_ActiveQuery.Topology,
+                    CustomLobbyName);
                 StartGameResult result = await runner.JoinSessionLobby(
                     lobby,
                     CustomLobbyName,
@@ -1013,11 +1015,23 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                 : region.Trim().ToLowerInvariant();
         }
 
-        private static string NormalizeLobbyName(string lobbyName)
+        /// <summary>
+        /// Fusion only honors the custom lobby name when <see cref="SessionLobby.Custom"/> is
+        /// used; the prebuilt <see cref="SessionLobby.ClientServer"/> and
+        /// <see cref="SessionLobby.Shared"/> values silently ignore the lobby ID (see the
+        /// decompiled CloudServices.JoinSessionLobby switch). A browser that joins the
+        /// prebuilt lobby never receives snapshots for sessions published in a custom
+        /// lobby, which is why discovery appeared always empty while join-by-code still
+        /// worked.
+        /// </summary>
+        private static SessionLobby ResolveSessionLobby(
+            NetworkLobbyTopology topology,
+            string customLobbyName)
         {
-            return string.IsNullOrWhiteSpace(lobbyName)
-                ? null
-                : lobbyName.Trim();
+            if (!string.IsNullOrEmpty(customLobbyName)) return SessionLobby.Custom;
+            return topology == NetworkLobbyTopology.Shared
+                ? SessionLobby.Shared
+                : SessionLobby.ClientServer;
         }
 
         public void OnSessionListUpdated(NetworkRunner runner, List<SessionInfo> sessionList)

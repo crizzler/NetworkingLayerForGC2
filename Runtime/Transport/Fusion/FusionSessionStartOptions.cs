@@ -14,9 +14,28 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
     /// </summary>
     public readonly struct FusionSessionStartOptions
     {
+        /// <summary>
+        /// Photon custom lobby used by default for Fusion sessions. It matches the shared
+        /// lobby browser default so bootstrap, demo-overlay, instruction, and lobby-service
+        /// flows publish and discover in one partition.
+        /// </summary>
+        public const string DefaultCustomLobbyName = "gc2-networking";
+
         private static readonly IReadOnlyDictionary<string, SessionProperty> EmptyProperties =
             new ReadOnlyDictionary<string, SessionProperty>(
                 new Dictionary<string, SessionProperty>());
+
+        /// <summary>
+        /// Trims a custom lobby name and returns null for blank input, which selects
+        /// Photon's default lobby. The shared lobby browser only lists sessions that
+        /// belong to the same lobby.
+        /// </summary>
+        public static string NormalizeCustomLobbyName(string customLobbyName)
+        {
+            return string.IsNullOrWhiteSpace(customLobbyName)
+                ? null
+                : customLobbyName.Trim();
+        }
 
         public FusionSessionStartOptions(
             string sessionName,
@@ -35,7 +54,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             ForcePhotonRelay = forcePhotonRelay;
             IsOpen = isOpen;
             IsVisible = isVisible;
-            CustomLobbyName = customLobbyName;
+            CustomLobbyName = NormalizeCustomLobbyName(customLobbyName);
             SessionProperties = CopyProperties(sessionProperties);
             MaxPlayers = maxPlayers.HasValue && maxPlayers.Value > 0
                 ? maxPlayers
@@ -59,6 +78,10 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         /// Optional per-start override. Null preserves Fusion's existing default.
         /// </summary>
         public bool? IsVisible { get; }
+        /// <summary>
+        /// Photon custom lobby to publish in. Null or blank uses Photon's default lobby,
+        /// which a lobby browser configured with a custom lobby cannot list.
+        /// </summary>
         public string CustomLobbyName { get; }
         /// <summary>
         /// Defensive, read-only copy of the properties advertised through Photon matchmaking.

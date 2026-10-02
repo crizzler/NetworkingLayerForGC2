@@ -82,6 +82,9 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         [SerializeField] private string m_DefaultSessionName = "GC2-Fusion";
         [Tooltip("Optional Photon region code (for example: us, eu, asia, jp). Empty selects the best region.")]
         [SerializeField] private string m_Region = string.Empty;
+        [Tooltip("Photon custom lobby for sessions started by this bootstrap. Keep it identical to the Fusion Lobby Service's Custom Lobby Name so default-hosted sessions stay discoverable. Empty uses Photon's default lobby, which the shared lobby browser does not list.")]
+        [SerializeField] private string m_CustomLobbyName =
+            FusionSessionStartOptions.DefaultCustomLobbyName;
         [Tooltip("Host/Client only. Disables NAT punch-through so gameplay uses Photon Cloud Relay. Shared Mode already uses Photon Relay.")]
         [SerializeField] private bool m_ForcePhotonRelay;
         [Tooltip("Optional project component implementing IFusionAuthenticationProvider. Keep Steamworks and other provider SDK references outside the core Fusion transport assembly.")]
@@ -132,6 +135,12 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         public FusionDefaultLaunchMode DefaultLaunchMode => m_DefaultLaunchMode;
         public string DefaultSessionName => m_DefaultSessionName;
         public string Region => m_Region;
+        /// <summary>
+        /// Normalized custom Photon lobby used by this bootstrap's default start paths.
+        /// Null selects Photon's default lobby.
+        /// </summary>
+        public string CustomLobbyName =>
+            FusionSessionStartOptions.NormalizeCustomLobbyName(m_CustomLobbyName);
         public bool ForcePhotonRelay => m_ForcePhotonRelay;
         public MonoBehaviour AuthenticationProviderBehaviour =>
             m_AuthenticationProviderBehaviour;
@@ -1219,6 +1228,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                 m_Region,
                 null,
                 m_ForcePhotonRelay,
+                customLobbyName: CustomLobbyName,
                 maxPlayers: m_MaxPlayers);
         }
 

@@ -1799,6 +1799,12 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                 {
                     var serviceObject = new SerializedObject(service);
                     SetObject(serviceObject, "m_SessionBootstrap", bootstrap);
+                    // Keep the browser and the bootstrap in one Photon custom lobby;
+                    // a mismatch makes default-hosted sessions invisible to the list.
+                    SetString(
+                        serviceObject,
+                        "m_CustomLobbyName",
+                        bootstrap.CustomLobbyName ?? string.Empty);
                     serviceObject.ApplyModifiedProperties();
                     EditorUtility.SetDirty(service);
                 }
