@@ -6,7 +6,13 @@ PurrNet transport: https://arawn-software-publishing.gitbook.io/networking-layer
 
 Fusion transport: https://arawn-software-publishing.gitbook.io/networking-layer-for-gc2/fusion-overview
 
-> **Fusion status:** Early alpha. The Fusion integration currently targets Photon Fusion 2.1.1.
+> **Release status:** Released. Both the PurrNet and Fusion integrations are out of alpha and beta and are available on the Unity Asset Store.
+
+## Unity Asset Store
+
+PurrNet: https://assetstore.unity.com/packages/tools/network/multiplayer-integration-for-game-creator-2-with-purrnet-379492
+
+Fusion: https://assetstore.unity.com/packages/tools/network/multiplayer-integration-for-game-creator-2-with-photon-fusion-397628
 
 ## Support
 

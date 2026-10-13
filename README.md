@@ -4,8 +4,8 @@ Transport-agnostic, server-authoritative multiplayer support for Game Creator 2.
 
 **[Online documentation](https://arawn-software-publishing.gitbook.io/networking-layer-for-gc2)** · **[Releases](https://github.com/crizzler/NetworkingLayerForGC2/releases)**
 
-> **Release status: Alpha**  
-> The package is in alpha and its APIs, behavior, and documentation may change. The new Photon Fusion integration is specifically an **early alpha** feature.
+> **Release status: Released**  
+> Both integrations (PurrNet and Photon Fusion 2) are out of alpha and beta, and both are available on the Unity Asset Store.
 
 <img width="880" height="1163" alt="Game Creator 2 Networking Layer" src="https://github.com/user-attachments/assets/53739b39-dbab-4222-9d33-98d0b3c18254" />
 
@@ -18,10 +18,10 @@ Transport-agnostic, server-authoritative multiplayer support for Game Creator 2.
 
 ## Supported Transports
 
-| Transport | Status | Included workflows |
-| --- | --- | --- |
-| PurrNet | Alpha | Host/client transport bridge, LAN discovery and direct join, staging/ready-room lobby with chat, and an optional Steamworks.NET lobby/invite demo |
-| Photon Fusion 2 | **Early alpha** | Host/Client and Shared topologies, Photon matchmaking/lobby discovery, session bootstrap and diagnostics, character selection, chat, and Steam authentication/invite extension points |
+| Transport | Status | Unity Asset Store | Included workflows |
+| --- | --- | --- | --- |
+| PurrNet | Released | [Multiplayer Integration for Game Creator 2 with PurrNet](https://assetstore.unity.com/packages/tools/network/multiplayer-integration-for-game-creator-2-with-purrnet-379492) | Host/client transport bridge, LAN discovery and direct join, staging/ready-room lobby with chat, and an optional Steamworks.NET lobby/invite demo |
+| Photon Fusion 2 | Released | [Multiplayer Integration for Game Creator 2 with Photon Fusion](https://assetstore.unity.com/packages/tools/network/multiplayer-integration-for-game-creator-2-with-photon-fusion-397628) | Host/Client and Shared topologies, Photon matchmaking/lobby discovery, session bootstrap and diagnostics, character selection, chat, and Steam authentication/invite extension points |
 
 The Fusion integration uses Fusion/Photon connectivity. It does not replace Fusion's transport with Steam Datagram Relay. In Host/Client mode Fusion can use direct UDP or Photon Relay; Shared Mode uses Photon Relay.
 
