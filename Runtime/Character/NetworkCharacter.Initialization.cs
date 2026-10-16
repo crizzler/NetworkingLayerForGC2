@@ -212,6 +212,8 @@ namespace Arawn.GameCreator2.Networking
 
             if (driver != null)
             {
+                WarnIfUnsupportedNpcMovement(driver);
+
                 // Use GC2's public driver API.
                 var kernel = m_Character.Kernel;
                 if (kernel != null)
@@ -316,6 +318,41 @@ namespace Arawn.GameCreator2.Networking
             }
 
             return CreateServerDriver();
+        }
+
+        // Diagnostics: an NPC needs a driver that can actually navigate it (Built-in server
+        // NavMesh, GC2's stock NavMesh driver, or a prediction backend such as Fusion Native).
+        // A player-style fallback or a plain CharacterController leaves the NPC standing where
+        // it spawned - or floating when it spawned at capsule-center height - while observers
+        // have nothing sensible to interpolate. Warn once per instance so hand-authored NPCs
+        // get an actionable pointer instead of silent misbehavior.
+        private bool m_WarnedUnsupportedNpcMovement;
+
+        private void WarnIfUnsupportedNpcMovement(IUnitDriver driver)
+        {
+            if (m_WarnedUnsupportedNpcMovement) return;
+            if (driver == null) return;
+            if (EffectiveActorType != NetworkCharacterActorType.NPC) return;
+            if (IsSupportedNpcMovementDriver(driver)) return;
+
+            m_WarnedUnsupportedNpcMovement = true;
+            Debug.LogWarning(
+                $"[NetworkCharacter] NPC '{name}' resolved to movement backend " +
+                $"'{driver.GetType().Name}', which cannot navigate. NPCs need a NavMesh " +
+                "movement backend: assign 'UnitDriverNavmeshNetworkServer' (or GC2's " +
+                "'UnitDriverNavmesh') with a baked NavMesh, run the Scene Setup Wizard's " +
+                "Server-Owned NPCs step, or select the Fusion Native prediction backend " +
+                "on Fusion.",
+                this);
+        }
+
+        private bool IsSupportedNpcMovementDriver(IUnitDriver driver)
+        {
+            if (m_ActivePredictionBackend != null) return true;
+
+            return driver is UnitDriverNavmeshNetworkServer ||
+                   driver is UnitDriverNavmesh ||
+                   driver is UnitDriverNetworkRemote;
         }
 
         private UnitDriverNetworkClient CreateClientDriver()

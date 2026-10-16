@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Reflection;
+using System.Text.RegularExpressions;
 using Arawn.GameCreator2.Networking.Editor;
 using Arawn.GameCreator2.Networking.TestUtilities;
 using GameCreator.Runtime.Characters;
@@ -8,6 +9,7 @@ using GameCreator.Runtime.Common;
 using NUnit.Framework;
 using UnityEngine;
 using UnityEngine.AI;
+using UnityEngine.TestTools;
 
 namespace Arawn.GameCreator2.Networking.Tests
 {
@@ -369,6 +371,114 @@ namespace Arawn.GameCreator2.Networking.Tests
                 valid.ActiveDriver,
                 Is.SameAs(authoredServerDriver),
                 "A legitimate authored server NavMesh driver must remain the authority driver.");
+        }
+
+        [Test]
+        [NUnit.Framework.Category("GC2Networking.FreeFlow")]
+        public void ServerNpc_UnsupportedMovementBackend_LogsActionableWarning()
+        {
+            NetworkCharacter misconfigured = CreateNetworkCharacter(
+                "Unsupported Backend NPC",
+                NetworkCharacterActorType.NPC,
+                authoredIsPlayer: false);
+            var authoredPlainDriver = new UnitDriverController();
+            SetField(misconfigured, "m_AuthoredDriver", authoredPlainDriver);
+
+            LogAssert.Expect(LogType.Warning, new Regex(
+                "NPC 'Unsupported Backend NPC' resolved to movement backend " +
+                "'UnitDriverController', which cannot navigate",
+                RegexOptions.Singleline));
+            EditModeLifecycle.InitializeNetworkRole(
+                misconfigured,
+                isServer: true,
+                isOwner: false,
+                isHost: true,
+                hasAuthenticatedPlayerOwner: false);
+
+            Assert.That(
+                misconfigured.ActiveDriver,
+                Is.SameAs(authoredPlainDriver),
+                "The diagnostics warning must not change driver resolution behavior.");
+
+            var repeatedWarnings = new List<string>();
+            Application.LogCallback handler = (condition, stackTrace, type) =>
+            {
+                if (type == LogType.Warning && condition.Contains("cannot navigate"))
+                {
+                    repeatedWarnings.Add(condition);
+                }
+            };
+
+            misconfigured.ResetNetworkRole();
+            Application.logMessageReceived += handler;
+            try
+            {
+                EditModeLifecycle.InitializeNetworkRole(
+                    misconfigured,
+                    isServer: true,
+                    isOwner: false,
+                    isHost: true,
+                    hasAuthenticatedPlayerOwner: false);
+            }
+            finally
+            {
+                Application.logMessageReceived -= handler;
+            }
+
+            Assert.That(
+                repeatedWarnings,
+                Is.Empty,
+                "The misconfiguration warning must only be logged once per instance.");
+        }
+
+        [Test]
+        [NUnit.Framework.Category("GC2Networking.FreeFlow")]
+        public void ServerNpc_SupportedMovementBackends_EmitNoMisconfigurationWarning()
+        {
+            AssertNoUnsupportedBackendWarning(
+                new UnitDriverNavmeshNetworkServer(),
+                "Supported Server NavMesh NPC");
+            AssertNoUnsupportedBackendWarning(
+                new UnitDriverNavmesh(),
+                "Supported Stock NavMesh NPC");
+        }
+
+        private void AssertNoUnsupportedBackendWarning(TUnitDriver authoredDriver, string name)
+        {
+            NetworkCharacter npc = CreateNetworkCharacter(
+                name,
+                NetworkCharacterActorType.NPC,
+                authoredIsPlayer: false);
+            SetField(npc, "m_AuthoredDriver", authoredDriver);
+
+            var warnings = new List<string>();
+            Application.LogCallback handler = (condition, stackTrace, type) =>
+            {
+                if (type == LogType.Warning && condition.Contains("cannot navigate"))
+                {
+                    warnings.Add(condition);
+                }
+            };
+
+            Application.logMessageReceived += handler;
+            try
+            {
+                EditModeLifecycle.InitializeNetworkRole(
+                    npc,
+                    isServer: true,
+                    isOwner: false,
+                    isHost: true,
+                    hasAuthenticatedPlayerOwner: false);
+            }
+            finally
+            {
+                Application.logMessageReceived -= handler;
+            }
+
+            Assert.That(
+                warnings,
+                Is.Empty,
+                $"'{name}' uses a documented NPC movement backend and must not warn.");
         }
 
         [Test]
