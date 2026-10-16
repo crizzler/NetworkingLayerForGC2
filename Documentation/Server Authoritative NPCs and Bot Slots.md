@@ -73,6 +73,14 @@ type and follow commands. The transport-neutral pose sampler publishes the
 existing `NetworkPositionState` schema for PurrNet and Built-in Fusion; Fusion
 Native continues to use its native tick state.
 
+If an NPC resolves without a supported backend — for example a prefab that still
+uses GC2's default CharacterController driver — the Networking Layer logs a
+one-time configuration warning naming the offending driver, because such an NPC
+cannot navigate and may not ground correctly. The warning does not change driver
+resolution; fix it by assigning `UnitDriverNavmeshNetworkServer` (or GC2's
+`UnitDriverNavmesh`) with a baked NavMesh, running the wizard's Server-Owned
+NPCs step, or selecting Fusion Native.
+
 ## Security behavior
 
 A trusted server-origin Shooter or Melee event is accepted only when its actor is

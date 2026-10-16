@@ -109,6 +109,16 @@ void SendToServer<TPayload>(byte messageType, TPayload payload) { /* transport s
 
 ### Client Requests
 
+> **Ownership rule:** every client request is validated against actor ownership.
+> A client may only request core actions (ragdoll, invincibility, poise, props,
+> busy state) for actors it owns — normally just its own player character.
+> Requests for remote players or NPCs are rejected with `Ownership mismatch` or
+> `Unresolved ownership`. The built-in spawners register each actor's owner;
+> a custom spawn path must register ownership through the transport bridge
+> (`SetCharacterOwner`) before gameplay requests are sent. To affect another
+> actor, decide the effect on the server and start it there — see
+> "Server-Triggered Knockback Ragdoll" below.
+
 ```csharp
 // Request ragdoll with knockback force
 NetworkCoreManager.Instance.RequestStartRagdoll(
@@ -149,6 +159,26 @@ NetworkCoreManager.Instance.RequestSetBusy(
     timeout: 2f
 );
 ```
+
+### Server-Triggered Knockback Ragdoll
+
+To knock down an actor the requesting client does **not** own — another player or
+an NPC — validate the hit on the server and start the ragdoll there. The client
+still sends its hit intent through the normal combat path; the server converts
+the validated result into force and direction:
+
+```csharp
+// Authority only. Author the knockback direction on the server.
+NetworkCoreManager.Instance.ServerStartRagdoll(
+    victimNetworkId,
+    force: knockback,      // e.g. hitDirection * strength from the validated hit
+    forcePoint: hitPoint
+);
+```
+
+A client never needs to send a ragdoll request for an actor it does not own;
+such requests are rejected by the security layer and surface as
+`Ownership mismatch` / `Unresolved ownership` warnings.
 
 ### Server Direct Methods
 
