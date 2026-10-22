@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Text.RegularExpressions;
 using Arawn.GameCreator2.Networking.Security;
 using Arawn.GameCreator2.Networking.Transport.Fusion;
 using Fusion;
@@ -69,6 +70,13 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
             "Arawn.GameCreator2.Networking.Transport.Fusion.asmdef";
 
         private const string FusionBuildInfoPath = "Assets/Photon/Fusion/build_info.txt";
+
+        /// <summary>
+        /// The Photon Fusion release this integration is validated against. This is a
+        /// reporting baseline, not an enforcement gate: Photon ships Fusion updates
+        /// independently, so other SDK releases must never block the setup wizard.
+        /// </summary>
+        internal const string ValidatedFusionVersion = "2.1.1";
 
         [Serializable]
         private sealed class AssemblyDefinitionData
@@ -146,12 +154,17 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                 return;
             }
 
+            // Report the installed SDK version against the validated baseline but never
+            // block the wizard on it. Photon publishes Fusion patch releases independently
+            // (for example 2.1.3); enforcing one exact version breaks customers as soon as
+            // they update their SDK.
             if (!File.Exists(FusionBuildInfoPath))
             {
                 report.Add(
-                    FusionSetupIssueSeverity.Error,
+                    FusionSetupIssueSeverity.Info,
                     $"Fusion build information was not found at '{FusionBuildInfoPath}'. " +
-                    "This integration targets Fusion 2.1.1.");
+                    $"This integration is validated against Photon Fusion {ValidatedFusionVersion}; " +
+                    "other SDK releases are accepted.");
                 return;
             }
 
@@ -163,18 +176,38 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
             catch (Exception exception)
             {
                 report.Add(
-                    FusionSetupIssueSeverity.Error,
+                    FusionSetupIssueSeverity.Warning,
                     $"Fusion build information could not be read: {exception.Message}");
                 return;
             }
 
-            if (buildInfo.IndexOf("2.1.1", StringComparison.OrdinalIgnoreCase) < 0)
+            string detectedVersion = FindReportedVersion(buildInfo);
+            if (detectedVersion == null)
             {
                 report.Add(
-                    FusionSetupIssueSeverity.Error,
-                    "The installed Fusion SDK does not report version 2.1.1. " +
-                    "Re-run transport compatibility tests before shipping.");
+                    FusionSetupIssueSeverity.Info,
+                    "The installed Fusion SDK build information does not report a version. " +
+                    $"This integration is validated against Photon Fusion {ValidatedFusionVersion}.");
+                return;
             }
+
+            if (string.Equals(detectedVersion, ValidatedFusionVersion, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            report.Add(
+                FusionSetupIssueSeverity.Info,
+                $"The installed Photon Fusion SDK reports version {detectedVersion}. " +
+                $"This integration is validated against Photon Fusion {ValidatedFusionVersion}. " +
+                "Other SDK releases are accepted; install the validated version only if you " +
+                "encounter weaving or RPC errors.");
+        }
+
+        private static string FindReportedVersion(string buildInfo)
+        {
+            Match match = Regex.Match(buildInfo, @"\b\d+\.\d+\.\d+\b");
+            return match.Success ? match.Value : null;
         }
 
         private static void ValidatePhotonSettings(FusionSetupReport report)

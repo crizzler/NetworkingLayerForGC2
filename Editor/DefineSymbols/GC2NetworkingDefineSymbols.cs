@@ -581,9 +581,21 @@ namespace Arawn.GameCreator2.Networking.Editor
             });
         }
 
+        /// <summary>
+        /// Returns the currently loaded assemblies. AppDomain reflection is used instead of
+        /// UnityEngine.Assemblies.CurrentAssemblies because that API was internal in earlier
+        /// supported Unity versions and caused a store-release compile failure.
+        /// </summary>
+        private static Assembly[] GetLoadedAssembliesForReflection()
+        {
+#pragma warning disable UAC0005 // Intentional cross-version reflection; see the summary above.
+            return AppDomain.CurrentDomain.GetAssemblies();
+#pragma warning restore UAC0005
+        }
+
         private static Type FindLoadedType(string fullName)
         {
-            foreach (Assembly assembly in AppDomain.CurrentDomain.GetAssemblies())
+            foreach (Assembly assembly in GetLoadedAssembliesForReflection())
             {
                 if (assembly == null || assembly.IsDynamic || assembly.ReflectionOnly) continue;
                 try
@@ -817,7 +829,7 @@ namespace Arawn.GameCreator2.Networking.Editor
 
         private static bool IsNamespacePresent(string namespaceName)
         {
-            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+            foreach (var assembly in GetLoadedAssembliesForReflection())
             {
                 if (assembly.IsDynamic || assembly.ReflectionOnly) continue;
 

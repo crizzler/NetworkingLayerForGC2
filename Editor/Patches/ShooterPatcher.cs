@@ -466,6 +466,18 @@ namespace GameCreator.Runtime.Shooter
                 return false;
             }
 
+            // GC2 Shooter 2.3.8 revisions key m_Equipment by EntityId. Keep the
+            // injected direct-trigger lookups on that identity type instead of
+            // hashing back to an int, because Unity 6000.6 rejects the obsolete
+            // implicit int-to-EntityId conversion.
+            if (content.Contains("Dictionary<EntityId, WeaponData>", StringComparison.Ordinal))
+            {
+                content = content.Replace(
+                    "int shooterWeaponId = shooterWeapon.GetInstanceID();",
+                    "EntityId shooterWeaponId = shooterWeapon.GetEntityId();",
+                    StringComparison.Ordinal);
+            }
+
             WriteFile(relativePath, content);
             Debug.Log($"[GC2 Networking] Patched {relativePath}");
             return true;

@@ -877,11 +877,13 @@ namespace Arawn.GameCreator2.Networking.Editor
 
         private static Type ResolveType(string fullName)
         {
+#pragma warning disable UAC0005 // AppDomain reflection keeps the editor tooling compatible with older Unity versions.
             foreach (Assembly assembly in AppDomain.CurrentDomain.GetAssemblies())
             {
                 Type type = assembly.GetType(fullName, false);
                 if (type != null) return type;
             }
+#pragma warning restore UAC0005
             return null;
         }
 

@@ -266,6 +266,44 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
         }
 
         [Test]
+        public void FusionSdkValidation_ReportsVersionWithoutBlockingSetup()
+        {
+            Type validationType = RequireEditorType(
+                "Arawn.GameCreator2.Networking.Transport.Fusion.Editor." +
+                "FusionSceneSetupValidation");
+            Type reportType = RequireEditorType(
+                "Arawn.GameCreator2.Networking.Transport.Fusion.Editor." +
+                "FusionSetupReport");
+            MethodInfo validateSdk = validationType.GetMethod("ValidateSdk", StaticNonPublic);
+            Assert.NotNull(validateSdk, "ValidateSdk must exist for SDK version reporting.");
+
+            object report = Activator.CreateInstance(reportType);
+            validateSdk.Invoke(null, new[] { report });
+
+            bool hasErrors = (bool)reportType.GetProperty("HasErrors").GetValue(report);
+            Assert.IsFalse(
+                hasErrors,
+                "SDK version reporting must never block setup. Photon ships Fusion updates " +
+                "independently (for example 2.1.3), so a non-baseline version may only be " +
+                "reported as informational text.");
+
+            string validation = ReadAssetSource(
+                "Arawn/NetworkingLayerForGC2/Editor/Transport/Fusion/" +
+                "FusionSceneSetupValidation.cs");
+            string validateSdkBody = ExtractMethodBody(
+                validation,
+                "private static void ValidateSdk(");
+            StringAssert.DoesNotContain(
+                "IndexOf(\"2.1.1\"",
+                validateSdkBody,
+                "ValidateSdk must not hard-gate on one exact Photon Fusion version.");
+            StringAssert.Contains(
+                "ValidatedFusionVersion",
+                validateSdkBody,
+                "Version deviations are reported against the validated baseline.");
+        }
+
+        [Test]
         public void FusionMonoBuildCompatibility_IsStrictOnlyForMonoPlayers()
         {
             Type compatibilityType = RequireEditorType(
@@ -3169,7 +3207,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
             StringAssert.Contains("ObserverResultGraceSeconds", bootstrap);
             StringAssert.Contains("SharedAuthorityResultGraceSeconds", bootstrap);
             StringAssert.Contains(
-                "#if GC2_TRAVERSAL && (UNITY_EDITOR || DEVELOPMENT_BUILD)",
+                "#if GC2_TRAVERSAL && (UNITY_EDITOR || DEBUG)",
                 bootstrap);
             StringAssert.Contains("actor.transform.position.y - climbStart.y", bootstrap);
             StringAssert.Contains("RunHostObserver()", bootstrap);
@@ -3230,7 +3268,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
                 "FusionTraversalCoverSmokeBootstrap.cs");
             StringAssert.Contains("fusion-traversal-cover", bootstrap);
             StringAssert.Contains(
-                "#if GC2_TRAVERSAL && (UNITY_EDITOR || DEVELOPMENT_BUILD)",
+                "#if GC2_TRAVERSAL && (UNITY_EDITOR || DEBUG)",
                 bootstrap,
                 "The regression harness must remain absent from release players.");
             StringAssert.Contains("FindCover(\"Cover_Low\")", bootstrap);
@@ -3292,7 +3330,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
                 "FusionTraversalLedgeTransitionSmokeBootstrap.cs");
             StringAssert.Contains("fusion-traversal-ledge-transition", bootstrap);
             StringAssert.Contains(
-                "#if GC2_TRAVERSAL && (UNITY_EDITOR || DEVELOPMENT_BUILD)",
+                "#if GC2_TRAVERSAL && (UNITY_EDITOR || DEBUG)",
                 bootstrap,
                 "The regression harness must remain absent from release players.");
             StringAssert.Contains("new(0f, 6f, -0.05f)", bootstrap);
@@ -3468,7 +3506,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
                 "FusionTraversalLedgeReconnectSmokeBootstrap.cs");
             StringAssert.Contains("fusion-traversal-ledge-reconnect", bootstrap);
             StringAssert.Contains(
-                "#if GC2_TRAVERSAL && (UNITY_EDITOR || DEVELOPMENT_BUILD)",
+                "#if GC2_TRAVERSAL && (UNITY_EDITOR || DEBUG)",
                 bootstrap,
                 "The regression harness must remain absent from release players.");
             StringAssert.Contains("ExactLedgeFixtureLocalPosition", bootstrap);
@@ -3550,7 +3588,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
                 "FusionTraversalPullUpSmokeBootstrap.cs");
             StringAssert.Contains("fusion-traversal-pullup", bootstrap);
             StringAssert.Contains(
-                "#if GC2_TRAVERSAL && (UNITY_EDITOR || DEVELOPMENT_BUILD)",
+                "#if GC2_TRAVERSAL && (UNITY_EDITOR || DEBUG)",
                 bootstrap,
                 "The PullUp regression harness must remain absent from release players.");
             StringAssert.Contains("private const int AttemptsRequired = 3", bootstrap);
@@ -3656,8 +3694,9 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
             StringAssert.Contains("--gc2-network-ci-trace", trace);
             StringAssert.Contains("GC2_NETWORK_CI_TRACE", trace);
             StringAssert.Contains("[Conditional(\"UNITY_EDITOR\")]", trace);
-            StringAssert.Contains("[Conditional(\"DEVELOPMENT_BUILD\")]", trace);
-            StringAssert.Contains("#if !UNITY_EDITOR && !DEVELOPMENT_BUILD", trace);
+            StringAssert.Contains("[Conditional(\"DEBUG\")]", trace);
+            StringAssert.Contains("#if !UNITY_EDITOR && !DEBUG", trace);
+            StringAssert.DoesNotContain("DEVELOPMENT_BUILD", trace);
             StringAssert.Contains("HasTraversalActivity", trace);
             StringAssert.Contains("TraversalTraceWindowActive", trace);
             StringAssert.Contains("TraversalTraceLingerSeconds = 30f", trace);
@@ -3674,7 +3713,8 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
 
             string motionTypes = ReadAssetSource(
                 "Arawn/NetworkingLayerForGC2/Runtime/Motion/NetworkMotionTypes.cs");
-            StringAssert.Contains("#if UNITY_EDITOR || DEVELOPMENT_BUILD", motionTypes);
+            StringAssert.Contains("#if UNITY_EDITOR || DEBUG", motionTypes);
+            StringAssert.DoesNotContain("DEVELOPMENT_BUILD", motionTypes);
             StringAssert.Contains(
                 "return NetworkCiTrace.Enabled && s_ActiveManagerCount > 0;",
                 motionTypes);
@@ -3683,10 +3723,12 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
             string traversal = ReadAssetSource(
                 "Arawn/NetworkingLayerForGC2/Traversal/NetworkTraversalController.cs");
             StringAssert.Contains("NetworkCiTrace.Log(", traversal);
+            StringAssert.DoesNotContain("DEVELOPMENT_BUILD", traversal);
 
             string motor = ReadAssetSource(
                 "Arawn/NetworkingLayerForGC2/Runtime/Transport/Fusion/" +
                 "FusionNativeNetworkCharacterMotor.cs");
+            StringAssert.DoesNotContain("DEVELOPMENT_BUILD", motor);
             StringAssert.Contains("authority-owner-pose-accepted", motor);
             StringAssert.Contains("owner-reconciled", motor);
             StringAssert.Contains("render-sample", motor);
@@ -3699,6 +3741,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
             string bridge = ReadAssetSource(
                 "Arawn/NetworkingLayerForGC2/Runtime/Transport/Fusion/" +
                 "FusionTransportBridge.cs");
+            StringAssert.DoesNotContain("DEVELOPMENT_BUILD", bridge);
             StringAssert.Contains("unity-heartbeat", bridge);
             StringAssert.Contains("tick-stalled", bridge);
             StringAssert.Contains("tick-recovered", bridge);
@@ -3709,6 +3752,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
             string player = ReadAssetSource(
                 "Arawn/NetworkingLayerForGC2/Runtime/Motion/" +
                 "UnitPlayerDirectionalNetwork.cs");
+            StringAssert.DoesNotContain("DEVELOPMENT_BUILD", player);
             StringAssert.Contains("gc2-player-input", player);
             StringAssert.Contains("character-not-controllable", player);
             StringAssert.Contains("network-input-sink-missing", player);
