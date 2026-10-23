@@ -110,6 +110,19 @@ namespace Arawn.GameCreator2.Networking.Editor
         /// </summary>
         public static void RecreateInstallRoot(string sourceRoot, string destinationRoot)
         {
+            RecreateInstallRoot(sourceRoot, destinationRoot, "FreeFlowCombatExamples@");
+        }
+
+        /// <summary>
+        /// Recreates a generated installer root from an installed example. The source is never
+        /// moved or modified. Deletion is restricted to a destination that contains the caller's
+        /// exact generated marker.
+        /// </summary>
+        public static void RecreateInstallRoot(
+            string sourceRoot,
+            string destinationRoot,
+            string requiredDestinationMarker)
+        {
             const string installsPrefix = "Assets/Plugins/GameCreator/Installs/";
             if (string.IsNullOrWhiteSpace(sourceRoot) ||
                 !sourceRoot.StartsWith(installsPrefix, StringComparison.Ordinal) ||
@@ -121,11 +134,12 @@ namespace Arawn.GameCreator2.Networking.Editor
 
             if (string.IsNullOrWhiteSpace(destinationRoot) ||
                 !destinationRoot.StartsWith(installsPrefix, StringComparison.Ordinal) ||
-                destinationRoot.IndexOf("FreeFlowCombatExamples@", StringComparison.Ordinal) < 0 ||
+                string.IsNullOrEmpty(requiredDestinationMarker) ||
+                destinationRoot.IndexOf(requiredDestinationMarker, StringComparison.Ordinal) < 0 ||
                 string.Equals(sourceRoot, destinationRoot, StringComparison.Ordinal))
             {
                 throw new InvalidOperationException(
-                    $"Refusing to replace unsafe Free Flow installer destination '{destinationRoot}'.");
+                    $"Refusing to replace unsafe installer destination '{destinationRoot}'.");
             }
 
             if (AssetDatabase.IsValidFolder(destinationRoot) &&

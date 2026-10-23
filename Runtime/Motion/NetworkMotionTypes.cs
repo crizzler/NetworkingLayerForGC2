@@ -437,7 +437,7 @@ namespace Arawn.GameCreator2.Networking
         {
             get
             {
-#if UNITY_EDITOR || DEVELOPMENT_BUILD
+#if UNITY_EDITOR || DEBUG
                 return NetworkCiTrace.Enabled && s_ActiveManagerCount > 0;
 #else
                 return false;
@@ -446,7 +446,7 @@ namespace Arawn.GameCreator2.Networking
         }
 
         [System.Diagnostics.Conditional("UNITY_EDITOR")]
-        [System.Diagnostics.Conditional("DEVELOPMENT_BUILD")]
+        [System.Diagnostics.Conditional("DEBUG")]
         public static void SetManagerActive(bool active)
         {
             s_ActiveManagerCount = Mathf.Max(0, s_ActiveManagerCount + (active ? 1 : -1));
@@ -459,7 +459,7 @@ namespace Arawn.GameCreator2.Networking
         }
 
         [System.Diagnostics.Conditional("UNITY_EDITOR")]
-        [System.Diagnostics.Conditional("DEVELOPMENT_BUILD")]
+        [System.Diagnostics.Conditional("DEBUG")]
         public static void SetCharacterFocus(GameObject character, uint networkId, bool focused)
         {
             if (character != null)
@@ -511,7 +511,7 @@ namespace Arawn.GameCreator2.Networking
         }
 
         [System.Diagnostics.Conditional("UNITY_EDITOR")]
-        [System.Diagnostics.Conditional("DEVELOPMENT_BUILD")]
+        [System.Diagnostics.Conditional("DEBUG")]
         public static void Log(
             string stage,
             string message,

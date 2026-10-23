@@ -31,4 +31,9 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
     {
         public NetworkMotionResultMessage message;
     }
+
+    public struct GC2MalbersStatePacket : IPackedAuto
+    {
+        public NetworkMalbersStateMessage message;
+    }
 }

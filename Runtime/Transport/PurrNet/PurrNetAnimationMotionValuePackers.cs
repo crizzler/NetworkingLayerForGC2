@@ -23,6 +23,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
             Hasher.PrepareType(typeof(NetworkMotionResultMessage));
             Hasher.PrepareType(typeof(NetworkMotionCommand));
             Hasher.PrepareType(typeof(NetworkMotionResult));
+            Hasher.PrepareType(typeof(NetworkMalbersStateMessage));
         }
 
         [UsedByIL]
@@ -191,6 +192,36 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
         {
             packer.Read(ref value.CharacterNetworkId);
             packer.Read(ref value.Result);
+        }
+
+        [UsedByIL]
+        public static void Write(this BitPacker packer, NetworkMalbersStateMessage value)
+        {
+            packer.Write(value.CharacterNetworkId);
+            packer.Write((int)value.Flags);
+            packer.Write(value.StateId);
+            packer.Write(value.ModeId);
+            packer.Write(value.StanceId);
+            packer.Write(value.AbilityIndex);
+            packer.Write(value.StateTime);
+            packer.Write(value.VerticalSpeed);
+            packer.Write(value.Grounded);
+        }
+
+        [UsedByIL]
+        public static void Read(this BitPacker packer, ref NetworkMalbersStateMessage value)
+        {
+            packer.Read(ref value.CharacterNetworkId);
+            int flags = 0;
+            packer.Read(ref flags);
+            value.Flags = (NetworkMalbersStateFlags)flags;
+            packer.Read(ref value.StateId);
+            packer.Read(ref value.ModeId);
+            packer.Read(ref value.StanceId);
+            packer.Read(ref value.AbilityIndex);
+            packer.Read(ref value.StateTime);
+            packer.Read(ref value.VerticalSpeed);
+            packer.Read(ref value.Grounded);
         }
 
         [UsedByIL]

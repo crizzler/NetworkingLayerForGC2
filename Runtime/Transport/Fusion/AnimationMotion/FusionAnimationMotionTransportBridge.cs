@@ -16,7 +16,8 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             AnimationStopState = 3,
             AnimationStopGesture = 4,
             MotionCommand = 5,
-            MotionResult = 6
+            MotionResult = 6,
+            MalbersState = 7
         }
 
         [SerializeField] private bool m_CreateManagersIfMissing = true;
@@ -24,6 +25,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
 
         private NetworkAnimationManager m_WiredAnimationManager;
         private NetworkMotionManager m_WiredMotionManager;
+        private NetworkMalbersStateManager m_WiredMalbersStateManager;
         private bool m_ManagersInitialized;
         private bool m_LastServer;
         private bool m_LastClient;
@@ -195,6 +197,31 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                         TryRead(message, out NetworkMotionResultMessage motionResult))
                         GetMotionManager()?.ReceiveResult(motionResult);
                     break;
+                case MessageType.MalbersState:
+                    if (NetworkCiTrace.Enabled)
+                    {
+                        NetworkCiTrace.Log(
+                            "malbers",
+                            "module-receive",
+                            message.SenderClientId,
+                            0,
+                            $"fromAuthority={message.FromAuthority} request={request} " +
+                            $"authorityMessage={authorityMessage} " +
+                            $"bytes={message.Payload.Length}");
+                    }
+
+                    if (request &&
+                        TryRead(message, out NetworkMalbersStateMessage malbersRequest))
+                    {
+                        GetMalbersStateManager()?.ReceiveRequest(
+                            message.SenderClientId, malbersRequest);
+                    }
+                    else if (authorityMessage &&
+                             TryRead(message, out NetworkMalbersStateMessage malbersBroadcast))
+                    {
+                        GetMalbersStateManager()?.ReceiveBroadcast(malbersBroadcast);
+                    }
+                    break;
             }
         }
 
@@ -240,12 +267,29 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                 motionManager.GetNetworkCharacterById = ResolveNetworkCharacter;
             }
 
+            NetworkMalbersStateManager malbersStateManager = GetMalbersStateManager();
+            if (m_WiredMalbersStateManager != null &&
+                m_WiredMalbersStateManager != malbersStateManager)
+            {
+                UnwireMalbersStateManager();
+            }
+            if (malbersStateManager != null)
+            {
+                m_WiredMalbersStateManager = malbersStateManager;
+                malbersStateManager.SendToServer -= SendMalbersState;
+                malbersStateManager.SendToServer += SendMalbersState;
+                malbersStateManager.BroadcastToClients -= BroadcastMalbersState;
+                malbersStateManager.BroadcastToClients += BroadcastMalbersState;
+                malbersStateManager.GetNetworkCharacterById = ResolveNetworkCharacter;
+            }
+
             bool isServer = TransportBridge != null && TransportBridge.IsServer;
             bool isClient = TransportBridge != null && TransportBridge.IsClient;
             if (!m_ManagersInitialized || isServer != m_LastServer || isClient != m_LastClient)
             {
                 animationManager?.Initialize(isServer, isClient);
                 motionManager?.Initialize(isServer, isClient);
+                malbersStateManager?.Initialize(isServer, isClient);
                 m_ManagersInitialized = true;
                 m_LastServer = isServer;
                 m_LastClient = isClient;
@@ -261,6 +305,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         {
             UnwireAnimationManager();
             UnwireMotionManager();
+            UnwireMalbersStateManager();
             m_ManagersInitialized = false;
         }
 
@@ -293,6 +338,17 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             m_WiredMotionManager = null;
         }
 
+        private void UnwireMalbersStateManager()
+        {
+            NetworkMalbersStateManager manager = m_WiredMalbersStateManager;
+            if (manager == null) return;
+            manager.SendToServer -= SendMalbersState;
+            manager.BroadcastToClients -= BroadcastMalbersState;
+            if (ReferenceEquals(manager.GetNetworkCharacterById?.Target, this))
+                manager.GetNetworkCharacterById = null;
+            m_WiredMalbersStateManager = null;
+        }
+
         private NetworkAnimationManager GetAnimationManager()
         {
             NetworkAnimationManager manager = NetworkAnimationManager.Instance;
@@ -301,6 +357,39 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             if (manager != null || !m_CreateManagersIfMissing) return manager;
             return new GameObject("Network Animation Manager")
                 .AddComponent<NetworkAnimationManager>();
+        }
+
+        private NetworkMalbersStateManager GetMalbersStateManager()
+        {
+            NetworkMalbersStateManager manager = NetworkMalbersStateManager.Instance;
+            if (manager == null)
+                manager = UnityObjectSearch.FindAny<NetworkMalbersStateManager>(
+                    FindObjectsInactive.Include);
+            if (manager != null || !m_CreateManagersIfMissing)
+            {
+                TraceMalbersManager("resolved", manager);
+                return manager;
+            }
+
+            manager = new GameObject("Network Malbers State Manager")
+                .AddComponent<NetworkMalbersStateManager>();
+            TraceMalbersManager("created", manager);
+            return manager;
+        }
+
+        private static void TraceMalbersManager(string stage, NetworkMalbersStateManager manager)
+        {
+            if (!NetworkCiTrace.Enabled) return;
+
+            NetworkCiTrace.Log(
+                "malbers",
+                "manager-" + stage,
+                0,
+                0,
+                $"name={(manager != null ? manager.name : "none")} " +
+                $"isServer={(manager != null && manager.IsServer)} " +
+                $"isClient={(manager != null && manager.IsClient)} " +
+                $"received={(manager != null ? manager.ReceivedSnapshotCount : 0)}");
         }
 
         private NetworkMotionManager GetMotionManager()
@@ -329,6 +418,8 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             SendToAuthority((ushort)MessageType.AnimationStopGesture, message);
         private void SendMotionCommand(NetworkMotionCommandMessage message) =>
             SendToAuthority((ushort)MessageType.MotionCommand, message);
+        private void SendMalbersState(NetworkMalbersStateMessage message) =>
+            SendToAuthority((ushort)MessageType.MalbersState, message);
 
         private void SendMotionResult(uint clientId, NetworkMotionResultMessage message) =>
             SendToClient(clientId, (ushort)MessageType.MotionResult, message);
@@ -343,6 +434,22 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             Broadcast((ushort)MessageType.AnimationStopGesture, message);
         private void BroadcastMotionCommand(NetworkMotionCommandMessage message) =>
             Broadcast((ushort)MessageType.MotionCommand, message);
+        private void BroadcastMalbersState(NetworkMalbersStateMessage message) =>
+            BroadcastMalbersStateCounted(message);
+
+        private void BroadcastMalbersStateCounted(NetworkMalbersStateMessage message)
+        {
+            int sent = BroadcastCounted((ushort)MessageType.MalbersState, message);
+            if (NetworkCiTrace.Enabled)
+            {
+                NetworkCiTrace.Log(
+                    "malbers",
+                    "module-broadcast",
+                    message.CharacterNetworkId,
+                    0,
+                    $"state={message.StateId} clients={sent}");
+            }
+        }
 
         private void Log(string message)
         {

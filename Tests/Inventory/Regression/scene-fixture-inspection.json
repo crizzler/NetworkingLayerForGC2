@@ -1,0 +1,13 @@
+{
+  "generator": "InventoryRegressionSceneGenerator",
+  "generatedScene": "Assets/Arawn/NetworkingLayerForGC2/Tests/Inventory/Regression/Scenes/InventoryDropPickupRegression.unity",
+  "generatedSceneGuid": "0d40ab7604054c918961d8fcd60b2875",
+  "sourceScene": "Assets/Plugins/GameCreator/Installs/GC2NetworkingLayerPurrNetTransport.InventoryExamples@1.0.0/Requires Inventory Demos - PurrNetInventoryDemo.unity",
+  "sourceSceneGuid": "6c407f2cb8f4350548b8e955006373b9",
+  "unityVersion": "6000.5.9f1",
+  "rootObjectCount": 7,
+  "addItemInstructionCount": 0,
+  "convertedPickupSourceCount": 0,
+  "addItemSources": [
+  ]
+}

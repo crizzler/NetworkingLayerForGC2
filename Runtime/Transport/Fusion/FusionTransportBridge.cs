@@ -107,7 +107,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         private float m_NextGameplayReadyRetryAt;
         private uint m_GameplayReadySendEpoch;
         private int m_GameplayReadySendCount;
-#if UNITY_EDITOR || DEVELOPMENT_BUILD
+#if UNITY_EDITOR || DEBUG
         private float m_CiNextRunnerHealthTraceAt;
         private float m_CiLastTickAdvanceAt;
         private int m_CiLastObservedTick = int.MinValue;
@@ -2819,10 +2819,10 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             float progress) { }
 
         [System.Diagnostics.Conditional("UNITY_EDITOR")]
-        [System.Diagnostics.Conditional("DEVELOPMENT_BUILD")]
+        [System.Diagnostics.Conditional("DEBUG")]
         private void ResetCiDiagnostics()
         {
-#if UNITY_EDITOR || DEVELOPMENT_BUILD
+#if UNITY_EDITOR || DEBUG
             m_CiNextRunnerHealthTraceAt = 0f;
             m_CiLastTickAdvanceAt = Time.realtimeSinceStartup;
             m_CiLastObservedTick = int.MinValue;
@@ -2831,10 +2831,10 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         }
 
         [System.Diagnostics.Conditional("UNITY_EDITOR")]
-        [System.Diagnostics.Conditional("DEVELOPMENT_BUILD")]
+        [System.Diagnostics.Conditional("DEBUG")]
         private void TraceCiRunnerHealth()
         {
-#if UNITY_EDITOR || DEVELOPMENT_BUILD
+#if UNITY_EDITOR || DEBUG
             if (!NetworkCiTrace.TraversalTraceWindowActive) return;
 
             float now = Time.realtimeSinceStartup;
@@ -2939,7 +2939,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         }
 
         [System.Diagnostics.Conditional("UNITY_EDITOR")]
-        [System.Diagnostics.Conditional("DEVELOPMENT_BUILD")]
+        [System.Diagnostics.Conditional("DEBUG")]
         private void TraceCiInputCallback(
             NetworkRunner runner,
             string stage,
@@ -2947,7 +2947,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             NetworkObject playerObject,
             bool consumed)
         {
-#if UNITY_EDITOR || DEVELOPMENT_BUILD
+#if UNITY_EDITOR || DEBUG
             if (!NetworkCiTrace.TraversalTraceWindowActive) return;
 
             string signature = $"{stage}:{reason}:{consumed}:" +

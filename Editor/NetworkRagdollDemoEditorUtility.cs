@@ -247,10 +247,20 @@ namespace Arawn.GameCreator2.Networking.Editor
                 throw new InvalidOperationException($"Invalid package output path '{packagePath}'.");
             Directory.CreateDirectory(outputDirectory);
 
+#if UNITY_6000_6_OR_NEWER
+            // Unity 6000.6 obsoletes AssetDatabase.ExportPackage; nested installers stay unsigned.
+            UnityEditor.AssetPackage.Package.Export(
+                new UnityEditor.AssetPackage.ExportPackageParameters(
+                    new[] { installRoot },
+                    fullPackagePath,
+                    string.Empty,
+                    ExportPackageOptions.Recurse));
+#else
             AssetDatabase.ExportPackage(
                 new[] { installRoot },
                 fullPackagePath,
                 ExportPackageOptions.Recurse);
+#endif
             if (!File.Exists(fullPackagePath))
                 throw new InvalidOperationException($"Unity did not write '{fullPackagePath}'.");
         }

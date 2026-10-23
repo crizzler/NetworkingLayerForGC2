@@ -38,6 +38,16 @@ namespace Arawn.GameCreator2.Networking.Editor.CI
         private const string PurrNetCoreInstallRoot =
             "Assets/Plugins/GameCreator/Installs/" +
             "GC2NetworkingLayerPurrNetTransport.CoreExamples@1.1.0";
+        private const string FusionMalbersArchive =
+            "Arawn/NetworkingLayerForGC2/Demo/Fusion/Packages/Malbers/Package.unitypackage";
+        private const string PurrNetMalbersArchive =
+            "Arawn/NetworkingLayerForGC2/Demo/PurrNet/Packages/Malbers/Package.unitypackage";
+        private const string FusionMalbersInstallRoot =
+            "Assets/Plugins/GameCreator/Installs/" +
+            "GC2NetworkingLayerFusionTransport.MalbersExamples@1.0.0";
+        private const string PurrNetMalbersInstallRoot =
+            "Assets/Plugins/GameCreator/Installs/" +
+            "GC2NetworkingLayerPurrNetTransport.MalbersExamples@1.0.0";
 
         private static readonly string[] DefaultGameCreatorPatchers =
         {
@@ -222,6 +232,47 @@ namespace Arawn.GameCreator2.Networking.Editor.CI
         }
 
         /// <summary>
+        /// Rebuilds the ignored Fusion and PurrNet Malbers install roots used by the focused
+        /// optional-integration tests. The checked-in Malbers archives are hashed before and
+        /// after preparation and must remain byte-identical. Malbers must already be installed.
+        /// </summary>
+        public static void PrepareMalbersExamples()
+        {
+            string[] archives =
+            {
+                FusionMalbersArchive,
+                PurrNetMalbersArchive
+            };
+            Dictionary<string, string> archiveHashes = HashOptionalAssets(archives);
+
+            try
+            {
+                InvokePublicStaticMethod(
+                    "Arawn.GameCreator2.Networking.Transport.Fusion.Editor." +
+                    "FusionMalbersDemoBuilder, " +
+                    "Arawn.GameCreator2.Networking.Transport.Fusion.Editor",
+                    "BuildValidationFixture");
+                InvokePublicStaticMethod(
+                    "Arawn.GameCreator2.Networking.Transport.PurrNet.Editor." +
+                    "PurrNetMalbersDemoBuilder, " +
+                    "Arawn.GameCreator2.Networking.Transport.PurrNet.Editor",
+                    "BuildValidationFixture");
+            }
+            finally
+            {
+                AssertAssetHashesUnchanged(archiveHashes);
+            }
+
+            AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
+            RequireGeneratedFolder(FusionMalbersInstallRoot);
+            RequireGeneratedFolder(PurrNetMalbersInstallRoot);
+
+            Debug.Log(
+                "[GC2 Networking CI] Malbers validation fixtures prepared without modifying " +
+                "installer archives.");
+        }
+
+        /// <summary>
         /// Rebuilds both transport Core Examples 1.1.0 installers, migrating an installed 1.0.2
         /// source fixture when necessary. This mutates installer archives and therefore belongs
         /// only in a disposable isolated project; copy reviewed outputs back afterward.
@@ -382,6 +433,19 @@ namespace Arawn.GameCreator2.Networking.Editor.CI
                 }
 
                 hashes[relativePath] = ComputeSha256(fullPath);
+            }
+
+            return hashes;
+        }
+
+        private static Dictionary<string, string> HashOptionalAssets(
+            IEnumerable<string> assetRelativePaths)
+        {
+            var hashes = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (string relativePath in assetRelativePaths)
+            {
+                string fullPath = Path.Combine(Application.dataPath, relativePath);
+                if (File.Exists(fullPath)) hashes[relativePath] = ComputeSha256(fullPath);
             }
 
             return hashes;

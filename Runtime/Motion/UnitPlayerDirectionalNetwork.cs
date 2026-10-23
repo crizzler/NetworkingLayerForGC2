@@ -264,10 +264,10 @@ namespace Arawn.GameCreator2.Networking
         }
 
         [System.Diagnostics.Conditional("UNITY_EDITOR")]
-        [System.Diagnostics.Conditional("DEVELOPMENT_BUILD")]
+        [System.Diagnostics.Conditional("DEBUG")]
         private void TraceCiInputHealth(string stage, string reason)
         {
-#if UNITY_EDITOR || DEVELOPMENT_BUILD
+#if UNITY_EDITOR || DEBUG
             if (!NetworkCiTrace.TraversalTraceWindowActive || this.Character == null)
             {
                 return;

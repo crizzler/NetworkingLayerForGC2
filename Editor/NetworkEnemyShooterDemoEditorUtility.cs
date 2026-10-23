@@ -8,6 +8,7 @@ using UnityEditor;
 using UnityEditor.Build.Reporting;
 using UnityEditor.SceneManagement;
 using UnityEngine;
+using UnityEngine.Rendering;
 using UnityEngine.SceneManagement;
 
 namespace Arawn.GameCreator2.Networking.Editor
@@ -239,12 +240,35 @@ namespace Arawn.GameCreator2.Networking.Editor
 
             string fullOutput = Path.GetFullPath(packagePath);
             Directory.CreateDirectory(Path.GetDirectoryName(fullOutput) ?? ".");
+#if UNITY_6000_6_OR_NEWER
+            // Unity 6000.6 obsoletes AssetDatabase.ExportPackage; nested installers stay unsigned.
+            UnityEditor.AssetPackage.Package.Export(
+                new UnityEditor.AssetPackage.ExportPackageParameters(
+                    distinct,
+                    fullOutput,
+                    string.Empty,
+                    ExportPackageOptions.Default));
+#else
             AssetDatabase.ExportPackage(distinct, fullOutput, ExportPackageOptions.Default);
+#endif
             if (!File.Exists(fullOutput))
                 throw new InvalidOperationException($"Unity did not write '{fullOutput}'.");
         }
 
         public static void BuildStandaloneSmokePlayer(string scenePath, string transportName)
+        {
+            BuildStandaloneSmokePlayer(scenePath, transportName, replaceMaterialsForSmoke: false);
+        }
+
+        /// <summary>
+        /// Builds a smoke player. Malbers demos pass <paramref name="replaceMaterialsForSmoke"/>
+        /// so the Shader Graph Malbers materials are replaced in the disposable fixture before
+        /// the player build; their variant space otherwise dominates an unattended smoke build.
+        /// </summary>
+        public static void BuildStandaloneSmokePlayer(
+            string scenePath,
+            string transportName,
+            bool replaceMaterialsForSmoke)
         {
             string output = Environment.GetEnvironmentVariable(
                 "GC2_NETWORK_SMOKE_BUILD_PATH");
@@ -256,16 +280,65 @@ namespace Arawn.GameCreator2.Networking.Editor
             if (AssetDatabase.LoadAssetAtPath<SceneAsset>(scenePath) == null)
                 throw new FileNotFoundException("Enemy smoke scene is missing.", scenePath);
 
+            string buildScenePath = replaceMaterialsForSmoke
+                ? PrepareSmokeScene(scenePath)
+                : scenePath;
+
             string fullOutput = Path.GetFullPath(output);
             Directory.CreateDirectory(Path.GetDirectoryName(fullOutput) ?? ".");
             var options = new BuildPlayerOptions
             {
-                scenes = new[] { scenePath },
+                scenes = new[] { buildScenePath },
                 locationPathName = fullOutput,
                 target = BuildTarget.StandaloneLinux64,
                 options = BuildOptions.Development
             };
-            BuildReport report = BuildPipeline.BuildPlayer(options);
+            string previousStripper = Environment.GetEnvironmentVariable(
+                "GC2_NETWORK_SMOKE_STRIP_SHADERS");
+            RenderPipelineAsset previousDefaultPipeline = GraphicsSettings.defaultRenderPipeline;
+            int previousQualityLevel = QualitySettings.GetQualityLevel();
+            int qualityCount = QualitySettings.names.Length;
+            var previousQualityPipelines = new RenderPipelineAsset[qualityCount];
+            if (replaceMaterialsForSmoke)
+            {
+                // A stripped smoke player has no visual requirement. Removing the render
+                // pipeline keeps URP's Lit variant space, which the Malbers shader graph
+                // amplifies, out of the build entirely.
+                for (int i = 0; i < qualityCount; i++)
+                {
+                    QualitySettings.SetQualityLevel(i, false);
+                    previousQualityPipelines[i] = QualitySettings.renderPipeline;
+                    QualitySettings.renderPipeline = null;
+                }
+
+                QualitySettings.SetQualityLevel(previousQualityLevel, false);
+                GraphicsSettings.defaultRenderPipeline = null;
+                Environment.SetEnvironmentVariable("GC2_NETWORK_SMOKE_STRIP_SHADERS", "1");
+            }
+
+            BuildReport report;
+            try
+            {
+                report = BuildPipeline.BuildPlayer(options);
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(
+                    "GC2_NETWORK_SMOKE_STRIP_SHADERS",
+                    previousStripper);
+                if (replaceMaterialsForSmoke)
+                {
+                    GraphicsSettings.defaultRenderPipeline = previousDefaultPipeline;
+                    for (int i = 0; i < qualityCount; i++)
+                    {
+                        QualitySettings.SetQualityLevel(i, false);
+                        QualitySettings.renderPipeline = previousQualityPipelines[i];
+                    }
+
+                    QualitySettings.SetQualityLevel(previousQualityLevel, false);
+                }
+            }
+
             if (report.summary.result != BuildResult.Succeeded)
             {
                 throw new InvalidOperationException(
@@ -275,6 +348,188 @@ namespace Arawn.GameCreator2.Networking.Editor
 
             Debug.Log(
                 $"[GC2 Network Smoke CI] Built {transportName} player at '{fullOutput}'.");
+        }
+
+        private static string PrepareSmokeScene(string scenePath)
+        {
+            const string generatedFolder = "Assets/Arawn/NetworkingLayerForGC2/Generated/MalbersSmoke";
+            EnsureFolder(generatedFolder);
+
+            string materialPath = generatedFolder + "/MalbersSmokeUnlit.mat";
+            Material material = AssetDatabase.LoadAssetAtPath<Material>(materialPath);
+            Shader shader = Shader.Find("Unlit/Color") ??
+                            Shader.Find("Sprites/Default") ??
+                            Shader.Find("Universal Render Pipeline/Unlit");
+            if (shader == null)
+                throw new InvalidOperationException("No fallback smoke shader is available.");
+
+            if (material == null)
+            {
+                material = new Material(shader) { name = "MalbersSmokeUnlit" };
+                AssetDatabase.CreateAsset(material, materialPath);
+            }
+            else if (material.shader != shader)
+            {
+                material.shader = shader;
+                EditorUtility.SetDirty(material);
+            }
+
+            string installRoot = Path.GetDirectoryName(scenePath)?.Replace('\\', '/');
+            if (string.IsNullOrEmpty(installRoot))
+                throw new InvalidOperationException("The smoke scene has no install root.");
+
+            // Nested Malbers prefab variants keep their base materials even when a scene or
+            // outer prefab overrides renderers. Retarget the licensed materials themselves in
+            // this disposable fixture so the Shader Graph variant space is not built at all.
+            ReplaceMaterialShaders(
+                material.shader,
+                "Assets/Malbers Animations",
+                installRoot);
+
+            string[] prefabGuids = AssetDatabase.FindAssets("t:Prefab", new[] { installRoot });
+            for (int i = 0; i < prefabGuids.Length; i++)
+            {
+                string prefabPath = AssetDatabase.GUIDToAssetPath(prefabGuids[i]);
+                GameObject root = PrefabUtility.LoadPrefabContents(prefabPath);
+                try
+                {
+                    ReplaceRendererMaterials(root, material);
+                    PrefabUtility.SaveAsPrefabAsset(root, prefabPath);
+                }
+                finally
+                {
+                    PrefabUtility.UnloadPrefabContents(root);
+                }
+            }
+
+            string smokeScenePath = generatedFolder + "/MalbersSmokeScene.unity";
+            Scene scene = EditorSceneManager.OpenScene(scenePath, OpenSceneMode.Single);
+            ReplaceRendererMaterials(scene, material);
+            EnableMalbersSmokeDiagnostics(scene);
+            EditorSceneManager.SaveScene(scene, smokeScenePath);
+            AssetDatabase.SaveAssets();
+            AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
+            Debug.Log(
+                $"[GC2 Network Smoke CI] Prepared stripped smoke scene '{smokeScenePath}'.");
+            return smokeScenePath;
+        }
+
+        /// <summary>
+        /// Turns on the Malbers replication diagnostics in the disposable smoke scene only. A
+        /// scene-authored manager is used by the transport, so both peers log send/apply drops.
+        /// </summary>
+        private static void EnableMalbersSmokeDiagnostics(Scene scene)
+        {
+            if (!scene.IsValid() || !scene.isLoaded) return;
+
+            GameObject host = scene.GetRootGameObjects()
+                .FirstOrDefault(root => root != null && root.name == "Malbers Smoke Diagnostics");
+            if (host == null)
+            {
+                host = new GameObject("Malbers Smoke Diagnostics");
+                UnityEngine.SceneManagement.SceneManager.MoveGameObjectToScene(host, scene);
+            }
+
+            NetworkMalbersStateManager manager = host.GetComponent<NetworkMalbersStateManager>();
+            if (manager == null) manager = host.AddComponent<NetworkMalbersStateManager>();
+            EnableSerializedFlag(manager, "m_LogDiagnostics");
+
+            string[] bridgeTypeNames =
+            {
+                "Arawn.GameCreator2.Networking.Malbers.NetworkMalbersStateBridge"
+            };
+            for (int i = 0; i < bridgeTypeNames.Length; i++)
+            {
+                Type bridgeType = NetworkMalbersIntegrationPolicy.FindLoadedType(bridgeTypeNames[i]);
+                if (bridgeType == null) continue;
+
+                foreach (GameObject root in scene.GetRootGameObjects())
+                {
+                    MonoBehaviour[] behaviours = root.GetComponentsInChildren(bridgeType, true)
+                        .OfType<MonoBehaviour>()
+                        .ToArray();
+                    for (int b = 0; b < behaviours.Length; b++)
+                    {
+                        EnableSerializedFlag(behaviours[b], "m_LogDiagnostics");
+                    }
+                }
+            }
+
+            EditorSceneManager.MarkSceneDirty(scene);
+        }
+
+        private static void EnableSerializedFlag(UnityEngine.Object target, string fieldName)
+        {
+            if (target == null) return;
+
+            var serialized = new SerializedObject(target);
+            SerializedProperty property = serialized.FindProperty(fieldName);
+            if (property == null || property.propertyType != SerializedPropertyType.Boolean) return;
+            if (property.boolValue) return;
+
+            property.boolValue = true;
+            serialized.ApplyModifiedPropertiesWithoutUndo();
+            EditorUtility.SetDirty(target);
+        }
+
+        private static void ReplaceRendererMaterials(GameObject root, Material material)
+        {
+            if (root == null || material == null) return;
+            foreach (Renderer renderer in root.GetComponentsInChildren<Renderer>(true))
+            {
+                ReplaceRendererMaterials(renderer, material);
+            }
+        }
+
+        private static void ReplaceRendererMaterials(Scene scene, Material material)
+        {
+            if (!scene.IsValid() || !scene.isLoaded || material == null) return;
+            foreach (GameObject root in scene.GetRootGameObjects())
+            {
+                ReplaceRendererMaterials(root, material);
+            }
+        }
+
+        private static void ReplaceRendererMaterials(Renderer renderer, Material material)
+        {
+            if (renderer == null) return;
+            int count = Mathf.Max(1, renderer.sharedMaterials.Length);
+            var materials = new Material[count];
+            for (int i = 0; i < count; i++) materials[i] = material;
+            renderer.sharedMaterials = materials;
+        }
+
+        private static void ReplaceMaterialShaders(Shader shader, params string[] roots)
+        {
+            if (shader == null || roots == null || roots.Length == 0) return;
+
+            for (int rootIndex = 0; rootIndex < roots.Length; rootIndex++)
+            {
+                string root = roots[rootIndex];
+                if (string.IsNullOrEmpty(root) || !AssetDatabase.IsValidFolder(root)) continue;
+
+                string[] guids = AssetDatabase.FindAssets("t:Material", new[] { root });
+                for (int i = 0; i < guids.Length; i++)
+                {
+                    string path = AssetDatabase.GUIDToAssetPath(guids[i]);
+                    Material material = AssetDatabase.LoadAssetAtPath<Material>(path);
+                    if (material == null || material.shader == shader) continue;
+                    material.shader = shader;
+                    EditorUtility.SetDirty(material);
+                }
+            }
+
+            AssetDatabase.SaveAssets();
+        }
+
+        private static void EnsureFolder(string folder)
+        {
+            if (AssetDatabase.IsValidFolder(folder)) return;
+            string parent = Path.GetDirectoryName(folder)?.Replace('\\', '/');
+            if (string.IsNullOrEmpty(parent))
+                throw new InvalidOperationException($"Cannot create folder '{folder}'.");
+            if (!AssetDatabase.IsValidFolder(parent)) EnsureFolder(parent);
+            AssetDatabase.CreateFolder(parent, Path.GetFileName(folder));
         }
 
         private static void ReplaceAiObjectReferences(

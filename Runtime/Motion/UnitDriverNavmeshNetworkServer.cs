@@ -1022,7 +1022,7 @@ namespace Arawn.GameCreator2.Networking
         }
 
         [System.Diagnostics.Conditional("UNITY_EDITOR")]
-        [System.Diagnostics.Conditional("DEVELOPMENT_BUILD")]
+        [System.Diagnostics.Conditional("DEBUG")]
         private void LogNavMeshBindingFailure(float sampleDistance)
         {
             Debug.LogWarning(

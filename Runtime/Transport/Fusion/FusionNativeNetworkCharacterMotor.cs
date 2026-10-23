@@ -309,7 +309,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         private int m_LastCiOwnerPoseAcceptTick = int.MinValue;
         private int m_LastCiAuthenticatedOwnerPoseApplyTick = int.MinValue;
         private int m_LastCiReconcileStateTick = int.MinValue;
-#if UNITY_EDITOR || DEVELOPMENT_BUILD
+#if UNITY_EDITOR || DEBUG
         private Vector3 m_CiRenderBeginPosition;
         private Vector3 m_CiRenderEndPosition;
         private Vector3 m_CiLastFramePosition;
@@ -325,7 +325,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             m_ListenHostPresentationVisualRoot;
         public Transform ActiveRemotePresentationTarget =>
             m_PresentationRoot != null ? m_PresentationRoot : transform;
-#if UNITY_EDITOR || DEVELOPMENT_BUILD
+#if UNITY_EDITOR || DEBUG
         /// <summary>
         /// Returns the world pose committed by the most recent Fusion Render pass. A direct
         /// child presentation root can temporarily inherit a newer simulation-root transform
@@ -1182,7 +1182,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         }
 
         [System.Diagnostics.Conditional("UNITY_EDITOR")]
-        [System.Diagnostics.Conditional("DEVELOPMENT_BUILD")]
+        [System.Diagnostics.Conditional("DEBUG")]
         private void TraceRemoteSnapshotUnderrun(
             string stage,
             Vector3 fromPosition,
@@ -3784,10 +3784,10 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         }
 
         [System.Diagnostics.Conditional("UNITY_EDITOR")]
-        [System.Diagnostics.Conditional("DEVELOPMENT_BUILD")]
+        [System.Diagnostics.Conditional("DEBUG")]
         private void BeginCiTraversalRenderTrace()
         {
-#if UNITY_EDITOR || DEVELOPMENT_BUILD
+#if UNITY_EDITOR || DEBUG
             if (!NetworkCiTrace.TraversalTraceWindowActive || transform == null) return;
 
             m_CiRenderFrame = Time.frameCount;
@@ -3796,10 +3796,10 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         }
 
         [System.Diagnostics.Conditional("UNITY_EDITOR")]
-        [System.Diagnostics.Conditional("DEVELOPMENT_BUILD")]
+        [System.Diagnostics.Conditional("DEBUG")]
         private void EndCiTraversalRenderTrace()
         {
-#if UNITY_EDITOR || DEVELOPMENT_BUILD
+#if UNITY_EDITOR || DEBUG
             if (!NetworkCiTrace.TraversalTraceWindowActive || transform == null ||
                 m_CiRenderFrame != Time.frameCount)
             {
@@ -3875,10 +3875,10 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         }
 
         [System.Diagnostics.Conditional("UNITY_EDITOR")]
-        [System.Diagnostics.Conditional("DEVELOPMENT_BUILD")]
+        [System.Diagnostics.Conditional("DEBUG")]
         private void TraceCiPostRenderWrite()
         {
-#if UNITY_EDITOR || DEVELOPMENT_BUILD
+#if UNITY_EDITOR || DEBUG
             if (!NetworkCiTrace.TraversalTraceWindowActive || transform == null ||
                 m_CiRenderFrame != Time.frameCount)
             {
@@ -3947,12 +3947,12 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         }
 
         [System.Diagnostics.Conditional("UNITY_EDITOR")]
-        [System.Diagnostics.Conditional("DEVELOPMENT_BUILD")]
+        [System.Diagnostics.Conditional("DEBUG")]
         private void TraceCiFixedTick(
             bool hasInput,
             FusionNativeCharacterInput input)
         {
-#if UNITY_EDITOR || DEVELOPMENT_BUILD
+#if UNITY_EDITOR || DEBUG
             if (!NetworkCiTrace.TraversalTraceWindowActive || Runner == null ||
                 transform == null)
             {
@@ -4001,10 +4001,10 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         }
 
         [System.Diagnostics.Conditional("UNITY_EDITOR")]
-        [System.Diagnostics.Conditional("DEVELOPMENT_BUILD")]
+        [System.Diagnostics.Conditional("DEBUG")]
         private void TraceCiOwnerInputPayload(FusionNativeCharacterInput input)
         {
-#if UNITY_EDITOR || DEVELOPMENT_BUILD
+#if UNITY_EDITOR || DEBUG
             if (!NetworkCiTrace.TraversalTraceWindowActive) return;
 
             uint actorId = m_Identity != null ? m_Identity.NetworkId : 0;

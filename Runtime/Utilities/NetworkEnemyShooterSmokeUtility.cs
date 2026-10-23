@@ -26,6 +26,10 @@ namespace Arawn.GameCreator2.Networking
             public int shotsValidated;
             public int hitsValidated;
             public float elapsedSeconds;
+            public int malbersActorNetworkId;
+            public int malbersAuthorityState;
+            public int malbersObservedState;
+            public bool malbersStateChanged;
         }
 
         private static readonly List<NetworkCharacter> s_Characters = new(64);

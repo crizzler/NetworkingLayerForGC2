@@ -28,6 +28,7 @@ namespace Arawn.GameCreator2.Networking.Editor
         private const string SYMBOL_TRANSPORT_INTEGRATION = "ARAWN_GC2_TRANSPORT_INTEGRATION";
         private const string OBSOLETE_SYMBOL_PURRNET_TRANSPORT = "ARAWN_GC2_PURRNET_TRANSPORT";
         public const string SYMBOL_FUSION_KCC = "ARAWN_GC2_FUSION_KCC";
+        public const string SYMBOL_MALBERS = "ARAWN_GC2_MALBERS";
 
         private const string GC2_PACKAGES_ROOT = "Assets/Plugins/GameCreator/Packages";
         private const string GC2_INVENTORY_DIR = GC2_PACKAGES_ROOT + "/Inventory";
@@ -41,6 +42,10 @@ namespace Arawn.GameCreator2.Networking.Editor
         private const string GC2_TRAVERSAL_DIR = GC2_PACKAGES_ROOT + "/Traversal";
 
         private const string ABILITIES_MODULE_DIR = "Assets/Plugins/DaimahouGames/Packages/Abilities";
+        private const string MALBERS_INTEGRATION_ROOT =
+            "Assets/Malbers Animations/Integrations/GameCreator2";
+        private const string MALBERS_NATIVE_DRIVER_FILE =
+            MALBERS_INTEGRATION_ROOT + "/UnitDriverMAnimal.cs";
         private const string TRANSPORT_RUNTIME_ROOT = "Assets/Arawn/NetworkingLayerForGC2/Runtime/Transport";
         private const string TRANSPORT_EDITOR_ROOT = "Assets/Arawn/NetworkingLayerForGC2/Editor/Transport";
         private const string FUSION_KCC_ROOT_SESSION_KEY =
@@ -49,6 +54,7 @@ namespace Arawn.GameCreator2.Networking.Editor
         private static bool s_IsUpdating;
         private static bool s_PendingUpdate;
         private static bool s_ForceFusionKccAbsentUntilReload;
+        private static bool s_ForceMalbersAbsentUntilReload;
         private static bool? s_FusionKccApiInstalled;
         private static string s_FusionKccSourceRoot;
         private static readonly Dictionary<string, bool> s_NamespaceCache = new Dictionary<string, bool>();
@@ -71,6 +77,7 @@ namespace Arawn.GameCreator2.Networking.Editor
         private static void OnAfterAssemblyReload()
         {
             s_ForceFusionKccAbsentUntilReload = false;
+            s_ForceMalbersAbsentUntilReload = false;
             s_FusionKccApiInstalled = null;
             s_FusionKccSourceRoot = null;
             s_NamespaceCache.Clear();
@@ -131,6 +138,7 @@ namespace Arawn.GameCreator2.Networking.Editor
                 ManageSymbol(symbolList, SYMBOL_ABILITIES, IsAbilitiesInstalled());
                 ManageSymbol(symbolList, SYMBOL_TRANSPORT_INTEGRATION, IsTransportIntegrationInstalled());
                 ManageSymbol(symbolList, SYMBOL_FUSION_KCC, IsFusionKccApiInstalled());
+                ManageSymbol(symbolList, SYMBOL_MALBERS, IsMalbersIntegrationInstalled());
                 RemoveSymbol(symbolList, OBSOLETE_SYMBOL_PURRNET_TRANSPORT);
 
                 string newSymbols = string.Join(";", symbolList);
@@ -276,6 +284,54 @@ namespace Arawn.GameCreator2.Networking.Editor
                    HasTransportSubdirectory(TRANSPORT_EDITOR_ROOT) ||
                    IsNamespacePresentCached("Arawn.GameCreator2.Networking.Transport.PurrNet") ||
                    IsNamespacePresentCached("Arawn.GameCreator2.Networking.Transport.Fusion");
+        }
+
+        /// <summary>
+        /// Detects the optional Malbers GC2 integration before Assembly-CSharp reloads. The
+        /// companion bridge itself compiles into Assembly-CSharp, so the symbol must be ready
+        /// on first import rather than waiting for a reflection-only namespace probe.
+        /// </summary>
+        public static bool IsMalbersIntegrationInstalled()
+        {
+            if (s_ForceMalbersAbsentUntilReload) return false;
+
+            Type nativeDriver = FindLoadedType(
+                Arawn.GameCreator2.Networking.NetworkMalbersIntegrationPolicy
+                    .MalbersNativeDriverTypeName);
+            if (nativeDriver != null) return true;
+
+            return File.Exists(MALBERS_NATIVE_DRIVER_FILE) ||
+                   IsNamespacePresentCached("MalbersAnimations.Integrations.GameCreator2");
+        }
+
+        internal static void NotifyMalbersAssetsDeleted()
+        {
+            // OnWillDeleteAsset runs before Unity recompiles. Force-remove the symbol now so
+            // the optional companion cannot compile once against a partially deleted integration.
+            s_ForceMalbersAbsentUntilReload = true;
+            SetMalbersSymbolForCurrentBuildTarget(false);
+        }
+
+        private static void SetMalbersSymbolForCurrentBuildTarget(bool shouldDefine)
+        {
+            BuildTargetGroup group = EditorUserBuildSettings.selectedBuildTargetGroup;
+            if (group == BuildTargetGroup.Unknown) return;
+
+            NamedBuildTarget namedBuildTarget = NamedBuildTarget.FromBuildTargetGroup(group);
+            string currentSymbols = PlayerSettings.GetScriptingDefineSymbols(namedBuildTarget);
+            List<string> symbols = currentSymbols
+                .Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries)
+                .Distinct(StringComparer.Ordinal)
+                .ToList();
+            ManageSymbol(symbols, SYMBOL_MALBERS, shouldDefine);
+            string nextSymbols = string.Join(";", symbols);
+            if (string.Equals(currentSymbols, nextSymbols, StringComparison.Ordinal)) return;
+
+            PlayerSettings.SetScriptingDefineSymbols(namedBuildTarget, nextSymbols);
+            Debug.Log(
+                shouldDefine
+                    ? $"[GC2 Networking] Enabled {SYMBOL_MALBERS} for the current build target."
+                    : $"[GC2 Networking] Removed {SYMBOL_MALBERS} before Malbers recompilation.");
         }
 
         /// <summary>
@@ -941,6 +997,55 @@ namespace Arawn.GameCreator2.Networking.Editor
             if (GC2NetworkingFusionKccAssetPostprocessor.IsFusionKccApiAssetPath(assetPath))
             {
                 GC2NetworkingDefineSymbols.NotifyFusionKccAssetsDeleted();
+            }
+            return AssetDeleteResult.DidNotDelete;
+        }
+    }
+
+    internal sealed class GC2NetworkingMalbersAssetPostprocessor : AssetPostprocessor
+    {
+        private static void OnPostprocessAllAssets(
+            string[] importedAssets,
+            string[] deletedAssets,
+            string[] movedAssets,
+            string[] movedFromAssetPaths)
+        {
+            bool deletedIntegration = deletedAssets.Any(IsMalbersIntegrationAssetPath);
+            if (deletedIntegration)
+            {
+                GC2NetworkingDefineSymbols.NotifyMalbersAssetsDeleted();
+            }
+
+            bool relevant = deletedIntegration ||
+                            importedAssets.Any(IsMalbersIntegrationAssetPath) ||
+                            movedAssets.Any(IsMalbersIntegrationAssetPath) ||
+                            movedFromAssetPaths.Any(IsMalbersIntegrationAssetPath);
+            if (relevant) GC2NetworkingDefineSymbols.QueueUpdate();
+        }
+
+        internal static bool IsMalbersIntegrationAssetPath(string assetPath)
+        {
+            if (string.IsNullOrEmpty(assetPath)) return false;
+
+            string normalized = assetPath.Replace('\\', '/');
+            return normalized.IndexOf(
+                       "/Integrations/GameCreator2/",
+                       StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   normalized.EndsWith(
+                       "/Integrations/GameCreator2",
+                       StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    internal sealed class GC2NetworkingMalbersDeletionProcessor : AssetModificationProcessor
+    {
+        private static AssetDeleteResult OnWillDeleteAsset(
+            string assetPath,
+            RemoveAssetOptions options)
+        {
+            if (GC2NetworkingMalbersAssetPostprocessor.IsMalbersIntegrationAssetPath(assetPath))
+            {
+                GC2NetworkingDefineSymbols.NotifyMalbersAssetsDeleted();
             }
             return AssetDeleteResult.DidNotDelete;
         }

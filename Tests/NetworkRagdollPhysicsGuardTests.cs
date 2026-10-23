@@ -400,6 +400,262 @@ namespace Arawn.GameCreator2.Networking.Tests
             });
         }
 
+        [Test]
+        public void RigidbodyLifecycle_CapturesAndRestoresKinematicGravityAndCollision()
+        {
+            var root = new GameObject("Ragdoll Rigidbody Guard");
+            root.SetActive(false);
+
+            try
+            {
+                Character character = root.AddComponent<Character>();
+                Rigidbody body = root.AddComponent<Rigidbody>();
+                body.isKinematic = false;
+                body.useGravity = true;
+                body.detectCollisions = true;
+
+                NetworkRagdollPhysicsGuard.Register(character, body);
+                NetworkRagdollPhysicsGuard guard =
+                    root.GetComponent<NetworkRagdollPhysicsGuard>();
+                Assert.That(guard, Is.Not.Null);
+
+                InvokeLifecycle(guard, "BeginRagdoll");
+                InvokeLifecycle(guard, "BeginRagdoll");
+                Assert.That(body.isKinematic, Is.True);
+                Assert.That(body.useGravity, Is.False);
+                Assert.That(body.detectCollisions, Is.False);
+
+                InvokeLifecycle(guard, "BeginRecovery");
+                InvokeLifecycle(guard, "BeginRecovery");
+                Assert.That(body.isKinematic, Is.False);
+                Assert.That(body.useGravity, Is.True);
+                Assert.That(body.detectCollisions, Is.True);
+                InvokeLifecycle(guard, "FinishRagdoll");
+
+                // An obsolete role unregistered mid-ragdoll must not revive the old body when
+                // recovery starts.
+                NetworkRagdollPhysicsGuard.Register(character, body);
+                InvokeLifecycle(guard, "BeginRagdoll");
+                NetworkRagdollPhysicsGuard.Unregister(character, body);
+                InvokeLifecycle(guard, "BeginRecovery");
+                Assert.That(body.isKinematic, Is.True);
+                Assert.That(body.useGravity, Is.False);
+                Assert.That(body.detectCollisions, Is.False);
+                InvokeLifecycle(guard, "FinishRagdoll");
+            }
+            finally
+            {
+                Object.DestroyImmediate(root);
+            }
+        }
+
+        [Test]
+        public void RigidbodyIntendedBaseline_OverridesMidEpochCaptureAndSurvivesLateRoleChange()
+        {
+            var root = new GameObject("Ragdoll Rigidbody Intended Baseline");
+            root.SetActive(false);
+
+            try
+            {
+                Character character = root.AddComponent<Character>();
+                Rigidbody body = root.AddComponent<Rigidbody>();
+                body.isKinematic = false;
+                body.useGravity = true;
+                body.detectCollisions = true;
+
+                // Presentation adopts the root after the epoch already started. The guard must
+                // restore the presentation baseline, not the authored dynamic state it saw.
+                NetworkRagdollPhysicsGuard.Register(character, body);
+                NetworkRagdollPhysicsGuard guard =
+                    root.GetComponent<NetworkRagdollPhysicsGuard>();
+                InvokeLifecycle(guard, "BeginRagdoll");
+
+                NetworkRagdollPhysicsGuard.Adopt(
+                    character,
+                    body,
+                    intendedKinematic: true,
+                    intendedUseGravity: false,
+                    intendedDetectCollisions: true,
+                    replaceActiveBaseline: true);
+                Assert.That(body.isKinematic, Is.True);
+                Assert.That(body.useGravity, Is.False);
+                Assert.That(body.detectCollisions, Is.False);
+
+                InvokeLifecycle(guard, "BeginRecovery");
+                Assert.That(body.isKinematic, Is.True);
+                Assert.That(body.useGravity, Is.False);
+                Assert.That(body.detectCollisions, Is.True);
+                InvokeLifecycle(guard, "FinishRagdoll");
+
+                // The bridge leaves presentation during a later epoch. Publishing the authored
+                // baseline must make recovery restore it even if the bridge never gets another
+                // callback (the destroy-path contract).
+                NetworkRagdollPhysicsGuard.Register(character, body);
+                InvokeLifecycle(guard, "BeginRagdoll");
+                NetworkRagdollPhysicsGuard.SetIntendedRigidbodyState(
+                    character,
+                    body,
+                    intendedKinematic: false,
+                    intendedUseGravity: true,
+                    intendedDetectCollisions: true);
+                InvokeLifecycle(guard, "BeginRecovery");
+                Assert.That(body.isKinematic, Is.False);
+                Assert.That(body.useGravity, Is.True);
+                Assert.That(body.detectCollisions, Is.True);
+                InvokeLifecycle(guard, "FinishRagdoll");
+
+                // A baseline changed after BeginRecovery already restored is applied once more
+                // when GC2 raises FinishRagdoll.
+                NetworkRagdollPhysicsGuard.Adopt(
+                    character,
+                    body,
+                    intendedKinematic: true,
+                    intendedUseGravity: false,
+                    intendedDetectCollisions: true,
+                    replaceActiveBaseline: true);
+                InvokeLifecycle(guard, "BeginRagdoll");
+                InvokeLifecycle(guard, "BeginRecovery");
+                Assert.That(body.isKinematic, Is.True);
+                NetworkRagdollPhysicsGuard.SetIntendedRigidbodyState(
+                    character,
+                    body,
+                    intendedKinematic: false,
+                    intendedUseGravity: true,
+                    intendedDetectCollisions: true);
+                InvokeLifecycle(guard, "FinishRagdoll");
+                Assert.That(body.isKinematic, Is.False);
+                Assert.That(body.useGravity, Is.True);
+                Assert.That(body.detectCollisions, Is.True);
+            }
+            finally
+            {
+                Object.DestroyImmediate(root);
+            }
+        }
+
+        [Test]
+        public void RigidbodyAdopt_PreservesActiveBaselineUnlessExplicitlyReplaced()
+        {
+            var root = new GameObject("Ragdoll Rigidbody Adopt Baseline");
+            root.SetActive(false);
+
+            try
+            {
+                Character character = root.AddComponent<Character>();
+                Rigidbody body = root.AddComponent<Rigidbody>();
+                body.isKinematic = false;
+                body.useGravity = true;
+                body.detectCollisions = true;
+
+                NetworkRagdollPhysicsGuard.Register(character, body);
+                NetworkRagdollPhysicsGuard guard =
+                    root.GetComponent<NetworkRagdollPhysicsGuard>();
+                InvokeLifecycle(guard, "BeginRagdoll");
+
+                // Ordinary adoption preserves the baseline captured before the epoch started.
+                NetworkRagdollPhysicsGuard.Adopt(
+                    character,
+                    body,
+                    intendedKinematic: true,
+                    intendedUseGravity: false,
+                    intendedDetectCollisions: true);
+                InvokeLifecycle(guard, "BeginRecovery");
+                Assert.That(body.isKinematic, Is.False);
+                Assert.That(body.useGravity, Is.True);
+                Assert.That(body.detectCollisions, Is.True);
+                InvokeLifecycle(guard, "FinishRagdoll");
+
+                // Presentation can explicitly replace the active baseline when re-entering.
+                NetworkRagdollPhysicsGuard.Register(character, body);
+                InvokeLifecycle(guard, "BeginRagdoll");
+                NetworkRagdollPhysicsGuard.Adopt(
+                    character,
+                    body,
+                    intendedKinematic: true,
+                    intendedUseGravity: false,
+                    intendedDetectCollisions: true,
+                    replaceActiveBaseline: true);
+                InvokeLifecycle(guard, "BeginRecovery");
+                Assert.That(body.isKinematic, Is.True);
+                Assert.That(body.useGravity, Is.False);
+                Assert.That(body.detectCollisions, Is.True);
+                InvokeLifecycle(guard, "FinishRagdoll");
+
+                // Updating a body the guard does not track is a silent no-op.
+                var untrackedRoot = new GameObject("Untracked Rigidbody");
+                untrackedRoot.transform.SetParent(root.transform, false);
+                Rigidbody untrackedBody = untrackedRoot.AddComponent<Rigidbody>();
+                Assert.DoesNotThrow(() =>
+                    NetworkRagdollPhysicsGuard.SetIntendedRigidbodyState(
+                        character,
+                        untrackedBody,
+                        intendedKinematic: false,
+                        intendedUseGravity: false,
+                        intendedDetectCollisions: false));
+                Assert.That(untrackedBody.isKinematic, Is.False);
+            }
+            finally
+            {
+                Object.DestroyImmediate(root);
+            }
+        }
+
+        [Test]
+        public void RigidbodyBaseline_CanBeReadAndAppliedWhenEpochEndsSilently()
+        {
+            var root = new GameObject("Ragdoll Rigidbody Silent End");
+            root.SetActive(false);
+
+            try
+            {
+                Character character = root.AddComponent<Character>();
+                Rigidbody body = root.AddComponent<Rigidbody>();
+                body.isKinematic = false;
+                body.useGravity = true;
+                body.detectCollisions = true;
+
+                NetworkRagdollPhysicsGuard.Register(character, body);
+                NetworkRagdollPhysicsGuard guard =
+                    root.GetComponent<NetworkRagdollPhysicsGuard>();
+                InvokeLifecycle(guard, "BeginRagdoll");
+
+                Assert.That(
+                    NetworkRagdollPhysicsGuard.TryGetRigidbodyBaseline(
+                        character,
+                        body,
+                        out bool cachedKinematic,
+                        out bool cachedUseGravity,
+                        out bool cachedDetectCollisions),
+                    Is.True);
+                Assert.That(cachedKinematic, Is.False);
+                Assert.That(cachedUseGravity, Is.True);
+                Assert.That(cachedDetectCollisions, Is.True);
+                Assert.That(body.isKinematic, Is.True);
+                Assert.That(body.detectCollisions, Is.False);
+
+                // Simulate an epoch that ends without BeginRecovery/FinishRagdoll.
+                NetworkRagdollPhysicsGuard.ApplyPendingRigidbodyBaseline(character, body);
+                Assert.That(body.isKinematic, Is.False);
+                Assert.That(body.useGravity, Is.True);
+                Assert.That(body.detectCollisions, Is.True);
+                Assert.That(
+                    NetworkRagdollPhysicsGuard.TryGetRigidbodyBaseline(
+                        character,
+                        body,
+                        out _,
+                        out _,
+                        out _),
+                    Is.False);
+
+                Assert.DoesNotThrow(() =>
+                    NetworkRagdollPhysicsGuard.ApplyPendingRigidbodyBaseline(character, body));
+            }
+            finally
+            {
+                Object.DestroyImmediate(root);
+            }
+        }
+
         private static void InvokeRagdollBodyCollector(
             Character character,
             List<Rigidbody> destination)

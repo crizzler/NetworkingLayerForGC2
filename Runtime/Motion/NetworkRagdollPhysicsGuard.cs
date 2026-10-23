@@ -49,12 +49,24 @@ namespace Arawn.GameCreator2.Networking
             public bool WasEnabled;
         }
 
+        private sealed class RigidbodyState
+        {
+            public Rigidbody Body;
+            public bool Active;
+            public bool Captured;
+            public bool WasKinematic;
+            public bool WasUseGravity;
+            public bool WasDetectingCollisions;
+        }
+
         private readonly List<CharacterControllerState> m_Controllers =
             new List<CharacterControllerState>(1);
         private readonly List<NavMeshAgentState> m_Agents =
             new List<NavMeshAgentState>(1);
         private readonly List<ColliderState> m_Colliders =
             new List<ColliderState>(1);
+        private readonly List<RigidbodyState> m_Rigidbodies =
+            new List<RigidbodyState>(1);
 
         private Character m_Character;
         private RagdollPhase m_Phase;
@@ -123,6 +135,109 @@ namespace Arawn.GameCreator2.Networking
         }
 
         /// <summary>
+        /// Registers the root locomotion Rigidbody. The guard preserves its kinematic, gravity,
+        /// and collision-query state and makes it inert while GC2's dynamic ragdoll bones are
+        /// active. This keeps a Malbers/MAnimal root body from competing with the ragdoll.
+        /// </summary>
+        public static void Register(Character character, Rigidbody body)
+        {
+            if (character == null || body == null) return;
+
+            NetworkRagdollPhysicsGuard guard = Require(character);
+            guard?.RegisterRigidbody(body);
+        }
+
+        /// <summary>
+        /// Adopts the root locomotion Rigidbody during an existing ragdoll epoch. Unlike
+        /// ordinary registration, this supplies the role's intended post-ragdoll state instead
+        /// of capturing the currently suspended body, which may already belong to a different
+        /// role or a presentation baseline. An already captured baseline is preserved unless
+        /// <paramref name="replaceActiveBaseline"/> is true, matching controller adoption.
+        /// </summary>
+        public static void Adopt(
+            Character character,
+            Rigidbody body,
+            bool intendedKinematic,
+            bool intendedUseGravity,
+            bool intendedDetectCollisions,
+            bool replaceActiveBaseline = false)
+        {
+            if (character == null || body == null) return;
+
+            NetworkRagdollPhysicsGuard guard = Require(character);
+            guard?.AdoptRigidbody(
+                body,
+                intendedKinematic,
+                intendedUseGravity,
+                intendedDetectCollisions,
+                replaceActiveBaseline);
+        }
+
+        /// <summary>
+        /// Replaces the post-ragdoll baseline for a registered root Rigidbody without changing
+        /// its current suspended state. Role transitions use this to ensure recovery restores
+        /// the newly intended owner's physics state even if the caller is disabled or destroyed
+        /// before GC2 finishes the ragdoll epoch.
+        /// </summary>
+        public static void SetIntendedRigidbodyState(
+            Character character,
+            Rigidbody body,
+            bool intendedKinematic,
+            bool intendedUseGravity,
+            bool intendedDetectCollisions)
+        {
+            if (character == null || body == null) return;
+
+            NetworkRagdollPhysicsGuard guard =
+                character.GetComponent<NetworkRagdollPhysicsGuard>();
+            guard?.SetRigidbodyIntendedState(
+                body,
+                intendedKinematic,
+                intendedUseGravity,
+                intendedDetectCollisions);
+        }
+
+        /// <summary>
+        /// Reads the post-ragdoll baseline currently held for a registered root Rigidbody. This
+        /// lets a replacement bridge recover authored values instead of caching the temporarily
+        /// suspended state from the live body.
+        /// </summary>
+        public static bool TryGetRigidbodyBaseline(
+            Character character,
+            Rigidbody body,
+            out bool isKinematic,
+            out bool useGravity,
+            out bool detectCollisions)
+        {
+            isKinematic = false;
+            useGravity = false;
+            detectCollisions = false;
+            if (character == null || body == null) return false;
+
+            NetworkRagdollPhysicsGuard guard =
+                character.GetComponent<NetworkRagdollPhysicsGuard>();
+            return guard != null &&
+                   guard.TryGetRigidbodyBaseline(
+                       body,
+                       out isKinematic,
+                       out useGravity,
+                       out detectCollisions);
+        }
+
+        /// <summary>
+        /// Applies a captured baseline when an epoch ended without its normal finish callback.
+        /// The bridge uses this before releasing deferred bookkeeping to a foreign driver.
+        /// </summary>
+        public static void ApplyPendingRigidbodyBaseline(Character character, Rigidbody body)
+        {
+            if (character == null || body == null) return;
+
+            NetworkRagdollPhysicsGuard guard =
+                character.GetComponent<NetworkRagdollPhysicsGuard>();
+            guard?.ApplyPendingRigidbodyBaseline(body);
+        }
+
+        /// <summary>
         /// Stops tracking a role-specific physics component without restoring it. Drivers use
         /// this while relinquishing a role during ragdoll so an obsolete backend is not revived
         /// when recovery starts.
@@ -187,6 +302,7 @@ namespace Arawn.GameCreator2.Networking
             m_Controllers.Clear();
             m_Agents.Clear();
             m_Colliders.Clear();
+            m_Rigidbodies.Clear();
             m_Character = null;
             m_Phase = RagdollPhase.None;
         }
@@ -380,6 +496,139 @@ namespace Arawn.GameCreator2.Networking
             }
         }
 
+        private void RegisterRigidbody(Rigidbody body)
+        {
+            RigidbodyState state = FindRigidbodyState(body);
+            if (state == null)
+            {
+                state = new RigidbodyState
+                {
+                    Body = body,
+                    Active = true
+                };
+                m_Rigidbodies.Add(state);
+            }
+            else
+            {
+                state.Active = true;
+            }
+
+            if (m_Phase == RagdollPhase.Dynamic)
+            {
+                CaptureAndSuspend(state);
+            }
+        }
+
+        private void AdoptRigidbody(
+            Rigidbody body,
+            bool intendedKinematic,
+            bool intendedUseGravity,
+            bool intendedDetectCollisions,
+            bool replaceActiveBaseline)
+        {
+            RigidbodyState state = FindRigidbodyState(body);
+            if (state == null)
+            {
+                state = new RigidbodyState { Body = body };
+                m_Rigidbodies.Add(state);
+            }
+
+            bool preserveActiveEpochBaseline =
+                !replaceActiveBaseline && state.Active && state.Captured;
+            state.Active = true;
+
+            if (preserveActiveEpochBaseline)
+            {
+                if (m_Phase == RagdollPhase.Dynamic)
+                {
+                    Suspend(state);
+                }
+                else
+                {
+                    ApplyIntendedState(state);
+                    state.Captured = false;
+                }
+
+                return;
+            }
+
+            state.WasKinematic = intendedKinematic;
+            state.WasUseGravity = intendedUseGravity;
+            state.WasDetectingCollisions = intendedDetectCollisions;
+
+            if (m_Phase == RagdollPhase.Dynamic)
+            {
+                state.Captured = true;
+                Suspend(state);
+            }
+            else
+            {
+                ApplyIntendedState(state);
+                state.Captured = false;
+            }
+        }
+
+        private bool TryGetRigidbodyBaseline(
+            Rigidbody body,
+            out bool isKinematic,
+            out bool useGravity,
+            out bool detectCollisions)
+        {
+            isKinematic = false;
+            useGravity = false;
+            detectCollisions = false;
+
+            RigidbodyState state = FindRigidbodyState(body);
+            if (state == null || !state.Active || !state.Captured) return false;
+
+            isKinematic = state.WasKinematic;
+            useGravity = state.WasUseGravity;
+            detectCollisions = state.WasDetectingCollisions;
+            return true;
+        }
+
+        private void ApplyPendingRigidbodyBaseline(Rigidbody body)
+        {
+            RigidbodyState state = FindRigidbodyState(body);
+            if (state == null || !state.Active || !state.Captured) return;
+
+            ApplyIntendedState(state);
+            state.Captured = false;
+        }
+
+        private void SetRigidbodyIntendedState(
+            Rigidbody body,
+            bool intendedKinematic,
+            bool intendedUseGravity,
+            bool intendedDetectCollisions)
+        {
+            RigidbodyState state = FindRigidbodyState(body);
+            if (state == null) return;
+
+            state.WasKinematic = intendedKinematic;
+            state.WasUseGravity = intendedUseGravity;
+            state.WasDetectingCollisions = intendedDetectCollisions;
+
+            if (m_Phase == RagdollPhase.Dynamic || m_Phase == RagdollPhase.Recovering)
+            {
+                // FinishRagdoll applies any baseline changed after BeginRecovery restored the
+                // previous one. Keeping the body suspended until then avoids a dynamic root
+                // beside still-recovering bones.
+                state.Captured = true;
+                if (m_Phase == RagdollPhase.Dynamic) Suspend(state);
+            }
+        }
+
+        private RigidbodyState FindRigidbodyState(Rigidbody body)
+        {
+            for (int i = 0; i < m_Rigidbodies.Count; ++i)
+            {
+                if (ReferenceEquals(m_Rigidbodies[i].Body, body)) return m_Rigidbodies[i];
+            }
+
+            return null;
+        }
+
         private void UnregisterComponent(Component component)
         {
             for (int i = m_Controllers.Count - 1; i >= 0; --i)
@@ -408,6 +657,15 @@ namespace Arawn.GameCreator2.Networking
                     else m_Colliders[i].Active = false;
                 }
             }
+
+            for (int i = m_Rigidbodies.Count - 1; i >= 0; --i)
+            {
+                if (ReferenceEquals(m_Rigidbodies[i].Body, component))
+                {
+                    if (m_Phase == RagdollPhase.None) m_Rigidbodies.RemoveAt(i);
+                    else m_Rigidbodies[i].Active = false;
+                }
+            }
         }
 
         private void BeginRagdoll()
@@ -432,6 +690,11 @@ namespace Arawn.GameCreator2.Networking
             {
                 if (m_Colliders[i].Active) CaptureAndSuspend(m_Colliders[i]);
             }
+
+            for (int i = 0; i < m_Rigidbodies.Count; ++i)
+            {
+                if (m_Rigidbodies[i].Active) CaptureAndSuspend(m_Rigidbodies[i]);
+            }
         }
 
         private void BeginRecovery()
@@ -447,14 +710,15 @@ namespace Arawn.GameCreator2.Networking
         {
             if (m_Phase == RagdollPhase.None) return;
 
-            // Fallback for a guard created after EventAfterStartRecover or an interrupted role
-            // transition. Normal recovery already restored in BeginRecovery.
+            // BeginRecovery normally restores and clears Captured. A role transition during
+            // recovery may install a new intended baseline afterwards, so apply any remaining
+            // captured state once more before ending the epoch.
             if (m_Phase == RagdollPhase.Dynamic)
             {
                 m_Phase = RagdollPhase.Recovering;
-                RestoreCapturedState();
             }
 
+            RestoreCapturedState();
             m_Phase = RagdollPhase.None;
             PruneInactiveComponents();
         }
@@ -519,6 +783,49 @@ namespace Arawn.GameCreator2.Networking
             if (collider.enabled) collider.enabled = false;
         }
 
+        private static void CaptureAndSuspend(RigidbodyState state)
+        {
+            Rigidbody body = state.Body;
+            if (body == null) return;
+
+            if (!state.Captured)
+            {
+                state.WasKinematic = body.isKinematic;
+                state.WasUseGravity = body.useGravity;
+                state.WasDetectingCollisions = body.detectCollisions;
+                state.Captured = true;
+            }
+
+            Suspend(state);
+        }
+
+        private static void Suspend(RigidbodyState state)
+        {
+            Rigidbody body = state.Body;
+            if (body == null) return;
+
+            if (!body.isKinematic) body.isKinematic = true;
+            if (body.useGravity) body.useGravity = false;
+            if (body.detectCollisions) body.detectCollisions = false;
+
+#if UNITY_6000_0_OR_NEWER
+            body.linearVelocity = Vector3.zero;
+#else
+            body.velocity = Vector3.zero;
+#endif
+            body.angularVelocity = Vector3.zero;
+        }
+
+        private static void ApplyIntendedState(RigidbodyState state)
+        {
+            Rigidbody body = state.Body;
+            if (body == null) return;
+
+            body.isKinematic = state.WasKinematic;
+            body.useGravity = state.WasUseGravity;
+            body.detectCollisions = state.WasDetectingCollisions;
+        }
+
         private void RestoreCapturedState()
         {
             // Restore collision before reactivating an agent which may immediately resume motion.
@@ -565,6 +872,20 @@ namespace Arawn.GameCreator2.Networking
 
                 state.Captured = false;
             }
+
+            for (int i = 0; i < m_Rigidbodies.Count; ++i)
+            {
+                RigidbodyState state = m_Rigidbodies[i];
+                if (!state.Captured) continue;
+
+                Rigidbody body = state.Body;
+                if (state.Active && body != null)
+                {
+                    ApplyIntendedState(state);
+                }
+
+                state.Captured = false;
+            }
         }
 
         private void PruneInactiveComponents()
@@ -582,6 +903,11 @@ namespace Arawn.GameCreator2.Networking
             for (int i = m_Colliders.Count - 1; i >= 0; --i)
             {
                 if (!m_Colliders[i].Active) m_Colliders.RemoveAt(i);
+            }
+
+            for (int i = m_Rigidbodies.Count - 1; i >= 0; --i)
+            {
+                if (!m_Rigidbodies[i].Active) m_Rigidbodies.RemoveAt(i);
             }
         }
     }

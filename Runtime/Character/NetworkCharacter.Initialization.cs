@@ -791,6 +791,9 @@ namespace Arawn.GameCreator2.Networking
                     }
                 }
             }
+            // Attach the optional Malbers companion last. It is resolved by type name from
+            // Assembly-CSharp, so the main package never acquires a Malbers compile dependency.
+            TryAttachMalbersMotorBridge();
         }
 
         private void ApplyServerOptimizations()

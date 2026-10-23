@@ -527,6 +527,18 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                 ModuleId, messageType, FusionWireSerializer.Serialize(value), reliable);
         }
 
+        /// <summary>
+        /// Broadcasts and returns how many clients accepted the message so diagnostics can tell a
+        /// readiness/relevance drop apart from a lost packet.
+        /// </summary>
+        protected int BroadcastCounted<T>(ushort messageType, T value, bool reliable = true)
+        {
+            FusionTransportBridge bridge = TransportBridge;
+            if (bridge == null || !bridge.IsServer) return 0;
+            return bridge.BroadcastModule(
+                ModuleId, messageType, FusionWireSerializer.Serialize(value), reliable);
+        }
+
         protected bool TryRead<T>(FusionModuleMessage message, out T value)
         {
             try

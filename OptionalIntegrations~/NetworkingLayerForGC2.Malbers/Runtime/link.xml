@@ -1,0 +1,12 @@
+<linker>
+  <!-- NetworkCharacter locates this optional companion by type name, so IL2CPP would
+       otherwise be free to strip it from Assembly-CSharp. -->
+  <assembly fullname="Assembly-CSharp">
+    <type fullname="Arawn.GameCreator2.Networking.Malbers.NetworkMalbersMotorBridge"
+          preserve="all" />
+    <type fullname="Arawn.GameCreator2.Networking.Malbers.NetworkMalbersStateBridge"
+          preserve="all" />
+    <type fullname="Arawn.GameCreator2.Networking.Malbers.NetworkMalbersDemoHud"
+          preserve="all" />
+  </assembly>
+</linker>

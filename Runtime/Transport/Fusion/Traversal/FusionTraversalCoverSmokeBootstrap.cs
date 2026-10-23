@@ -1,4 +1,4 @@
-#if GC2_TRAVERSAL && (UNITY_EDITOR || DEVELOPMENT_BUILD)
+#if GC2_TRAVERSAL && (UNITY_EDITOR || DEBUG)
 using System;
 using System.Collections;
 using System.IO;

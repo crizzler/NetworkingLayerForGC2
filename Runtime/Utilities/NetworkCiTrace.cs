@@ -22,7 +22,7 @@ namespace Arawn.GameCreator2.Networking
 
         private static bool? s_Enabled;
         private static string s_Role;
-#if UNITY_EDITOR || DEVELOPMENT_BUILD
+#if UNITY_EDITOR || DEBUG
         private static bool s_FramePacingApplied;
         private static readonly HashSet<uint> s_ActiveTraversalActors = new();
         private static readonly Dictionary<string, float> s_LastSamples = new(128);
@@ -35,7 +35,7 @@ namespace Arawn.GameCreator2.Networking
         {
             s_Enabled = null;
             s_Role = null;
-#if UNITY_EDITOR || DEVELOPMENT_BUILD
+#if UNITY_EDITOR || DEBUG
             s_FramePacingApplied = false;
             s_ActiveTraversalActors.Clear();
             s_LastSamples.Clear();
@@ -53,7 +53,7 @@ namespace Arawn.GameCreator2.Networking
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.BeforeSceneLoad)]
         private static void ApplyTraceFramePacing()
         {
-#if UNITY_EDITOR || DEVELOPMENT_BUILD
+#if UNITY_EDITOR || DEBUG
             if (Application.isEditor || s_FramePacingApplied || !Enabled) return;
 
             int targetFrameRate = ResolveTraceFrameRate();
@@ -75,7 +75,7 @@ namespace Arawn.GameCreator2.Networking
         {
             get
             {
-#if !UNITY_EDITOR && !DEVELOPMENT_BUILD
+#if !UNITY_EDITOR && !DEBUG
                 return false;
 #else
                 if (s_Enabled.HasValue) return s_Enabled.Value;
@@ -108,7 +108,7 @@ namespace Arawn.GameCreator2.Networking
         {
             get
             {
-#if UNITY_EDITOR || DEVELOPMENT_BUILD
+#if UNITY_EDITOR || DEBUG
                 return Enabled && s_ActiveTraversalActors.Count > 0;
 #else
                 return false;
@@ -125,7 +125,7 @@ namespace Arawn.GameCreator2.Networking
         {
             get
             {
-#if UNITY_EDITOR || DEVELOPMENT_BUILD
+#if UNITY_EDITOR || DEBUG
                 return Enabled &&
                        (s_ActiveTraversalActors.Count > 0 ||
                         Time.realtimeSinceStartup <= s_TraversalTraceUntil);
@@ -136,10 +136,10 @@ namespace Arawn.GameCreator2.Networking
         }
 
         [Conditional("UNITY_EDITOR")]
-        [Conditional("DEVELOPMENT_BUILD")]
+        [Conditional("DEBUG")]
         public static void SetTraversalActivity(uint actorNetworkId, bool active)
         {
-#if UNITY_EDITOR || DEVELOPMENT_BUILD
+#if UNITY_EDITOR || DEBUG
             if (actorNetworkId == 0) return;
 
             bool changed = active
@@ -162,7 +162,7 @@ namespace Arawn.GameCreator2.Networking
 
         public static bool ShouldSample(string key, float interval = 0.5f)
         {
-#if UNITY_EDITOR || DEVELOPMENT_BUILD
+#if UNITY_EDITOR || DEBUG
             if (!TraversalTraceWindowActive || string.IsNullOrEmpty(key)) return false;
 
             float now = Time.realtimeSinceStartup;
@@ -181,7 +181,7 @@ namespace Arawn.GameCreator2.Networking
 
         public static bool HasChanged(string key, string value)
         {
-#if UNITY_EDITOR || DEVELOPMENT_BUILD
+#if UNITY_EDITOR || DEBUG
             if (!TraversalTraceWindowActive || string.IsNullOrEmpty(key)) return false;
 
             value ??= string.Empty;
@@ -198,7 +198,7 @@ namespace Arawn.GameCreator2.Networking
         }
 
         [Conditional("UNITY_EDITOR")]
-        [Conditional("DEVELOPMENT_BUILD")]
+        [Conditional("DEBUG")]
         public static void Log(
             string channel,
             string stage,

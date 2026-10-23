@@ -4915,7 +4915,7 @@ namespace Arawn.GameCreator2.Networking.Traversal
             uint correlationId,
             uint stateVersion)
         {
-#if UNITY_EDITOR || DEVELOPMENT_BUILD
+#if UNITY_EDITOR || DEBUG
             if (!m_IsServer || source?.Motion == null ||
                 target is not TraverseInteractive targetInteractive ||
                 targetInteractive.MotionInteractive == null ||

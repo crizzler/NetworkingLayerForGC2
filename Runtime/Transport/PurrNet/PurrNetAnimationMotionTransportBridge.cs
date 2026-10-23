@@ -24,6 +24,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
         private bool m_SubscribedServer;
         private bool m_SubscribedClient;
         private NetworkManager m_HookedManager;
+        private NetworkMalbersStateManager m_WiredMalbersStateManager;
         private bool m_ManagersInitialized;
         private bool m_LastServer;
         private bool m_LastClient;
@@ -157,6 +158,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
             manager.Subscribe<GC2AnimationStopStateCommandPacket>(HandleAnimationStopStateCommandServer, true);
             manager.Subscribe<GC2AnimationStopGestureCommandPacket>(HandleAnimationStopGestureCommandServer, true);
             manager.Subscribe<GC2MotionCommandPacket>(HandleMotionCommandServer, true);
+            manager.Subscribe<GC2MalbersStatePacket>(HandleMalbersStateServer, true);
         }
 
         private void UnsubscribeServer(NetworkManager manager)
@@ -166,6 +168,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
             manager.Unsubscribe<GC2AnimationStopStateCommandPacket>(HandleAnimationStopStateCommandServer, true);
             manager.Unsubscribe<GC2AnimationStopGestureCommandPacket>(HandleAnimationStopGestureCommandServer, true);
             manager.Unsubscribe<GC2MotionCommandPacket>(HandleMotionCommandServer, true);
+            manager.Unsubscribe<GC2MalbersStatePacket>(HandleMalbersStateServer, true);
         }
 
         private void SubscribeClient(NetworkManager manager)
@@ -176,6 +179,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
             manager.Subscribe<GC2AnimationStopGestureCommandPacket>(HandleAnimationStopGestureBroadcastClient, false);
             manager.Subscribe<GC2MotionResultPacket>(HandleMotionResultClient, false);
             manager.Subscribe<GC2MotionCommandPacket>(HandleMotionBroadcastClient, false);
+            manager.Subscribe<GC2MalbersStatePacket>(HandleMalbersStateBroadcastClient, false);
         }
 
         private void UnsubscribeClient(NetworkManager manager)
@@ -186,6 +190,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
             manager.Unsubscribe<GC2AnimationStopGestureCommandPacket>(HandleAnimationStopGestureBroadcastClient, false);
             manager.Unsubscribe<GC2MotionResultPacket>(HandleMotionResultClient, false);
             manager.Unsubscribe<GC2MotionCommandPacket>(HandleMotionBroadcastClient, false);
+            manager.Unsubscribe<GC2MalbersStatePacket>(HandleMalbersStateBroadcastClient, false);
         }
 
         private void WireManagers()
@@ -230,10 +235,27 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
             bool isServer = nm != null && nm.isServer;
             bool isClient = nm != null && nm.isClient;
 
+            NetworkMalbersStateManager malbersStateManager = GetMalbersStateManager();
+            if (m_WiredMalbersStateManager != null &&
+                m_WiredMalbersStateManager != malbersStateManager)
+            {
+                UnwireMalbersStateManager();
+            }
+            if (malbersStateManager != null)
+            {
+                m_WiredMalbersStateManager = malbersStateManager;
+                malbersStateManager.SendToServer -= SendMalbersStateToServer;
+                malbersStateManager.SendToServer += SendMalbersStateToServer;
+                malbersStateManager.BroadcastToClients -= BroadcastMalbersState;
+                malbersStateManager.BroadcastToClients += BroadcastMalbersState;
+                malbersStateManager.GetNetworkCharacterById = ResolveNetworkCharacter;
+            }
+
             if (!m_ManagersInitialized || isServer != m_LastServer || isClient != m_LastClient)
             {
                 animationManager?.Initialize(isServer, isClient);
                 motionManager?.Initialize(isServer, isClient);
+                malbersStateManager?.Initialize(isServer, isClient);
                 LogDash(
                     $"wired managers server={isServer} client={isClient} " +
                     $"animation={(animationManager != null)} motion={(motionManager != null)}");
@@ -281,7 +303,22 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
                 }
             }
 
+            UnwireMalbersStateManager();
             m_ManagersInitialized = false;
+        }
+
+        private void UnwireMalbersStateManager()
+        {
+            NetworkMalbersStateManager manager = m_WiredMalbersStateManager;
+            if (manager == null) return;
+            manager.SendToServer -= SendMalbersStateToServer;
+            manager.BroadcastToClients -= BroadcastMalbersState;
+            if (ReferenceEquals(manager.GetNetworkCharacterById?.Target, this))
+            {
+                manager.GetNetworkCharacterById = null;
+            }
+
+            m_WiredMalbersStateManager = null;
         }
 
         private NetworkAnimationManager GetAnimationManager()
@@ -301,6 +338,23 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
             var go = new GameObject("Network Animation Manager");
             manager = go.AddComponent<NetworkAnimationManager>();
             return manager;
+        }
+
+        private NetworkMalbersStateManager GetMalbersStateManager()
+        {
+            NetworkMalbersStateManager manager = NetworkMalbersStateManager.Instance;
+            if (manager == null)
+            {
+#if UNITY_2023_1_OR_NEWER
+                manager = UnityObjectSearch.FindAny<NetworkMalbersStateManager>(
+                    FindObjectsInactive.Include);
+#else
+                manager = FindObjectOfType<NetworkMalbersStateManager>(true);
+#endif
+            }
+            if (manager != null || !m_CreateManagersIfMissing) return manager;
+            var go = new GameObject("Network Malbers State Manager");
+            return go.AddComponent<NetworkMalbersStateManager>();
         }
 
         private NetworkMotionManager GetMotionManager()
@@ -351,6 +405,13 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
         {
             LogDash(message, "send motion to server");
             SendToServerOrLoopback(new GC2MotionCommandPacket { message = message }, DispatchMotionCommandOnServer);
+        }
+
+        private void SendMalbersStateToServer(NetworkMalbersStateMessage message)
+        {
+            SendToServerOrLoopback(
+                new GC2MalbersStatePacket { message = message },
+                DispatchMalbersStateOnServer);
         }
 
         private void SendToServerOrLoopback<T>(T packet, System.Action<PlayerID, T> hostLoopback)
@@ -434,6 +495,11 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
             ActiveManager?.SendToAll(new GC2MotionCommandPacket { message = message }, m_Channel);
         }
 
+        private void BroadcastMalbersState(NetworkMalbersStateMessage message)
+        {
+            ActiveManager?.SendToAll(new GC2MalbersStatePacket { message = message }, m_Channel);
+        }
+
         private void HandleAnimationStateCommandServer(PlayerID senderPlayer, GC2AnimationStateCommandPacket data, bool asServer)
         {
             if (!asServer) return;
@@ -462,6 +528,12 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
         {
             if (!asServer) return;
             DispatchMotionCommandOnServer(senderPlayer, data);
+        }
+
+        private void HandleMalbersStateServer(PlayerID senderPlayer, GC2MalbersStatePacket data, bool asServer)
+        {
+            if (!asServer) return;
+            DispatchMalbersStateOnServer(senderPlayer, data);
         }
 
         private void DispatchAnimationStateCommandOnServer(PlayerID senderPlayer, GC2AnimationStateCommandPacket data)
@@ -508,6 +580,17 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
             GetMotionManager()?.ReceiveCommand(senderClientId, data.message);
         }
 
+        private void DispatchMalbersStateOnServer(PlayerID senderPlayer, GC2MalbersStatePacket data)
+        {
+            if (!TryConvertSenderClientId(senderPlayer, out uint senderClientId))
+            {
+                LogDash($"server malbers dispatch dropped: could not convert sender={senderPlayer.id}");
+                return;
+            }
+
+            GetMalbersStateManager()?.ReceiveRequest(senderClientId, data.message);
+        }
+
         private void HandleAnimationStateBroadcastClient(PlayerID senderPlayer, GC2AnimationStateCommandPacket data, bool asServer)
         {
             if (asServer) return;
@@ -547,6 +630,12 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
             if (asServer) return;
             LogDash(data.message, $"client received motion broadcast sender={senderPlayer.id}");
             GetMotionManager()?.ReceiveBroadcast(data.message);
+        }
+
+        private void HandleMalbersStateBroadcastClient(PlayerID senderPlayer, GC2MalbersStatePacket data, bool asServer)
+        {
+            if (asServer) return;
+            GetMalbersStateManager()?.ReceiveBroadcast(data.message);
         }
 
         private void LogDash(NetworkMotionCommandMessage message, string prefix)
