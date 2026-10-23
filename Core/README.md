@@ -33,6 +33,28 @@ prefabs and optional bot-backed slots. Network authority comes from
 `NetworkCharacter.ActorType` and transport-authenticated ownership, never from
 changing GC2's local `Character.IsPlayer` flag.
 
+### Malbers Animal Controller
+
+When the Malbers Animal Controller Game Creator 2 integration is present, the
+wizard reports it under **Optional Integrations** and generates nothing for it:
+`ARAWN_GC2_MALBERS` is managed automatically, and `NetworkCharacter` attaches the
+Malbers state/motor bridges and provisions `NetworkMalbersStateManager` when the
+scene has none.
+
+A Malbers character keeps its own kernel units (`UnitDriverMAnimal`,
+`UnitFacingMAnimal`, `UnitAnimimMAnimal`). The setup wizard, both transport
+scene setup wizards, and the `NetworkCharacter` menu tools deliberately skip the
+kernel rewrite for such a rig, because `NetworkCharacter` applies the role driver
+(server, owning client, remote) at runtime. Replacing those units detaches
+MAnimal from locomotion, facing, and the Animator.
+
+### Fusion Advanced KCC
+
+Advanced KCC is a Fusion-only movement backend and is not configured here. Choose
+it under **Prediction Backend** in `Game Creator > Networking Layer > Fusion
+Scene Setup Wizard`; that wizard greys the option out with the reason when the
+addon is missing and manages `ARAWN_GC2_FUSION_KCC` automatically.
+
 ## Architecture
 
 ```

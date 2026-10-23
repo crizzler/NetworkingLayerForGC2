@@ -53,6 +53,20 @@ namespace Arawn.GameCreator2.Networking.Editor
         {
             if (character == null) return false;
 
+            // A Malbers Animal Controller rig authors UnitDriverMAnimal/UnitFacingMAnimal/
+            // UnitAnimimMAnimal and lets NetworkCharacter swap in the role driver at runtime.
+            // Replacing those units detaches MAnimal from locomotion, facing and the Animator, so
+            // the transport wizards leave the kernel authored as the Malbers demos ship it.
+            if (NetworkMalbersIntegrationPolicy.HasMalbersAnimal(character.gameObject))
+            {
+                Debug.Log(
+                    "[GC2 Networking] Kept the Malbers Animal Controller kernel on '" +
+                    character.gameObject.name +
+                    "'. NetworkCharacter applies the role driver at runtime, so no authored " +
+                    "driver/animim replacement is needed.");
+                return false;
+            }
+
             Transform mannequin = character.Animim?.Mannequin;
             Animator animator = character.Animim?.Animator;
             var serialized = new SerializedObject(character);

@@ -457,6 +457,49 @@ namespace Arawn.GameCreator2.Networking.Tests
             StringAssert.Contains("state.WasDetectingCollisions", source);
         }
 
+        /// <summary>
+        /// A Malbers rig authors UnitDriverMAnimal/UnitFacingMAnimal/UnitAnimimMAnimal and relies on
+        /// NetworkCharacter swapping in the role driver at runtime. Every setup tool that rewrites a
+        /// GC2 kernel must therefore bail out before it replaces a single unit.
+        /// </summary>
+        [Test]
+        public void SetupTools_KeepTheMalbersCharacterKernel()
+        {
+            AssertGuardPrecedesFirstKernelWrite(
+                "Arawn/NetworkingLayerForGC2/Editor/GameCreator2NetworkingSetupWizard.cs",
+                "scene setup wizard");
+
+            AssertGuardPrecedesFirstKernelWrite(
+                "Arawn/NetworkingLayerForGC2/Editor/GC2SceneSetupShared.cs",
+                "shared transport wizard helper");
+
+            string menu = ReadAssetSource(
+                "Arawn/NetworkingLayerForGC2/Editor/NetworkCharacterMenuItems.cs");
+            StringAssert.Contains(
+                "NetworkMalbersIntegrationPolicy.HasMalbersAnimal(character.gameObject)",
+                menu,
+                "The NetworkCharacter menu tools must not replace Malbers kernel units.");
+        }
+
+        private static void AssertGuardPrecedesFirstKernelWrite(
+            string relativePath,
+            string toolName)
+        {
+            string source = ReadAssetSource(relativePath);
+
+            int guard = source.IndexOf(
+                "NetworkMalbersIntegrationPolicy.HasMalbersAnimal",
+                StringComparison.Ordinal);
+            int firstWrite = source.IndexOf("managedReferenceValue", StringComparison.Ordinal);
+
+            Assert.GreaterOrEqual(guard, 0, $"The {toolName} has no Malbers kernel guard.");
+            Assert.GreaterOrEqual(firstWrite, 0, $"The {toolName} no longer writes a GC2 kernel.");
+            Assert.Less(
+                guard,
+                firstWrite,
+                $"The {toolName} must check for a Malbers character before replacing kernel units.");
+        }
+
         private static string AssetPath(string relativePath)
         {
             string projectRoot = Path.GetFullPath(Path.Combine(Application.dataPath, ".."));

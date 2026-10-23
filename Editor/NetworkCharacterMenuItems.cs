@@ -115,6 +115,15 @@ namespace Arawn.EnemyMasses.Editor.GameCreator2
 
         private static void ConfigureNetworkUnits(Character character, NetworkCharacterType type)
         {
+            if (character == null) return;
+
+            // Malbers rigs keep their own driver/facing/animim units; the runtime applies the
+            // network role driver instead. See NetworkMalbersIntegrationPolicy.
+            if (NetworkMalbersIntegrationPolicy.HasMalbersAnimal(character.gameObject))
+            {
+                return;
+            }
+
             // Use SerializedObject to set the kernel units to network versions
             SerializedObject serializedCharacter = new SerializedObject(character);
             SerializedProperty kernelProperty = serializedCharacter.FindProperty("m_Kernel");

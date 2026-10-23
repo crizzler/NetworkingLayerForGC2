@@ -25,13 +25,32 @@ companion compiles into `Assembly-CSharp` behind the automatically managed
 4. Use the Malbers GC2 setup wizard as usual, then add a `NetworkCharacter` to the same
    character.
 
-`NetworkCharacter` automatically attaches `NetworkMalbersMotorBridge` when it finds
-`MAnimal` and the optional bridge assembly. You can also add the component manually to a
-prefab; it is idempotent.
+`NetworkCharacter` automatically attaches `NetworkMalbersMotorBridge` and
+`NetworkMalbersStateBridge` when it finds `MAnimal` and the optional bridge assembly. You can
+also add either component manually to a prefab; both are idempotent. `NetworkMalbersStateBridge`
+provisions a `NetworkMalbersStateManager` when the scene has none; disable `Create Manager If
+Missing` when your own bootstrap owns manager creation.
 
-If the bridge is not attached, verify that `ARAWN_GC2_MALBERS` appears under
+If a bridge does not attach, verify that `ARAWN_GC2_MALBERS` appears under
 `Project Settings > Player > Scripting Define Symbols` for the active build target, that this
 folder still has no `.asmdef`, and that the Malbers Game Creator 2 integration compiled.
+
+## Setup wizard
+
+`Game Creator > Networking Layer > Scene Setup Wizard` reports this integration under
+**Optional Integrations**. It generates nothing for Malbers, because the bridges and the state
+manager provision themselves at runtime as described above.
+
+The wizard, both transport scene setup wizards
+(`GC2SceneSetupShared.ConfigureNetworkReadyCharacterKernel`), and the `NetworkCharacter` menu
+tools deliberately skip the GC2 kernel rewrite for a Malbers character. The validated Malbers
+demos author `UnitDriverMAnimal`, `UnitFacingMAnimal`, and `UnitAnimimMAnimal`, and
+`NetworkCharacter` swaps in the role driver (server, owning client, remote) at runtime;
+replacing those units only detaches MAnimal from locomotion, facing, and the Animator. The wizard
+records the skip in its setup report warnings.
+
+If the status is wrong after importing or removing Malbers, use **Refresh integration detection**
+in the wizard; it re-runs `GC2NetworkingDefineSymbols.RefreshNow()`.
 
 ## What the bridge does
 
@@ -111,6 +130,14 @@ must be shipped to every peer at the same time.
 The bridge samples on a change and therefore does not stream continuous Malbers speed-set or
 free-movement selections. Continuous locomotion continues to come from the network driver.
 
+It also resends the last snapshot every `m_HeartbeatInterval` seconds (default `1.5`, `0`
+disables it). Without that heartbeat a peer joining after the last Malbers transition would wait
+for the next state change, so late joiners and recovering proxies converge on their own.
+
+Proxy diagnostics are exposed on the bridge: `AppliedSnapshotCount`, `LastAppliedCharacterId`,
+and `LastAppliedStateId` prove that a snapshot was applied to a specific actor rather than only
+arriving at the process.
+
 ## Demo
 
 The optional demos are built from the licensed Malbers GC2 Wolf scene and reference Malbers
@@ -187,7 +214,8 @@ reference Malbers assemblies that the main package does not own. Every source fi
   `EventChangeFacing` re-priority, stale tank-unit restore guard, instance-aware driver
   refresh, deferred Rigidbody restore, and input/AI suppression options), the
   `NetworkMalbersStateManager` authority/broadcast contract, Fusion/PurrNet transport wiring,
-  and the generated demo installer contents.
+  the generated demo installer contents, and `SetupTools_KeepTheMalbersCharacterKernel`,
+  which fails if any setup tool ever starts replacing Malbers kernel units again.
 - `.github/workflows/unity-malbers-tests.yml` runs the `GC2Networking.Malbers` category with a
   minimum passed count and both required suites on a runner that has Malbers installed.
 - These are compile/source-contract tests. Unity EditMode, Play Mode, IL2CPP, authority

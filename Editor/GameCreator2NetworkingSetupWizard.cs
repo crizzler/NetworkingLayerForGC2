@@ -90,6 +90,9 @@ namespace Arawn.GameCreator2.Networking.Editor
         private Vector2 m_Scroll;
         private SetupStep m_CurrentStep = SetupStep.Scenario;
 
+        // Cached so the Malbers status does not re-scan loaded assemblies on every repaint.
+        private bool? m_MalbersIntegrationInstalled;
+
         private const int TOTAL_STEPS = 5;
 
         private static readonly GUIContent GUI_GAME_TYPE = new GUIContent(
@@ -499,6 +502,10 @@ namespace Arawn.GameCreator2.Networking.Editor
             );
 #endif
 
+            EditorGUILayout.Space(6);
+            EditorGUILayout.LabelField("Optional Integrations", EditorStyles.boldLabel);
+            DrawMalbersIntegrationStatus();
+
             m_AssignAssetsToSceneComponents = DrawToggleWithGuidance(
                 GUI_ASSIGN_SCENE_ASSETS,
                 m_AssignAssetsToSceneComponents,
@@ -525,6 +532,54 @@ namespace Arawn.GameCreator2.Networking.Editor
                 "You want a runtime test helper in the scene to validate security, sequence tracking, and relevance-tier logic during QA.",
                 "This is a production build or you already have your own test harness."
             );
+        }
+
+        /// <summary>
+        /// Reports whether the Malbers Animal Controller Game Creator 2 integration is present, and
+        /// explains what the wizard does (and deliberately does not do) for it.
+        /// </summary>
+        private void DrawMalbersIntegrationStatus()
+        {
+            m_MalbersIntegrationInstalled ??=
+                GC2NetworkingDefineSymbols.IsMalbersIntegrationInstalled();
+
+            if (m_MalbersIntegrationInstalled.Value)
+            {
+                EditorGUILayout.HelpBox(
+                    "Malbers Animal Controller (Game Creator 2 integration) detected. " +
+                    "ARAWN_GC2_MALBERS is managed automatically, and NetworkCharacter attaches " +
+                    "the Malbers state/motor bridges plus NetworkMalbersStateManager when the " +
+                    "scene has none. This wizard generates no Malbers objects and leaves a " +
+                    "Malbers kernel (UnitDriverMAnimal / UnitFacingMAnimal / UnitAnimimMAnimal) " +
+                    "untouched, because NetworkCharacter applies the role driver at runtime.",
+                    MessageType.Info);
+            }
+            else
+            {
+                EditorGUILayout.HelpBox(
+                    "Malbers Animal Controller integration not detected, so native Malbers state " +
+                    "(active state, mode/ability, stance, grounded) is not replicated. Install " +
+                    "Malbers Animal Controller with its Game Creator 2 integration " +
+                    "(Assets/Malbers Animations/Integrations/GameCreator2); the editor enables " +
+                    "ARAWN_GC2_MALBERS automatically once it is present.",
+                    MessageType.None);
+            }
+
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                if (GUILayout.Button("Refresh integration detection", GUILayout.Width(230f)))
+                {
+                    m_MalbersIntegrationInstalled = null;
+                    GC2NetworkingDefineSymbols.RefreshNow();
+                }
+            }
+
+            EditorGUILayout.HelpBox(
+                "Fusion Advanced KCC is a Fusion-only movement backend. Choose it under " +
+                "Prediction Backend in Game Creator > Networking Layer > Fusion Scene Setup " +
+                "Wizard; that wizard greys the option out with a reason when the addon is " +
+                "missing and manages ARAWN_GC2_FUSION_KCC automatically.",
+                MessageType.None);
         }
 
         private void DrawPlayerSection()
@@ -1100,7 +1155,8 @@ namespace Arawn.GameCreator2.Networking.Editor
                     character,
                     m_UseNetworkDriverUnit,
                     m_UseNetworkFacingUnit,
-                    m_UseNetworkAnimimUnit
+                    m_UseNetworkAnimimUnit,
+                    report
                 );
 
                 networkCharacter = go.AddComponent<NetworkCharacter>();
@@ -1118,7 +1174,8 @@ namespace Arawn.GameCreator2.Networking.Editor
                         character,
                         m_UseNetworkDriverUnit,
                         m_UseNetworkFacingUnit,
-                        m_UseNetworkAnimimUnit
+                        m_UseNetworkAnimimUnit,
+                        report
                     );
                 }
 
@@ -1270,13 +1327,36 @@ namespace Arawn.GameCreator2.Networking.Editor
             character.transform.position += Vector3.up * halfHeight;
         }
 
-        private void ConfigureKernelForNetworkPlayer(
+        /// <summary>
+        /// Authors the network kernel units on a player template.
+        ///
+        /// A Malbers Animal Controller character is left untouched: the validated Malbers demos
+        /// author <c>UnitDriverMAnimal</c>, <c>UnitFacingMAnimal</c> and <c>UnitAnimimMAnimal</c>,
+        /// and <see cref="NetworkCharacter"/> swaps in the role driver
+        /// (server/client/remote) at runtime. Overwriting those units with the plain network
+        /// units detaches MAnimal from locomotion, facing and the Animator, which silently breaks
+        /// the Malbers rig instead of networking it.
+        /// </summary>
+        private static void ConfigureKernelForNetworkPlayer(
             Character character,
             bool useNetworkDriver,
             bool useNetworkFacing,
-            bool useNetworkAnimim
+            bool useNetworkAnimim,
+            SetupReport report
         )
         {
+            if (character == null) return;
+
+            if (NetworkMalbersIntegrationPolicy.HasMalbersAnimal(character.gameObject))
+            {
+                report.Warnings.AppendLine(
+                    "- Skipped network kernel units on '" + character.gameObject.name +
+                    "' because it is a Malbers Animal Controller character. " +
+                    "UnitDriverMAnimal / UnitFacingMAnimal / UnitAnimimMAnimal were preserved; " +
+                    "NetworkCharacter applies the role driver at runtime.");
+                return;
+            }
+
             var so = new SerializedObject(character);
             SerializedProperty kernel = so.FindProperty("m_Kernel");
             if (kernel == null)

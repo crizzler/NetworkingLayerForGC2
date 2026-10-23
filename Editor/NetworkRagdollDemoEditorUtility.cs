@@ -247,20 +247,21 @@ namespace Arawn.GameCreator2.Networking.Editor
                 throw new InvalidOperationException($"Invalid package output path '{packagePath}'.");
             Directory.CreateDirectory(outputDirectory);
 
-#if UNITY_6000_6_OR_NEWER
-            // Unity 6000.6 obsoletes AssetDatabase.ExportPackage; nested installers stay unsigned.
-            UnityEditor.AssetPackage.Package.Export(
-                new UnityEditor.AssetPackage.ExportPackageParameters(
-                    new[] { installRoot },
-                    fullPackagePath,
-                    string.Empty,
-                    ExportPackageOptions.Recurse));
-#else
-            AssetDatabase.ExportPackage(
+            // Unity 6000.6 replaced AssetDatabase.ExportPackage with an API that also carries the
+            // owner organization id, which is what makes the Editor embed a package-registry
+            // attestation. Older Editors cannot attest and log the archive as unsigned.
+            NetworkPackageExportResult export = NetworkPackageSigning.Export(
                 new[] { installRoot },
                 fullPackagePath,
-                ExportPackageOptions.Recurse);
-#endif
+                ExportPackageOptions.Recurse,
+                "network ragdoll demo installer");
+            if (!export.Signed)
+            {
+                Debug.LogWarning(
+                    "[GC2-DEMO-SIGN] Network ragdoll demo installer is unsigned: " +
+                    export.SignatureStatus);
+            }
+
             if (!File.Exists(fullPackagePath))
                 throw new InvalidOperationException($"Unity did not write '{fullPackagePath}'.");
         }
