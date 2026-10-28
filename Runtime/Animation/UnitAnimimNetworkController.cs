@@ -25,7 +25,6 @@ namespace Arawn.GameCreator2.Networking
     /// </summary>
     public class UnitAnimimNetworkController : MonoBehaviour
     {
-        private const int MAX_AUTO_DISCOVERY_DEPTH = 8;
         private const int MAX_AUTO_DISCOVERED_CLIPS = 256;
         private const int MAX_GLOBAL_AUTO_DISCOVERED_CLIPS = 1024;
 
@@ -897,19 +896,25 @@ namespace Arawn.GameCreator2.Networking
             if (s_HasDiscoveredGlobalClips) return;
 
             s_HasDiscoveredGlobalClips = true;
-            var visited = new HashSet<object>(ReferenceComparer.Instance);
             int registered = 0;
 
-            Component[] components = UnityObjectSearch.FindAll<Component>(
+            Animator[] animators = UnityObjectSearch.FindAll<Animator>(
                 FindObjectsInactive.Include);
-
-            for (int i = 0; i < components.Length; i++)
+            for (int i = 0; i < animators.Length; i++)
             {
-                Component component = components[i];
-                if (component == null) continue;
+                Animator animator = animators[i];
+                if (animator == null) continue;
 
-                RegisterGlobalAnimationClipsFromObject(component, 0, visited, ref registered);
-                if (registered >= MAX_GLOBAL_AUTO_DISCOVERED_CLIPS) break;
+                RuntimeAnimatorController controller = animator.runtimeAnimatorController;
+                AnimationClip[] clips = controller != null ? controller.animationClips : null;
+                if (clips == null) continue;
+
+                for (int j = 0; j < clips.Length; j++)
+                {
+                    AnimationClip clip = clips[j];
+                    if (clip != null && RegisterGlobalClipIfNew(clip)) registered++;
+                    if (registered >= MAX_GLOBAL_AUTO_DISCOVERED_CLIPS) return;
+                }
             }
         }
 
@@ -918,122 +923,35 @@ namespace Arawn.GameCreator2.Networking
             if (m_HasAutoDiscoveredClips || m_Character == null) return;
 
             m_HasAutoDiscoveredClips = true;
-            var visited = new HashSet<object>(ReferenceComparer.Instance);
             int registered = 0;
 
-            Component[] components = m_Character.GetComponentsInChildren<Component>(true);
-            for (int i = 0; i < components.Length; i++)
+            // Do not reflect over arbitrary Game Creator component fields here. IL2CPP can
+            // fault when reflection touches a destroyed or partially initialized Unity
+            // object during a remote prefab's Spawned callback. Animator controllers and the
+            // explicitly registered clip list cover the runtime clips without that risk.
+            Animator[] animators = m_Character.GetComponentsInChildren<Animator>(true);
+            for (int i = 0; i < animators.Length; i++)
             {
-                Component component = components[i];
-                if (component == null) continue;
+                Animator animator = animators[i];
+                if (animator == null) continue;
 
-                RegisterAnimationClipsFromObject(component, 0, visited, ref registered);
+                RuntimeAnimatorController controller = animator.runtimeAnimatorController;
+                AnimationClip[] clips = controller != null ? controller.animationClips : null;
+                if (clips == null) continue;
+
+                for (int j = 0; j < clips.Length; j++)
+                {
+                    AnimationClip clip = clips[j];
+                    if (clip != null && RegisterClipIfNew(clip)) registered++;
+                    if (registered >= MAX_AUTO_DISCOVERED_CLIPS) break;
+                }
+
                 if (registered >= MAX_AUTO_DISCOVERED_CLIPS) break;
             }
 
             if (registered > 0)
             {
-                LogDash($"auto-registered {registered} animation clip(s) from serialized character data");
-            }
-        }
-
-        private void RegisterAnimationClipsFromObject(
-            object value,
-            int depth,
-            HashSet<object> visited,
-            ref int registered)
-        {
-            if (value == null) return;
-            if (depth > MAX_AUTO_DISCOVERY_DEPTH) return;
-            if (registered >= MAX_AUTO_DISCOVERED_CLIPS) return;
-
-            if (value is AnimationClip clip)
-            {
-                if (RegisterClipIfNew(clip)) registered++;
-                return;
-            }
-
-            Type type = value.GetType();
-            if (IsTerminalType(type)) return;
-            if (IsUnsupportedTraversalType(type)) return;
-
-            if (value is Component component &&
-                component.GetType().Assembly == typeof(Component).Assembly)
-            {
-                return;
-            }
-
-            if (value is GameObject)
-            {
-                return;
-            }
-
-            if (value is UnityEngine.Object &&
-                value is not Component)
-            {
-                return;
-            }
-
-            if (!type.IsValueType && !visited.Add(value)) return;
-
-            if (value is IEnumerable enumerable && value is not string)
-            {
-                IEnumerator enumerator = null;
-                try
-                {
-                    enumerator = enumerable.GetEnumerator();
-                    while (enumerator.MoveNext())
-                    {
-                        RegisterAnimationClipsFromObject(enumerator.Current, depth + 1, visited, ref registered);
-                        if (registered >= MAX_AUTO_DISCOVERED_CLIPS) return;
-                    }
-                }
-                catch
-                {
-                    // Serialized component discovery is best-effort. Some Unity native
-                    // containers expose IEnumerable but throw from GetEnumerator().
-                }
-                finally
-                {
-                    (enumerator as IDisposable)?.Dispose();
-                }
-
-                return;
-            }
-
-            for (Type current = type;
-                 current != null &&
-                 current != typeof(object) &&
-                 current != typeof(UnityEngine.Object) &&
-                 current != typeof(Component) &&
-                 current != typeof(Behaviour) &&
-                 current != typeof(MonoBehaviour);
-                 current = current.BaseType)
-            {
-                FieldInfo[] fields = current.GetFields(
-                    BindingFlags.Instance |
-                    BindingFlags.Public |
-                    BindingFlags.NonPublic |
-                    BindingFlags.DeclaredOnly);
-
-                for (int i = 0; i < fields.Length; i++)
-                {
-                    FieldInfo field = fields[i];
-                    if (ShouldSkipField(field)) continue;
-
-                    object fieldValue;
-                    try
-                    {
-                        fieldValue = field.GetValue(value);
-                    }
-                    catch
-                    {
-                        continue;
-                    }
-
-                    RegisterAnimationClipsFromObject(fieldValue, depth + 1, visited, ref registered);
-                    if (registered >= MAX_AUTO_DISCOVERED_CLIPS) return;
-                }
+                LogDash($"auto-registered {registered} animation clip(s) from Animator controllers");
             }
         }
 
@@ -1049,123 +967,6 @@ namespace Arawn.GameCreator2.Networking
             return isNew;
         }
 
-        private static void RegisterGlobalAnimationClipsFromObject(
-            object value,
-            int depth,
-            HashSet<object> visited,
-            ref int registered)
-        {
-            if (value == null) return;
-            if (depth > MAX_AUTO_DISCOVERY_DEPTH) return;
-            if (registered >= MAX_GLOBAL_AUTO_DISCOVERED_CLIPS) return;
-
-            if (value is AnimationClip clip)
-            {
-                if (RegisterGlobalClipIfNew(clip)) registered++;
-                return;
-            }
-
-            if (value is State state)
-            {
-                if (RegisterGlobalStateIfNew(state)) registered++;
-                return;
-            }
-
-            if (value is RuntimeAnimatorController controller)
-            {
-                if (RegisterGlobalRuntimeControllerIfNew(controller)) registered++;
-                return;
-            }
-
-            Type type = value.GetType();
-            if (IsTerminalType(type)) return;
-            if (IsUnsupportedTraversalType(type)) return;
-
-            if (value is Component component &&
-                component.GetType().Assembly == typeof(Component).Assembly)
-            {
-                return;
-            }
-
-            if (value is GameObject)
-            {
-                return;
-            }
-
-            if (value is UnityEngine.Object &&
-                value is not Component)
-            {
-                return;
-            }
-
-            if (!type.IsValueType && !visited.Add(value)) return;
-
-            if (value is IEnumerable enumerable && value is not string)
-            {
-                IEnumerator enumerator = null;
-                try
-                {
-                    enumerator = enumerable.GetEnumerator();
-                    while (enumerator.MoveNext())
-                    {
-                        RegisterGlobalAnimationClipsFromObject(
-                            enumerator.Current,
-                            depth + 1,
-                            visited,
-                            ref registered);
-
-                        if (registered >= MAX_GLOBAL_AUTO_DISCOVERED_CLIPS) return;
-                    }
-                }
-                catch
-                {
-                    // Serialized scene discovery is best-effort. Some Unity native
-                    // containers expose IEnumerable but throw from GetEnumerator().
-                }
-                finally
-                {
-                    (enumerator as IDisposable)?.Dispose();
-                }
-
-                return;
-            }
-
-            for (Type current = type;
-                 current != null &&
-                 current != typeof(object) &&
-                 current != typeof(UnityEngine.Object) &&
-                 current != typeof(Component) &&
-                 current != typeof(Behaviour) &&
-                 current != typeof(MonoBehaviour);
-                 current = current.BaseType)
-            {
-                FieldInfo[] fields = current.GetFields(
-                    BindingFlags.Instance |
-                    BindingFlags.Public |
-                    BindingFlags.NonPublic |
-                    BindingFlags.DeclaredOnly);
-
-                for (int i = 0; i < fields.Length; i++)
-                {
-                    FieldInfo field = fields[i];
-                    if (ShouldSkipField(field)) continue;
-
-                    object fieldValue;
-                    try
-                    {
-                        fieldValue = field.GetValue(value);
-                    }
-                    catch
-                    {
-                        continue;
-                    }
-
-                    RegisterGlobalAnimationClipsFromObject(fieldValue, depth + 1, visited, ref registered);
-                    if (registered >= MAX_GLOBAL_AUTO_DISCOVERED_CLIPS) return;
-                }
-            }
-        }
-
         private static bool RegisterGlobalClipIfNew(AnimationClip clip)
         {
             if (clip == null) return false;
@@ -1174,67 +975,6 @@ namespace Arawn.GameCreator2.Networking
             bool isNew = !s_GlobalClipCache.TryGetValue(hash, out AnimationClip existing) || existing == null;
             s_GlobalClipCache[hash] = clip;
             return isNew;
-        }
-
-        private static bool RegisterGlobalStateIfNew(State state)
-        {
-            if (state == null) return false;
-
-            int hash = StableHashUtility.GetStableHash(state);
-            bool isNew = !s_GlobalStateCache.TryGetValue(hash, out State existing) || existing == null;
-            s_GlobalStateCache[hash] = state;
-            return isNew;
-        }
-
-        private static bool RegisterGlobalRuntimeControllerIfNew(RuntimeAnimatorController controller)
-        {
-            if (controller == null) return false;
-
-            int hash = StableHashUtility.GetStableHash(controller);
-            bool isNew = !s_GlobalControllerCache.TryGetValue(hash, out RuntimeAnimatorController existing) ||
-                         existing == null;
-            s_GlobalControllerCache[hash] = controller;
-            return isNew;
-        }
-
-        private static bool ShouldSkipField(FieldInfo field)
-        {
-            if (field == null) return true;
-            if (field.IsStatic || field.IsLiteral) return true;
-            if (field.IsNotSerialized) return true;
-
-            Type fieldType = field.FieldType;
-            return typeof(Delegate).IsAssignableFrom(fieldType) ||
-                   IsUnsupportedTraversalType(fieldType) ||
-                   fieldType == typeof(IntPtr) ||
-                   fieldType == typeof(UIntPtr);
-        }
-
-        private static bool IsTerminalType(Type type)
-        {
-            return type == null ||
-                   type.IsPrimitive ||
-                   type.IsEnum ||
-                   type == typeof(string) ||
-                   type == typeof(decimal) ||
-                   type == typeof(Type) ||
-                   type == typeof(IntPtr) ||
-                   type == typeof(UIntPtr);
-        }
-
-        private static bool IsUnsupportedTraversalType(Type type)
-        {
-            if (type == null) return true;
-
-            string typeNamespace = type.Namespace ?? string.Empty;
-            if (typeNamespace == "Unity.Collections" ||
-                typeNamespace.StartsWith("Unity.Collections.", StringComparison.Ordinal))
-            {
-                return true;
-            }
-
-            string assemblyName = type.Assembly.GetName().Name;
-            return assemblyName.StartsWith("Unity.Collections", StringComparison.Ordinal);
         }
 
         private void ObserveAnimimState()

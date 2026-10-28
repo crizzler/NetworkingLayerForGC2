@@ -314,6 +314,15 @@ namespace Arawn.GameCreator2.Networking
         /// <summary>Whether this is the local player's character.</summary>
         public bool IsLocalPlayer => m_RuntimeIsOwner;
 
+        /// <summary>
+        /// True for an authenticated player actor observed from another peer, including the
+        /// server-side instance of a client-owned player. <see cref="NetworkRole.Server"/>
+        /// identifies the simulation role on a host/server; it must not hide the fact that the
+        /// actor belongs to, and is driven by, a remote client.
+        /// </summary>
+        public bool IsRemotePlayer =>
+            m_RuntimeHasAuthenticatedPlayerOwner && !m_RuntimeIsOwner;
+
         /// <summary>Whether this is running on the server.</summary>
         public bool IsServerInstance => m_RuntimeIsServer;
 
@@ -322,9 +331,6 @@ namespace Arawn.GameCreator2.Networking
 
         /// <summary>Whether this instance is host (server+client).</summary>
         public bool IsHostInstance => m_RuntimeIsHost;
-
-        /// <summary>Whether this is a remote player's character.</summary>
-        public bool IsRemotePlayer => m_CurrentRole == NetworkRole.RemoteClient;
 
         /// <summary>Stable network identifier used across subsystems.</summary>
         public uint NetworkId => m_RuntimeNetworkId;

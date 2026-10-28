@@ -6,6 +6,7 @@ using System.Reflection;
 using System.Security.Cryptography;
 using Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches;
 using UnityEditor;
+using UnityEditor.Build;
 using UnityEngine;
 
 namespace Arawn.GameCreator2.Networking.Editor.CI
@@ -294,6 +295,292 @@ namespace Arawn.GameCreator2.Networking.Editor.CI
             RequireGeneratedFolder(FusionCoreInstallRoot);
             RequireGeneratedFolder(PurrNetCoreInstallRoot);
             Debug.Log("[GC2 Networking CI] Core ragdoll example installers rebuilt.");
+        }
+
+        /// <summary>
+        /// Applies the Android player settings required by Fusion (INTERNET permission,
+        /// ARM64, IL2CPP, minimum SDK) and synchronizes scripting defines for Android.
+        /// Run once after Unity has selected the Android build target, then run
+        /// <see cref="BuildAndroidPlayer"/> in a second process so the new defines are compiled.
+        /// </summary>
+        public static void ConfigureAndroidPlayer()
+        {
+            string report = NetworkAndroidPlatformSetup.ApplyAndroidSettings();
+            GC2NetworkingDefineSymbols.RefreshNow(false);
+
+            if (!NetworkAndroidPlatformSetup.TryValidateAndroidSettings(out string error))
+            {
+                throw new InvalidOperationException(
+                    "Android player settings are invalid: " + error);
+            }
+
+            if (!NetworkAndroidPlatformSetup.TryEnsureAndroidJdk(out string jdkReport))
+            {
+                throw new InvalidOperationException(jdkReport);
+            }
+
+            string androidSymbols = PlayerSettings.GetScriptingDefineSymbols(
+                NamedBuildTarget.Android);
+            bool hasTransportIntegration = androidSymbols
+                .Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries)
+                .Any(symbol => string.Equals(
+                    symbol.Trim(),
+                    "ARAWN_GC2_TRANSPORT_INTEGRATION",
+                    StringComparison.Ordinal));
+            if (!hasTransportIntegration)
+            {
+                throw new InvalidOperationException(
+                    "ARAWN_GC2_TRANSPORT_INTEGRATION is missing from the Android define set.");
+            }
+
+            Debug.Log("[GC2 Networking CI] Android player configured: " + report + "; " + jdkReport);
+        }
+
+        /// <summary>
+        /// Builds a signed-development-style Android APK through the Unity CLI in an isolated
+        /// project. The output path and optional scene override are read from
+        /// GC2_ANDROID_BUILD_OUTPUT and GC2_ANDROID_BUILD_SCENE.
+        /// </summary>
+        public static void BuildAndroidPlayer()
+        {
+            if (!NetworkAndroidPlatformSetup.TryValidateAndroidSettings(out string error))
+            {
+                throw new InvalidOperationException(
+                    "Android player settings are invalid: " + error);
+            }
+
+            if (!NetworkAndroidPlatformSetup.TryEnsureAndroidJdk(out string jdkReport))
+            {
+                throw new InvalidOperationException(jdkReport);
+            }
+
+            Debug.Log("[GC2 Networking CI] Android JDK: " + jdkReport);
+            string outputPath = Environment.GetEnvironmentVariable("GC2_ANDROID_BUILD_OUTPUT");
+            if (string.IsNullOrWhiteSpace(outputPath))
+            {
+                outputPath = "Build/Android/GC2Networking.apk";
+            }
+
+            string fullOutputPath = Path.GetFullPath(outputPath);
+            string outputDirectory = Path.GetDirectoryName(fullOutputPath);
+            if (!string.IsNullOrEmpty(outputDirectory))
+            {
+                Directory.CreateDirectory(outputDirectory);
+            }
+
+            string scene = ResolveAndroidBuildScene();
+            var options = new BuildPlayerOptions
+            {
+                scenes = new[] { scene },
+                locationPathName = fullOutputPath,
+                target = BuildTarget.Android,
+                targetGroup = BuildTargetGroup.Android,
+                options = BuildOptions.None
+            };
+
+            UnityEditor.Build.Reporting.BuildReport report =
+                BuildPipeline.BuildPlayer(options);
+            if (report.summary.result !=
+                UnityEditor.Build.Reporting.BuildResult.Succeeded)
+            {
+                throw new InvalidOperationException(
+                    $"Android build failed: {report.summary.result} " +
+                    $"({report.summary.totalErrors} errors).");
+            }
+
+            long bytes = File.Exists(fullOutputPath)
+                ? new FileInfo(fullOutputPath).Length
+                : 0L;
+            Debug.Log(
+                $"[GC2 Networking CI] Android build passed: {fullOutputPath} " +
+                $"bytes={bytes} scene={scene} unity={Application.unityVersion}");
+        }
+
+        private const string FusionCoreVariablesScene =
+            "Assets/Plugins/GameCreator/Installs/" +
+            "GC2NetworkingLayerFusionTransport.CoreExamples@1.1.0/" +
+            "Requires GC2 Core Demos - FusionCoreVariablesDemo.unity";
+
+        /// <summary>
+        /// Builds the Fusion Core demo as an Android development APK for device smoke tests.
+        /// The runtime harness is activated by gc2-network-smoke-* intent extras, so this scene
+        /// does not need a committed test component.
+        /// </summary>
+        public static void BuildAndroidSmokePlayer()
+        {
+            if (!NetworkAndroidPlatformSetup.TryValidateAndroidSettings(out string error))
+            {
+                throw new InvalidOperationException(
+                    "Android player settings are invalid: " + error);
+            }
+
+            if (!NetworkAndroidPlatformSetup.TryEnsureAndroidJdk(out string jdkReport))
+            {
+                throw new InvalidOperationException(jdkReport);
+            }
+
+            string outputPath = Environment.GetEnvironmentVariable(
+                "GC2_ANDROID_SMOKE_OUTPUT");
+            if (string.IsNullOrWhiteSpace(outputPath))
+            {
+                outputPath = "Build/Android/GC2AndroidSmoke.apk";
+            }
+            string fullOutputPath = Path.GetFullPath(outputPath);
+            Directory.CreateDirectory(
+                Path.GetDirectoryName(fullOutputPath) ?? ".");
+
+            string scene = ResolveCoreSmokeScene();
+            if (string.IsNullOrWhiteSpace(scene))
+            {
+                throw new FileNotFoundException(
+                    "The Fusion Core Variables demo scene is missing.");
+            }
+
+            var options = new BuildPlayerOptions
+            {
+                scenes = new[] { scene },
+                locationPathName = fullOutputPath,
+                target = BuildTarget.Android,
+                targetGroup = BuildTargetGroup.Android,
+                options = BuildOptions.Development
+            };
+
+            UnityEditor.Build.Reporting.BuildReport report =
+                BuildPipeline.BuildPlayer(options);
+            if (report.summary.result !=
+                UnityEditor.Build.Reporting.BuildResult.Succeeded)
+            {
+                throw new InvalidOperationException(
+                    $"Android smoke build failed: {report.summary.result} " +
+                    $"({report.summary.totalErrors} errors).");
+            }
+
+            long bytes = File.Exists(fullOutputPath)
+                ? new FileInfo(fullOutputPath).Length
+                : 0L;
+            Debug.Log(
+                $"[GC2 Networking CI] Android smoke build passed: {fullOutputPath} " +
+                $"bytes={bytes} scene={scene} jdk={jdkReport}");
+        }
+
+        private static string ResolveCoreSmokeScene()
+        {
+            string scene = Environment.GetEnvironmentVariable(
+                "GC2_CORE_SMOKE_SCENE");
+            if (string.IsNullOrWhiteSpace(scene))
+            {
+                scene = FusionCoreVariablesScene;
+            }
+
+            if (!File.Exists(scene))
+            {
+                string[] guids = AssetDatabase.FindAssets(
+                    "FusionCoreVariablesDemo t:Scene");
+                scene = guids.Length > 0
+                    ? AssetDatabase.GUIDToAssetPath(guids[0])
+                    : string.Empty;
+            }
+
+            return scene;
+        }
+
+        /// <summary>
+        /// Builds the same Core Variables smoke scene as a Linux development player. This is
+        /// the fallback second peer when an ARM64 Android emulator is unavailable on an x86_64
+        /// host, or the desktop side of a phone-vs-desktop sync check.
+        /// </summary>
+        public static void BuildDesktopSmokePlayer()
+        {
+            string outputPath = Environment.GetEnvironmentVariable(
+                "GC2_DESKTOP_SMOKE_OUTPUT");
+            if (string.IsNullOrWhiteSpace(outputPath))
+            {
+                outputPath = "Build/Desktop/GC2CoreSmoke/GC2CoreSmoke.x86_64";
+            }
+            string fullOutputPath = Path.GetFullPath(outputPath);
+            Directory.CreateDirectory(
+                Path.GetDirectoryName(fullOutputPath) ?? ".");
+
+            string scene = ResolveCoreSmokeScene();
+            if (string.IsNullOrWhiteSpace(scene))
+            {
+                throw new FileNotFoundException(
+                    "The Fusion Core Variables demo scene is missing.");
+            }
+
+            var options = new BuildPlayerOptions
+            {
+                scenes = new[] { scene },
+                locationPathName = fullOutputPath,
+                target = BuildTarget.StandaloneLinux64,
+                targetGroup = BuildTargetGroup.Standalone,
+                options = BuildOptions.Development
+            };
+
+            UnityEditor.Build.Reporting.BuildReport report =
+                BuildPipeline.BuildPlayer(options);
+            if (report.summary.result !=
+                UnityEditor.Build.Reporting.BuildResult.Succeeded)
+            {
+                throw new InvalidOperationException(
+                    $"Desktop smoke build failed: {report.summary.result} " +
+                    $"({report.summary.totalErrors} errors).");
+            }
+
+            Debug.Log(
+                $"[GC2 Networking CI] Desktop smoke build passed: {fullOutputPath} " +
+                $"scene={scene}");
+        }
+
+        private static string ResolveAndroidBuildScene()
+        {
+            string configured = Environment.GetEnvironmentVariable("GC2_ANDROID_BUILD_SCENE");
+            if (!string.IsNullOrWhiteSpace(configured))
+            {
+                string normalized = configured.Replace('\\', '/');
+                if (!File.Exists(normalized))
+                {
+                    throw new InvalidOperationException(
+                        $"GC2_ANDROID_BUILD_SCENE does not exist: {normalized}");
+                }
+                return normalized;
+            }
+
+            string enabledScene = EditorBuildSettings.scenes
+                .Where(scene => scene.enabled)
+                .Select(scene => scene.path)
+                .FirstOrDefault(path => !string.IsNullOrWhiteSpace(path));
+            if (!string.IsNullOrWhiteSpace(enabledScene))
+            {
+                return enabledScene;
+            }
+
+            string[] sceneGuids = AssetDatabase.FindAssets(
+                "t:Scene",
+                new[] { "Assets/Plugins/GameCreator/Installs" });
+            foreach (string guid in sceneGuids)
+            {
+                string path = AssetDatabase.GUIDToAssetPath(guid);
+                if (path.IndexOf("Fusion", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                    path.EndsWith(".unity", StringComparison.OrdinalIgnoreCase))
+                {
+                    return path;
+                }
+            }
+
+            const string generatedScene = "Assets/__GC2AndroidBuildSmoke.unity";
+            UnityEngine.SceneManagement.Scene scene =
+                UnityEditor.SceneManagement.EditorSceneManager.NewScene(
+                    UnityEditor.SceneManagement.NewSceneSetup.EmptyScene,
+                    UnityEditor.SceneManagement.NewSceneMode.Single);
+            new GameObject("GC2 Android Build Smoke");
+            UnityEditor.SceneManagement.EditorSceneManager.SaveScene(
+                scene,
+                generatedScene);
+            AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
+            Debug.Log(
+                $"[GC2 Networking CI] Created fallback Android build scene: {generatedScene}");
+            return generatedScene;
         }
 
         private static string[] ResolvePatcherNames()

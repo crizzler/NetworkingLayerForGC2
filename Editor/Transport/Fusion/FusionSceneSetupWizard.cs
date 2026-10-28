@@ -677,6 +677,8 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                 "Shared uses the current master as the logical GC2 server. All transport-managed " +
                 "gameplay objects remain master-owned; player ownership is stored separately.",
                 MessageType.Info);
+
+            NetworkAndroidPlatformSetup.DrawWizardSection();
         }
 
         private void DrawInfrastructurePage()

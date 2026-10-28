@@ -15,9 +15,9 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
         private static void CreateWhenRequested()
         {
-            if (NetworkEnemyShooterSmokeUtility.TryGetArgument(
+            if (!NetworkEnemyShooterSmokeUtility.TryGetArgument(
                     "--gc2-network-smoke-scenario",
-                    out string scenario) &&
+                    out string scenario) ||
                 !string.Equals(scenario, "enemy-shooter", StringComparison.Ordinal))
             {
                 return;

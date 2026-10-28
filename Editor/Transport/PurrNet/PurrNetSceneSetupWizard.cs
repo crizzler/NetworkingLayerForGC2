@@ -411,6 +411,8 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
                     m_Port);
                 m_Port = (ushort)Mathf.Clamp(port, 1, ushort.MaxValue);
             }
+
+            NetworkAndroidPlatformSetup.DrawWizardSection();
         }
 
         private void DrawModuleSection()

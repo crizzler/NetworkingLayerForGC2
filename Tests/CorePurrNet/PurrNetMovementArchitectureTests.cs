@@ -227,6 +227,28 @@ namespace Arawn.GameCreator2.Networking.CorePurrNet.Tests
         }
 
         [Test]
+        public void NetworkCharacter_RepairsMissingFootstepBindingsBeforeUpdate()
+        {
+            Character character = CreateCharacter("Footstep Repair", out _);
+            Footsteps footsteps = character.Footsteps;
+            FieldInfo feetField = typeof(Footsteps).GetField(
+                "m_Feet",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.That(feetField, Is.Not.Null);
+
+            Footstep[] feet = (Footstep[])feetField.GetValue(footsteps);
+            Assert.That(feet, Is.Not.Null);
+            Assert.That(feet.Length, Is.EqualTo(2));
+            feet[0] = null;
+            feet[1] = null;
+
+            EditModeLifecycle.AddComponent<NetworkCharacter>(character.gameObject);
+
+            Assert.That(footsteps.Feet[0], Is.Not.Null);
+            Assert.That(footsteps.Feet[1], Is.Not.Null);
+        }
+
+        [Test]
         public void VisualPresentation_TransportNetworkComponentUnderMannequinFailsClosed()
         {
             Character character = CreateCharacter("Network Component Safety", out Transform mannequin);

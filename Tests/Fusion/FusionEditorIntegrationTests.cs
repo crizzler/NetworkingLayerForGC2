@@ -2512,6 +2512,43 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Tests
         }
 
         [Test]
+        public void AnimationClipDiscovery_UsesAnimatorControllersWithoutComponentReflection()
+        {
+            string controllerSource = ReadAssetSource(
+                "Arawn/NetworkingLayerForGC2/Runtime/Animation/UnitAnimimNetworkController.cs");
+            string discover = ExtractDeclaredMethodBody(
+                controllerSource,
+                "DiscoverAnimationClipsFromCharacter");
+            string globalDiscover = ExtractDeclaredMethodBody(
+                controllerSource,
+                "EnsureGlobalAnimationClipsDiscovered");
+
+            StringAssert.Contains("GetComponentsInChildren<Animator>", discover);
+            StringAssert.Contains("runtimeAnimatorController", discover);
+            StringAssert.DoesNotContain("RegisterAnimationClipsFromObject", discover);
+            StringAssert.Contains("FindAll<Animator>", globalDiscover);
+            StringAssert.DoesNotContain("RegisterGlobalAnimationClipsFromObject", globalDiscover);
+        }
+
+        [Test]
+        public void RemotePlayerClassification_IncludesServerObservedClientActors()
+        {
+            string characterSource = ReadAssetSource(
+                "Arawn/NetworkingLayerForGC2/Runtime/Character/NetworkCharacter.cs");
+
+            PropertyInfo property = typeof(NetworkCharacter).GetProperty("IsRemotePlayer");
+            Assert.NotNull(property);
+            StringAssert.Contains(
+                "m_RuntimeHasAuthenticatedPlayerOwner && !m_RuntimeIsOwner",
+                characterSource,
+                "The server-side instance of a client-owned player must remain remote even " +
+                "though its simulation role is Server.");
+            StringAssert.DoesNotContain(
+                "IsRemotePlayer => m_CurrentRole == NetworkRole.RemoteClient",
+                characterSource);
+        }
+
+        [Test]
         public void SharedAuthorityMigration_QuarantinesUntilFusionTransfersStateAuthority()
         {
             string registrySource = ReadAssetSource(

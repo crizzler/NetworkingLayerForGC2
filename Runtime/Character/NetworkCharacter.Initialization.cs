@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Reflection;
 using UnityEngine;
 using GameCreator.Runtime.Characters;
 using GameCreator.Runtime.Common;
@@ -70,6 +71,9 @@ namespace Arawn.GameCreator2.Networking
             m_AuthoredDriver = m_Character.Driver as TUnitDriver;
             m_LastIsDead = m_Character.IsDead;
             m_LastIsPlayer = m_Character.IsPlayer;
+
+            // Do this before Character.Update can reach the obsolete footstep detector.
+            RepairFootstepBindings();
         }
 
         /// <summary>
@@ -591,6 +595,8 @@ namespace Arawn.GameCreator2.Networking
         {
             if (m_Character == null || m_Character.Footsteps == null) return;
 
+            RepairFootstepBindings();
+
             if (!m_HasCachedFootstepsState)
             {
                 m_DefaultFootstepsActive = m_Character.Footsteps.IsActive;
@@ -608,6 +614,44 @@ namespace Arawn.GameCreator2.Networking
                 default:
                     m_Character.Footsteps.IsActive = m_DefaultFootstepsActive;
                     break;
+            }
+        }
+
+        /// <summary>
+        /// Player builds can deserialize the authored GC2 footstep list with null entries.
+        /// The obsolete animation-curve detector then throws every frame from Character.Update.
+        /// Restore the authored left/right defaults before footstep updates run.
+        /// </summary>
+        private void RepairFootstepBindings()
+        {
+            if (m_Character == null || m_Character.Footsteps == null) return;
+
+            const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
+            FieldInfo feetField = typeof(Footsteps).GetField("m_Feet", flags);
+            if (feetField == null ||
+                feetField.GetValue(m_Character.Footsteps) is not Footstep[] feet ||
+                feet.Length == 0)
+            {
+                return;
+            }
+
+            int repaired = 0;
+            for (int i = 0; i < feet.Length; i++)
+            {
+                if (feet[i] != null) continue;
+
+                feet[i] = new Footstep(
+                    i % 2 == 0
+                        ? HumanBodyBones.LeftFoot
+                        : HumanBodyBones.RightFoot);
+                repaired++;
+            }
+
+            if (repaired > 0)
+            {
+                Debug.LogWarning(
+                    $"[NetworkCharacter] Restored {repaired} missing footstep " +
+                    $"binding(s) on '{name}'.");
             }
         }
 
@@ -712,6 +756,8 @@ namespace Arawn.GameCreator2.Networking
 
         private void SetupOptionalComponents()
         {
+            RepairFootstepBindings();
+
             // Setup IK network controller if enabled and in sync mode
             if (m_UseNetworkIK && m_IKMode == RemoteSystemMode.Synchronized)
             {
