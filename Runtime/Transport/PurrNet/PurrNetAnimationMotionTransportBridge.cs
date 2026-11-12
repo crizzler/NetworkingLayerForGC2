@@ -82,6 +82,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
             {
                 nm.onNetworkStarted -= HandleNetworkStarted;
                 nm.onNetworkShutdown -= HandleNetworkShutdown;
+                nm.onPlayerLoadedScene -= HandlePlayerLoadedScene;
 
                 if (m_SubscribedServer)
                 {
@@ -112,9 +113,20 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet
             m_HookedManager = nm;
             nm.onNetworkStarted += HandleNetworkStarted;
             nm.onNetworkShutdown += HandleNetworkShutdown;
+            nm.onPlayerLoadedScene += HandlePlayerLoadedScene;
 
             if (nm.isServer) HandleNetworkStarted(nm, true);
             if (nm.isClient) HandleNetworkStarted(nm, false);
+        }
+
+        private void HandlePlayerLoadedScene(PlayerID player, SceneID scene, bool asServer)
+        {
+            if (!asServer || ActiveManager == null) return;
+            WireManagers();
+            NetworkMotionManager manager = NetworkMotionManager.Instance;
+            if (manager == null) return;
+            foreach (NetworkMotionCommandMessage target in manager.CaptureCombatTargets())
+                ActiveManager.Send(player, new GC2MotionCommandPacket { message = target }, m_Channel);
         }
 
         private void HandleNetworkStarted(NetworkManager manager, bool asServer)

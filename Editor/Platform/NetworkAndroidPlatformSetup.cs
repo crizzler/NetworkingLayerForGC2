@@ -208,10 +208,14 @@ namespace Arawn.GameCreator2.Networking.Editor
                 false);
             if (type != null) return type;
 
+#if UNITY_6000_6_OR_NEWER
+            IReadOnlyList<Assembly> assemblies = UnityEngine.Assemblies.CurrentAssemblies.GetLoadedAssemblies();
+#else
+            // CurrentAssemblies was internal in earlier supported Editors.
             Assembly[] assemblies = AppDomain.CurrentDomain.GetAssemblies();
-            for (int i = 0; i < assemblies.Length; i++)
+#endif
+            foreach (Assembly assembly in assemblies)
             {
-                Assembly assembly = assemblies[i];
                 if (assembly == null || assembly.IsDynamic) continue;
 
                 type = assembly.GetType(AndroidExternalToolsTypeName, false);

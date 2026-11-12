@@ -351,7 +351,10 @@ namespace Arawn.GameCreator2.Networking.Editor
             EditorSceneManager.MarkSceneDirty(scene);
         }
 
-        public static string BakeNavMesh(Scene scene, GameObject parent)
+        public static string BakeNavMesh(Scene scene, GameObject parent,
+            string surfaceName = "Free Flow Combat NavMesh Surface",
+            string assetName = "NavMesh-FreeFlowCombat.asset",
+            bool preserveAssetIdentity = false)
         {
             Type surfaceType = Type.GetType("Unity.AI.Navigation.NavMeshSurface, Unity.AI.Navigation");
             if (surfaceType == null)
@@ -360,8 +363,8 @@ namespace Arawn.GameCreator2.Networking.Editor
                     "Unity AI Navigation is required to bake the Free Flow Combat demo NavMesh.");
             }
 
-            DestroyNamedObjects(scene, "Free Flow Combat NavMesh Surface");
-            var surfaceObject = new GameObject("Free Flow Combat NavMesh Surface");
+            DestroyNamedObjects(scene, surfaceName);
+            var surfaceObject = new GameObject(surfaceName);
             SceneManager.MoveGameObjectToScene(surfaceObject, scene);
             if (parent != null) surfaceObject.transform.SetParent(parent.transform, false);
             Component surface = surfaceObject.AddComponent(surfaceType);
@@ -400,13 +403,22 @@ namespace Arawn.GameCreator2.Networking.Editor
                 throw new InvalidOperationException("The generated Free Flow scene has no asset path.");
             }
             EnsureAssetFolder(sceneDataFolder);
-            string destination = sceneDataFolder + "/NavMesh-FreeFlowCombat.asset";
+            string destination = sceneDataFolder + "/" + assetName;
             string current = AssetDatabase.GetAssetPath(data);
             if (string.IsNullOrEmpty(current))
             {
-                if (AssetDatabase.LoadMainAssetAtPath(destination) != null)
-                    AssetDatabase.DeleteAsset(destination);
-                AssetDatabase.CreateAsset(data, destination);
+                UnityEngine.Object existingData = AssetDatabase.LoadMainAssetAtPath(destination);
+                if (preserveAssetIdentity && existingData != null)
+                {
+                    EditorUtility.CopySerialized(data, existingData);
+                    dataProperty.SetValue(surface, existingData);
+                    EditorUtility.SetDirty(existingData);
+                }
+                else
+                {
+                    if (existingData != null) AssetDatabase.DeleteAsset(destination);
+                    AssetDatabase.CreateAsset(data, destination);
+                }
             }
             else if (!string.Equals(current, destination, StringComparison.Ordinal))
             {

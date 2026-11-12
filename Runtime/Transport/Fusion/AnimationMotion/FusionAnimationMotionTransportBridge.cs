@@ -109,8 +109,8 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                     "Animation and motion managers are unavailable or not initialized.");
             }
 
-            // These managers replicate semantic commands and have no persistent packet state.
-            // Reporting an explicit zero-packet completion keeps the readiness barrier honest.
+            foreach (NetworkMotionCommandMessage target in m_WiredMotionManager.CaptureCombatTargets())
+                SendToClient(context.ClientId, (ushort)MessageType.MotionCommand, target);
             return context.Complete();
         }
 

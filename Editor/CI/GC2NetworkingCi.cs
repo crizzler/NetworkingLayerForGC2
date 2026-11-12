@@ -148,12 +148,77 @@ namespace Arawn.GameCreator2.Networking.Editor.CI
                 string.Join(", ", patcherNames));
         }
 
-        /// <summary>
-        /// Rebuilds the ignored Fusion and PurrNet Free Flow Combat install roots used by the
-        /// installer tests. Transport editor assemblies are resolved by name so this base editor
-        /// assembly does not acquire transport-specific references. The checked-in archives are
-        /// hashed before and after preparation and must remain byte-identical.
-        /// </summary>
+        /// <summary>Authors both targeting fixtures without exporting their installers.</summary>
+        public static void BuildTargetingScenes()
+        {
+            foreach (string transport in new[] { "Fusion", "PurrNet" })
+                InvokePublicStaticMethod($"Arawn.GameCreator2.Networking.Transport.{transport}.Editor.{transport}TargetingDemoBuilder, Arawn.GameCreator2.Networking.Transport.{transport}.Editor", "BuildValidationFixture");
+            Debug.Log("[GC2 Networking CI] Both targeting scenes built.");
+        }
+
+        public static void BuildTargetingInstallers()
+        {
+            BuildTargetingScenes();
+            ExportTargetingInstallers();
+        }
+
+        public static void ExportTargetingInstallers()
+        {
+            NetworkPackageExportResult fusion = NetworkTargetingDemoEditorUtility.Export("Fusion");
+            NetworkPackageExportResult purrNet = NetworkTargetingDemoEditorUtility.Export("PurrNet");
+            Debug.Log($"[GC2 Networking CI] Both targeting Melee installers exported. Fusion signed={fusion.Signed}; PurrNet signed={purrNet.Signed}.");
+        }
+
+        public static void PrepareTargetingExamples()
+        {
+            if (!File.Exists(".gc2-networking-isolated"))
+                throw new InvalidOperationException("Targeting fixture extraction requires an isolated validation project.");
+            UnityEditor.SceneManagement.EditorSceneManager.NewScene(UnityEditor.SceneManagement.NewSceneSetup.EmptyScene);
+            foreach (string transport in new[] { "Fusion", "PurrNet" })
+            {
+                string root = NetworkTargetingDemoEditorUtility.Root(transport);
+                string package = $"Assets/Arawn/NetworkingLayerForGC2/Demo/{transport}/Packages/Melee/Package.unitypackage";
+                string before = ComputeSha256(package);
+                var entries = NetworkPackageSigning.ReadEntries(Path.GetFullPath(package));
+                string fullRoot = Path.GetFullPath(root);
+                var paths = new HashSet<string>(StringComparer.Ordinal);
+                foreach (NetworkUnityPackageEntry entry in entries)
+                {
+                    string path = entry.Pathname;
+                    string fullPath = Path.GetFullPath(path);
+                    if (Path.IsPathRooted(path) || path.Contains('\\') ||
+                        path.Split('/').Any(part => part == "." || part == ".." || part.Length == 0) ||
+                        (fullPath != fullRoot && !fullPath.StartsWith(fullRoot + Path.DirectorySeparatorChar, StringComparison.Ordinal)) ||
+                        !paths.Add(path) || entry.AssetMeta == null || entry.MetaGuid != entry.Guid)
+                        throw new InvalidOperationException("Unsafe or malformed Melee installer entry: " + path);
+                }
+                if (!entries.Any(x => x.Pathname == NetworkTargetingDemoEditorUtility.ScenePath(transport)))
+                    throw new InvalidOperationException("Melee installer lacks its targeting scene. Rebuild the installer first.");
+                if (Directory.Exists(root)) Directory.Delete(root, true);
+                foreach (NetworkUnityPackageEntry entry in entries)
+                {
+                    if (entry.IsFolder) Directory.CreateDirectory(entry.Pathname);
+                    else
+                    {
+                        Directory.CreateDirectory(Path.GetDirectoryName(entry.Pathname));
+                        File.WriteAllBytes(entry.Pathname, entry.Asset);
+                    }
+                    if (entry.AssetMeta != null) File.WriteAllBytes(entry.Pathname + ".meta", entry.AssetMeta);
+                }
+                if (before != ComputeSha256(package)) throw new InvalidOperationException("Installer changed during fixture extraction.");
+            }
+            AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
+            InvokePublicStaticMethod("Fusion.Editor.NetworkProjectConfigUtilities, Fusion.Unity.Editor", "RebuildPrefabTable");
+            AssetDatabase.SaveAssets();
+            EditorBuildSettings.scenes = new[]
+            {
+                new EditorBuildSettingsScene(NetworkTargetingDemoEditorUtility.ScenePath("Fusion"), true),
+                new EditorBuildSettingsScene(NetworkTargetingDemoEditorUtility.ScenePath("PurrNet"), true)
+            };
+            Debug.Log("[GC2 Networking CI] Targeting fixtures extracted without modifying installer archives.");
+        }
+
+        /// <summary>Rebuilds isolated Free Flow fixtures while proving checked-in archives remain unchanged.</summary>
         public static void PrepareFreeFlowCombatExamples()
         {
             string[] archives =

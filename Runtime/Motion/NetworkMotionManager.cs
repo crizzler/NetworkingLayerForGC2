@@ -54,6 +54,7 @@ namespace Arawn.GameCreator2.Networking
 
         public void Initialize(bool isServer, bool isClient)
         {
+            if (!isServer && !isClient) m_PendingCombatTargets.Clear();
             m_IsServer = isServer;
             m_IsClient = isClient;
             LogDash($"initialized server={m_IsServer} client={m_IsClient}");
@@ -73,6 +74,7 @@ namespace Arawn.GameCreator2.Networking
                 if (existing.NetworkId == networkId)
                 {
                     m_ControllersById[networkId] = controller;
+                    FlushCombatTarget(networkId, controller);
                     return;
                 }
 
@@ -95,6 +97,7 @@ namespace Arawn.GameCreator2.Networking
 
             m_BindingsByController[controller] = binding;
             m_ControllersById[networkId] = controller;
+            FlushCombatTarget(networkId, controller);
             LogDash($"registered '{controller.Character.name}' netId={networkId}");
         }
 
@@ -210,8 +213,49 @@ namespace Arawn.GameCreator2.Networking
             controller.HandleCommandResult(message.Result);
         }
 
+        public List<NetworkMotionCommandMessage> CaptureCombatTargets()
+        {
+            var result = new List<NetworkMotionCommandMessage>();
+            if (!m_IsServer) return result;
+            RefreshControllerRegistry();
+            foreach (var pair in m_ControllersById)
+            {
+                Character character = pair.Value.Character;
+                if (character == null) continue;
+                NetworkCombatTarget target = character.GetComponent<NetworkCombatTarget>();
+                if (target != null) result.Add(new NetworkMotionCommandMessage
+                {
+                    CharacterNetworkId = pair.Key, Command = target.Capture()
+                });
+            }
+            return result;
+        }
+
+        private readonly Dictionary<uint, NetworkMotionCommand> m_PendingCombatTargets = new();
+
+        private void FlushCombatTarget(uint id, UnitMotionNetworkController controller)
+        {
+            if (!m_PendingCombatTargets.TryGetValue(id, out NetworkMotionCommand command)) return;
+            NetworkCombatTarget target = controller.Character.GetComponent<NetworkCombatTarget>();
+            if (target == null) return;
+            target.ApplyConfirmed(command);
+            m_PendingCombatTargets.Remove(id);
+        }
+
         public void ReceiveBroadcast(NetworkMotionCommandMessage message)
         {
+            if (message.Command.commandType == NetworkMotionCommandType.SetCombatTarget)
+            {
+                if (!m_IsClient || m_IsServer || message.CharacterNetworkId == 0 || message.Command.dataX == 0) return;
+                if (m_PendingCombatTargets.TryGetValue(message.CharacterNetworkId, out NetworkMotionCommand previous) &&
+                    unchecked(message.Command.dataX - previous.dataX) <= 0) return;
+                if (m_PendingCombatTargets.Count >= 128 && !m_PendingCombatTargets.ContainsKey(message.CharacterNetworkId)) return;
+                m_PendingCombatTargets[message.CharacterNetworkId] = message.Command;
+                if (TryGetController(message.CharacterNetworkId, out UnitMotionNetworkController registered))
+                    FlushCombatTarget(message.CharacterNetworkId, registered);
+                return;
+            }
+
             if (!m_IsClient)
             {
                 LogDash(message.Command, $"dropped broadcast: manager is not client character={message.CharacterNetworkId}");

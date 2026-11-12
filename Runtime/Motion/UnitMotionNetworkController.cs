@@ -1014,6 +1014,28 @@ namespace Arawn.GameCreator2.Networking
             }
         }
 
+        /// <summary>Submit native combat selection through the same authenticated path on host and client.</summary>
+        public void RequestCombatTarget(uint targetId)
+        {
+            if (Character == null) return;
+            NetworkCharacter actor = Character.GetComponent<NetworkCharacter>();
+            if (actor == null || !actor.IsOwnerInstance) return;
+            OnSendCommand?.Invoke(new NetworkMotionCommand
+            {
+                commandType = NetworkMotionCommandType.SetCombatTarget,
+                sequenceNumber = NextCommandSequence(false),
+                targetNetworkId = targetId
+            });
+        }
+
+        public void ClearInvalidCombatTarget()
+        {
+            if (!m_IsServer || Character == null) return;
+            NetworkCombatTarget target = Character.GetComponent<NetworkCombatTarget>();
+            if (target == null || target.TargetNetworkId == 0 || target.CanSelect(target.TargetNetworkId)) return;
+            OnBroadcastCommand?.Invoke(target.Commit(0, NextCommandSequence(false)));
+        }
+
         // SERVER-SIDE VALIDATION: ----------------------------------------------------------------
 
         /// <summary>
@@ -1102,6 +1124,13 @@ namespace Arawn.GameCreator2.Networking
         {
             switch (command.commandType)
             {
+                case NetworkMotionCommandType.SetCombatTarget:
+                    NetworkCombatTarget targeting = Character.GetComponent<NetworkCombatTarget>();
+                    if (targeting == null || !targeting.CanSelect(command.targetNetworkId))
+                        return NetworkMotionResult.Rejected(command.sequenceNumber, NetworkMotionResult.REJECT_NOT_ALLOWED);
+                    OnBroadcastCommand?.Invoke(targeting.Commit(command.targetNetworkId, command.sequenceNumber));
+                    return NetworkMotionResult.Approved(command.sequenceNumber);
+
                 case NetworkMotionCommandType.Dash:
                     NetworkMotionResult result = ValidateDashCommand(command);
                     if (result.approved)

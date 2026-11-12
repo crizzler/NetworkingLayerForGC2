@@ -126,7 +126,8 @@ namespace Arawn.GameCreator2.Networking
         ForceJump = 8,
         SetTransient = 9,
         FollowTarget = 10,
-        StopFollow = 11
+        StopFollow = 11,
+        SetCombatTarget = 12
     }
 
     /// <summary>

@@ -9,6 +9,33 @@ Transport-agnostic, server-authoritative multiplayer support for Game Creator 2.
 
 <img width="880" height="1163" alt="Game Creator 2 Networking Layer" src="https://github.com/user-attachments/assets/53739b39-dbab-4222-9d33-98d0b3c18254" />
 
+## Version 2.5.0: multiplayer targeting and facing
+
+GC2's native target selection can now be validated by authority and replicated
+with `NetworkCombatTarget`. Use `Network Look at Combat Target`
+(`UnitFacingNetworkTarget`) with `Network Motion Controller` to turn toward that
+Character's confirmed target. The existing ownership, rate and replay checks
+remain in effect; the target and revision are restored for late joiners.
+
+Install **Melee Examples** for your transport through Game Creator's Install menu
+and open **Requires Melee Examples - FusionTargetClosestDemo** or
+**Requires Melee Examples - PurrNetTargetClosestDemo**. Both extend the stock
+`10_Target_Closest` arena with network players, nine server NPCs, TAB closest-target
+selection, PvP target controls, and facing diagnostics.
+
+**Update every peer together:** 2.5.0 introduces the `SetCombatTarget` semantic
+command in the existing motion packet layout. See the
+[targeting setup and validation guide](Documentation/Network%20Combat%20Targeting.md).
+Unity 6000.6+ Android JDK discovery also uses Unity's managed-assembly API to avoid
+`UAC0005` while retaining the older-Editor fallback.
+
+Download exactly one transport package from the
+[2.5.0 release](https://github.com/crizzler/NetworkingLayerForGC2/releases/tag/v2.5.0).
+Before switching transports or migrating from a combined package, delete
+`Assets/Arawn/NetworkingLayerForGC2`; when switching from Fusion to PurrNet, also
+delete `Assets/Arawn/NetworkingLayerForGC2.FusionAdvancedKCC`. Unitypackage import
+is additive and does not remove old transport files.
+
 ## What This Package Is
 
 - A runtime networking layer for GC2 that is not bound to one networking SDK.
