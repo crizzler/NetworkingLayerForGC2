@@ -107,12 +107,16 @@ Client. This keeps an Android transport regression automatic on an x86_64
 development host. The desktop peer is transport/scene coverage only; Android
 UI, lifecycle, and XR runtime behavior still need the phone.
 
-Unity 6000.6 no longer builds x86_64 or ARMv7 Android players. The x86_64
-Android emulator cannot run an ARM64 APK, and an ARM64 AVD cannot boot on an
-x86_64 host because the Android emulator's QEMU2 backend requires a matching
-host architecture. Use a physical phone, an ARM64 CI runner/cloud device, or the
-phone-plus-desktop fallback. A run where the Android process never logs its own
-sync marker is not Android network evidence.
+The Networking Layer smoke APK targets `arm64-v8a`. On x86_64 Linux, start an
+x86_64 Google APIs AVD and check `adb shell getprop ro.product.cpu.abilist`.
+If the list includes `arm64-v8a`, the image can install the APK through native
+translation. Use `adb install --abi arm64-v8a` to verify it. The API 36 image
+ran the Unity player with host GPU rendering and OpenGL ES in this workspace.
+Vulkan crashed in the emulator graphics driver during startup, so use OpenGL ES
+for this test fixture. An ARM64 AVD itself still requires an ARM64 host with the
+installed emulator. If translation is unavailable or the APK fails at launch,
+use a physical device, an ARM64 runner, or the phone-plus-desktop fallback.
+Require the sync marker from each Android process before counting that run.
 
 The current validated pair is a Xiaomi `M2103K19PG` (Android 13, arm64) and a
 Linux x86_64 desktop player, with both phone-host and phone-client directions

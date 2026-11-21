@@ -329,18 +329,39 @@ namespace Arawn.GameCreator2.Networking.Melee
 
             if (broadcast.CharacterNetworkId == ourNetworkId && m_IsRemoteClient)
             {
-                // Apply block state from server
                 if (broadcast.Action == NetworkBlockAction.Raise)
                 {
-                    m_Character.Combat.Block.RaiseGuard();
-                    LogMeleeSync($"remote RaiseGuard complete gc2Blocking={m_Character.Combat.Block.IsBlocking}");
+                    m_PendingRemoteGuardShieldHash = broadcast.ShieldHash;
+                    TryApplyPendingRemoteGuard();
                 }
                 else
                 {
+                    m_PendingRemoteGuardShieldHash = null;
                     m_Character.Combat.Block.LowerGuard();
                     LogMeleeSync($"remote LowerGuard complete gc2Blocking={m_Character.Combat.Block.IsBlocking}");
                 }
             }
+        }
+
+        private void TryApplyPendingRemoteGuard()
+        {
+            if (!m_IsRemoteClient || !m_PendingRemoteGuardShieldHash.HasValue) return;
+
+            Block block = m_Character?.Combat.Block;
+            IShield shield = block?.Shield;
+            int shieldHash = m_PendingRemoteGuardShieldHash.Value;
+            // A weapon snapshot can still be equipping when the guard arrives. GC2 accepts
+            // RaiseGuard with no shield and then skips the shield's presentation callback.
+            if (shield == null || (shieldHash != 0 && shieldHash != StableHashUtility.GetStableHash(shield.Name)))
+            {
+                return;
+            }
+
+            block.RaiseGuard();
+            if (!block.IsBlocking) return;
+
+            m_PendingRemoteGuardShieldHash = null;
+            LogMeleeSync($"remote RaiseGuard complete shield={shield.Name}");
         }
 
         private void ObserveGc2BlockState()

@@ -23,7 +23,11 @@ for its supported scope and complete setup.
 - Fusion or PurrNet integration, or a custom transport adapter updated for the
   current Melee and optional Free Flow payloads
 - Game Creator 2 Melee `2.2.x` or `2.3.x`
-- The required GC2 Melee source patch (`3.7.0-melee`)
+- The required GC2 Melee source patch (`3.8.0-melee`)
+
+Melee patch 3.8.0 preserves the authority-selected attacker and defender through
+parry playback, even when an authored reaction changes its GC2 `Args`. Reapply
+the Melee authority patch and rebuild the players to pick up the fix.
 
 ## Installation
 
@@ -457,7 +461,7 @@ Configure per-character via `NetworkMeleeController.OptimisticEffects`.
    source changes while Unity is compiling or reports a failed compilation.
 2. Close and reopen Unity after resolving the errors, then wait for a successful
    script compilation and domain reload.
-3. Confirm that the patch confirmation title and body show `3.7.0-melee` before
+3. Confirm that the patch confirmation title and body show `3.8.0-melee` before
    applying the patch.
 
 ### Hits not being intercepted

@@ -10,7 +10,7 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
     public class MeleePatcher : GC2PatcherBase
     {
         public override string ModuleName => "Melee";
-        public override string PatchVersion => "3.7.0-melee";
+        public override string PatchVersion => "3.8.0-melee";
         public override string DisplayName => "Melee (Game Creator 2)";
 
         public override string PatchDescription =>
@@ -96,8 +96,9 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                 return new[]
                 {
                     "NetworkReactionResolved",
-                    "NetworkReactionResolved?.Invoke",
-                    "ReactionOutput reactionOutput = this.m_Reaction.Run"
+                    "networkReactionResolved?.Invoke",
+                    "ReactionOutput reactionOutput = this.m_Reaction.Run",
+                    "Args networkReactionArgs = networkReactionResolved != null ? args.Clone : null;"
                 };
             }
 
@@ -144,7 +145,7 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
             {
                 return new System.Collections.Generic.Dictionary<string, int>
                 {
-                    { "NetworkReactionResolved?.Invoke", 1 },
+                    { "networkReactionResolved?.Invoke", 1 },
                     { "ReactionOutput reactionOutput = this.m_Reaction.Run", 1 }
                 };
             }
@@ -159,7 +160,9 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                 return new System.Collections.Generic.Dictionary<string, int>
                 {
                     { @"(?s)\b(public|internal)\s+void\s+OnHit\s*\(\s*Args\s+args\s*,\s*Vector3\s+point\s*,\s*Vector3\s+direction\s*\)\s*\{.*?NetworkOnHitValidator\.Invoke", 1 },
-                    { @"\bpublic\s+BlockType\s+NetworkResolveDefenseDirect\s*\(\s*Character\s+attacker\s*,\s*Character\s+target\s*,\s*Vector3\s+point\s*,\s*Vector3\s+targetLocalDirection\s*,\s*float\s+power\s*\)", 1 }
+                    { @"\bpublic\s+BlockType\s+NetworkResolveDefenseDirect\s*\(\s*Character\s+attacker\s*,\s*Character\s+target\s*,\s*Vector3\s+point\s*,\s*Vector3\s+targetLocalDirection\s*,\s*float\s+power\s*\)", 1 },
+                    { @"this\.OnParried\(new Args\(attacker\.gameObject, target\.gameObject\), reactionInput\)", 1 },
+                    { @"Args blockArgs = new Args\(target\.gameObject, attacker\.gameObject\);", 1 }
                 };
             }
 
@@ -199,7 +202,7 @@ namespace Arawn.EnemyMasses.Editor.Integration.GameCreator2.Patches
                         @"public\s+static\s+Action\s*<\s*TShieldResponse\s*,\s*Args\s*,\s*ShieldOutput\s*,\s*ReactionInput\s*,\s*Reaction\s*,\s*ReactionOutput\s*>\s+NetworkReactionResolved",
                         1
                     },
-                    { @"NetworkReactionResolved\?\.Invoke\s*\(", 1 }
+                    { @"(?s)Args\s+networkReactionArgs\s*=\s*networkReactionResolved\s*!=\s*null\s*\?\s*args\.Clone\s*:\s*null\s*;\s*ReactionOutput\s+reactionOutput\s*=\s*this\.m_Reaction\.Run\(.*?networkReactionResolved\?\.Invoke\(\s*this,\s*networkReactionArgs,", 1 }
                 };
             }
 
@@ -815,15 +818,17 @@ namespace GameCreator.Runtime.Melee
                 out ShieldOutput shieldOutput
             );
 
+            // Authored properties and conditions receive mutable Args. Keep the
+            // authoritative participants for the subsequent reaction callbacks.
             switch (shieldOutput.Type)
             {
-                case BlockType.Block: this.OnBlocked(hitArgs, reactionInput); break;
-                case BlockType.Parry: this.OnParried(hitArgs, reactionInput); break;
+                case BlockType.Block: this.OnBlocked(new Args(attacker.gameObject, target.gameObject), reactionInput); break;
+                case BlockType.Parry: this.OnParried(new Args(attacker.gameObject, target.gameObject), reactionInput); break;
             }
 
             if (shield != null)
             {
-                Args blockArgs = new Args(hitArgs.Target, hitArgs.Self);
+                Args blockArgs = new Args(target.gameObject, attacker.gameObject);
                 shield.OnDefend(blockArgs, shieldOutput, reactionInput);
             }
 
@@ -874,10 +879,12 @@ namespace GameCreator.Runtime.Melee
                     "                this.m_Reaction.Run(character, args, reactionInput);";
                 const string patchedReactionRun =
                     "                Character character = args.Self.Get<Character>();\n" +
+                    "                var networkReactionResolved = NetworkReactionResolved;\n" +
+                    "                Args networkReactionArgs = networkReactionResolved != null ? args.Clone : null;\n" +
                     "                ReactionOutput reactionOutput = this.m_Reaction.Run(character, args, reactionInput);\n\n" +
                     "                // [GC2_NETWORK_PATCH] Shield responses bypass MeleeStance, so report the exact authored result.\n" +
-                    "                NetworkReactionResolved?.Invoke(\n" +
-                    "                    this, args, shieldOutput, reactionInput, this.m_Reaction, reactionOutput);\n" +
+                    "                networkReactionResolved?.Invoke(\n" +
+                    "                    this, networkReactionArgs, shieldOutput, reactionInput, this.m_Reaction, reactionOutput);\n" +
                     "                // [GC2_NETWORK_PATCH_END]";
 
                 if (!TryReplaceWithFlexibleWhitespace(ref content, reactionRun, patchedReactionRun))

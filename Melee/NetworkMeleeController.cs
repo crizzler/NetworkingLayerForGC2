@@ -179,6 +179,7 @@ namespace Arawn.GameCreator2.Networking.Melee
         private int m_CurrentShieldHash;
         private bool m_HasObservedGc2BlockState;
         private bool m_LastObservedGc2BlockState;
+        private int? m_PendingRemoteGuardShieldHash;
         private readonly Dictionary<ulong, PendingBlockRequest> m_PendingBlockRequests = new(4);
 
         // Charge state tracking
@@ -1114,7 +1115,11 @@ namespace Arawn.GameCreator2.Networking.Melee
                 s_LastMeleePhysicsSyncFrame = Time.frameCount;
             }
 
-            if (!m_IsLocalClient && !m_IsServer) return;
+            if (!m_IsLocalClient && !m_IsServer)
+            {
+                TryApplyPendingRemoteGuard();
+                return;
+            }
 
             if (m_MeleeStance == null)
             {
@@ -1151,6 +1156,7 @@ namespace Arawn.GameCreator2.Networking.Melee
             // it as both caused host loopback broadcasts to replay skills and block transitions
             // that Process*Request had already applied.
             m_IsRemoteClient = !isServer && !isLocalClient;
+            m_PendingRemoteGuardShieldHash = null;
             m_ServerAttackLeases.Clear();
             m_NextServerAttackAcceptVersion = 0;
             m_CurrentLocalAttackCorrelationId = 0;

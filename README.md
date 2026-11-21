@@ -9,6 +9,13 @@ Transport-agnostic, server-authoritative multiplayer support for Game Creator 2.
 
 <img width="880" height="1163" alt="Game Creator 2 Networking Layer" src="https://github.com/user-attachments/assets/53739b39-dbab-4222-9d33-98d0b3c18254" />
 
+## Version 2.5.1
+
+The Melee authority patch preserves the attacker and defender across authored
+GC2 shield reactions. Remote Free Flow guard waits for the matching shield to
+equip, and releasing guard cancels a pending raise. Reapply Melee patch
+`3.8.0-melee` and rebuild your players. See the [Melee setup guide](Melee/README.md).
+
 ## Version 2.5.0: multiplayer targeting and facing
 
 GC2's native target selection can now be validated by authority and replicated
@@ -30,7 +37,7 @@ Unity 6000.6+ Android JDK discovery also uses Unity's managed-assembly API to av
 `UAC0005` while retaining the older-Editor fallback.
 
 Download exactly one transport package from the
-[2.5.0 release](https://github.com/crizzler/NetworkingLayerForGC2/releases/tag/v2.5.0).
+[latest release](https://github.com/crizzler/NetworkingLayerForGC2/releases/latest).
 Before switching transports or migrating from a combined package, delete
 `Assets/Arawn/NetworkingLayerForGC2`; when switching from Fusion to PurrNet, also
 delete `Assets/Arawn/NetworkingLayerForGC2.FusionAdvancedKCC`. Unitypackage import

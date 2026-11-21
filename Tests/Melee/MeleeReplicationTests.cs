@@ -23,6 +23,24 @@ namespace Arawn.GameCreator2.Networking.Melee.Tests
         {
         }
 
+        private sealed class TestGuardShield : Shield
+        {
+            public int Raises { get; private set; }
+
+            public override void OnRaise(Character character) => Raises++;
+            public override void OnLower(Character character) { }
+        }
+
+        private sealed class RetargetReactionSpeed : GetDecimalConstantOne
+        {
+            public override double Get(Args args)
+            {
+                args.ChangeSelf(args.Target);
+                args.ChangeTarget((GameObject)null);
+                return 1;
+            }
+        }
+
         private sealed class TestFreeFlowReceiver : MonoBehaviour, INetworkFreeFlowCombatReceiver
         {
             public int ApplyCount;
@@ -254,6 +272,48 @@ namespace Arawn.GameCreator2.Networking.Melee.Tests
         }
 
         [Test]
+        public void ShieldParry_ReportsOriginalParticipantsAfterAuthoredReactionRetargetsArgs()
+        {
+            GameObject attacker = Track(new GameObject("Parried attacker"));
+            GameObject defender = Track(new GameObject("Parrying defender"));
+            EditModeLifecycle.AddComponent<Character>(defender);
+            TestReaction reaction = Track(ScriptableObject.CreateInstance<TestReaction>());
+            typeof(Reaction).GetField("m_ReactionList", BindingFlags.Instance | BindingFlags.NonPublic)
+                .SetValue(reaction, new ReactionList(new ReactionItem()));
+            typeof(Reaction).GetField("m_Speed", BindingFlags.Instance | BindingFlags.NonPublic)
+                .SetValue(reaction, new PropertyGetDecimal(new RetargetReactionSpeed()));
+            var response = new ShieldResponseParry();
+            typeof(TShieldResponse).GetField("m_Reaction", BindingFlags.Instance | BindingFlags.NonPublic)
+                .SetValue(response, reaction);
+
+            FieldInfo callbackField = typeof(TShieldResponse).GetField("NetworkReactionResolved");
+            Assert.That(callbackField, Is.Not.Null, "Apply the current Melee authority patch.");
+            object previous = callbackField.GetValue(null);
+            Args publishedArgs = null;
+            System.Action<TShieldResponse, Args, ShieldOutput, ReactionInput, Reaction, ReactionOutput>
+                capture = (_, args, _, _, _, _) => publishedArgs = args;
+            var authoredArgs = new Args(defender, attacker);
+
+            try
+            {
+                callbackField.SetValue(null, capture);
+                response.Run(
+                    authoredArgs,
+                    new ShieldOutput(true, Vector3.zero, 0f, BlockType.Parry),
+                    new ReactionInput(Vector3.back, 1f));
+            }
+            finally
+            {
+                callbackField.SetValue(null, previous);
+            }
+
+            Assert.That(authoredArgs.Self, Is.SameAs(attacker), "The authored property must actually retarget the context.");
+            Assert.That(publishedArgs, Is.Not.Null);
+            Assert.That(publishedArgs.Self, Is.SameAs(defender));
+            Assert.That(publishedArgs.Target, Is.SameAs(attacker));
+        }
+
+        [Test]
         public void ReactionBroadcast_PurrNetRoundTrip_PreservesAuthoredNoneDirection()
         {
             var expected = new NetworkReactionBroadcast
@@ -432,6 +492,54 @@ namespace Arawn.GameCreator2.Networking.Melee.Tests
             Assert.That(actual.WeaponState.WeaponHash, Is.EqualTo(200));
             Assert.That(actual.HasBlockState, Is.True);
             Assert.That(actual.BlockState.Action, Is.EqualTo(NetworkBlockAction.Lower));
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        [NUnit.Framework.Category("GC2Networking.FreeFlow")]
+        public void RemoteGuard_WaitsForMatchingShieldAndHonorsRelease(bool releaseBeforeEquip)
+        {
+            GameObject actor = Track(new GameObject("Melee Guard Replica"));
+            Character character = EditModeLifecycle.AddComponent<Character>(actor);
+            NetworkCharacter networkCharacter = EditModeLifecycle.AddComponent<NetworkCharacter>(actor);
+            networkCharacter.SetManualNetworkId(44);
+            NetworkMeleeController controller = EditModeLifecycle.AddComponent<NetworkMeleeController>(actor);
+            controller.Initialize(isServer: false, isLocalClient: false);
+            Block block = character.Combat.Block;
+            TestGuardShield shield = Track(ScriptableObject.CreateInstance<TestGuardShield>());
+            shield.name = "Expected Guard Shield";
+            TestGuardShield otherShield = Track(ScriptableObject.CreateInstance<TestGuardShield>());
+            otherShield.name = "Different Guard Shield";
+            var broadcast = new NetworkBlockBroadcast
+            {
+                CharacterNetworkId = networkCharacter.NetworkId,
+                Action = NetworkBlockAction.Raise,
+                ShieldHash = StableHashUtility.GetStableHash(shield.Name)
+            };
+
+            controller.ReceiveBlockBroadcast(broadcast);
+            Assert.That(block.IsBlocking, Is.False, "A raise with no shield would consume the guard transition.");
+
+            block.SetShield(otherShield);
+            InvokePrivate(controller, "Update");
+            Assert.That(otherShield.Raises, Is.Zero);
+
+            if (releaseBeforeEquip)
+            {
+                broadcast.Action = NetworkBlockAction.Lower;
+                controller.ReceiveBlockBroadcast(broadcast);
+            }
+
+            block.SetShield(shield);
+            character.Busy.MakeLegsBusy();
+            InvokePrivate(controller, "Update");
+            Assert.That(shield.Raises, Is.Zero);
+
+            character.Busy.RemoveLegsBusy();
+            InvokePrivate(controller, "Update");
+            InvokePrivate(controller, "Update");
+            Assert.That(block.IsBlocking, Is.EqualTo(!releaseBeforeEquip));
+            Assert.That(shield.Raises, Is.EqualTo(releaseBeforeEquip ? 0 : 1));
         }
 
         [Test]
