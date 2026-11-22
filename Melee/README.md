@@ -35,6 +35,60 @@ the Melee authority patch and rebuild the players to pick up the fix.
 2. Import this GC2 Melee Network module
 3. The module will auto-detect GC2 Melee via the `GC2_MELEE` define symbol
 
+## Melee damage and Stats health
+
+### Try the demo
+
+With the updated Networking Layer installed, use Game Creator's Install
+Manager to install the **Melee Examples** for your transport. Reinstall them
+if you already have the examples. Open **Requires Melee & Stats Demos - FusionMeleeHealthDemo** or
+**Requires Melee & Stats Demos - PurrNetMeleeHealthDemo** in the corresponding
+examples folder under `Assets/Plugins/GameCreator/Installs/`.
+
+Start a Host and use **WASD** and **Left Mouse** to move into sword range and
+strike the **Practice NPC** in the middle of the arena. To try PvP, join the
+same session with a second player and strike the other player. The
+**Replicated Health** panel shows the current and maximum HP for the NPC and
+each player. Compare the target's HP on both peers after a hit. **Right Mouse**
+lets the defending player block to compare the result.
+
+### Wire your own scene
+
+1. In the **Fusion Scene Setup Wizard** or **PurrNet Scene Setup Wizard**,
+   enable **Melee**, **Stats**, and **Add Melee -> Stats damage bridge**.
+   Assign the GC2 Attribute your characters use in **Melee Health Attribute**. The wizards
+   can prepare the selected player and server-owned NPC prefabs and apply
+   the required Melee and Stats patches.
+2. On the same root as each damageable `Character`, use `NetworkCharacter`,
+   `NetworkMeleeController`, `NetworkStatsController`, and GC2 `Traits`.
+   The Traits **Class** must include the same Attribute selected on the damage
+   bridge. A combat NPC uses explicit **NPC** and **Server Authoritative**
+   settings and is registered by the scene's transport. A human uses
+   **Player Owned** and the transport's authenticated player spawner.
+3. Equip the attacker's `MeleeWeapon`. Add it to **Register Weapons** on the
+   scene's Fusion or PurrNet Melee transport bridge so authority can resolve
+   the canonical weapon and its combo Skills.
+4. For formula-based damage, set a **Formula** property in the attack
+   Skill's **Power** field. Set the Formula's **Source** to **Self** and
+   **Target** to **Target**. In the validated hit, these resolve to the actual
+   attacker and defender. A positive Power gives the base damage, and the
+   Melee controller applies its hit-zone multiplier before the bridge
+   subtracts HP. A nonpositive Power uses the controller's Default Base
+   Damage. Use the same Skill assets on all peers.
+
+The Melee authority patch intercepts the strike before the stock Skill
+**On Hit** list runs. A **Network Action Target** HP instruction in that
+list is therefore skipped on the networked strike route. That target property
+is populated by Network Action execution. In this setup
+`NetworkMeleeStatsDamageBridge` resolves the defender from the validated hit,
+applies HP on authority, and sends the result through Stats replication.
+
+If hits show a reaction but HP stays unchanged, enable **Log Damage
+Application** on the damage bridge. **AttributeNotFound** means the target's
+Traits Class lacks the assigned Attribute. Also check that the target has
+registered with `NetworkStatsManager`, the Melee patch is current, and the
+strike was neither blocked nor parried.
+
 ## PurrNet Scene Setup Wizard
 
 For PurrNet projects, enable **Melee** on the PurrNet wizard Modules page. The wizard applies/verifies the required source patch, then creates/reuses `NetworkMeleeManager` and `PurrNetMeleeTransportBridge`. Setup is blocked when the patch is missing or stale.

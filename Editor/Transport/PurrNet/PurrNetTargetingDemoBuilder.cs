@@ -19,6 +19,16 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
             Debug.Log("[TargetingDemo] PurrNet fixture prepared.");
         }
 
+        public static void BuildHealthDemo()
+        {
+            NetworkMeleeHealthDemoBuilder.Build("PurrNet", ConfigureNpc);
+        }
+
+        public static void BuildInstalledMeleeHealthSmokePlayer()
+        {
+            NetworkEnemyShooterDemoEditorUtility.BuildStandaloneSmokePlayer(NetworkMeleeHealthDemoBuilder.ScenePath("PurrNet"), "PurrNet Melee Health");
+        }
+
         public static void BuildNetworkSmokePlayer()
         {
             BuildValidationFixture();

@@ -15,7 +15,7 @@ MonoBehaviour:
   m_Install:
     m_Name: Melee Examples
     m_Module: GC2 Networking Layer Fusion Transport
-    m_Description: Fusion server-authoritative Melee, Stats and Closest Target examples. Target NPCs or another player and verify replicated facing.
+    m_Description: Fusion Melee examples with replicated HP for a practice NPC or another player, and a Closest Target demo.
     m_Author: Arawn
     m_Version:
       major: 1
@@ -43,3 +43,8 @@ MonoBehaviour:
         major: 1
         minor: 6
         patch: 12
+    - m_ID: Stats.Classes
+      m_MinVersion:
+        major: 1
+        minor: 3
+        patch: 7

@@ -87,6 +87,16 @@ namespace Arawn.GameCreator2.Networking.Combat
             Skill skill = null,
             MeleeWeapon weapon = null)
         {
+            return ValidateMeleeHit(request, attackerCharacter, skill, weapon, attackerCharacter);
+        }
+
+        internal CombatValidationResult ValidateMeleeHit(
+            NetworkMeleeHitRequest request,
+            Character attackerCharacter,
+            Skill skill,
+            MeleeWeapon weapon,
+            Character targetCharacter)
+        {
             var result = new CombatValidationResult
             {
                 AttackerNetworkId = request.AttackerNetworkId,
@@ -310,7 +320,7 @@ namespace Arawn.GameCreator2.Networking.Combat
             // STEP 10: Calculate damage
             // ═══════════════════════════════════════════════════════════════
 
-            result.BaseDamage = GetBaseDamage(weapon, skill, attackerCharacter);
+            result.BaseDamage = GetBaseDamage(skill, attackerCharacter, targetCharacter);
             result.DistanceFalloff = 1f; // Melee typically doesn't have distance falloff
             result.FinalDamage = result.BaseDamage * result.HitZoneDamageMultiplier * result.DistanceFalloff;
 
@@ -433,12 +443,12 @@ namespace Arawn.GameCreator2.Networking.Combat
             return Config.DefaultAttackArc;
         }
 
-        private float GetBaseDamage(MeleeWeapon weapon, Skill skill, Character attacker)
+        private float GetBaseDamage(Skill skill, Character attacker, Character target)
         {
-            // Use the skill's configured power value if available.
+            // Match GC2's hit context when evaluating target-dependent Power properties.
             if (skill != null && attacker != null)
             {
-                Args args = new Args(attacker);
+                Args args = new Args(attacker, target);
                 float power = skill.GetPower(args);
                 if (power > 0f) return power;
             }

@@ -201,6 +201,8 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
         private bool m_CreateModuleBridges = true;
         private bool m_RegisterInstalledDemoAssets = true;
         private bool m_CreateMeleeStatsDamageBridge = true;
+        private UnityEngine.Object m_MeleeHealthAttribute;
+        private bool m_MeleeHealthAttributeEdited;
         private bool m_CreateShooterStatsDamageBridge = true;
         private bool m_EnableFreeFlowCombat;
 
@@ -1141,6 +1143,13 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
                 m_CreateMeleeStatsDamageBridge = EditorGUILayout.ToggleLeft(
                     new GUIContent("Add Melee -> Stats damage bridge", "Only used when both Melee and Stats are selected."),
                     m_CreateMeleeStatsDamageBridge);
+            }
+
+            if (m_ModuleMelee && m_ModuleStats && m_CreateMeleeStatsDamageBridge &&
+                Type.GetType(NETWORK_MELEE_STATS_DAMAGE_BRIDGE_TYPE) is Type meleeDamageBridge)
+            {
+                MeleeStatsWizardHealth.Draw(FindSceneComponent(meleeDamageBridge),
+                    ref m_MeleeHealthAttribute, ref m_MeleeHealthAttributeEdited);
             }
 
             using (new EditorGUI.DisabledScope(!m_ModuleShooter || !m_ModuleStats))
@@ -3209,20 +3218,15 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
 
             if (m_ModuleMelee && m_ModuleStats && m_CreateMeleeStatsDamageBridge)
             {
+                Type bridgeType = Type.GetType(NETWORK_MELEE_STATS_DAMAGE_BRIDGE_TYPE);
+                Component existing = bridgeType != null ? FindSceneComponent(bridgeType) : null;
                 Component bridge = EnsureComponentByType(
                     NETWORK_MELEE_STATS_DAMAGE_BRIDGE_TYPE,
                     "Network Melee Stats Damage Bridge",
                     root);
 
-                if (bridge != null)
-                {
-                    var so = new SerializedObject(bridge);
-                    var healthAttribute = LoadAsset(HEALTH_ATTRIBUTE_PATH);
-                    if (healthAttribute != null) AssignObjectReference(so, "m_HealthAttribute", healthAttribute);
-                    SetString(so, "m_FallbackHealthAttributeId", "hp");
-                    so.ApplyModifiedPropertiesWithoutUndo();
-                    EditorUtility.SetDirty(bridge);
-                }
+                MeleeStatsWizardHealth.Apply(
+                    bridge, existing, m_MeleeHealthAttribute, m_MeleeHealthAttributeEdited);
             }
 
             if (m_ModuleShooter && m_ModuleStats && m_CreateShooterStatsDamageBridge)

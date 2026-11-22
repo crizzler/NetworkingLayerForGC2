@@ -611,7 +611,8 @@ namespace Arawn.GameCreator2.Networking.Melee
                 request,
                 m_Character,
                 skill: authoritativeSkill,
-                weapon: authoritativeWeapon
+                weapon: authoritativeWeapon,
+                targetCharacter: targetCharacter
             );
 
             if (!validationResult.IsValid)

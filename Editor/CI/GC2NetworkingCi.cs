@@ -156,6 +156,18 @@ namespace Arawn.GameCreator2.Networking.Editor.CI
             Debug.Log("[GC2 Networking CI] Both targeting scenes built.");
         }
 
+        public static void BuildMeleeHealthScenes()
+        {
+            foreach (string transport in new[] { "Fusion", "PurrNet" })
+            {
+                InvokePublicStaticMethod(
+                    $"Arawn.GameCreator2.Networking.Transport.{transport}.Editor.{transport}TargetingDemoBuilder, Arawn.GameCreator2.Networking.Transport.{transport}.Editor",
+                    "BuildHealthDemo");
+            }
+
+            Debug.Log("[GC2 Networking CI] Both Melee Health scenes built.");
+        }
+
         public static void BuildTargetingInstallers()
         {
             BuildTargetingScenes();
@@ -210,11 +222,15 @@ namespace Arawn.GameCreator2.Networking.Editor.CI
             AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
             InvokePublicStaticMethod("Fusion.Editor.NetworkProjectConfigUtilities, Fusion.Unity.Editor", "RebuildPrefabTable");
             AssetDatabase.SaveAssets();
-            EditorBuildSettings.scenes = new[]
-            {
-                new EditorBuildSettingsScene(NetworkTargetingDemoEditorUtility.ScenePath("Fusion"), true),
-                new EditorBuildSettingsScene(NetworkTargetingDemoEditorUtility.ScenePath("PurrNet"), true)
-            };
+            EditorBuildSettings.scenes = new[] { "Fusion", "PurrNet" }
+                .SelectMany(transport => new[]
+                {
+                    NetworkTargetingDemoEditorUtility.ScenePath(transport),
+                    NetworkMeleeHealthDemoBuilder.ScenePath(transport)
+                })
+                .Where(File.Exists)
+                .Select(path => new EditorBuildSettingsScene(path, true))
+                .ToArray();
             Debug.Log("[GC2 Networking CI] Targeting fixtures extracted without modifying installer archives.");
         }
 

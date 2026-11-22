@@ -9,6 +9,17 @@ Transport-agnostic, server-authoritative multiplayer support for Game Creator 2.
 
 <img width="880" height="1163" alt="Game Creator 2 Networking Layer" src="https://github.com/user-attachments/assets/53739b39-dbab-4222-9d33-98d0b3c18254" />
 
+## Version 2.5.2
+
+The Fusion and PurrNet Melee Examples now include a **Melee Health Demo**
+with a practice NPC, PvP, and an HP panel that shows the replicated result
+of each strike. Reinstall **Melee Examples** to add the new scene.
+
+Both Scene Setup Wizards let you assign the GC2 Attribute that receives
+melee damage. For formula-based damage, set the Formula on the attack
+Skill's **Power** property. Validated hits evaluate it with the actual
+attacker and defender. See the [Melee setup guide](Melee/README.md).
+
 ## Version 2.5.1
 
 The Melee authority patch preserves the attacker and defender across authored

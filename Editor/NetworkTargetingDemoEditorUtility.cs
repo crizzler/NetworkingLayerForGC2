@@ -97,20 +97,24 @@ namespace Arawn.GameCreator2.Networking.Editor
             return scene;
         }
 
-        public static NetworkPackageExportResult Export(string transport)
+        public static NetworkPackageExportResult Export(string transport) =>
+            Export(transport, PackagePath(transport), transport + " closest-target Melee installer");
+
+        internal static string PackagePath(string transport) =>
+            $"Assets/Arawn/NetworkingLayerForGC2/Demo/{transport}/Packages/Melee/Package.unitypackage";
+
+        internal static NetworkPackageExportResult Export(string transport, string package, string context)
         {
             string descriptorPath = $"Assets/Arawn/NetworkingLayerForGC2/Demo/{transport}/Packages/Melee/GC2NetworkingLayer{transport}Transport.MeleeExamples.asset";
             Installer descriptor = AssetDatabase.LoadAssetAtPath<Installer>(descriptorPath);
             if (descriptor == null) throw new FileNotFoundException("Melee installer descriptor is missing.", descriptorPath);
             string root = InstallManager.GetInstallPath(descriptor.Data.ID, descriptor.Data.Version).Replace('\\', '/').TrimEnd('/');
             if (root != Root(transport)) throw new InvalidOperationException("Installer ID/version no longer matches the targeting fixture root: " + root);
-            string package = Path.GetDirectoryName(descriptorPath) + "/Package.unitypackage";
             string[] payload = AssetDatabase.FindAssets(string.Empty, new[] { root })
                 .Select(AssetDatabase.GUIDToAssetPath).Append(root)
                 .Concat(Directory.GetDirectories(root, "*", SearchOption.AllDirectories).Select(x => x.Replace('\\', '/')))
                 .Where(x => x == root || x.StartsWith(root + "/", StringComparison.Ordinal)).Distinct().OrderBy(x => x, StringComparer.Ordinal).ToArray();
-            return NetworkPackageSigning.ExportSigned(payload, Path.GetFullPath(package), ExportPackageOptions.Default,
-                transport + " closest-target Melee installer");
+            return NetworkPackageSigning.ExportSigned(payload, Path.GetFullPath(package), ExportPackageOptions.Default, context);
         }
 
         public static void SetUnit(Character character, string name, object unit)

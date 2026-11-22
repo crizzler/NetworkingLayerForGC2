@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
+using Arawn.GameCreator2.Networking.Combat;
 using Arawn.GameCreator2.Networking.Melee.Transport.PurrNet;
 using Arawn.GameCreator2.Networking.Security;
 using Arawn.GameCreator2.Networking.TestUtilities;
@@ -39,6 +40,34 @@ namespace Arawn.GameCreator2.Networking.Melee.Tests
                 args.ChangeTarget((GameObject)null);
                 return 1;
             }
+        }
+
+        private sealed class TargetDependentPower : GetDecimalConstantOne
+        {
+            public GameObject Attacker;
+            public GameObject Defender;
+
+            public override double Get(Args args) =>
+                args.Self == Attacker && args.Target == Defender ? 18 : 2;
+        }
+
+        [Test]
+        [NUnit.Framework.Category("GC2Networking.MeleeHealth")]
+        public void MeleeDamagePower_ReceivesTheAttackerAndStruckCharacter()
+        {
+            var attacker = Track(new GameObject("Attacker")).AddComponent<Character>();
+            var defender = Track(new GameObject("Defender")).AddComponent<Character>();
+            var skill = Track(ScriptableObject.CreateInstance<Skill>());
+            SetPrivateField(skill, "m_Power", new PropertyGetDecimal(new TargetDependentPower
+            {
+                Attacker = attacker.gameObject,
+                Defender = defender.gameObject
+            }));
+            var validator = new MeleeLagCompensationValidator(new MeleeValidationConfig());
+
+            float damage = InvokePrivateResult<float>(validator, "GetBaseDamage", skill, attacker, defender);
+
+            Assert.That(damage, Is.EqualTo(18f));
         }
 
         private sealed class TestFreeFlowReceiver : MonoBehaviour, INetworkFreeFlowCombatReceiver

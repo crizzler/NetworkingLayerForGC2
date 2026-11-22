@@ -204,6 +204,8 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
         private bool m_ModuleAbilities;
         private bool m_RegisterInstalledDemoAssets = true;
         private bool m_CreateMeleeStatsDamageBridge = true;
+        private UnityEngine.Object m_MeleeHealthAttribute;
+        private bool m_MeleeHealthAttributeEdited;
         private bool m_CreateShooterStatsDamageBridge = true;
         private bool m_EnableFreeFlowCombat;
 
@@ -585,6 +587,13 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                         "Add Melee -> Stats damage bridge",
                         "Applies validated Melee damage to the selected GC2 health Attribute."),
                     m_CreateMeleeStatsDamageBridge);
+            }
+
+            if (m_ModuleMelee && m_ModuleStats && m_CreateMeleeStatsDamageBridge &&
+                Type.GetType(NetworkMeleeStatsDamageBridgeType) is Type meleeDamageBridge)
+            {
+                MeleeStatsWizardHealth.Draw(FindSceneComponent(meleeDamageBridge),
+                    ref m_MeleeHealthAttribute, ref m_MeleeHealthAttributeEdited);
             }
 
             using (new EditorGUI.DisabledScope(!m_ModuleShooter || !m_ModuleStats))
@@ -1556,11 +1565,14 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
 
             if (m_ModuleMelee && m_ModuleStats && m_CreateMeleeStatsDamageBridge)
             {
-                ConfigureStatsDamageBridge(
+                Type bridgeType = Type.GetType(NetworkMeleeStatsDamageBridgeType);
+                Component existing = bridgeType != null ? FindSceneComponent(bridgeType) : null;
+                MeleeStatsWizardHealth.Apply(
                     EnsureComponentByType(
                         NetworkMeleeStatsDamageBridgeType,
                         "Network Melee Stats Damage Bridge",
-                        root));
+                        root),
+                    existing, m_MeleeHealthAttribute, m_MeleeHealthAttributeEdited);
             }
 
             if (m_ModuleShooter && m_ModuleStats && m_CreateShooterStatsDamageBridge)

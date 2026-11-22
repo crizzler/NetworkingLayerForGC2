@@ -23,6 +23,21 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
             Debug.Log("[TargetingDemo] Fusion fixture prepared.");
         }
 
+        public static void BuildHealthDemo()
+        {
+            NetworkMeleeHealthDemoBuilder.Build("Fusion", root =>
+            {
+                var motor = root.GetComponent<FusionNativeNetworkCharacterMotor>();
+                if (motor != null) Object.DestroyImmediate(motor);
+                ConfigureNpc(root);
+            });
+        }
+
+        public static void BuildInstalledMeleeHealthSmokePlayer()
+        {
+            NetworkEnemyShooterDemoEditorUtility.BuildStandaloneSmokePlayer(NetworkMeleeHealthDemoBuilder.ScenePath("Fusion"), "Fusion Melee Health");
+        }
+
         public static void BuildNetworkSmokePlayer()
         {
             BuildValidationFixture();
