@@ -9,11 +9,29 @@ Transport-agnostic, server-authoritative multiplayer support for Game Creator 2.
 
 <img width="880" height="1163" alt="Game Creator 2 Networking Layer" src="https://github.com/user-attachments/assets/53739b39-dbab-4222-9d33-98d0b3c18254" />
 
+## Version 2.5.3
+
+A server-confirmed parry opens the stock counter window for the connected
+defender. Melee HP damage uses the Skill's **Power → Stats → Formula** on
+authority. A Formula result of zero stays zero instead of falling back to
+default damage. See the [Melee setup guide](Melee/README.md).
+
+Fusion republishes current Melee equipment after snapshot acknowledgement so
+replicas can resolve weapon-based reactions. A queued older weapon reaction
+does not replace a newer reaction on the same character.
+
+Reinstall **Melee Examples** for your transport to get the updated Melee Health
+Demo, including an editable Training Riposte and damage Formula. The combat
+changes were checked on Linux with two independently owned clients swapping
+roles and a host observing, on Fusion 2.1.3 and PurrNet 1.23.0-beta.51. These
+tests do not establish mixed-version, live forced-resync, migration, or Android
+compatibility for this revision.
+
 ## Version 2.5.2
 
 The Fusion and PurrNet Melee Examples now include a **Melee Health Demo**
 with a practice NPC, PvP, and an HP panel that shows the replicated result
-of each strike. Reinstall **Melee Examples** to add the new scene.
+of each strike.
 
 Both Scene Setup Wizards let you assign the GC2 Attribute that receives
 melee damage. For formula-based damage, set the Formula on the attack
