@@ -23,6 +23,21 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             public float GapStartedAt = -1f;
         }
 
+        private sealed class PendingSnapshotAck
+        {
+            public readonly uint Token;
+            public readonly byte[] Payload;
+            public float NextAttemptAt;
+
+            public PendingSnapshotAck(uint token)
+            {
+                Token = token;
+                var writer = new FusionPacketWriter(4);
+                writer.WriteUInt32(token);
+                Payload = writer.ToArray();
+            }
+        }
+
         private struct RateWindow
         {
             public float StartedAt;
@@ -73,6 +88,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         private readonly Dictionary<uint, float> m_LastSnapshotStartedAt =
             new Dictionary<uint, float>();
         private readonly Dictionary<ulong, uint> m_OutgoingSequences = new Dictionary<ulong, uint>();
+        private readonly HashSet<ulong> m_ReliableRpcSendsInProgress = new HashSet<ulong>();
         private readonly Dictionary<ulong, OrderedReceiveState> m_IncomingSequences =
             new Dictionary<ulong, OrderedReceiveState>();
         private readonly HashSet<ulong> m_SequenceBaselineResets = new HashSet<ulong>();
@@ -104,6 +120,9 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         private bool m_HasLastLocalSceneObservation;
         private FusionSceneLifecycleInfo m_LastLocalSceneObservation;
         private uint m_LocalSnapshotCompletedEpoch;
+        private uint m_LocalSnapshotCompletedToken;
+        private ulong m_LocalSnapshotRevision;
+        private PendingSnapshotAck m_PendingSnapshotAck;
         private float m_NextGameplayReadyRetryAt;
         private uint m_GameplayReadySendEpoch;
         private int m_GameplayReadySendCount;
@@ -286,10 +305,13 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                     SendSceneReady();
                 }
 
-                // GameplayReady is an intent, not a one-shot edge. Re-announce it until the
-                // authority's snapshot-complete marker proves that this epoch reached the
-                // client. This also recovers if readiness was first sent during an epoch race.
-                if (m_LocalGameplayReadyIntent &&
+                // A received marker means authority is waiting for its exact token, not
+                // another GameplayReady. This also covers resync within an already ready epoch.
+                if (m_PendingSnapshotAck != null)
+                {
+                    TrySendPendingSnapshotAck();
+                }
+                else if (m_LocalGameplayReadyIntent &&
                     m_LocalSnapshotCompletedEpoch != m_AuthorityEpoch &&
                     Time.unscaledTime >= m_NextGameplayReadyRetryAt)
                 {
@@ -667,6 +689,13 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
         public override bool IsLocalGameplayReady =>
             IsRunnerUsable && IsClient && m_LocalSceneReady && m_LocalGameplayReadyIntent &&
             m_AuthorityEpoch != 0 && m_LocalSnapshotCompletedEpoch == m_AuthorityEpoch;
+
+        /// <summary>
+        /// A local revision for each distinct snapshot acknowledgement successfully queued.
+        /// Unlike the authority epoch, it advances after same-epoch resynchronization.
+        /// Zero indicates that this peer is not locally ready.
+        /// </summary>
+        public ulong LocalGameplaySnapshotRevision => IsLocalGameplayReady ? m_LocalSnapshotRevision : 0;
         public bool IsClientSceneReady(uint clientId) => m_SceneReadyClients.Contains(clientId);
 
         /// <summary>
@@ -1201,25 +1230,10 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                     break;
 
                 case FusionTransportMessageType.SnapshotComplete:
-                    if (envelope.Direction == FusionPacketDirection.FromAuthority)
+                    if (envelope.Direction == FusionPacketDirection.FromAuthority &&
+                        TryReadControlToken(envelope.Payload, out uint completedToken))
                     {
-                        if (TryReadControlToken(envelope.Payload, out uint snapshotToken))
-                        {
-                            LogLifecycle(
-                                $"received SnapshotComplete; token={snapshotToken} " +
-                                $"epoch={m_AuthorityEpoch}");
-                            var writer = new FusionPacketWriter(4);
-                            writer.WriteUInt32(snapshotToken);
-                            if (SendControlToAuthority(
-                                    FusionTransportMessageType.SnapshotAcknowledged,
-                                    writer.ToArray()))
-                            {
-                                m_LocalSnapshotCompletedEpoch = m_AuthorityEpoch;
-                                LogLifecycle(
-                                    $"sent SnapshotAcknowledged; token={snapshotToken} " +
-                                    $"epoch={m_AuthorityEpoch}");
-                            }
-                        }
+                        RetainSnapshotAck(completedToken);
                     }
                     break;
 
@@ -1282,31 +1296,15 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                     ? m_Runner.GetMasterClient()
                     : PlayerRef.None;
 
-            if (!IsServer && m_RpcSendFailureLatched) return false;
-
+            bool loopback = IsServer;
+            if (!loopback && m_Runner.GameMode == GameMode.Shared && !target.IsRealPlayer) return false;
             uint sequenceTarget = TryPlayerToClientId(target, out uint targetId) ? targetId : NoSequenceTarget;
-            var envelope = CreateEnvelope(
+            uint sender = loopback && TryGetLocalClientId(out uint localClientId)
+                ? localClientId
+                : InvalidClientId;
+            return SendEnvelope(
                 FusionPacketDirection.ToAuthority,
-                moduleId,
-                messageType,
-                payload,
-                reliable,
-                sequenceTarget);
-            byte[] packet = FusionPacketCodec.Encode(envelope);
-
-            if (IsServer)
-            {
-                uint sender = TryGetLocalClientId(out uint localClientId)
-                    ? localClientId
-                    : InvalidClientId;
-                ProcessReceivedEnvelope(envelope, sender, reliable);
-                return true;
-            }
-
-            if (m_Runner.GameMode == GameMode.Shared && !target.IsRealPlayer) return false;
-            return TrySendRpc(
-                () => FusionRpcRouter.SendToAuthority(m_Runner, target, packet, reliable),
-                "client-to-authority");
+                moduleId, messageType, payload, reliable, target, sequenceTarget, loopback, sender);
         }
 
         private bool SendToClientInternal(
@@ -1324,26 +1322,76 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                 return false;
             }
 
-            if (target != m_Runner.LocalPlayer && m_RpcSendFailureLatched) return false;
-
-            var envelope = CreateEnvelope(
+            return SendEnvelope(
                 FusionPacketDirection.FromAuthority,
-                moduleId,
-                messageType,
-                payload,
-                reliable,
-                clientId);
-            byte[] packet = FusionPacketCodec.Encode(envelope);
+                moduleId, messageType, payload, reliable, target, clientId,
+                target == m_Runner.LocalPlayer, InvalidClientId);
+        }
 
-            if (target == m_Runner.LocalPlayer)
+        private bool SendEnvelope(
+            FusionPacketDirection direction,
+            ushort moduleId,
+            ushort messageType,
+            byte[] payload,
+            bool reliable,
+            PlayerRef target,
+            uint sequenceTarget,
+            bool loopback,
+            uint localSender)
+        {
+            if (!loopback && m_RpcSendFailureLatched) return false;
+
+            ulong key = OutgoingSequenceKey(sequenceTarget, direction);
+            // The SDK can notify debug callbacks synchronously before returning its result.
+            // A reentrant send on this stream cannot use the unresolved candidate sequence.
+            if (reliable && m_ReliableRpcSendsInProgress.Contains(key)) return false;
+            uint sequence = reliable ? NextOutgoingSequence(key) : 0;
+            var envelope = new FusionPacketEnvelope(
+                m_AuthorityEpoch, direction, moduleId, messageType, sequence,
+                payload == null ? ReadOnlyMemory<byte>.Empty : new ReadOnlyMemory<byte>(payload));
+
+            if (loopback)
             {
-                ProcessReceivedEnvelope(envelope, InvalidClientId, reliable);
+                if (reliable) m_OutgoingSequences[key] = sequence;
+                ProcessReceivedEnvelope(envelope, localSender, reliable);
                 return true;
             }
 
-            return TrySendRpc(
-                () => FusionRpcRouter.SendFromAuthority(m_Runner, target, packet, reliable),
-                "authority-to-client");
+            NetworkRunner runner = m_Runner;
+            byte[] packet = FusionPacketCodec.Encode(envelope);
+            bool toAuthority = direction == FusionPacketDirection.ToAuthority;
+            RpcInvokeInfo result = default;
+            if (reliable) m_ReliableRpcSendsInProgress.Add(key);
+            try
+            {
+                if (!TrySendRpc(
+                        () => result = toAuthority
+                            ? FusionRpcRouter.SendToAuthority(runner, target, packet, reliable)
+                            : FusionRpcRouter.SendFromAuthority(runner, target, packet, reliable),
+                        toAuthority ? "client-to-authority" : "authority-to-client"))
+                {
+                    return false;
+                }
+
+                if (!reliable) return true;
+                // Fusion 2.1.x returns Prepare's result. Sent allows the woven stub to call
+                // Send; it does not report delivery, authority acceptance, or a later drop.
+                // Sent is zero, so require metadata from a real non-empty envelope too.
+                if (result.SendMessageResult != RpcSendMessageResult.Sent || result.PayloadSize <= 0)
+                {
+                    return false;
+                }
+
+                if (ReferenceEquals(m_Runner, runner) && m_AuthorityEpoch == envelope.AuthorityEpoch)
+                {
+                    m_OutgoingSequences[key] = sequence;
+                }
+                return true;
+            }
+            finally
+            {
+                if (reliable) m_ReliableRpcSendsInProgress.Remove(key);
+            }
         }
 
         private bool TrySendRpc(Action send, string route)
@@ -1381,24 +1429,6 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             m_LastRpcSendFailure = string.Empty;
         }
 
-        private FusionPacketEnvelope CreateEnvelope(
-            FusionPacketDirection direction,
-            ushort moduleId,
-            ushort messageType,
-            byte[] payload,
-            bool reliable,
-            uint sequenceTarget)
-        {
-            uint sequence = reliable ? NextOutgoingSequence(direction, sequenceTarget) : 0;
-            return new FusionPacketEnvelope(
-                m_AuthorityEpoch,
-                direction,
-                moduleId,
-                messageType,
-                sequence,
-                payload == null ? ReadOnlyMemory<byte>.Empty : new ReadOnlyMemory<byte>(payload));
-        }
-
         private bool ValidatePayload(byte[] payload, bool reliable)
         {
             int length = payload?.Length ?? 0;
@@ -1423,14 +1453,11 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             return true;
         }
 
-        private uint NextOutgoingSequence(FusionPacketDirection direction, uint target)
+        private uint NextOutgoingSequence(ulong key)
         {
-            ulong key = OutgoingSequenceKey(target, direction);
             m_OutgoingSequences.TryGetValue(key, out uint sequence);
-            sequence++;
-            if (sequence == 0) sequence = 1;
-            m_OutgoingSequences[key] = sequence;
-            return sequence;
+            sequence = unchecked(sequence + 1);
+            return sequence == 0 ? 1 : sequence;
         }
 
         private void ReceiveCharacterInput(uint senderClientId, ReadOnlyMemory<byte> payload)
@@ -1597,7 +1624,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
 
         private void SendGameplayReadyIntent()
         {
-            if (!m_LocalSceneReady || !m_LocalGameplayReadyIntent) return;
+            if (!m_LocalSceneReady || !m_LocalGameplayReadyIntent || m_PendingSnapshotAck != null) return;
             m_NextGameplayReadyRetryAt =
                 Time.unscaledTime + GameplayReadyRetrySeconds;
             if (!SendControlToAuthority(
@@ -1631,6 +1658,52 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
                 (ushort)type,
                 payload,
                 true);
+        }
+
+        private void RetainSnapshotAck(uint token)
+        {
+            if (!IsClient || !m_LocalSceneReady || !m_LocalGameplayReadyIntent) return;
+
+            // The authority allocates increasing, nonzero tokens (wrapping at uint.MaxValue).
+            // A duplicate must not restart the retry timer or replace newer work.
+            uint latest = m_PendingSnapshotAck?.Token ?? m_LocalSnapshotCompletedToken;
+            if (latest != 0 && unchecked((int)(token - latest)) <= 0) return;
+
+            LogLifecycle($"received SnapshotComplete; token={token} epoch={m_AuthorityEpoch}");
+            m_PendingSnapshotAck = new PendingSnapshotAck(token);
+            TrySendPendingSnapshotAck();
+        }
+
+        private void TrySendPendingSnapshotAck()
+        {
+            PendingSnapshotAck pending = m_PendingSnapshotAck;
+            if (pending == null || (m_RpcSendFailureLatched && !IsServer)) return;
+
+            float now = Time.unscaledTime;
+            if (now < pending.NextAttemptAt) return;
+            // Use the admission retry cadence until this token succeeds or its scope ends.
+            // Set the deadline before sending: host dispatch can call back synchronously.
+            pending.NextAttemptAt = now + GameplayReadyRetrySeconds;
+            if (!SendControlToAuthority(FusionTransportMessageType.SnapshotAcknowledged, pending.Payload) ||
+                !ReferenceEquals(m_PendingSnapshotAck, pending))
+            {
+                return;
+            }
+
+            // Success is local dispatch/enqueue, not proof of authority acceptance. A newer
+            // marker or a lifecycle reset during dispatch already invalidated the old work.
+            m_PendingSnapshotAck = null;
+            m_LocalSnapshotCompletedEpoch = m_AuthorityEpoch;
+            m_LocalSnapshotCompletedToken = pending.Token;
+            ++m_LocalSnapshotRevision;
+            LogLifecycle($"sent SnapshotAcknowledged; token={pending.Token} epoch={m_AuthorityEpoch}");
+        }
+
+        private void ResetLocalSnapshot()
+        {
+            m_PendingSnapshotAck = null;
+            m_LocalSnapshotCompletedEpoch = 0;
+            m_LocalSnapshotCompletedToken = 0;
         }
 
         private void SendAuthorityAnnouncement()
@@ -2019,7 +2092,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             m_PendingSnapshotTokens.Clear();
             m_LastSnapshotStartedAt.Clear();
             m_RejectedInputLogs.Clear();
-            m_LocalSnapshotCompletedEpoch = 0;
+            ResetLocalSnapshot();
             m_NextGameplayReadyRetryAt = 0f;
             m_GameplayReadySendEpoch = 0;
             m_GameplayReadySendCount = 0;
@@ -2683,7 +2756,7 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion
             m_PendingSnapshotTokens.Clear();
             m_LastSnapshotStartedAt.Clear();
             m_RejectedInputLogs.Clear();
-            m_LocalSnapshotCompletedEpoch = 0;
+            ResetLocalSnapshot();
             m_NextGameplayReadyRetryAt = 0f;
             m_GameplayReadySendEpoch = 0;
             m_GameplayReadySendCount = 0;

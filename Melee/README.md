@@ -49,8 +49,31 @@ Start a Host and use **WASD** and **Left Mouse** to move into sword range and
 strike the **Practice NPC** in the middle of the arena. To try PvP, join the
 same session with a second player and strike the other player. The
 **Replicated Health** panel shows the current and maximum HP for the NPC and
-each player. Compare the target's HP on both peers after a hit. **Right Mouse**
-lets the defending player block to compare the result.
+each player. Compare the target's HP on both peers after a hit.
+
+The steps below require the updated demo with the `Parry Formula` folder. If
+you already have an older copy installed, back up any local edits before
+removing it in Install Manager and reinstalling the updated examples.
+
+**Parry and counter:** Have the other player swing at you. Raise guard with
+**Right Mouse** just before impact. On a confirmed parry, release guard and tap
+**Left Mouse** within one second to select **Training Riposte**. Holding guard
+well before the attack gives an ordinary block instead. Use two players to
+practice parrying; the practice NPC is a stationary damage target.
+
+**Inspect the Formula:** In the install's `Parry Formula` folder, open
+**Training Sword**. Its attack tap checks GC2's **Time since Last Parry** first,
+then falls back to **Training Slash**. Both Skills select **Training Damage**
+under **Power → Stats → Formula** (Source **Self**, Target **Target**):
+
+```text
+source.attr[hp] * 0.08
+```
+
+A clean hit from an attacker at 100 HP deals 8 damage. If the attacker is
+wounded to 92 HP, their next clean hit deals 7.36 damage. The demo uses
+neutral hit-zone multipliers. A successful parry of the incoming attack
+does not remove HP; the counter must land its own hit.
 
 ### Wire your own scene
 
@@ -68,13 +91,17 @@ lets the defending player block to compare the result.
 3. Equip the attacker's `MeleeWeapon`. Add it to **Register Weapons** on the
    scene's Fusion or PurrNet Melee transport bridge so authority can resolve
    the canonical weapon and its combo Skills.
-4. For formula-based damage, set a **Formula** property in the attack
-   Skill's **Power** field. Set the Formula's **Source** to **Self** and
-   **Target** to **Target**. In the validated hit, these resolve to the actual
-   attacker and defender. A positive Power gives the base damage, and the
-   Melee controller applies its hit-zone multiplier before the bridge
-   subtracts HP. A nonpositive Power uses the controller's Default Base
-   Damage. Use the same Skill assets on all peers.
+4. For formula-based damage, set **Stats → Formula** in the **Power** field
+   of the Skill referenced by the weapon's combo entry. For a counter, edit
+   the counter Skill itself (for example, Sword's **Riposte**). Set **Source**
+   to **Self** and **Target** to **Target**. The server evaluates the Formula
+   with the actual attacker and struck character. Positive results reduce HP;
+   zero, negative and non-finite results deal no damage. The hit
+   uses that raw Power for defense and reaction and applies the hit-zone
+   multiplier to HP damage. Set both **Head Damage Multiplier** and **Legs
+   Damage Multiplier** to `1` in the attacker's Melee controller if HP damage
+   should match the Formula on every hit zone. Block and parry still prevent
+   HP damage. Use the same Skill assets on all peers.
 
 The Melee authority patch intercepts the strike before the stock Skill
 **On Hit** list runs. A **Network Action Target** HP instruction in that
@@ -88,6 +115,24 @@ Application** on the damage bridge. **AttributeNotFound** means the target's
 Traits Class lacks the assigned Attribute. Also check that the target has
 registered with `NetworkStatsManager`, the Melee patch is current, and the
 strike was neither blocked nor parried.
+
+### Stock parry counters
+
+Use the weapon's authored counter combo and normal Melee input after a parry.
+Stock Sword **Riposte** and Brawl **Counter** use the GC2 **Time since Last
+Parry** condition. A live confirmed parry updates that condition for the
+connected defender before the hit-confirmed event. The existing Skill request
+and reaction broadcasts still drive playback. A parry response animation is
+not a counter hit: the counter's strike must land and pass validation before
+the defender of that strike takes damage or plays a hit reaction. Use the
+current Melee patch on both builds, especially if the missing clip is one of
+the original parry pair rather than the follow-up counter.
+
+For a stock Melee **Shield**, assign the particle prefab in **Parry → Effect**.
+Connected peers replay that effect at the confirmed contact if no custom impact
+is registered for the incoming Skill on `NetworkMeleeManager`. The host keeps
+GC2's native Shield effect. Clients do not re-run the Shield response's
+instructions or re-evaluate defense to play the particles.
 
 ## PurrNet Scene Setup Wizard
 

@@ -30,7 +30,12 @@ namespace Arawn.GameCreator2.Networking.Transport.Fusion.Editor
                 var motor = root.GetComponent<FusionNativeNetworkCharacterMotor>();
                 if (motor != null) Object.DestroyImmediate(motor);
                 ConfigureNpc(root);
+            }, (scene, player) =>
+            {
+                ConfigureSession(scene, player);
+                AssetDatabase.SetLabels(player, AssetDatabase.GetLabels(player).Append("FusionPrefab").Distinct().ToArray());
             });
+            NetworkProjectConfigUtilities.RebuildPrefabTable();
         }
 
         public static void BuildInstalledMeleeHealthSmokePlayer()

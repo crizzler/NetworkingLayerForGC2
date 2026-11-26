@@ -1,5 +1,6 @@
 #if GC2_STATS && GC2_MELEE
 using System.Collections.Generic;
+using GameCreator.Runtime.Characters;
 using GameCreator.Runtime.Stats;
 using UnityEngine;
 using GC2Attribute = GameCreator.Runtime.Stats.Attribute;
@@ -10,8 +11,12 @@ namespace Arawn.GameCreator2.Networking.Stats.Melee
     public sealed class NetworkMeleeHealthDemoMonitor : MonoBehaviour
     {
         [SerializeField] private GC2Attribute m_Health;
+        [SerializeField] private bool m_ShowParryAndFormula;
+
+        public const string TrainingFormula = "source.attr[hp] * 0.08";
 
         private readonly List<NetworkCharacter> m_Characters = new();
+        private GUIStyle m_WrappedLabel;
         private Vector2 m_Scroll;
         private float m_NextRefresh;
 
@@ -37,13 +42,28 @@ namespace Arawn.GameCreator2.Networking.Stats.Melee
 
             const float margin = 12f;
             float width = Mathf.Min(330f, Screen.width - 2f * margin);
-            float height = Mathf.Min(205f, Screen.height * 0.47f);
+            float height = m_ShowParryAndFormula
+                ? Mathf.Min(300f, Screen.height * 0.60f)
+                : Mathf.Min(205f, Screen.height * 0.47f);
             var panel = new Rect(Screen.width - width - margin, Screen.height - height - margin, width, height);
             GUILayout.BeginArea(panel, "Replicated Health", GUI.skin.window);
             m_Scroll = GUILayout.BeginScrollView(m_Scroll);
 
-            GUILayout.Label("Strike the practice NPC at the center of the arena, or join with a second player and duel.");
-            GUILayout.Label("The session authority validates strikes and synchronizes HP.");
+            m_WrappedLabel ??= new GUIStyle(GUI.skin.label) { wordWrap = true };
+            GUILayout.Label("Strike the practice NPC at the center of the arena, or join with a second player and duel.", m_WrappedLabel);
+            GUILayout.Label("The session authority validates strikes and synchronizes HP.", m_WrappedLabel);
+            if (m_ShowParryAndFormula)
+            {
+                GUILayout.Label("Duel: raise guard just before impact. Release guard and tap attack within one second to Riposte.", m_WrappedLabel);
+                GUILayout.Label("Damage = 8% of attacker HP before the hit (8 at 100 HP).", m_WrappedLabel);
+                foreach (NetworkCharacter actor in m_Characters)
+                {
+                    if (actor == null || !actor.IsLocalPlayer || !actor.TryGetComponent(out Character character)) continue;
+                    if (character.Time.Time - character.Combat.LastParryTime < 1f)
+                        GUILayout.Label("Parry confirmed: tap attack for Riposte.", m_WrappedLabel);
+                    break;
+                }
+            }
             GUILayout.Space(6f);
             bool displayedHealth = false;
             foreach (NetworkCharacter character in m_Characters)

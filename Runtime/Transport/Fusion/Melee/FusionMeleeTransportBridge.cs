@@ -52,6 +52,50 @@ namespace Arawn.GameCreator2.Networking.Melee.Transport.Fusion
 
         private readonly Dictionary<uint, NetworkMeleeController> m_RegisteredControllers = new(32);
         private readonly List<uint> m_RemoveBuffer = new(16);
+        private readonly List<NetworkMeleeController> m_OwnerWeaponPublishBuffer = new(4);
+        private const int EquipmentSendLimit = 4;
+        private const float EquipmentRetryInterval = 0.25f;
+        private const int DeferredFallbackLimit = 128;
+        private const float DeferredFallbackLifetime = 2f;
+
+        // A null recipient is the local owner's route to authority.
+        private readonly Dictionary<(uint? ClientId, uint ActorId), PendingEquipment> m_PendingEquipment = new();
+        private readonly List<(uint? ClientId, uint ActorId)> m_EquipmentRetryKeys = new();
+        private readonly LinkedList<DeferredFallback> m_DeferredFallbacks = new();
+
+        private sealed class PendingEquipment
+        {
+            public NetworkCharacter Actor;
+            public NetworkMeleeWeaponState State;
+            public int Attempts;
+            public float RetryAt;
+            public bool Accepted;
+            public bool Abandoned;
+        }
+
+        private readonly struct DeferredFallback
+        {
+            public readonly uint ClientId;
+            public readonly NetworkCharacter Actor;
+            public readonly NetworkReactionBroadcast Reaction;
+            public readonly PendingEquipment Equipment;
+            public readonly float ExpiresAt;
+
+            public DeferredFallback(uint clientId, NetworkCharacter actor, NetworkReactionBroadcast reaction,
+                PendingEquipment equipment)
+            {
+                ClientId = clientId;
+                Actor = actor;
+                Reaction = reaction;
+                Equipment = equipment;
+                ExpiresAt = Time.unscaledTime + DeferredFallbackLifetime;
+            }
+        }
+
+#if UNITY_EDITOR
+        // Offline tests replace only the equipment enqueue result, not admission or state handling.
+        private Func<uint?, byte[], bool?> m_EquipmentSendProbe = null;
+#endif
 
         private FusionTransportBridge m_BoundBridge;
         private NetworkMeleeManager m_WiredManager;
@@ -60,6 +104,7 @@ namespace Arawn.GameCreator2.Networking.Melee.Transport.Fusion
         private bool m_LastClient;
         private bool m_AssetsRegistered;
         private float m_NextControllerScanTime;
+        private ulong m_OwnerWeaponPublishRevision;
 
         public string GameplayReadinessName => "Melee";
         public FusionTransportBridge GameplayReadinessTransport => m_BoundBridge;
@@ -122,9 +167,14 @@ namespace Arawn.GameCreator2.Networking.Melee.Transport.Fusion
             WireManager();
             RegisterConfiguredAssets();
 
-            if (!m_AutoRegisterSceneControllers || Time.unscaledTime < m_NextControllerScanTime) return;
-            m_NextControllerScanTime = Time.unscaledTime + Mathf.Max(0.05f, m_ControllerScanInterval);
-            RefreshControllerRegistry(force: false);
+            if (m_AutoRegisterSceneControllers && Time.unscaledTime >= m_NextControllerScanTime)
+            {
+                m_NextControllerScanTime = Time.unscaledTime + Mathf.Max(0.05f, m_ControllerScanInterval);
+                RefreshControllerRegistry(force: false);
+            }
+            PublishOwnerWeaponsWhenReady();
+            FlushEquipmentSends();
+            FlushDeferredFallbacks();
         }
 
         private void OnDisable()
@@ -160,14 +210,23 @@ namespace Arawn.GameCreator2.Networking.Melee.Transport.Fusion
                 return;
             }
             candidate.AuthorityChanged += HandleAuthorityChanged;
+            candidate.ClientSnapshotAcknowledged += CatchUpClientWeaponStates;
+            candidate.PlayerObservedLeft += DiscardDepartedClientEquipment;
+            candidate.RunnerObservedUnbound += DiscardUnboundRunnerEquipment;
+            candidate.LocalSceneObservedStarted += DiscardPreviousSceneEquipment;
             WireManager(forceRoleRefresh: true);
         }
 
         private void UnbindTransport()
         {
+            ResetEquipmentDelivery();
             if (m_BoundBridge == null) return;
             m_BoundBridge.UnregisterFullSnapshotProducer(this);
             m_BoundBridge.AuthorityChanged -= HandleAuthorityChanged;
+            m_BoundBridge.ClientSnapshotAcknowledged -= CatchUpClientWeaponStates;
+            m_BoundBridge.PlayerObservedLeft -= DiscardDepartedClientEquipment;
+            m_BoundBridge.RunnerObservedUnbound -= DiscardUnboundRunnerEquipment;
+            m_BoundBridge.LocalSceneObservedStarted -= DiscardPreviousSceneEquipment;
             m_BoundBridge.UnregisterModuleHandler(ModuleId, HandleModuleMessage);
             m_BoundBridge = null;
         }
@@ -201,9 +260,164 @@ namespace Arawn.GameCreator2.Networking.Melee.Transport.Fusion
 
         private void HandleAuthorityChanged(bool isAuthority, uint authorityEpoch)
         {
+            ResetEquipmentDelivery();
             WireManager(forceRoleRefresh: true);
             RefreshControllerRegistry(force: true);
             Log("authority changed server=" + isAuthority + " epoch=" + authorityEpoch);
+        }
+
+        private void PublishOwnerWeaponsWhenReady()
+        {
+            ulong revision = m_BoundBridge != null ? m_BoundBridge.LocalGameplaySnapshotRevision : 0;
+            if (revision == 0 || m_OwnerWeaponPublishRevision == revision) return;
+            m_OwnerWeaponPublishRevision = revision;
+            DiscardEquipmentForRecipient(null);
+
+            // An equip rejected during resync may not emit another event. Rebuild the
+            // current state after each distinct snapshot ack, not only on a new epoch.
+            // Copy before sending: host loopback can refresh the registry synchronously.
+            m_OwnerWeaponPublishBuffer.Clear();
+            foreach (NetworkMeleeController controller in m_RegisteredControllers.Values)
+            {
+                if (controller != null && controller.IsLocalClient) m_OwnerWeaponPublishBuffer.Add(controller);
+            }
+            foreach (NetworkMeleeController controller in m_OwnerWeaponPublishBuffer)
+            {
+                if (controller != null && controller.IsLocalClient) controller.PublishCurrentWeaponState();
+            }
+            m_OwnerWeaponPublishBuffer.Clear();
+        }
+
+        private void CatchUpClientWeaponStates(uint clientId)
+        {
+            if (m_BoundBridge == null || !m_BoundBridge.IsServer || !m_BoundBridge.IsClientReady(clientId)) return;
+            if (m_BoundBridge.TryGetLocalClientId(out uint localClientId) && clientId == localClientId) return;
+            DiscardEquipmentForRecipient(clientId);
+            NetworkMeleeManager manager = GetManager();
+            if (manager == null) return;
+
+            // A change after snapshot capture may have skipped this in-flight client.
+            // Send persistent equipment only: do not replay other state or combat events.
+            foreach (NetworkMeleeCharacterSnapshot snapshot in manager.CaptureCharacterSnapshots())
+            {
+                if (!snapshot.HasWeaponState) continue;
+                NetworkCharacter actor = ResolveNetworkCharacter(snapshot.CharacterNetworkId);
+                QueueEquipment(clientId, snapshot.CharacterNetworkId, actor, snapshot.WeaponState);
+            }
+        }
+
+        private void ResetEquipmentDelivery()
+        {
+            m_OwnerWeaponPublishRevision = 0;
+            m_PendingEquipment.Clear();
+            m_DeferredFallbacks.Clear();
+        }
+
+        private void DiscardUnboundRunnerEquipment(FusionRunnerBindingInfo _) => ResetEquipmentDelivery();
+        private void DiscardPreviousSceneEquipment(FusionSceneLifecycleInfo _) => ResetEquipmentDelivery();
+        private void DiscardDepartedClientEquipment(FusionPlayerConnectionInfo client) =>
+            DiscardEquipmentForRecipient(client.ClientId);
+
+        private void DiscardEquipmentForRecipient(uint? clientId)
+        {
+            if (clientId.HasValue) DiscardDeferredFallbacks(clientId.Value);
+            if (m_PendingEquipment.Count == 0) return;
+            foreach (var key in new List<(uint? ClientId, uint ActorId)>(m_PendingEquipment.Keys))
+            {
+                if (key.ClientId == clientId) m_PendingEquipment.Remove(key);
+            }
+        }
+
+        private void QueueEquipment(
+            uint? clientId, uint actorId, NetworkCharacter actor, NetworkMeleeWeaponState state, bool defer = false)
+        {
+            if (m_BoundBridge == null || actorId == 0 || actor == null || actor.NetworkId != actorId) return;
+            var key = (ClientId: clientId, ActorId: actorId);
+            float retryAt = 0f;
+            if (m_PendingEquipment.TryGetValue(key, out PendingEquipment previous) && previous.Actor == actor)
+            {
+                if (previous.State.WeaponHash == state.WeaponHash &&
+                    previous.State.ShieldFlags == state.ShieldFlags &&
+                    previous.State.BlockTiming == state.BlockTiming && !previous.Abandoned) return;
+                // A new value replaces an unsent one but does not bypass its pacing.
+                retryAt = previous.RetryAt;
+            }
+            // Do not play the fallback of a superseded update against its replacement.
+            if (clientId.HasValue) DiscardDeferredFallbacks(clientId.Value, actorId);
+            var pending = new PendingEquipment { Actor = actor, State = state, RetryAt = retryAt };
+            m_PendingEquipment[key] = pending;
+            if (!defer) TrySendEquipment(key, pending);
+        }
+
+        private void FlushEquipmentSends()
+        {
+            if (m_PendingEquipment.Count == 0) return;
+            // An accepted loopback send may synchronously refresh controllers or enqueue fan-out.
+            m_EquipmentRetryKeys.AddRange(m_PendingEquipment.Keys);
+            foreach (var key in m_EquipmentRetryKeys)
+            {
+                if (m_PendingEquipment.TryGetValue(key, out PendingEquipment pending)) TrySendEquipment(key, pending);
+            }
+            m_EquipmentRetryKeys.Clear();
+        }
+
+        private void TrySendEquipment((uint? ClientId, uint ActorId) key, PendingEquipment pending)
+        {
+            FusionTransportBridge bridge = m_BoundBridge;
+            NetworkCharacter actor = pending.Actor;
+            if (bridge == null || actor == null || !actor.isActiveAndEnabled || actor.NetworkId != key.ActorId ||
+                actor.Role == NetworkCharacter.NetworkRole.None ||
+                (key.ClientId.HasValue ? !bridge.IsServer || !bridge.IsClientReady(key.ClientId.Value) : !actor.IsOwnerInstance))
+            {
+                m_PendingEquipment.Remove(key);
+                return;
+            }
+
+            if (!key.ClientId.HasValue && !bridge.IsLocalGameplayReady) return;
+            float now = Time.unscaledTime;
+            if (now < pending.RetryAt) return;
+            if (ResolveNetworkCharacter(key.ActorId) != actor)
+            {
+                m_PendingEquipment.Remove(key);
+                return;
+            }
+            if (pending.Abandoned) return;
+
+            // Pace before sending because offline/host loopback can run other callbacks inline.
+            pending.RetryAt = now + EquipmentRetryInterval;
+            ++pending.Attempts;
+            byte[] payload = EncodeWeaponState(key.ActorId, pending.State);
+            bool accepted = SendEquipmentPayload(bridge, key.ClientId, payload);
+            if (!m_PendingEquipment.TryGetValue(key, out PendingEquipment current) || current != pending) return;
+            if (!accepted && pending.Attempts < EquipmentSendLimit) return;
+
+            if (accepted)
+            {
+                pending.Accepted = true;
+                m_PendingEquipment.Remove(key);
+            }
+            else
+            {
+                // This recipient may still have an older weapon. Keep a dormant barrier,
+                // not more retries, until a new publication or binding invalidation.
+                pending.Abandoned = true;
+                if (key.ClientId.HasValue) DiscardDeferredFallbacks(key.ClientId.Value, key.ActorId);
+                else m_PendingEquipment.Remove(key);
+                string destination = key.ClientId.HasValue ? $"client={key.ClientId.Value}" : "authority";
+                Debug.LogWarning($"[FusionMeleeTransportBridge] Reliable equipment send abandoned: {destination} " +
+                    $"actor={key.ActorId} epoch={bridge.AuthorityEpoch} attempts={pending.Attempts}.", this);
+            }
+        }
+
+        private bool SendEquipmentPayload(FusionTransportBridge bridge, uint? clientId, byte[] payload)
+        {
+#if UNITY_EDITOR
+            bool? probe = m_EquipmentSendProbe?.Invoke(clientId, payload);
+            if (probe.HasValue) return probe.Value;
+#endif
+            return clientId.HasValue
+                ? bridge.SendModuleToClient(clientId.Value, ModuleId, (ushort)MessageType.WeaponState, payload, reliable: true)
+                : bridge.SendModuleToAuthority(ModuleId, (ushort)MessageType.WeaponState, payload, reliable: true);
         }
 
         private void WireManager(bool forceRoleRefresh = false)
@@ -434,7 +648,7 @@ namespace Arawn.GameCreator2.Networking.Melee.Transport.Fusion
 
             if (controller.IsLocalClient)
             {
-                SendWeaponState(networkId, state);
+                QueueEquipment(null, networkId, character, state);
                 return;
             }
 
@@ -447,7 +661,7 @@ namespace Arawn.GameCreator2.Networking.Melee.Transport.Fusion
 
             NetworkMeleeManager manager = GetManager();
             manager?.RecordAuthoritativeWeaponState(networkId, state);
-            BroadcastWeaponState(networkId, state, reliable: true);
+            BroadcastWeaponState(networkId, state);
         }
 
         private void SendHitRequest(NetworkMeleeHitRequest value) =>
@@ -478,8 +692,111 @@ namespace Arawn.GameCreator2.Networking.Melee.Transport.Fusion
             Broadcast(MessageType.FreeFlowState, value, (writer, item) => writer.Write(item));
         private void BroadcastCharge(NetworkChargeBroadcast value) =>
             Broadcast(MessageType.ChargeBroadcast, value, (writer, item) => writer.Write(item));
-        private void BroadcastReaction(NetworkReactionBroadcast value) =>
-            Broadcast(MessageType.ReactionBroadcast, value, (writer, item) => writer.Write(item));
+        private void BroadcastReaction(NetworkReactionBroadcast value)
+        {
+            FusionTransportBridge bridge = m_BoundBridge;
+            if (bridge == null || !bridge.IsServer) return;
+            RetireSupersededFallbacks(bridge, value);
+            NetworkCharacter actor = null;
+            if (value.PlaybackKind == NetworkReactionPlaybackKind.Stance && value.ReactionHash == 0 &&
+                value.CharacterNetworkId != 0 && m_PendingEquipment.Count != 0)
+            {
+                foreach (uint clientId in bridge.ConnectedClientIds)
+                {
+                    if (!bridge.IsClientReady(clientId) ||
+                        !m_PendingEquipment.TryGetValue((clientId, value.CharacterNetworkId), out var pending)) continue;
+                    actor = ResolveNetworkCharacter(value.CharacterNetworkId);
+                    if (actor != null && pending.Actor == actor) break;
+                    actor = null;
+                }
+            }
+
+            if (actor == null)
+            {
+                Broadcast(MessageType.ReactionBroadcast, value, (writer, item) => writer.Write(item));
+                return;
+            }
+
+            // Split only this fallback's audience. Targeted live sends drain in Update,
+            // outside snapshot production; unaffected recipients don't wait on retries.
+            foreach (uint clientId in bridge.ConnectedClientIds)
+            {
+                if (!bridge.IsClientReady(clientId)) continue;
+                m_PendingEquipment.TryGetValue((clientId, value.CharacterNetworkId), out var equipment);
+                if (equipment != null && equipment.Actor != actor) equipment = null;
+                if (equipment != null && equipment.Abandoned) continue;
+                if (m_DeferredFallbacks.Count >= DeferredFallbackLimit) m_DeferredFallbacks.RemoveFirst();
+                m_DeferredFallbacks.AddLast(new DeferredFallback(clientId, actor, value, equipment));
+            }
+        }
+
+        private void RetireSupersededFallbacks(FusionTransportBridge bridge, NetworkReactionBroadcast successor)
+        {
+            if (successor.CharacterNetworkId == 0 || successor.Sequence == 0 || m_DeferredFallbacks.Count == 0) return;
+            NetworkCharacter actor = ResolveNetworkCharacter(successor.CharacterNetworkId);
+            if (actor == null) return;
+
+            // A newer authoritative reaction supersedes older deferred presentation for
+            // this actor in the current ready audience. Do this before sending: a loopback
+            // handler can run synchronously, and an enqueue refusal cannot revive stale work.
+            for (var node = m_DeferredFallbacks.First; node != null;)
+            {
+                var next = node.Next;
+                DeferredFallback item = node.Value;
+                if (item.Actor == actor && item.Reaction.CharacterNetworkId == successor.CharacterNetworkId &&
+                    bridge.IsClientReady(item.ClientId) && item.Reaction.Sequence != 0 &&
+                    unchecked((int)(successor.Sequence - item.Reaction.Sequence)) > 0)
+                {
+                    m_DeferredFallbacks.Remove(node);
+                }
+                node = next;
+            }
+        }
+
+        private void DiscardDeferredFallbacks(uint clientId, uint? actorId = null)
+        {
+            for (var node = m_DeferredFallbacks.First; node != null;)
+            {
+                var next = node.Next;
+                if (node.Value.ClientId == clientId &&
+                    (!actorId.HasValue || node.Value.Reaction.CharacterNetworkId == actorId.Value))
+                {
+                    m_DeferredFallbacks.Remove(node);
+                }
+                node = next;
+            }
+        }
+
+        private void FlushDeferredFallbacks()
+        {
+            FusionTransportBridge bridge = m_BoundBridge;
+            if (bridge == null || !bridge.IsServer) return;
+            for (var node = m_DeferredFallbacks.First; node != null && node.List == m_DeferredFallbacks;)
+            {
+                var next = node.Next;
+                DeferredFallback item = node.Value;
+                uint actorId = item.Reaction.CharacterNetworkId;
+                if (Time.unscaledTime >= item.ExpiresAt || !bridge.IsClientReady(item.ClientId) ||
+                    item.Actor == null || !item.Actor.isActiveAndEnabled ||
+                    item.Actor.Role == NetworkCharacter.NetworkRole.None || ResolveNetworkCharacter(actorId) != item.Actor)
+                {
+                    m_DeferredFallbacks.Remove(node);
+                }
+                else if (item.Equipment == null || item.Equipment.Accepted)
+                {
+                    // Do not retry transient sends or replay a reentrant loopback callback.
+                    m_DeferredFallbacks.Remove(node);
+                    SendToClient(item.ClientId, MessageType.ReactionBroadcast, item.Reaction,
+                        (writer, value) => writer.Write(value));
+                }
+                else if (!m_PendingEquipment.TryGetValue((item.ClientId, actorId), out var current) ||
+                         current != item.Equipment)
+                {
+                    m_DeferredFallbacks.Remove(node);
+                }
+                node = next;
+            }
+        }
 
         private void SendToAuthority<T>(
             MessageType type,
@@ -512,33 +829,27 @@ namespace Arawn.GameCreator2.Networking.Melee.Transport.Fusion
                 ModuleId, (ushort)type, FusionValueCodec.Encode(value, write));
         }
 
-        private void SendWeaponState(uint characterNetworkId, NetworkMeleeWeaponState state)
+        private void BroadcastWeaponState(uint characterNetworkId, NetworkMeleeWeaponState state)
         {
-            if (m_BoundBridge == null || !m_BoundBridge.IsClient || characterNetworkId == 0) return;
-            var writer = new FusionValueWriter();
-            writer.Write(characterNetworkId);
-            writer.Write(state);
-            m_BoundBridge.SendModuleToAuthority(
-                ModuleId,
-                (ushort)MessageType.WeaponState,
-                writer.ToArray(),
-                reliable: false);
+            FusionTransportBridge bridge = m_BoundBridge;
+            if (bridge == null || !bridge.IsServer || characterNetworkId == 0) return;
+            NetworkCharacter actor = ResolveNetworkCharacter(characterNetworkId);
+            // A broadcast count cannot identify which recipient refused. Enumerate the
+            // same ready audience and retain only the unsuccessful targeted sends.
+            // Flush outside synchronous snapshot production: targeted sends made inside
+            // a producer would be counted as output of that producer.
+            foreach (uint clientId in bridge.ConnectedClientIds)
+            {
+                if (bridge.IsClientReady(clientId)) QueueEquipment(clientId, characterNetworkId, actor, state, defer: true);
+            }
         }
 
-        private void BroadcastWeaponState(
-            uint characterNetworkId,
-            NetworkMeleeWeaponState state,
-            bool reliable = false)
+        private static byte[] EncodeWeaponState(uint characterNetworkId, NetworkMeleeWeaponState state)
         {
-            if (m_BoundBridge == null || !m_BoundBridge.IsServer || characterNetworkId == 0) return;
             var writer = new FusionValueWriter();
             writer.Write(characterNetworkId);
             writer.Write(state);
-            m_BoundBridge.BroadcastModule(
-                ModuleId,
-                (ushort)MessageType.WeaponState,
-                writer.ToArray(),
-                reliable: reliable);
+            return writer.ToArray();
         }
 
         private bool SendCharacterSnapshot(uint clientId, NetworkMeleeCharacterSnapshot snapshot)

@@ -271,6 +271,8 @@ namespace Arawn.GameCreator2.Networking.Melee
         // each delivery role separately so resolving the target later cannot replay presentation
         // that the attacker controller already handled.
         private readonly List<PendingHitBroadcast> m_PendingHitBroadcasts = new(16);
+        private readonly List<(NetworkMeleeHitBroadcast Hit, bool AfterPrediction, float Received)> m_PendingParryPresentation = new(8);
+        private bool m_FlushingTransientBroadcasts;
         private readonly List<PendingReactionBroadcast> m_PendingReactionBroadcasts = new(16);
 
         // Server hit queue
@@ -318,10 +320,14 @@ namespace Arawn.GameCreator2.Networking.Melee
         private static readonly Dictionary<int, SkillRegistryEntry> s_SkillRegistry = new(64);
         private static readonly Dictionary<int, Reaction> s_ReactionRegistry = new(32);
 
+        private static readonly FieldInfo s_ShieldParryResponseField =
+            typeof(Shield).GetField("m_Parry", BindingFlags.Instance | BindingFlags.NonPublic);
+        private static readonly FieldInfo s_ShieldResponseEffectField =
+            typeof(TShieldResponse).GetField("m_Effect", BindingFlags.Instance | BindingFlags.NonPublic);
         private static readonly FieldInfo[] s_ShieldResponseFields =
         {
             typeof(Shield).GetField("m_Block", BindingFlags.Instance | BindingFlags.NonPublic),
-            typeof(Shield).GetField("m_Parry", BindingFlags.Instance | BindingFlags.NonPublic),
+            s_ShieldParryResponseField,
             typeof(Shield).GetField("m_Break", BindingFlags.Instance | BindingFlags.NonPublic)
         };
 
@@ -586,10 +592,17 @@ namespace Arawn.GameCreator2.Networking.Melee
 
             if (!m_HitEffectRegistry.TryGetValue(broadcast.SkillHash, out MeleeHitEffectRegistration registration))
             {
+                // Authority already ran the native Shield response. Connected peers replay
+                // just its visual, not OnDefend (which can run gameplay instructions).
+                if (result == NetworkBlockResult.Parried)
+                {
+                    if (!m_IsServer) RequestShieldParryPresentation(broadcast, afterPrediction: false);
+                    return false;
+                }
+
                 // Upgrade compatibility: ordinary and block-broken hits may safely reuse the
                 // Skill's presentation-only prefab without invoking Skill.OnHit (which also
-                // contains gameplay instructions). Explicit outcome variants still require the
-                // manager registry.
+                // contains gameplay instructions).
                 if ((result == NetworkBlockResult.None || result == NetworkBlockResult.BlockBroken) &&
                     TryPresentSkillHitEffect(skill, args, broadcast.HitPoint, rotation))
                 {
@@ -628,11 +641,11 @@ namespace Arawn.GameCreator2.Networking.Melee
         }
 
         /// <summary>
-        /// Complete the audio portion of a confirmed hit whose visual was already presented
-        /// optimistically. This intentionally does not raise the presentation replacement event
-        /// or instantiate another effect.
+        /// Complete feedback only known after confirmation: the outcome sound and, when no
+        /// custom impact is registered, the native Shield parry effect. Do not replay the
+        /// predicted impact or raise the presentation replacement event again.
         /// </summary>
-        internal void RequestConfirmedHitAudio(NetworkMeleeHitBroadcast broadcast)
+        internal void RequestConfirmedHitFeedback(NetworkMeleeHitBroadcast broadcast)
         {
             if (!m_IsClient) return;
 
@@ -653,6 +666,60 @@ namespace Arawn.GameCreator2.Networking.Melee
                 args,
                 result,
                 out _);
+
+            if (result == NetworkBlockResult.Parried && !m_IsServer &&
+                !m_HitEffectRegistry.ContainsKey(broadcast.SkillHash))
+            {
+                RequestShieldParryPresentation(broadcast, afterPrediction: true);
+            }
+        }
+
+        private void RequestShieldParryPresentation(NetworkMeleeHitBroadcast hit, bool afterPrediction)
+        {
+            if (hit.AttackerNetworkId == 0 || hit.TargetNetworkId == 0) return;
+            if (TryResolveParryPresentationActors(hit, out Character attacker, out Character defender))
+            {
+                PresentConfirmedShieldParry(hit, afterPrediction, attacker, defender);
+                return;
+            }
+
+            if (m_PendingParryPresentation.Count >= Mathf.Max(1, m_MaxPendingTransientBroadcasts))
+            {
+                m_PendingParryPresentation.RemoveAt(0);
+            }
+            m_PendingParryPresentation.Add((hit, afterPrediction, Time.unscaledTime));
+        }
+
+        private bool TryResolveParryPresentationActors(
+            NetworkMeleeHitBroadcast hit, out Character attacker, out Character defender)
+        {
+            attacker = null;
+            defender = null;
+            if (m_PendingCharacterStates.TryGetValue(hit.TargetNetworkId, out var state) &&
+                (state.HasWeaponState || state.HasBlockState)) return false;
+            if (!TryGetTransientController(hit.AttackerNetworkId, false, out var attackController) ||
+                !TryGetTransientController(hit.TargetNetworkId, false, out var defenseController) ||
+                !defenseController.IsShieldParryPresentationReady()) return false;
+
+            attacker = attackController.GetComponent<Character>();
+            defender = defenseController.GetComponent<Character>();
+            return attacker != null && defender != null;
+        }
+
+        private void PresentConfirmedShieldParry(
+            NetworkMeleeHitBroadcast hit, bool afterPrediction, Character attacker, Character defender)
+        {
+            if (afterPrediction)
+            {
+                var context = new NetworkMeleeHitPresentationContext(hit, GetSkillByHash(hit.SkillHash),
+                    attacker, defender, isConfirmedParryAfterPrediction: true);
+                InvokeHitPresentationSubscribers(context);
+                if (context.Handled) return;
+            }
+            if (!m_HitEffectRegistry.ContainsKey(hit.SkillHash))
+            {
+                TryPresentShieldParryEffect(defender, attacker.gameObject, hit);
+            }
         }
 
         private void InvokeHitPresentationSubscribers(NetworkMeleeHitPresentationContext context)
@@ -712,6 +779,40 @@ namespace Arawn.GameCreator2.Networking.Melee
                     rotation,
                     SkillEffects.POOL_COUNT,
                     SkillEffects.POOL_DURATION);
+                return true;
+            }
+            catch (Exception exception)
+            {
+                Debug.LogException(exception);
+                return false;
+            }
+        }
+
+        private static bool TryPresentShieldParryEffect(
+            Character defender,
+            GameObject attacker,
+            NetworkMeleeHitBroadcast broadcast)
+        {
+            if (defender == null || defender.Combat.Block.Shield is not Shield shield || shield == null)
+            {
+                return false;
+            }
+
+            try
+            {
+                object response = s_ShieldParryResponseField?.GetValue(shield);
+                if (response == null) return false;
+                var effect = s_ShieldResponseEffectField?.GetValue(response) as PropertyGetGameObject;
+                GameObject prefab = effect?.Get(new Args(defender.gameObject, attacker));
+                if (prefab == null || PoolManager.Instance == null) return false;
+
+                // Native Shield effects use the target-local direction directly.
+                Vector3 direction = broadcast.StrikeDirection;
+                Quaternion rotation = direction.sqrMagnitude > 0f
+                    ? Quaternion.LookRotation(-direction, direction.normalized != Vector3.up ? Vector3.up : Vector3.right)
+                    : Quaternion.identity;
+                PoolManager.Instance.Pick(
+                    prefab, broadcast.HitPoint, rotation, SkillEffects.POOL_COUNT, SkillEffects.POOL_DURATION);
                 return true;
             }
             catch (Exception exception)
@@ -1055,7 +1156,8 @@ namespace Arawn.GameCreator2.Networking.Melee
                 FlushPendingCharacterStates();
             }
 
-            if (m_PendingReactionBroadcasts.Count > 0 || m_PendingHitBroadcasts.Count > 0)
+            if (m_PendingReactionBroadcasts.Count > 0 || m_PendingHitBroadcasts.Count > 0 ||
+                m_PendingParryPresentation.Count > 0)
             {
                 FlushPendingTransientBroadcasts();
             }
@@ -1073,6 +1175,7 @@ namespace Arawn.GameCreator2.Networking.Melee
             m_LatestCharacterStates.Clear();
             m_PendingHitBroadcasts.Clear();
             m_PendingReactionBroadcasts.Clear();
+            m_PendingParryPresentation.Clear();
             m_TrustedServerSkillBroadcasts.Clear();
             m_FreeFlowAdapters.Clear();
         }
@@ -1148,10 +1251,9 @@ namespace Arawn.GameCreator2.Networking.Melee
             controller.OnChargeRequested -= OnControllerChargeRequested;
             controller.OnChargeRequested += OnControllerChargeRequested;
 
-            if (m_PendingCharacterStates.TryGetValue(networkId, out NetworkMeleeCharacterSnapshot pendingState) &&
-                ApplyCharacterState(controller, pendingState))
+            if (m_PendingCharacterStates.TryGetValue(networkId, out NetworkMeleeCharacterSnapshot pendingState))
             {
-                m_PendingCharacterStates.Remove(networkId);
+                ApplyOrRetainCharacterState(controller, pendingState);
             }
 
             // Registration normally follows role initialization. Flush immediately for the common
@@ -1185,6 +1287,8 @@ namespace Arawn.GameCreator2.Networking.Melee
             // state must not survive ID reuse and appear in a later player's join snapshot.
             m_LatestCharacterStates.Remove(networkId);
             m_PendingCharacterStates.Remove(networkId);
+            m_PendingParryPresentation.RemoveAll(pending =>
+                pending.Hit.AttackerNetworkId == networkId || pending.Hit.TargetNetworkId == networkId);
         }
 
         /// <summary>
@@ -1197,13 +1301,12 @@ namespace Arawn.GameCreator2.Networking.Melee
             m_FreeFlowAdapters[networkId] = adapter;
 
             // Controller and adapter OnEnable ordering is not guaranteed. Retry the complete
-            // pending snapshot whenever either side becomes available.
+            // pending fields whenever either side becomes available.
             if (m_Controllers.TryGetValue(networkId, out NetworkMeleeController controller) &&
                 controller != null &&
-                m_PendingCharacterStates.TryGetValue(networkId, out NetworkMeleeCharacterSnapshot pending) &&
-                ApplyCharacterState(controller, pending))
+                m_PendingCharacterStates.TryGetValue(networkId, out NetworkMeleeCharacterSnapshot pending))
             {
-                m_PendingCharacterStates.Remove(networkId);
+                ApplyOrRetainCharacterState(controller, pending);
             }
         }
 
@@ -1294,15 +1397,17 @@ namespace Arawn.GameCreator2.Networking.Melee
         {
             if (snapshot.CharacterNetworkId == 0) return;
 
-            // Targeted snapshots use full-replacement semantics. An omitted field therefore
-            // means the authoritative default, rather than "leave whatever this peer happened
-            // to apply before the snapshot arrived".
-            if (!snapshot.HasWeaponState)
+            // Only a present weapon field with hash zero confirms an unequip. Unknown
+            // equipment must leave both the applied weapon and any confirmed pending update alone.
+            if (!snapshot.HasWeaponState &&
+                m_PendingCharacterStates.TryGetValue(snapshot.CharacterNetworkId, out var pending) &&
+                pending.HasWeaponState)
             {
                 snapshot.HasWeaponState = true;
-                snapshot.WeaponState = NetworkMeleeWeaponState.None;
+                snapshot.WeaponState = pending.WeaponState;
             }
 
+            // Block and Free Flow still use full replacement, including omitted-field resets.
             if (!snapshot.HasBlockState)
             {
                 snapshot.HasBlockState = true;
@@ -1331,9 +1436,8 @@ namespace Arawn.GameCreator2.Networking.Melee
                 snapshot.FreeFlowState.CharacterNetworkId = snapshot.CharacterNetworkId;
             }
 
-            // A targeted snapshot is a complete point-in-time replacement. Do not merge it
-            // with an older spawn-order entry or a cleared weapon/block state could survive a
-            // repeated snapshot. Incremental weapon/block broadcasts still use merge semantics.
+            // Replace the pending entry with the resolved snapshot: a confirmed unequip,
+            // lower, or Free Flow reset must supersede its older pending value.
             ApplyOrQueueCharacterState(snapshot, true);
         }
 
@@ -1350,12 +1454,6 @@ namespace Arawn.GameCreator2.Networking.Melee
                 if (networkId == 0 || controller == null) continue;
 
                 NetworkMeleeCharacterSnapshot snapshot = GetOrCreateLatestState(networkId);
-                if (!snapshot.HasWeaponState)
-                {
-                    snapshot.HasWeaponState = true;
-                    snapshot.WeaponState = controller.CurrentWeaponState;
-                }
-
                 if (!snapshot.HasBlockState)
                 {
                     snapshot.HasBlockState = true;
@@ -1381,8 +1479,18 @@ namespace Arawn.GameCreator2.Networking.Melee
 
             var snapshots = new NetworkMeleeCharacterSnapshot[m_LatestCharacterStates.Count];
             int index = 0;
-            foreach (NetworkMeleeCharacterSnapshot snapshot in m_LatestCharacterStates.Values)
+            foreach (NetworkMeleeCharacterSnapshot latest in m_LatestCharacterStates.Values)
             {
+                var snapshot = latest;
+                // Prefer a recorded authoritative value, including explicit zero. Sample an
+                // authority-owned actor only for this capture; don't cache the fallback as a publication.
+                if (!snapshot.HasWeaponState &&
+                    m_Controllers.TryGetValue(snapshot.CharacterNetworkId, out NetworkMeleeController controller) &&
+                    controller != null && controller.TryCaptureAuthoritativeWeaponState(out var weaponState))
+                {
+                    snapshot.HasWeaponState = true;
+                    snapshot.WeaponState = weaponState;
+                }
                 snapshots[index++] = snapshot;
             }
 
@@ -1446,20 +1554,27 @@ namespace Arawn.GameCreator2.Networking.Melee
                 }
             }
 
-            if (m_Controllers.TryGetValue(networkId, out NetworkMeleeController controller) &&
-                controller != null &&
-                ApplyCharacterState(controller, pending))
-            {
-                m_PendingCharacterStates.Remove(networkId);
-                return;
-            }
+            m_Controllers.TryGetValue(networkId, out NetworkMeleeController controller);
+            ApplyOrRetainCharacterState(controller, pending);
+        }
 
-            StorePendingCharacterState(networkId, pending);
+        private void ApplyOrRetainCharacterState(
+            NetworkMeleeController controller,
+            NetworkMeleeCharacterSnapshot snapshot)
+        {
+            if (ApplyCharacterState(controller, ref snapshot))
+            {
+                m_PendingCharacterStates.Remove(snapshot.CharacterNetworkId);
+            }
+            else
+            {
+                StorePendingCharacterState(snapshot.CharacterNetworkId, snapshot);
+            }
         }
 
         private bool ApplyCharacterState(
             NetworkMeleeController controller,
-            NetworkMeleeCharacterSnapshot snapshot)
+            ref NetworkMeleeCharacterSnapshot snapshot)
         {
             if (controller == null) return false;
 
@@ -1476,6 +1591,9 @@ namespace Arawn.GameCreator2.Networking.Melee
                 }
 
                 controller.ApplyRemoteWeaponState(snapshot.WeaponState, weapon);
+                // The controller owns async equip and guard readiness after handoff. An
+                // unavailable optional adapter must not requeue or gate already delivered state.
+                snapshot.HasWeaponState = false;
             }
 
             if (snapshot.HasBlockState)
@@ -1483,6 +1601,7 @@ namespace Arawn.GameCreator2.Networking.Melee
                 NetworkBlockBroadcast blockState = snapshot.BlockState;
                 blockState.CharacterNetworkId = snapshot.CharacterNetworkId;
                 controller.ReceiveBlockBroadcast(blockState);
+                snapshot.HasBlockState = false;
             }
 
             if (snapshot.HasFreeFlowState)
@@ -1545,10 +1664,7 @@ namespace Arawn.GameCreator2.Networking.Melee
                     continue;
                 }
 
-                if (ApplyCharacterState(controller, state))
-                {
-                    m_PendingCharacterStates.Remove(networkId);
-                }
+                ApplyOrRetainCharacterState(controller, state);
             }
         }
 
@@ -2086,7 +2202,8 @@ namespace Arawn.GameCreator2.Networking.Melee
             NetworkMeleeHitResponse response = attackerController.ProcessHitRequest(
                 request,
                 queued.ClientNetworkId,
-                queued.TrustedServerOrigin);
+                queued.TrustedServerOrigin,
+                out float authoritativePower);
             response.ActorNetworkId = request.ActorNetworkId;
             response.CorrelationId = request.CorrelationId;
             if (response.Validated)
@@ -2111,7 +2228,6 @@ namespace Arawn.GameCreator2.Networking.Melee
                 // ═══════════════════════════════════════════════════════════════════════════════
 
                 BlockEvaluationResult blockResult = BlockEvaluationResult.NoBlock;
-                float authoritativePower = ResolveAuthoritativeSkillPower(request, response.Damage);
 
                 // The target controller readiness gate above guarantees authored defense and
                 // reaction routing are available before any health mutation occurs.
@@ -2435,44 +2551,6 @@ namespace Arawn.GameCreator2.Networking.Melee
                 targetCharacter,
                 skill,
                 new ReactionInput(localDirection, Mathf.Max(0f, authoritativePower)));
-        }
-
-        private float ResolveAuthoritativeSkillPower(
-            NetworkMeleeHitRequest request,
-            float fallbackDamage)
-        {
-            uint attackerNetworkId = request.ActorNetworkId != 0
-                ? request.ActorNetworkId
-                : request.AttackerNetworkId;
-            Character attackerCharacter = GetCharacterByNetworkId(attackerNetworkId)
-                ?.GetComponent<Character>();
-            Character targetCharacter = GetCharacterByNetworkId(request.TargetNetworkId)
-                ?.GetComponent<Character>();
-            Skill skill = GetSkillByHash(request.SkillHash);
-
-            if (skill == null || attackerCharacter == null || targetCharacter == null)
-            {
-                return Mathf.Max(0f, fallbackDamage);
-            }
-
-            try
-            {
-                // Match AttackSkill's authored power evaluation: attacker is Args.Self and the
-                // struck character is Args.Target. Evaluate before damage mutates Stats.
-                return Mathf.Max(
-                    0f,
-                    skill.GetPower(new Args(
-                        attackerCharacter.gameObject,
-                        targetCharacter.gameObject)));
-            }
-            catch (Exception ex)
-            {
-                WarnAuthoritativeHitInvariant(
-                    request.SkillHash ^ 0x145A,
-                    $"Could not evaluate reaction power for Skill '{skill.name}'. " +
-                    $"Using validated damage as power. {ex.Message}");
-                return Mathf.Max(0f, fallbackDamage);
-            }
         }
 
         private bool ApplyAuthoritativeReactionOnServer(
@@ -3201,20 +3279,36 @@ namespace Arawn.GameCreator2.Networking.Melee
         /// </summary>
         public void ReceiveReactionBroadcast(NetworkReactionBroadcast broadcast)
         {
+            RetireSupersededPendingFallbacks(broadcast);
             LogMeleeFlow(
                 $"received reaction broadcast target={broadcast.CharacterNetworkId} from={broadcast.FromNetworkId} " +
                 $"hasController={m_Controllers.ContainsKey(broadcast.CharacterNetworkId)}");
 
-            if (TryGetTransientController(
-                    broadcast.CharacterNetworkId,
-                    requireReactionStance: true,
-                    out NetworkMeleeController ctrl))
+            if (TryGetReactionController(broadcast, out NetworkMeleeController ctrl))
             {
                 ctrl.ReceiveReactionBroadcast(broadcast);
                 return;
             }
 
             EnqueuePendingReactionBroadcast(broadcast);
+        }
+
+        private void RetireSupersededPendingFallbacks(NetworkReactionBroadcast successor)
+        {
+            if (successor.CharacterNetworkId == 0 || successor.Sequence == 0) return;
+
+            // A newer reaction supersedes only queued weapon-dependent presentation for
+            // this replica, even if the successor itself cannot be delivered yet.
+            for (int i = m_PendingReactionBroadcasts.Count - 1; i >= 0; --i)
+            {
+                NetworkReactionBroadcast pending = m_PendingReactionBroadcasts[i].Broadcast;
+                if (pending.CharacterNetworkId == successor.CharacterNetworkId &&
+                    IsWeaponFallbackReaction(pending) && pending.Sequence != 0 &&
+                    unchecked((int)(successor.Sequence - pending.Sequence)) > 0)
+                {
+                    m_PendingReactionBroadcasts.RemoveAt(i);
+                }
+            }
         }
 
         private void RouteHitBroadcast(
@@ -3293,6 +3387,24 @@ namespace Arawn.GameCreator2.Networking.Melee
             return false;
         }
 
+        private static bool IsWeaponFallbackReaction(NetworkReactionBroadcast broadcast) =>
+            broadcast.PlaybackKind == NetworkReactionPlaybackKind.Stance && broadcast.ReactionHash == 0;
+
+        private bool TryGetReactionController(NetworkReactionBroadcast broadcast, out NetworkMeleeController controller)
+        {
+            if (!TryGetTransientController(broadcast.CharacterNetworkId, true, out controller)) return false;
+            if (!IsWeaponFallbackReaction(broadcast) || controller.IsServer || controller.IsLocalClient)
+            {
+                return true;
+            }
+
+            // Only the native weapon fallback depends on this state. Wait for both asset
+            // resolution and native equip/unequip; explicit reactions don't need either.
+            return !controller.HasPendingRemoteWeaponApplication &&
+                   (!m_PendingCharacterStates.TryGetValue(broadcast.CharacterNetworkId, out var pending) ||
+                    !pending.HasWeaponState);
+        }
+
         private void EnqueuePendingHitBroadcast(
             NetworkMeleeHitBroadcast broadcast,
             bool needsAttacker,
@@ -3355,6 +3467,22 @@ namespace Arawn.GameCreator2.Networking.Melee
 
         private void FlushPendingTransientBroadcasts()
         {
+            // RegisterController can run synchronously from a hit/reaction callback. Do not
+            // redeliver the currently dispatched queue entry on its nested flush.
+            if (m_FlushingTransientBroadcasts) return;
+            m_FlushingTransientBroadcasts = true;
+            try
+            {
+                FlushPendingTransientBroadcastsCore();
+            }
+            finally
+            {
+                m_FlushingTransientBroadcasts = false;
+            }
+        }
+
+        private void FlushPendingTransientBroadcastsCore()
+        {
             float now = Time.unscaledTime;
             float lifetime = Mathf.Max(0.05f, m_TransientBroadcastLifetime);
 
@@ -3369,17 +3497,17 @@ namespace Arawn.GameCreator2.Networking.Melee
                     continue;
                 }
 
-                if (!TryGetTransientController(
-                        pending.Broadcast.CharacterNetworkId,
-                        requireReactionStance: true,
-                        out NetworkMeleeController controller))
+                if (!TryGetReactionController(pending.Broadcast, out NetworkMeleeController controller))
                 {
                     i++;
                     continue;
                 }
 
-                controller.ReceiveReactionBroadcast(pending.Broadcast);
                 m_PendingReactionBroadcasts.RemoveAt(i);
+                controller.ReceiveReactionBroadcast(pending.Broadcast);
+                // An inline receipt can retire earlier entries (or clear the queue).
+                // Re-scan the bounded queue instead of resuming at a stale index.
+                i = 0;
             }
 
             for (int i = 0; i < m_PendingHitBroadcasts.Count;)
@@ -3425,7 +3553,8 @@ namespace Arawn.GameCreator2.Networking.Melee
                         requireReactionStance: false,
                         out NetworkMeleeController targetController))
                 {
-                    targetController.ReceiveHitBroadcastAsTarget(broadcast);
+                    // Deferred playback must not open a new stock Riposte window.
+                    targetController.ReceiveHitBroadcastAsTarget(broadcast, live: false);
                     pending.NeedsTarget = false;
                 }
 
@@ -3438,6 +3567,23 @@ namespace Arawn.GameCreator2.Networking.Melee
                     m_PendingHitBroadcasts[i] = pending;
                     i++;
                 }
+            }
+
+            for (int i = 0; i < m_PendingParryPresentation.Count;)
+            {
+                var pending = m_PendingParryPresentation[i];
+                if (now - pending.Received > lifetime || !m_IsClient || m_IsServer)
+                {
+                    m_PendingParryPresentation.RemoveAt(i);
+                    continue;
+                }
+                if (!TryResolveParryPresentationActors(pending.Hit, out Character attacker, out Character defender))
+                {
+                    i++;
+                    continue;
+                }
+                m_PendingParryPresentation.RemoveAt(i);
+                PresentConfirmedShieldParry(pending.Hit, pending.AfterPrediction, attacker, defender);
             }
         }
     }

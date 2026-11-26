@@ -396,6 +396,9 @@ namespace Arawn.GameCreator2.Networking.Melee
         /// <summary>Whether this is the local player's character.</summary>
         public bool IsLocalClient => m_IsLocalClient;
 
+        internal bool HasPendingRemoteWeaponApplication => m_RemoteWeaponApplyRunning ||
+            m_RemoteWeaponApplyVersion != m_AppliedRemoteWeaponVersion;
+
         /// <summary>Current live GC2 phase used by same-assembly authoritative diagnostics.</summary>
         internal MeleePhase LivePhase => m_MeleeStance?.CurrentPhase ?? MeleePhase.None;
 
@@ -1256,6 +1259,17 @@ namespace Arawn.GameCreator2.Networking.Melee
             PublishWeaponStateIfChanged(force: true);
         }
 
+        internal bool TryCaptureAuthoritativeWeaponState(out NetworkMeleeWeaponState state)
+        {
+            state = default;
+            // Server-side copies of remote players do not author equipment. Their current
+            // native weapon (or lack of one) is not a substitute for an accepted owner update.
+            if (!m_IsServer || m_Character == null || !CanPublishWeaponState()) return false;
+
+            state = BuildWeaponState();
+            return true;
+        }
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // STANCE TRACKING
         // ════════════════════════════════════════════════════════════════════════════════════════
@@ -1851,6 +1865,16 @@ namespace Arawn.GameCreator2.Networking.Melee
             {
                 ApplyLatestRemoteWeaponState();
             }
+        }
+
+        internal bool IsShieldParryPresentationReady()
+        {
+            IShield shield = m_Character?.Combat.Block.Shield;
+            if (shield == null) return false;
+            if (m_IsLocalClient) return true;
+            if (m_RemoteWeaponApplyRunning || m_RemoteWeaponApplyVersion != m_AppliedRemoteWeaponVersion) return false;
+            return !m_PendingRemoteGuardShieldHash.HasValue ||
+                StableHashUtility.GetStableHash(shield.Name) == m_PendingRemoteGuardShieldHash.Value;
         }
 
         private async void ApplyLatestRemoteWeaponState()

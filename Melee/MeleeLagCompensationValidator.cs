@@ -450,7 +450,8 @@ namespace Arawn.GameCreator2.Networking.Combat
             {
                 Args args = new Args(attacker, target);
                 float power = skill.GetPower(args);
-                if (power > 0f) return power;
+                // Authored zero (for example, armor cancelling damage) is not missing data.
+                return power > 0f && !float.IsInfinity(power) ? power : 0f;
             }
 
             return Config.DefaultBaseDamage;

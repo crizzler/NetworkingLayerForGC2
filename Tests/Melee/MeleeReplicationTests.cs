@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
+using System.Threading.Tasks;
 using Arawn.GameCreator2.Networking.Combat;
 using Arawn.GameCreator2.Networking.Melee.Transport.PurrNet;
 using Arawn.GameCreator2.Networking.Security;
@@ -12,7 +13,9 @@ using GameCreator.Runtime.Common;
 using GameCreator.Runtime.Melee;
 using NUnit.Framework;
 using PurrNet.Packing;
+using UnityEditor;
 using UnityEngine;
+using UnityEngine.TestTools;
 
 namespace Arawn.GameCreator2.Networking.Melee.Tests
 {
@@ -68,6 +71,68 @@ namespace Arawn.GameCreator2.Networking.Melee.Tests
             float damage = InvokePrivateResult<float>(validator, "GetBaseDamage", skill, attacker, defender);
 
             Assert.That(damage, Is.EqualTo(18f));
+        }
+
+        [TestCase(0f)]
+        [TestCase(-5f)]
+        [TestCase(float.NaN)]
+        [TestCase(float.PositiveInfinity)]
+        [NUnit.Framework.Category("GC2Networking.MeleeHealth")]
+        public void AuthoredNonDamagingPower_DoesNotBecomeDefaultDamage(float power)
+        {
+            var attacker = Track(new GameObject("Attacker")).AddComponent<Character>();
+            var defender = Track(new GameObject("Defender")).AddComponent<Character>();
+            var skill = Track(ScriptableObject.CreateInstance<Skill>());
+            SetPrivateField(skill, "m_Power", new PropertyGetDecimal(power));
+            var validator = new MeleeLagCompensationValidator(new MeleeValidationConfig { DefaultBaseDamage = 10f });
+
+            Assert.That(InvokePrivateResult<float>(validator, "GetBaseDamage", skill, attacker, defender), Is.Zero);
+            Assert.That(InvokePrivateResult<float>(validator, "GetBaseDamage", (Skill)null, attacker, defender), Is.EqualTo(10f));
+        }
+
+        [TestCase(false, true, false, NetworkBlockResult.Parried, true)]
+        [TestCase(false, true, false, NetworkBlockResult.Blocked, false)]
+        [TestCase(false, false, false, NetworkBlockResult.Parried, false)]
+        [TestCase(true, true, false, NetworkBlockResult.Parried, false)]
+        [TestCase(false, true, true, NetworkBlockResult.Parried, false)]
+        public void ConfirmedParry_ArmsStockRiposteConditionOnlyOnConnectedDefender(
+            bool isServer, bool isLocal, bool deferred, NetworkBlockResult result, bool expected)
+        {
+            NetworkMeleeManager manager = CreateManager(isServer, true);
+            NetworkMeleeController defender = CreateParticipant("Parrying defender", 42, isLocal);
+            NetworkMeleeController attacker = CreateParticipant("Parried attacker", 41, false);
+
+            var condition = new ConditionMeleeCompareTimeLastParry();
+            var args = new Args(defender.gameObject, attacker.gameObject);
+            Assert.That(condition.Check(args), Is.False);
+            bool? eligibleInVisualScript = null;
+            defender.OnHitConfirmed += _ => eligibleInVisualScript = condition.Check(args);
+            if (!deferred) manager.RegisterController(42, defender);
+
+            manager.ReceiveHitBroadcast(new NetworkMeleeHitBroadcast
+            {
+                AttackerNetworkId = 41,
+                TargetNetworkId = 42,
+                BlockResult = (byte)result
+            });
+            if (deferred) manager.RegisterController(42, defender);
+
+            Assert.That(eligibleInVisualScript, Is.EqualTo(expected));
+            Assert.That(condition.Check(args), Is.EqualTo(expected));
+            Assert.That(condition.Check(new Args(attacker.gameObject, defender.gameObject)), Is.False);
+            defender.GetComponent<Character>().Combat.ResetParryTime();
+            Assert.That(condition.Check(args), Is.False);
+
+            NetworkMeleeController CreateParticipant(string name, uint id, bool local)
+            {
+                GameObject root = Track(new GameObject(name));
+                EditModeLifecycle.AddComponent<Character>(root);
+                EditModeLifecycle.AddComponent<NetworkCharacter>(root).SetManualNetworkId(id);
+                NetworkMeleeController controller = EditModeLifecycle.AddComponent<NetworkMeleeController>(root);
+                controller.Initialize(isServer, local);
+                if (id == 41) manager.RegisterController(id, controller);
+                return controller;
+            }
         }
 
         private sealed class TestFreeFlowReceiver : MonoBehaviour, INetworkFreeFlowCombatReceiver
@@ -742,6 +807,142 @@ namespace Arawn.GameCreator2.Networking.Melee.Tests
         }
 
         [Test]
+        public void CharacterSnapshot_CaptureDistinguishesUnknownRemoteEquipmentFromConfirmedUnequip()
+        {
+            const uint actorId = 45;
+            NetworkMeleeManager manager = CreateManager(true, false);
+            var bridge = EditModeLifecycle.AddComponent<TestTransportBridge>(Track(new GameObject("Melee Owner Bridge")));
+            NetworkMeleeController controller = CreateSnapshotController(actorId, isServer: true);
+            NetworkCharacter identity = controller.GetComponent<NetworkCharacter>();
+            // Supply the role facts normally set by admission without swapping the GC2 driver.
+            SetPrivateField(identity, "m_RuntimeIsServer", true);
+            SetPrivateField(identity, "m_RuntimeHasAuthenticatedPlayerOwner", true);
+            bridge.RegisterCharacter(identity);
+            bridge.SetCharacterOwner(actorId, 7);
+            manager.RegisterController(actorId, controller);
+            Assert.That(bridge.TryVerifyActorOwnership(7, actorId, out _), Is.True);
+            Assert.That(controller.IsServer && !controller.IsLocalClient, Is.True);
+
+            NetworkMeleeCharacterSnapshot startup = manager.CaptureCharacterSnapshots()[0];
+            Assert.That(startup.CharacterNetworkId, Is.EqualTo(actorId));
+            Assert.That(startup.HasBlockState, Is.True);
+            Assert.That(startup.HasWeaponState, Is.False,
+                "A remote owner's unpublished equipment is unknown, not a confirmed unequip.");
+
+            // A role change can leave a native weapon on the authority's replica. This is
+            // still not a weapon update accepted from the authenticated owner.
+            MeleeWeapon replicaWeapon = CreateComboWeapon(out _, out _);
+            controller.ApplyRemoteWeaponState(
+                new NetworkMeleeWeaponState { WeaponHash = replicaWeapon.Id.Hash }, replicaWeapon);
+            Assert.That(controller.CurrentWeaponState.WeaponHash, Is.EqualTo(replicaWeapon.Id.Hash));
+            Assert.That(manager.CaptureCharacterSnapshots()[0].HasWeaponState, Is.False);
+
+            var accepted = new NetworkMeleeWeaponState { WeaponHash = replicaWeapon.Id.Hash };
+            manager.RecordAuthoritativeWeaponState(actorId, accepted);
+            NetworkMeleeCharacterSnapshot equipped = manager.CaptureCharacterSnapshots()[0];
+            Assert.That(equipped.HasWeaponState, Is.True);
+            Assert.That(equipped.WeaponState.WeaponHash, Is.EqualTo(accepted.WeaponHash));
+
+            manager.RecordAuthoritativeWeaponState(actorId, NetworkMeleeWeaponState.None);
+            NetworkMeleeCharacterSnapshot unequipped = manager.CaptureCharacterSnapshots()[0];
+            Assert.That(unequipped.HasWeaponState, Is.True);
+            Assert.That(unequipped.WeaponState.WeaponHash, Is.Zero);
+        }
+
+        [TestCase(false, TestName = "CharacterSnapshot_CapturesServerOwnedNpcEquipmentBeforePublication")]
+        [TestCase(true, TestName = "CharacterSnapshot_CapturesHostLocalEquipmentBeforePublication")]
+        public async System.Threading.Tasks.Task CharacterSnapshot_CapturesLocallyAuthoritativeEquipment(bool localOwner)
+        {
+            const uint actorId = 45;
+            NetworkMeleeManager manager = CreateManager(true, localOwner);
+            var bridge = EditModeLifecycle.AddComponent<TestTransportBridge>(Track(new GameObject("Melee Authority Bridge")));
+            Assert.That(NetworkTransportBridge.Active, Is.SameAs(bridge));
+            NetworkMeleeController controller = CreateSnapshotController(actorId, isServer: true);
+            NetworkCharacter identity = controller.GetComponent<NetworkCharacter>();
+            if (!localOwner)
+            {
+                SetPrivateField(identity, "m_ActorType", NetworkCharacterActorType.NPC);
+                identity.InitializeNetworkRole(
+                    isServer: true, isOwner: false, isHost: false, hasAuthenticatedPlayerOwner: false);
+                Assert.That(identity.IsServerAuthoritativeNPC && identity.HasSimulationAuthority, Is.True);
+            }
+            controller.Initialize(isServer: true, isLocalClient: localOwner);
+            bridge.RegisterCharacter(identity);
+            manager.RegisterController(actorId, controller);
+
+            // Capture a known empty state, then equip without waiting for the next publication.
+            NetworkMeleeCharacterSnapshot empty = manager.CaptureCharacterSnapshots()[0];
+            Assert.That(empty.HasWeaponState, Is.True);
+            Assert.That(empty.WeaponState.WeaponHash, Is.Zero);
+            MeleeWeapon weapon = CreateComboWeapon(out _, out _);
+            Character character = controller.GetComponent<Character>();
+            await character.Combat.Equip(weapon, null, new Args(character.gameObject));
+            Assert.That(character.Combat.IsEquipped(weapon), Is.True);
+
+            NetworkMeleeCharacterSnapshot equipped = manager.CaptureCharacterSnapshots()[0];
+            Assert.That(equipped.HasWeaponState, Is.True);
+            Assert.That(equipped.WeaponState.WeaponHash, Is.EqualTo(weapon.Id.Hash));
+        }
+
+        [TestCase(false, TestName = "CharacterSnapshot_OmittedWeaponPreservesEquippedReplica")]
+        [TestCase(true, TestName = "CharacterSnapshot_ConfirmedUnequipClearsEquippedReplica")]
+        public void CharacterSnapshot_ReconcilesEquippedReplica(bool hasWeaponState)
+        {
+            const uint actorId = 45;
+            NetworkMeleeManager manager = CreateManager(false, true);
+            NetworkMeleeController controller = CreateSnapshotController(actorId, isServer: false);
+            manager.RegisterController(actorId, controller);
+            MeleeWeapon weapon = CreateComboWeapon(out _, out _);
+            NetworkMeleeManager.RegisterMeleeWeapon(weapon);
+            Character replica = controller.GetComponent<Character>();
+            manager.ReceiveWeaponState(actorId, new NetworkMeleeWeaponState { WeaponHash = weapon.Id.Hash });
+            Assert.That(replica.Combat.IsEquipped(weapon), Is.True);
+
+            NetworkMeleeCharacterSnapshot snapshot = NetworkMeleeCharacterSnapshot.Create(actorId);
+            snapshot.HasWeaponState = hasWeaponState;
+            snapshot.WeaponState = NetworkMeleeWeaponState.None;
+            manager.ReceiveCharacterSnapshot(RoundTrip(snapshot));
+
+            Assert.That(replica.Combat.IsEquipped(weapon), Is.EqualTo(!hasWeaponState),
+                "Only a snapshot carrying explicit weapon zero may unequip the replica.");
+        }
+
+        [TestCase(false, TestName = "CharacterSnapshot_OmittedWeaponPreservesPendingEquip")]
+        [TestCase(true, TestName = "CharacterSnapshot_ConfirmedUnequipSupersedesPendingEquip")]
+        public void CharacterSnapshot_ReconcilesPendingWeapon(bool hasWeaponState)
+        {
+            const uint actorId = 45;
+            NetworkMeleeManager manager = CreateManager(false, true);
+            MeleeWeapon weapon = CreateComboWeapon(out _, out _);
+            Assert.That(weapon.Id.Hash, Is.Not.Zero);
+            Assert.That(NetworkMeleeManager.GetMeleeWeaponByHash(weapon.Id.Hash), Is.Null);
+            manager.ReceiveWeaponState(actorId, new NetworkMeleeWeaponState { WeaponHash = weapon.Id.Hash });
+
+            NetworkMeleeCharacterSnapshot snapshot = NetworkMeleeCharacterSnapshot.Create(actorId);
+            snapshot.HasWeaponState = hasWeaponState;
+            snapshot.WeaponState = NetworkMeleeWeaponState.None;
+            manager.ReceiveCharacterSnapshot(snapshot);
+
+            NetworkMeleeManager.RegisterMeleeWeapon(weapon);
+            NetworkMeleeController controller = CreateSnapshotController(actorId, isServer: false);
+            manager.RegisterController(actorId, controller);
+            Assert.That(controller.GetComponent<Character>().Combat.IsEquipped(weapon),
+                Is.EqualTo(!hasWeaponState), "An unknown snapshot must not erase the last confirmed pending equip.");
+        }
+
+        private NetworkMeleeController CreateSnapshotController(uint actorId, bool isServer)
+        {
+            GameObject actor = Track(new GameObject("Melee Snapshot Actor"));
+            EditModeLifecycle.AddComponent<Character>(actor);
+            NetworkCharacter identity = EditModeLifecycle.AddComponent<NetworkCharacter>(actor);
+            SetPrivateField(identity, "m_ActorType", NetworkCharacterActorType.PlayerOwned);
+            identity.SetManualNetworkId(actorId);
+            NetworkMeleeController controller = EditModeLifecycle.AddComponent<NetworkMeleeController>(actor);
+            controller.Initialize(isServer, isLocalClient: false);
+            return controller;
+        }
+
+        [Test]
         public void AuthoritativeUnregister_RemovesCharacterFromLateJoinSnapshots()
         {
             NetworkMeleeManager manager = CreateManager(true, false);
@@ -882,6 +1083,166 @@ namespace Arawn.GameCreator2.Networking.Melee.Tests
         }
 
         [Test]
+        public void ConfirmedParry_ResolvesAuthoredShieldEffectOnConnectedPeer()
+        {
+            AssertShieldParryPresentation(isHost: false, NetworkBlockResult.Parried, handled: false, expected: 1);
+        }
+
+        [Test]
+        public void ConfirmedParry_ResolvesShieldEffectAfterOptimisticAttackFeedback()
+        {
+            AssertShieldParryPresentation(isHost: false, NetworkBlockResult.Parried, handled: false,
+                expected: 1, afterOptimisticHit: true);
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void ConfirmedParry_WaitsForLateDefenderWithoutRepeatingHitCallbacks(bool afterOptimisticHit)
+        {
+            AssertShieldParryPresentation(false, NetworkBlockResult.Parried, false, 1,
+                afterOptimisticHit: afterOptimisticHit, lateDefender: true);
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void ConfirmedParry_PresentsOnReadyDefenderWhileOptionalSnapshotWaits(bool afterOptimisticHit)
+        {
+            AssertShieldParryPresentation(false, NetworkBlockResult.Parried, false, 1,
+                afterOptimisticHit: afterOptimisticHit, pendingOptionalSnapshot: true);
+        }
+
+        [Test]
+        public void ConfirmedParry_DoesNotPlayPreviousShieldDuringReplicatedEquip()
+        {
+            AssertShieldParryPresentation(false, NetworkBlockResult.Parried, false, 1, switchingShield: true);
+        }
+
+        [Test]
+        public void ConfirmedParry_OffersOutcomeOverrideAfterOptimisticAttackFeedback()
+        {
+            AssertShieldParryPresentation(false, NetworkBlockResult.Parried, true, 0, afterOptimisticHit: true);
+        }
+
+        [TestCase(true, NetworkBlockResult.Parried, false)]
+        [TestCase(false, NetworkBlockResult.None, false)]
+        [TestCase(false, NetworkBlockResult.Parried, true)]
+        public void ShieldParryEffect_RespectsAuthorityOutcomeAndCustomPresentation(
+            bool isHost, NetworkBlockResult result, bool handled)
+        {
+            AssertShieldParryPresentation(isHost, result, handled, expected: 0);
+        }
+
+        private void AssertShieldParryPresentation(
+            bool isHost, NetworkBlockResult result, bool handled, int expected,
+            bool afterOptimisticHit = false, bool lateDefender = false, bool switchingShield = false,
+            bool pendingOptionalSnapshot = false)
+        {
+            NetworkMeleeManager manager = CreateManager(isHost, true);
+            NetworkCharacter attacker = CreateParticipant("Shield VFX Attacker", 41, out _);
+            NetworkCharacter defender = CreateParticipant("Shield VFX Defender", 42, out Character character);
+            if (!lateDefender) Assert.That(manager.GetCharacterByNetworkId(42), Is.SameAs(defender));
+
+            var shield = Track(ScriptableObject.CreateInstance<Shield>());
+            var effect = new EffectArgsProbe();
+            var response = GetPrivateField<ShieldResponseParry>(shield, "m_Parry");
+            typeof(TShieldResponse).GetField("m_Effect", BindingFlags.Instance | BindingFlags.NonPublic)
+                .SetValue(response, new PropertyGetGameObject(effect));
+            NetworkMeleeController defenderController = defender.GetComponent<NetworkMeleeController>();
+            var originalEffect = new EffectArgsProbe();
+            if (switchingShield)
+            {
+                var previous = Track(ScriptableObject.CreateInstance<Shield>());
+                var previousResponse = GetPrivateField<ShieldResponseParry>(previous, "m_Parry");
+                typeof(TShieldResponse).GetField("m_Effect", BindingFlags.Instance | BindingFlags.NonPublic)
+                    .SetValue(previousResponse, new PropertyGetGameObject(originalEffect));
+                character.Combat.Block.SetShield(previous);
+                SetPrivateField(defenderController, "m_RemoteWeaponApplyVersion", 1u);
+                SetPrivateField(defenderController, "m_RemoteWeaponApplyRunning", true);
+            }
+            else character.Combat.Block.SetShield(shield);
+            int guardSnapshots = 0;
+            if (pendingOptionalSnapshot)
+            {
+                defenderController.OnBlockStateChanged += _ => guardSnapshots++;
+                // A regular stock Melee participant has no Free Flow adapter. A full snapshot
+                // still carries default weapon/guard state and an optional Free Flow clear.
+                manager.ReceiveCharacterSnapshot(NetworkMeleeCharacterSnapshot.Create(42));
+                Assert.That(guardSnapshots, Is.EqualTo(1));
+                Assert.That(character.Combat.Block.Shield, Is.SameAs(shield));
+            }
+            int confirmedOverrides = 0;
+            int defenderConfirmations = 0;
+            defenderController.OnHitConfirmed += _ => defenderConfirmations++;
+            manager.OnHitPresentationRequested += context =>
+            {
+                if (context.Broadcast.BlockResult != (byte)NetworkBlockResult.Parried) return;
+                Assert.That(context.IsConfirmedParryAfterPrediction, Is.EqualTo(afterOptimisticHit));
+                confirmedOverrides++;
+                context.Handled = handled;
+            };
+            var hit = new NetworkMeleeHitBroadcast
+            {
+                AttackerNetworkId = 41,
+                TargetNetworkId = 42,
+                SkillHash = 555,
+                HitPoint = Vector3.one,
+                BlockResult = (byte)result
+            };
+            if (afterOptimisticHit) InvokePrivate(manager, "RequestConfirmedHitFeedback", hit);
+            else manager.ReceiveHitBroadcast(hit);
+
+            if (lateDefender) manager.RegisterController(42, defenderController);
+            if (switchingShield)
+            {
+                Assert.That(originalEffect.Calls, Is.Zero, "Never use the shield being replaced.");
+                character.Combat.Block.SetShield(shield);
+                SetPrivateField(defenderController, "m_AppliedRemoteWeaponVersion", 1u);
+                SetPrivateField(defenderController, "m_RemoteWeaponApplyRunning", false);
+            }
+            InvokePrivate(manager, "FlushPendingTransientBroadcasts");
+            InvokePrivate(manager, "FlushPendingTransientBroadcasts");
+
+            Assert.That(defenderConfirmations, Is.EqualTo(afterOptimisticHit ? 0 : 1));
+            if (handled && result == NetworkBlockResult.Parried) Assert.That(confirmedOverrides, Is.EqualTo(1));
+            Assert.That(effect.Calls, Is.EqualTo(expected));
+            if (pendingOptionalSnapshot)
+            {
+                InvokePrivate(manager, "FlushPendingCharacterStates");
+                Assert.That(guardSnapshots, Is.EqualTo(1), "Retrying optional state must not redeliver guard state.");
+            }
+            if (expected == 1)
+            {
+                Assert.That(effect.Self, Is.SameAs(defender.gameObject));
+                Assert.That(effect.Target, Is.SameAs(attacker.gameObject));
+            }
+
+            NetworkCharacter CreateParticipant(string name, uint id, out Character gc2)
+            {
+                GameObject root = Track(new GameObject(name));
+                gc2 = EditModeLifecycle.AddComponent<Character>(root);
+                NetworkCharacter identity = EditModeLifecycle.AddComponent<NetworkCharacter>(root);
+                identity.SetManualNetworkId(id);
+                NetworkMeleeController controller = EditModeLifecycle.AddComponent<NetworkMeleeController>(root);
+                controller.Initialize(isHost, false);
+                if (!lateDefender || id != 42) manager.RegisterController(id, controller);
+                return identity;
+            }
+        }
+
+        private sealed class EffectArgsProbe : GetGameObjectInstance
+        {
+            public int Calls;
+            public GameObject Self, Target;
+            public override GameObject Get(Args args)
+            {
+                Calls++;
+                Self = args.Self;
+                Target = args.Target;
+                return null;
+            }
+        }
+
+        [Test]
         public void SkillHitAudioSelection_UsesAuthoritativeBlockOutcome()
         {
             var effects = new SkillEffects();
@@ -958,6 +1319,34 @@ namespace Arawn.GameCreator2.Networking.Melee.Tests
         }
 
         [Test]
+        public void PendingHit_RegistrationInsideCallbackDoesNotRepeatPresentation()
+        {
+            NetworkMeleeManager manager = CreateManager(false, true);
+            NetworkMeleeController attacker = CreateController("Late attacker");
+            NetworkMeleeController target = CreateController("Nested target");
+            int notifications = 0;
+            int presentations = 0;
+            attacker.OnHitConfirmed += _ =>
+            {
+                if (++notifications == 1) manager.RegisterController(42, target);
+            };
+            manager.OnHitPresentationRequested += context =>
+            {
+                presentations++;
+                context.Handled = true;
+            };
+            manager.ReceiveHitBroadcast(new NetworkMeleeHitBroadcast
+            {
+                AttackerNetworkId = 41, TargetNetworkId = 42, SkillHash = 808,
+                BlockResult = (byte)NetworkBlockResult.Parried
+            });
+            manager.RegisterController(41, attacker);
+            Assert.That(notifications, Is.EqualTo(1));
+            Assert.That(presentations, Is.EqualTo(1));
+            Assert.That(GetPrivateField<IList>(manager, "m_PendingHitBroadcasts"), Is.Empty);
+        }
+
+        [Test]
         public void PendingSelfHit_RegistersAsOneCombinedDelivery()
         {
             NetworkMeleeManager manager = CreateManager(false, true);
@@ -1024,6 +1413,388 @@ namespace Arawn.GameCreator2.Networking.Melee.Tests
 
             InvokePrivate(manager, "FlushPendingTransientBroadcasts");
             Assert.That(received, Is.EqualTo(1));
+        }
+
+        [TestCase(false, false, TestName = "PendingEquipmentReaction_StanceWaitsForWeaponThenPlaysOnce")]
+        [TestCase(true, false, TestName = "PendingEquipmentReaction_ExplicitShieldPlaysImmediatelyAndUnequipDoesNotWait")]
+        [TestCase(false, true, TestName = "PendingEquipmentReaction_UnknownSnapshotKeepsStanceWaitingForKnownWeapon")]
+        public void PendingEquipmentReaction(bool explicitShield, bool receiveUnknownSnapshot)
+        {
+            const uint sourceId = 71;
+            const uint targetId = 72;
+            NetworkMeleeManager manager = CreateManager(false, true);
+            NetworkMeleeController source = RegisterReplica(sourceId, "Reaction Source");
+            NetworkMeleeController target = RegisterReplica(targetId, "Reaction Target");
+            Character character = target.GetComponent<Character>();
+            Assert.That(target.IsServer || target.IsLocalClient, Is.False);
+            Assert.That(manager.GetCharacterByNetworkId(targetId), Is.SameAs(target.GetComponent<NetworkCharacter>()));
+            Assert.That(manager.GetCharacterByNetworkId(sourceId), Is.SameAs(source.GetComponent<NetworkCharacter>()));
+            Assert.That(character.Combat.RequestStance<MeleeStance>().Character, Is.SameAs(character));
+
+            var oldPlayback = new ReactionPlaybackProbe();
+            var newPlayback = new ReactionPlaybackProbe();
+            MeleeWeapon oldWeapon = CreateWeapon("Pending Equipment Old Weapon", oldPlayback);
+            MeleeWeapon newWeapon = CreateWeapon("Pending Equipment New Weapon", newPlayback);
+            NetworkMeleeManager.RegisterMeleeWeapon(oldWeapon);
+            manager.ReceiveWeaponState(targetId, new NetworkMeleeWeaponState { WeaponHash = oldWeapon.Id.Hash });
+            Assert.That(character.Combat.IsEquipped(oldWeapon), Is.True);
+
+            int pendingHash = newWeapon.Id.Hash;
+            Assert.That(pendingHash, Is.Not.Zero.And.Not.EqualTo(oldWeapon.Id.Hash));
+            Assert.That(NetworkMeleeManager.GetMeleeWeaponByHash(pendingHash), Is.Null);
+            manager.ReceiveWeaponState(targetId, new NetworkMeleeWeaponState { WeaponHash = pendingHash });
+            var pendingStates = GetPrivateField<IDictionary>(manager, "m_PendingCharacterStates");
+            Assert.That(pendingStates.Contains(targetId), Is.True);
+            var pending = (NetworkMeleeCharacterSnapshot)pendingStates[targetId];
+            Assert.That(pending.HasWeaponState, Is.True);
+            Assert.That(pending.WeaponState.WeaponHash, Is.EqualTo(pendingHash));
+            Assert.That(character.Combat.GetActiveWeapon<MeleeWeapon>(), Is.SameAs(oldWeapon));
+
+            var received = new List<uint>();
+            target.OnReactionReceived += value => received.Add(value.Sequence);
+            var broadcast = new NetworkReactionBroadcast
+            {
+                CharacterNetworkId = targetId,
+                FromNetworkId = sourceId,
+                Sequence = 17,
+                PlaybackKind = NetworkReactionPlaybackKind.Stance,
+                Direction = NetworkReactionBroadcast.CompressDirection(Vector3.up),
+                DirectionY = NetworkReactionBroadcast.CompressDirectionY(Vector3.up),
+                Power = NetworkReactionBroadcast.CompressPower(3f)
+            };
+
+            if (explicitShield)
+            {
+                var explicitPlayback = new ReactionPlaybackProbe();
+                broadcast.ReactionHash = NetworkMeleeManager.GetReactionHash(
+                    CreateReaction("Pending Equipment Explicit Shield Reaction", explicitPlayback));
+                Assert.That(broadcast.ReactionHash, Is.Not.Zero);
+                broadcast.PlaybackKind = NetworkReactionPlaybackKind.DirectShield;
+                manager.ReceiveReactionBroadcast(broadcast);
+                AssertPlayedOnce(explicitPlayback);
+                Assert.That(received, Is.EqualTo(new uint[] { 17 }));
+                Assert.That(pendingStates.Contains(targetId), Is.True, "Shield playback must not consume pending equipment.");
+
+                manager.ReceiveWeaponState(targetId, NetworkMeleeWeaponState.None);
+                Assert.That(pendingStates.Contains(targetId), Is.False, "Confirmed unequip supersedes the pending nonzero state.");
+                Assert.That(character.Combat.GetActiveWeapon<MeleeWeapon>(), Is.Null);
+                broadcast.Sequence++;
+                broadcast.ReactionHash = 0;
+                broadcast.PlaybackKind = NetworkReactionPlaybackKind.Stance;
+                manager.ReceiveReactionBroadcast(broadcast);
+                Assert.That(received, Is.EqualTo(new uint[] { 17, 18 }), "An explicitly unarmed replica is ready immediately.");
+                InvokePrivate(manager, "FlushPendingTransientBroadcasts");
+                Assert.That(explicitPlayback.Calls, Is.EqualTo(1));
+                Assert.That(oldPlayback.Calls + newPlayback.Calls, Is.Zero);
+                return;
+            }
+
+            if (receiveUnknownSnapshot)
+            {
+                manager.ReceiveCharacterSnapshot(NetworkMeleeCharacterSnapshot.Create(targetId));
+                Assert.That(character.Combat.GetActiveWeapon<MeleeWeapon>(), Is.SameAs(oldWeapon),
+                    "The snapshot must not unequip an existing weapon while a confirmed replacement is pending.");
+            }
+
+            manager.ReceiveReactionBroadcast(broadcast);
+            InvokePrivate(manager, "FlushPendingTransientBroadcasts");
+            int oldPlaysWhilePending = oldPlayback.Calls;
+            int newPlaysWhilePending = newPlayback.Calls;
+
+            // Resolve the real pending state and retry the original event without resending it.
+            NetworkMeleeManager.RegisterMeleeWeapon(newWeapon);
+            InvokePrivate(manager, "FlushPendingCharacterStates");
+            if (receiveUnknownSnapshot && pendingStates.Contains(targetId))
+            {
+                // The Free Flow reset may still wait for an optional adapter, not for equipment.
+                var remaining = (NetworkMeleeCharacterSnapshot)pendingStates[targetId];
+                Assert.That(remaining.HasWeaponState || remaining.HasBlockState, Is.False);
+            }
+            else
+            {
+                Assert.That(pendingStates.Contains(targetId), Is.False);
+            }
+            Assert.That(character.Combat.GetActiveWeapon<MeleeWeapon>(), Is.SameAs(newWeapon));
+            InvokePrivate(manager, "FlushPendingTransientBroadcasts");
+            InvokePrivate(manager, "FlushPendingTransientBroadcasts");
+
+            Assert.That(oldPlaysWhilePending, Is.Zero,
+                "A hash-zero stance reaction must not play the old weapon's authored reaction while known replacement equipment is pending.");
+            Assert.That(newPlaysWhilePending, Is.Zero);
+            Assert.That(oldPlayback.Calls, Is.Zero);
+            AssertPlayedOnce(newPlayback);
+            Assert.That(received, Is.EqualTo(new uint[] { 17 }));
+
+            NetworkMeleeController RegisterReplica(uint id, string name)
+            {
+                var root = Track(new GameObject(name));
+                EditModeLifecycle.AddComponent<Character>(root);
+                EditModeLifecycle.AddComponent<NetworkCharacter>(root).SetManualNetworkId(id);
+                var controller = EditModeLifecycle.AddComponent<NetworkMeleeController>(root);
+                controller.Initialize(false, false);
+                manager.RegisterController(id, controller);
+                return controller;
+            }
+
+            MeleeWeapon CreateWeapon(string name, ReactionPlaybackProbe playback)
+            {
+                var weapon = Track(ScriptableObject.CreateInstance<MeleeWeapon>());
+                weapon.name = name;
+                const BindingFlags fields = BindingFlags.Instance | BindingFlags.NonPublic;
+                typeof(TWeapon).GetField("m_Id", fields).SetValue(weapon, new UniqueID(name));
+                typeof(TWeapon).GetField("m_HitReaction", fields).SetValue(weapon, CreateReaction(name + " Reaction", playback));
+                return weapon;
+            }
+
+            Reaction CreateReaction(string name, ReactionPlaybackProbe playback)
+            {
+                var reaction = Track(ScriptableObject.CreateInstance<TestReaction>());
+                reaction.name = name;
+                const BindingFlags fields = BindingFlags.Instance | BindingFlags.NonPublic;
+                // GC2 evaluates speed in Reaction.Run, not during selection or OnReactionReceived.
+                // No clip is needed to observe the authored reaction executing in EditMode.
+                typeof(Reaction).GetField("m_ReactionList", fields).SetValue(reaction, new ReactionList(new ReactionItem()));
+                typeof(Reaction).GetField("m_Speed", fields).SetValue(reaction, new PropertyGetDecimal(playback));
+                return reaction;
+            }
+
+            void AssertPlayedOnce(ReactionPlaybackProbe playback)
+            {
+                Assert.That(playback.Calls, Is.EqualTo(1));
+                Assert.That(playback.Self, Is.SameAs(target.gameObject));
+                Assert.That(playback.Target, Is.SameAs(source.gameObject));
+            }
+        }
+
+        [TestCase(17u, 18u, false)]
+        [TestCase(17u, 17u, true)]
+        [TestCase(17u, 16u, true)]
+        [TestCase(0u, 18u, true)]
+        [TestCase(17u, 0u, true)]
+        public void ReplicaReactionQueue_OnlyStrictlyNewerKnownSequenceRetiresFallback(
+            uint fallbackSequence, uint successorSequence, bool keepFallback)
+        {
+            const uint id = 83;
+            var manager = CreateManager(false, true);
+            var reaction = Track(ScriptableObject.CreateInstance<TestReaction>());
+            reaction.name = "Queued replica successor";
+            int hash = NetworkMeleeManager.GetReactionHash(reaction);
+            Assert.That(hash, Is.Not.Zero);
+
+            // Neither reaction can route yet. Supersession happens on receipt, not playback.
+            manager.ReceiveReactionBroadcast(ReplicaReaction(id, fallbackSequence));
+            manager.ReceiveReactionBroadcast(ReplicaReaction(id, successorSequence, hash));
+            var received = new List<uint>();
+            var replica = CreateReactionQueueReplica(id, received);
+            manager.RegisterController(id, replica);
+            InvokePrivate(manager, "FlushPendingTransientBroadcasts");
+
+            Assert.That(received, Is.EqualTo(keepFallback
+                ? new[] { fallbackSequence, successorSequence }
+                : new[] { successorSequence }));
+        }
+
+        [Test]
+        public void ReplicaReactionQueue_ReentrantSuccessorDoesNotSkipFollowingEntry()
+        {
+            const uint heldId = 84;
+            const uint lateId = 85;
+            var manager = CreateManager(false, true);
+            var reaction = Track(ScriptableObject.CreateInstance<TestReaction>());
+            reaction.name = "Reentrant replica successor";
+            int hash = NetworkMeleeManager.GetReactionHash(reaction);
+            Assert.That(hash, Is.Not.Zero);
+            var heldReceived = new List<uint>();
+            var held = CreateReactionQueueReplica(heldId, heldReceived);
+            manager.RegisterController(heldId, held);
+            manager.ReceiveWeaponState(heldId, new NetworkMeleeWeaponState { WeaponHash = 123456789 });
+            manager.ReceiveReactionBroadcast(ReplicaReaction(heldId, 20));
+            manager.ReceiveReactionBroadcast(ReplicaReaction(lateId, 21, hash));
+            manager.ReceiveReactionBroadcast(ReplicaReaction(lateId, 22, hash));
+
+            var lateReceived = new List<uint>();
+            var late = CreateReactionQueueReplica(lateId, lateReceived);
+            late.OnReactionReceived += value =>
+            {
+                if (value.Sequence != 21) return;
+                // Retires the blocked item before the current item in the outer flush.
+                manager.ReceiveReactionBroadcast(ReplicaReaction(heldId, 23, hash));
+                manager.RegisterController(lateId, late);
+            };
+            manager.RegisterController(lateId, late);
+
+            Assert.That(heldReceived, Is.EqualTo(new uint[] { 23 }));
+            Assert.That(lateReceived, Is.EqualTo(new uint[] { 21, 22 }));
+            // Confirmed unequip removes the remaining equipment gate, not the reaction.
+            manager.ReceiveWeaponState(heldId, NetworkMeleeWeaponState.None);
+            InvokePrivate(manager, "FlushPendingTransientBroadcasts");
+            Assert.That(heldReceived, Is.EqualTo(new uint[] { 23 }));
+            Assert.That(lateReceived, Is.EqualTo(new uint[] { 21, 22 }));
+        }
+
+        private NetworkMeleeController CreateReactionQueueReplica(uint id, List<uint> received)
+        {
+            var root = Track(new GameObject($"Replica {id}"));
+            EditModeLifecycle.AddComponent<Character>(root);
+            EditModeLifecycle.AddComponent<NetworkCharacter>(root).SetManualNetworkId(id);
+            var replica = EditModeLifecycle.AddComponent<NetworkMeleeController>(root);
+            replica.Initialize(false, false);
+            replica.OnReactionReceived += value => received.Add(value.Sequence);
+            return replica;
+        }
+
+        [UnityTest]
+        public IEnumerator ReplicaReactionQueue_KeepsNewerPoseAfterEquipCompletes()
+        {
+            yield return new EnterPlayMode();
+            Assert.That(Application.isPlaying, Is.True);
+            var manager = Track(new GameObject("Replica presentation manager")).AddComponent<NetworkMeleeManager>();
+            manager.Initialize(false, true);
+
+            const uint replacedId = 81;
+            const uint controlId = 82;
+            const string markerName = "Reaction pose marker";
+            var replaced = CreateReplica(replacedId);
+            var control = CreateReplica(controlId);
+            var fallback = CreatePoseReaction("Replica fallback clip", -1f);
+            var explicitReaction = CreatePoseReaction("Replica explicit clip", 1f);
+            var weapon = Track(ScriptableObject.CreateInstance<HeldEquipWeapon>());
+            SetDeclaredField<TWeapon>(weapon, "m_Id", new UniqueID("Replica held-equip weapon"));
+            SetDeclaredField<TWeapon>(weapon, "m_HitReaction", fallback);
+            NetworkMeleeManager.RegisterMeleeWeapon(weapon);
+            int explicitHash = NetworkMeleeManager.GetReactionHash(explicitReaction);
+            Assert.That(explicitHash, Is.Not.Zero);
+
+            try
+            {
+                var equipment = new NetworkMeleeWeaponState { WeaponHash = weapon.Id.Hash };
+                manager.ReceiveWeaponState(replacedId, equipment);
+                manager.ReceiveWeaponState(controlId, equipment);
+                Assert.That(weapon.Started, Is.EqualTo(2), "Both stock Combat.Equip calls must enter the held equip step.");
+                Assert.That(weapon.Released.Task.IsCompleted, Is.False);
+
+                manager.ReceiveReactionBroadcast(ReplicaReaction(replacedId, uint.MaxValue));
+                manager.ReceiveReactionBroadcast(ReplicaReaction(controlId, uint.MaxValue));
+                Assert.That(replaced.Received, Is.Empty);
+                Assert.That(control.Received, Is.Empty);
+
+                manager.ReceiveReactionBroadcast(ReplicaReaction(replacedId, 1, explicitHash));
+                Assert.That(replaced.Received, Is.EqualTo(new uint[] { 1 }));
+                float deadline = Time.realtimeSinceStartup + 0.5f;
+                while (replaced.Marker.localPosition.x < 0.9f && Time.realtimeSinceStartup < deadline)
+                    yield return null;
+                float before = replaced.Marker.localPosition.x;
+                Assert.That(before, Is.GreaterThan(0.9f), "The explicit clip must evaluate while equip is still held.");
+                Assert.That(weapon.Released.Task.IsCompleted, Is.False);
+                Assert.That(control.Marker.localPosition.x, Is.EqualTo(0f));
+
+                weapon.Released.SetResult(true);
+                deadline = Time.realtimeSinceStartup + 0.5f;
+                while (control.Marker.localPosition.x > -0.9f && Time.realtimeSinceStartup < deadline)
+                    yield return null;
+                yield return null;
+                Assert.That(replaced.Character.Combat.IsEquipped(weapon), Is.True);
+                Assert.That(control.Character.Combat.IsEquipped(weapon), Is.True);
+                Assert.That(control.Marker.localPosition.x, Is.LessThan(-0.9f), "The other actor's unsuperseded fallback must evaluate.");
+                Assert.That(control.Received, Is.EqualTo(new[] { uint.MaxValue }));
+                float after = replaced.Marker.localPosition.x;
+                Debug.Log($"[ReplicaReactionPose] playing={Application.isPlaying} explicitBefore={before:R} targetAfter={after:R} " +
+                    $"controlAfter={control.Marker.localPosition.x:R} targetSequences={string.Join(",", replaced.Received)} " +
+                    $"controlSequences={string.Join(",", control.Received)}");
+                Assert.That(after, Is.GreaterThan(0.9f),
+                    "STALE-REPLICA-POSE: the deferred weapon fallback replaced the newer explicit clip after equip.");
+                Assert.That(replaced.Received, Is.EqualTo(new uint[] { 1 }));
+            }
+            finally
+            {
+                weapon.Released.TrySetResult(true);
+            }
+
+            (Character Character, Transform Marker, List<uint> Received) CreateReplica(uint id)
+            {
+                var root = Track(new GameObject($"Replica {id}"));
+                root.SetActive(false);
+                var character = root.AddComponent<Character>();
+                var model = new GameObject("Model");
+                model.transform.SetParent(root.transform, false);
+                character.Animim.Animator = model.AddComponent<Animator>();
+                var marker = new GameObject(markerName).transform;
+                marker.SetParent(model.transform, false);
+                var serialized = new SerializedObject(character);
+                serialized.FindProperty("m_Footsteps.m_FootstepDetector").managedReferenceValue = null;
+                serialized.ApplyModifiedPropertiesWithoutUndo();
+                root.AddComponent<NetworkCharacter>().SetManualNetworkId(id);
+                var controller = root.AddComponent<NetworkMeleeController>();
+                root.SetActive(true);
+                controller.Initialize(false, false);
+                Assert.That(controller.IsServer || controller.IsLocalClient, Is.False);
+                var received = new List<uint>();
+                controller.OnReactionReceived += value => received.Add(value.Sequence);
+                manager.RegisterController(id, controller);
+                return (character, marker, received);
+            }
+
+            MeleeReaction CreatePoseReaction(string name, float pose)
+            {
+                var clip = Track(new AnimationClip { name = name });
+                AnimationUtility.SetEditorCurve(clip,
+                    EditorCurveBinding.FloatCurve(markerName, typeof(Transform), "m_LocalPosition.x"),
+                    AnimationCurve.Constant(0f, 3f, pose));
+                var item = new ReactionItem();
+                var animations = GetPrivateField<ReactionAnimations>(item, "m_Animations");
+                SetPrivateField(animations, "m_Animations", new[] { clip });
+                var reaction = Track(ScriptableObject.CreateInstance<MeleeReaction>());
+                reaction.name = name;
+                SetDeclaredField<Reaction>(reaction, "m_ReactionList", new ReactionList(item));
+                SetDeclaredField<Reaction>(reaction, "m_TransitionIn", 0f);
+                SetDeclaredField<Reaction>(reaction, "m_UseRootMotion", false);
+                return reaction;
+            }
+        }
+
+        private sealed class HeldEquipWeapon : MeleeWeapon
+        {
+            public readonly TaskCompletionSource<bool> Released = new();
+            public int Started { get; private set; }
+
+            public override async Task RunOnEquip(Character character, Args args)
+            {
+                Started++;
+                await Released.Task;
+                await base.RunOnEquip(character, args);
+            }
+        }
+
+        private static NetworkReactionBroadcast ReplicaReaction(uint actor, uint sequence, int hash = 0) => new()
+        {
+            CharacterNetworkId = actor,
+            Sequence = sequence,
+            ReactionHash = hash,
+            PlaybackKind = hash == 0 ? NetworkReactionPlaybackKind.Stance : NetworkReactionPlaybackKind.DirectShield,
+            Direction = NetworkReactionBroadcast.CompressDirection(Vector3.forward),
+            Power = NetworkReactionBroadcast.CompressPower(3f)
+        };
+
+        private static void SetDeclaredField<TDeclaring>(TDeclaring target, string name, object value)
+        {
+            const BindingFlags fields = BindingFlags.Instance | BindingFlags.NonPublic;
+            FieldInfo field = typeof(TDeclaring).GetField(name, fields);
+            Assert.That(field, Is.Not.Null, $"Missing field {name}");
+            field.SetValue(target, value);
+        }
+
+        private sealed class ReactionPlaybackProbe : GetDecimalConstantOne
+        {
+            public int Calls;
+            public GameObject Self, Target;
+
+            public override double Get(Args args)
+            {
+                Calls++;
+                Self = args.Self;
+                Target = args.Target;
+                return 1;
+            }
         }
 
         [Test]

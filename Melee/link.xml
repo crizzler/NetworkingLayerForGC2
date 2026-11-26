@@ -5,6 +5,17 @@
     -->
     <assembly fullname="GameCreator.Runtime.Melee">
         <type fullname="GameCreator.Runtime.Melee.Skill" preserve="all" />
+        <type fullname="GameCreator.Runtime.Melee.Shield">
+            <field name="m_Parry" />
+        </type>
+        <type fullname="GameCreator.Runtime.Melee.TShieldResponse">
+            <field name="m_Effect" />
+        </type>
+    </assembly>
+    <assembly fullname="GameCreator.Runtime.Core">
+        <type fullname="GameCreator.Runtime.Characters.Combat">
+            <property name="LastParryTime" accessors="all" />
+        </type>
     </assembly>
     <!-- Optional Free Flow integration currently lives in Assembly-CSharp to preserve its
          existing managed-reference assembly names. ignoreIfMissing keeps standalone installs

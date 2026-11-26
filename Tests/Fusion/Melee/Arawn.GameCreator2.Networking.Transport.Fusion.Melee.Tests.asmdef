@@ -1,0 +1,22 @@
+{
+    "name": "Arawn.GameCreator2.Networking.Transport.Fusion.Melee.Tests",
+    "references": [
+        "Arawn.GameCreator2.Networking",
+        "Arawn.GameCreator2.Networking.Melee",
+        "Arawn.GameCreator2.Networking.Melee.Transport.Fusion",
+        "Arawn.GameCreator2.Networking.Transport.Fusion",
+        "Fusion.Unity",
+        "GameCreator.Runtime.Core",
+        "GameCreator.Runtime.Melee",
+        "UnityEngine.TestRunner",
+        "UnityEditor.TestRunner"
+    ],
+    "includePlatforms": ["Editor"],
+    "overrideReferences": true,
+    "precompiledReferences": ["Fusion.Common.dll", "Fusion.Runtime.dll", "nunit.framework.dll"],
+    "autoReferenced": false,
+    "defineConstraints": ["UNITY_INCLUDE_TESTS", "GC2_MELEE"],
+    "versionDefines": [
+        { "name": "com.gamecreator.melee", "expression": "", "define": "GC2_MELEE" }
+    ]
+}

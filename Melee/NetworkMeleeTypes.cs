@@ -359,18 +359,21 @@ namespace Arawn.GameCreator2.Networking.Melee
         public Skill Skill { get; }
         public Character Attacker { get; }
         public Character Target { get; }
+        /// <summary>This callback is for the confirmed parry only; the impact was already predicted.</summary>
+        public bool IsConfirmedParryAfterPrediction { get; }
         public bool Handled { get; set; }
 
         internal NetworkMeleeHitPresentationContext(
             NetworkMeleeHitBroadcast broadcast,
             Skill skill,
             Character attacker,
-            Character target)
+            Character target, bool isConfirmedParryAfterPrediction = false)
         {
             Broadcast = broadcast;
             Skill = skill;
             Attacker = attacker;
             Target = target;
+            IsConfirmedParryAfterPrediction = isConfirmedParryAfterPrediction;
         }
     }
 #endif

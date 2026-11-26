@@ -79,6 +79,55 @@ namespace Arawn.GameCreator2.Networking.Tests
             }
         }
 
+        [TestCase("Fusion", "FusionPlayerSpawner", "FusionMeleeTransportBridge")]
+        [TestCase("PurrNet", "PurrNetDemoPlayerSpawner", "PurrNetMeleeTransportBridge")]
+        public void Demo_UsesTrainingSwordAndAuthoredFormula(string transport, string spawnerType, string bridgeType)
+        {
+            string scenePath = NetworkMeleeHealthDemoBuilder.ScenePath(transport);
+            string folder = Path.GetDirectoryName(scenePath) + "/Parry Formula/";
+            var sword = AssetDatabase.LoadMainAssetAtPath(folder + "Training Sword.asset");
+            var formula = AssetDatabase.LoadMainAssetAtPath(folder + "Training Damage.asset");
+            Assert.That(sword, Is.Not.Null);
+            Assert.That(formula, Is.Not.Null);
+            Assert.That(new SerializedObject(formula).FindProperty("m_Formula").stringValue,
+                Is.EqualTo("source.attr[hp] * 0.08"));
+
+            var tree = sword.GetType().GetProperty("Combo").GetValue(sword);
+            var roots = (int[])tree.GetType().GetProperty("RootIds").GetValue(tree);
+            Assert.That(roots, Has.Length.EqualTo(2));
+            for (int i = 0; i < roots.Length; i++)
+            {
+                string name = i == 0 ? "Riposte" : "Slash";
+                var node = tree.GetType().GetMethod("Get").Invoke(tree, new object[] { roots[i] });
+                var skill = (UnityEngine.Object)node.GetType().GetProperty("Skill").GetValue(node);
+                Assert.That(AssetDatabase.GetAssetPath(skill), Is.EqualTo(folder + $"{transport} Training {name}.asset"));
+                Assert.That(ReadReference(skill, "m_Animation"), Is.Not.Null);
+                var skillData = new SerializedObject(skill);
+                if (i == 0)
+                {
+                    var motion = skillData.FindProperty("m_Motion");
+                    Assert.That(motion.enumNames[motion.enumValueIndex], Is.EqualTo("MotionWarp"));
+                }
+                var power = skillData.FindProperty("m_Power.m_Property");
+                Assert.That(power.managedReferenceValue.GetType().Name, Is.EqualTo("GetDecimalFormula"));
+                Assert.That(power.FindPropertyRelative("m_Formula.m_Property.m_Formula").objectReferenceValue, Is.SameAs(formula));
+                Assert.That(power.FindPropertyRelative("m_Source.m_Property").managedReferenceValue.GetType().Name, Is.EqualTo("GetGameObjectSelf"));
+                Assert.That(power.FindPropertyRelative("m_Target.m_Property").managedReferenceValue.GetType().Name, Is.EqualTo("GetGameObjectTarget"));
+            }
+
+            var scene = EditorSceneManager.OpenScene(scenePath, OpenSceneMode.Additive);
+            try
+            {
+                var components = scene.GetRootGameObjects().SelectMany(root => root.GetComponentsInChildren<MonoBehaviour>(true)).ToArray();
+                var weapons = new SerializedObject(Find(components, bridgeType)).FindProperty("m_RegisterWeapons");
+                Assert.That(weapons.GetArrayElementAtIndex(0).objectReferenceValue, Is.SameAs(sword));
+                var playerRef = ReadReference(Find(components, spawnerType), "m_PlayerPrefab");
+                Assert.That(AssetDatabase.GetAssetPath(playerRef), Is.EqualTo(folder + $"{transport}DemoPlayer-ParryFormula.prefab"));
+                Assert.That(AssetDatabase.GetDependencies(scenePath), Does.Contain(AssetDatabase.GetAssetPath(formula)));
+            }
+            finally { EditorSceneManager.CloseScene(scene, true); }
+        }
+
         [Test]
         public void Wizard_UsesExplicitHealthAndPreservesExistingHealthAndFallbackOnRerun()
         {

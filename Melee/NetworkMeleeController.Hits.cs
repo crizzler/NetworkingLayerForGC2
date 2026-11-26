@@ -13,6 +13,13 @@ namespace Arawn.GameCreator2.Networking.Melee
 {
     public partial class NetworkMeleeController
     {
+        // Stock GC2 only writes this timestamp during defense resolution. Cache the private
+        // setter rather than coupling the transport-neutral module to another source patch.
+        private static readonly MethodInfo s_SetLastParryTime =
+            typeof(GameCreator.Runtime.Characters.Combat)
+                .GetProperty(nameof(GameCreator.Runtime.Characters.Combat.LastParryTime))?
+                .GetSetMethod(nonPublic: true);
+
         // ════════════════════════════════════════════════════════════════════════════════════════
         // HIT INTERCEPTION (Called by NetworkStriker or custom integrations)
         // ════════════════════════════════════════════════════════════════════════════════════════
@@ -475,7 +482,7 @@ namespace Arawn.GameCreator2.Networking.Melee
         /// </summary>
         public NetworkMeleeHitResponse ProcessHitRequest(NetworkMeleeHitRequest request, uint clientNetworkId)
         {
-            return ProcessHitRequest(request, clientNetworkId, false);
+            return ProcessHitRequest(request, clientNetworkId, false, out _);
         }
 
         /// <summary>
@@ -486,8 +493,10 @@ namespace Arawn.GameCreator2.Networking.Melee
         internal NetworkMeleeHitResponse ProcessHitRequest(
             NetworkMeleeHitRequest request,
             uint clientNetworkId,
-            bool trustedServerOrigin)
+            bool trustedServerOrigin,
+            out float authoritativePower)
         {
+            authoritativePower = 0f;
             if (!m_IsServer)
             {
                 WarnHitRoutingInvariant(
@@ -676,6 +685,10 @@ namespace Arawn.GameCreator2.Networking.Melee
                     };
                 }
             }
+
+            // Reuse the same authored Power sample for defense and reactions. HP damage below
+            // already includes the hit-zone multiplier, which must not affect defense Power.
+            authoritativePower = validationResult.BaseDamage;
 
             // Hit validated with lag compensation!
             LogReactionDiagnostics(
@@ -1294,7 +1307,7 @@ namespace Arawn.GameCreator2.Networking.Melee
                 {
                     if (!customHandled)
                     {
-                        manager.RequestConfirmedHitAudio(broadcast);
+                        manager.RequestConfirmedHitFeedback(broadcast);
                     }
                 }
                 else
@@ -1362,8 +1375,25 @@ namespace Arawn.GameCreator2.Networking.Melee
         /// Receive the target side of a confirmed hit. Target routing intentionally does not
         /// instantiate the shared impact effect.
         /// </summary>
-        internal void ReceiveHitBroadcastAsTarget(NetworkMeleeHitBroadcast broadcast)
+        internal void ReceiveHitBroadcastAsTarget(
+            NetworkMeleeHitBroadcast broadcast,
+            bool live = true)
         {
+            if (live && !m_IsServer && m_IsLocalClient &&
+                broadcast.TargetNetworkId == NetworkId &&
+                broadcast.BlockResult == (byte)NetworkBlockResult.Parried && m_Character != null)
+            {
+                // The stock Riposte condition reads this Character's clock. Reflect the
+                // confirmed outcome before visual scripting runs, without resolving defense.
+                if (s_SetLastParryTime != null)
+                {
+                    s_SetLastParryTime.Invoke(m_Character.Combat, new object[] { m_Character.Time.Time });
+                }
+                else
+                {
+                    WarnHitRoutingInvariant("Cannot mirror a confirmed parry: GC2 Core lacks the compatible LastParryTime setter.");
+                }
+            }
             NotifyHitConfirmed(broadcast);
             ApplyTargetHitReconciliation(broadcast);
         }

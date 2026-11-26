@@ -21,7 +21,8 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
 
         public static void BuildHealthDemo()
         {
-            NetworkMeleeHealthDemoBuilder.Build("PurrNet", ConfigureNpc);
+            NetworkMeleeHealthDemoBuilder.Build("PurrNet", ConfigureNpc, (scene, player) => ConfigureSession(
+                scene, player, NetworkTargetingDemoEditorUtility.Root("PurrNet") + "/Parry Formula/Training Network Prefabs.asset"));
         }
 
         public static void BuildInstalledMeleeHealthSmokePlayer()
@@ -47,14 +48,17 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
             if (root.GetComponent<PurrNetNetworkCharacterAuto>() == null) root.AddComponent<PurrNetNetworkCharacterAuto>();
         }
 
-        private static void ConfigureSession(Scene scene, GameObject player)
+        private static void ConfigureSession(Scene scene, GameObject player) =>
+            ConfigureSession(scene, player, NetworkTargetingDemoEditorUtility.Root("PurrNet") + "/TargetingNetworkPrefabs.asset");
+
+        private static void ConfigureSession(Scene scene, GameObject player, string path)
         {
             PurrNetDemoPlayerSpawner spawner = scene.GetRootGameObjects().SelectMany(x => x.GetComponentsInChildren<PurrNetDemoPlayerSpawner>(true)).Single();
             NetworkTargetingDemoEditorUtility.Set(spawner, "m_PlayerPrefab", player);
             var serialized = new SerializedObject(spawner);
             serialized.FindProperty("m_PlayerPrefabs").arraySize = 0;
             serialized.ApplyModifiedPropertiesWithoutUndo();
-            string path = NetworkTargetingDemoEditorUtility.Root("PurrNet") + "/TargetingNetworkPrefabs.asset";
+
             NetworkPrefabs prefabs = AssetDatabase.LoadAssetAtPath<NetworkPrefabs>(path);
             if (prefabs == null) { prefabs = ScriptableObject.CreateInstance<NetworkPrefabs>(); AssetDatabase.CreateAsset(prefabs, path); }
             prefabs.autoGenerate = false;
@@ -62,7 +66,7 @@ namespace Arawn.GameCreator2.Networking.Transport.PurrNet.Editor
             prefabs.linkedNetworkPrefabs = new List<NetworkPrefabs>();
             prefabs.prefabs = new List<NetworkPrefabs.UserPrefabData>
             {
-                new NetworkPrefabs.UserPrefabData { guid = AssetDatabase.AssetPathToGUID(NetworkTargetingDemoEditorUtility.PlayerPath("PurrNet")), prefab = player, pooled = false }
+                new NetworkPrefabs.UserPrefabData { guid = AssetDatabase.AssetPathToGUID(AssetDatabase.GetAssetPath(player)), prefab = player, pooled = false }
             };
             prefabs.Refresh();
             EditorUtility.SetDirty(prefabs);
